@@ -1,0 +1,357 @@
+use std::{collections::BTreeMap, env, fs, sync::Mutex};
+
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    Healthy,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendCapabilities {
+    pub read: bool,
+    pub write: bool,
+    pub delete: bool,
+    pub multipart_upload: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceHealth {
+    pub backend: String,
+    pub status: HealthStatus,
+    pub capabilities: BackendCapabilities,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerInfo {
+    pub name: String,
+    pub object_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjectInfo {
+    pub key: String,
+    pub size: u64,
+    pub etag: Option<String>,
+    pub content_type: Option<String>,
+    pub last_modified: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListObjectsRequest {
+    pub container: Option<String>,
+    pub prefix: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ObjectPayload {
+    pub info: ObjectInfo,
+    pub body: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PutObjectRequest {
+    pub container: String,
+    pub key: String,
+    pub body: Vec<u8>,
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PutObjectResult {
+    pub etag: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum BlobError {
+    #[error("configuration error: {0}")]
+    Configuration(String),
+    #[error("upstream error: {0}")]
+    Upstream(String),
+    #[error("feature not implemented: {0}")]
+    NotImplemented(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TokenSource {
+    EnvVar { key: String },
+    File { path: String },
+    Static { bearer: String },
+}
+
+impl TokenSource {
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::EnvVar { .. } => "env",
+            Self::File { .. } => "file",
+            Self::Static { .. } => "inline",
+        }
+    }
+
+    pub fn load(&self) -> Result<String, BlobError> {
+        match self {
+            Self::EnvVar { key } => env::var(key).map_err(|_| {
+                BlobError::Configuration(format!("missing environment variable: {key}"))
+            }),
+            Self::File { path } => fs::read_to_string(path)
+                .map(|value| value.trim().to_string())
+                .map_err(|error| {
+                    BlobError::Configuration(format!("failed to read token file {path}: {error}"))
+                }),
+            Self::Static { bearer } => {
+                if bearer.trim().is_empty() {
+                    Err(BlobError::Configuration(
+                        "inline token is empty".to_string(),
+                    ))
+                } else {
+                    Ok(bearer.trim().to_string())
+                }
+            }
+        }
+    }
+}
+
+#[async_trait]
+pub trait BlobBackend: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn capabilities(&self) -> BackendCapabilities;
+
+    async fn health(&self) -> Result<ServiceHealth, BlobError>;
+    async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError>;
+    async fn list_objects(&self, request: ListObjectsRequest)
+    -> Result<Vec<ObjectInfo>, BlobError>;
+
+    async fn head_container(&self, name: &str) -> Result<ContainerInfo, BlobError> {
+        self.list_containers()
+            .await?
+            .into_iter()
+            .find(|container| container.name == name)
+            .ok_or_else(|| BlobError::NotFound(format!("container not found: {name}")))
+    }
+
+    async fn head_object(&self, container: &str, key: &str) -> Result<ObjectInfo, BlobError> {
+        self.list_objects(ListObjectsRequest {
+            container: Some(container.to_string()),
+            prefix: Some(key.to_string()),
+            limit: None,
+        })
+        .await?
+        .into_iter()
+        .find(|object| object.key == key)
+        .ok_or_else(|| BlobError::NotFound(format!("object not found: {container}/{key}")))
+    }
+
+    async fn get_object(&self, container: &str, key: &str) -> Result<ObjectPayload, BlobError> {
+        Err(BlobError::NotImplemented(format!(
+            "get_object not implemented for {container}/{key}"
+        )))
+    }
+
+    async fn put_object(&self, request: PutObjectRequest) -> Result<PutObjectResult, BlobError> {
+        Err(BlobError::NotImplemented(format!(
+            "put_object not implemented for {}/{}",
+            request.container, request.key
+        )))
+    }
+
+    async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+        Err(BlobError::NotImplemented(format!(
+            "delete_object not implemented for {container}/{key}"
+        )))
+    }
+}
+
+struct StubObject {
+    body: Vec<u8>,
+    etag: String,
+    content_type: Option<String>,
+    last_modified: String,
+}
+
+pub struct StubBackend {
+    objects: Mutex<BTreeMap<String, BTreeMap<String, StubObject>>>,
+}
+
+impl StubBackend {
+    pub fn new() -> Self {
+        let mut buckets = BTreeMap::new();
+        let mut objects = BTreeMap::new();
+        let body = b"stub object from carrier-cloud-blob-gateway\n".to_vec();
+        objects.insert(
+            "example.txt".to_string(),
+            StubObject {
+                etag: calculate_stub_etag(&body),
+                body,
+                content_type: Some("text/plain".to_string()),
+                last_modified: "2026-01-01T00:00:00.000Z".to_string(),
+            },
+        );
+        buckets.insert("placeholder".to_string(), objects);
+
+        Self {
+            objects: Mutex::new(buckets),
+        }
+    }
+}
+
+#[async_trait]
+impl BlobBackend for StubBackend {
+    fn name(&self) -> &'static str {
+        "stub"
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            read: true,
+            write: true,
+            delete: true,
+            multipart_upload: false,
+        }
+    }
+
+    async fn health(&self) -> Result<ServiceHealth, BlobError> {
+        Ok(ServiceHealth {
+            backend: self.name().to_string(),
+            status: HealthStatus::Degraded,
+            capabilities: self.capabilities(),
+            notes: vec!["stub backend enabled; no upstream attached".to_string()],
+        })
+    }
+
+    async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
+        let objects = self.objects.lock().expect("stub backend state poisoned");
+
+        Ok(objects
+            .iter()
+            .map(|(name, entries)| ContainerInfo {
+                name: name.clone(),
+                object_count: Some(entries.len() as u64),
+            })
+            .collect())
+    }
+
+    async fn list_objects(
+        &self,
+        request: ListObjectsRequest,
+    ) -> Result<Vec<ObjectInfo>, BlobError> {
+        let Some(container) = request.container else {
+            return Ok(Vec::new());
+        };
+
+        let objects = self.objects.lock().expect("stub backend state poisoned");
+        let Some(entries) = objects.get(&container) else {
+            return Err(BlobError::NotFound(format!(
+                "container not found: {container}"
+            )));
+        };
+
+        let prefix = request.prefix.unwrap_or_default();
+        let limit = request.limit.unwrap_or(usize::MAX);
+
+        Ok(entries
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .take(limit)
+            .map(|(key, object)| ObjectInfo {
+                key: key.clone(),
+                size: object.body.len() as u64,
+                etag: Some(object.etag.clone()),
+                content_type: object.content_type.clone(),
+                last_modified: Some(object.last_modified.clone()),
+            })
+            .collect())
+    }
+
+    async fn get_object(&self, container: &str, key: &str) -> Result<ObjectPayload, BlobError> {
+        let objects = self.objects.lock().expect("stub backend state poisoned");
+        let Some(entries) = objects.get(container) else {
+            return Err(BlobError::NotFound(format!(
+                "container not found: {container}"
+            )));
+        };
+        let Some(object) = entries.get(key) else {
+            return Err(BlobError::NotFound(format!(
+                "object not found: {container}/{key}"
+            )));
+        };
+
+        Ok(ObjectPayload {
+            info: ObjectInfo {
+                key: key.to_string(),
+                size: object.body.len() as u64,
+                etag: Some(object.etag.clone()),
+                content_type: object.content_type.clone(),
+                last_modified: Some(object.last_modified.clone()),
+            },
+            body: object.body.clone(),
+        })
+    }
+
+    async fn put_object(&self, request: PutObjectRequest) -> Result<PutObjectResult, BlobError> {
+        let mut objects = self.objects.lock().expect("stub backend state poisoned");
+        let entries = objects.entry(request.container).or_default();
+        let etag = calculate_stub_etag(&request.body);
+
+        entries.insert(
+            request.key,
+            StubObject {
+                etag: etag.clone(),
+                body: request.body,
+                content_type: request.content_type,
+                last_modified: "2026-01-01T00:00:00.000Z".to_string(),
+            },
+        );
+
+        Ok(PutObjectResult { etag: Some(etag) })
+    }
+
+    async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+        let mut objects = self.objects.lock().expect("stub backend state poisoned");
+        let Some(entries) = objects.get_mut(container) else {
+            return Err(BlobError::NotFound(format!(
+                "container not found: {container}"
+            )));
+        };
+
+        if entries.remove(key).is_some() {
+            Ok(())
+        } else {
+            Err(BlobError::NotFound(format!(
+                "object not found: {container}/{key}"
+            )))
+        }
+    }
+}
+
+fn calculate_stub_etag(bytes: &[u8]) -> String {
+    let hash = bytes.iter().fold(0xcbf29ce484222325_u64, |acc, byte| {
+        (acc ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+
+    format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenSource;
+
+    #[test]
+    fn inline_token_is_trimmed() {
+        let token = TokenSource::Static {
+            bearer: "  token-value  ".to_string(),
+        }
+        .load()
+        .expect("inline token should load");
+
+        assert_eq!(token, "token-value");
+    }
+}

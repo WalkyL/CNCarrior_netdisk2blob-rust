@@ -1,0 +1,10 @@
+[package]
+name = "replication-engine"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+policy-engine = { path = "../policy-engine" }
+serde = { workspace = true }
+thiserror = { workspace = true }

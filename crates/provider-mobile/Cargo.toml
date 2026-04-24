@@ -1,0 +1,10 @@
+[package]
+name = "provider-mobile"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+blob-core = { path = "../blob-core" }
+serde = { workspace = true }

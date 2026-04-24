@@ -1,0 +1,205 @@
+# carrier-cloud-blob-gateway
+
+面向 Hermes Agent、Open Claw Agent 等编程 Agent 的本地 S3 兼容对象网关。
+
+项目目标是把中国联通、中国电信、中国移动云盘接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商云盘作为唯一写入主云盘，其他被选中的运营商云盘可作为异步同步目标，OneDrive 作为默认备份同步对象，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。源码一期按公开 GitHub 仓库形式发布。
+
+当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的最小 Graph 读写实现。当前状态是: OneDrive 已支持显式 access token 注入下的健康检查、容器映射、对象读写删与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；三家运营商 provider 仍是配置和健康检查骨架。认证部分仅支持由操作者显式提供 token 或通过后续控制平面完成授权，不在服务内实现浏览器会话拦截、Cookie 窃取或自动凭据抓取。
+
+当前针对轻量设备的策略也已明确: `OpenWRT` 优先作为 host 服务宿主，默认通过 `CCBG_MAX_IN_MEMORY_OBJECT_BYTES` 控制非流式对象路径的峰值内存，并通过 SQLite 元数据保留上限控制 flash 增长；`ESP32-S3` 默认按 `client-only` 兼容处理，只有在确认资源充足时才考虑更小功能集的 relay 形态，后续元数据应走更轻量的 `tiny-state-client` 路线而不是继续复用完整 SQLite 宿主形态。
+
+## 当前目标
+
+- 用 Rust 建立一个可长期维护的 Agent-first 边缘对象网关，而不是一次性脚本。
+- 将“运营商云盘访问”“OneDrive 异步复制”“本地 S3 兼容 API 暴露”“管理界面”解耦。
+- 将“核心网关能力”和“Agent 集成封装”解耦，确保能分别交付为 daemon、MCP 和 Skill。
+- 明确采用“单写主云盘 + 多异步同步目标”模型，避免多主写入导致的数据冲突。
+- 数据面正式目标兼容 S3 API，优先支持 Agent 常用的最小 S3 子集。
+- 一期兼容目标覆盖 `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`、`OpenWRT arm64`，以及 `STM32` 客户端接入。
+- 先跑通本地 Ubuntu，后续平滑迁移到 PVE/LXC、软路由和 ARM Linux 设备。
+- 统一将监听端口约束在 `60000-65534` 区间，降低与系统常用端口冲突的概率。
+
+## 目录结构
+
+```text
+carrier-cloud-blob-gateway/
+├── config/
+│   └── example.env
+├── crates/
+│   ├── blob-core/        # 抽象对象存储模型与错误定义
+│   ├── gatewayd/         # 本地 HTTP 服务入口
+│   ├── metadata-store/   # SQLite 元数据与复制状态持久化
+│   ├── policy-engine/    # primary/sync/fallback 拓扑校验
+│   ├── provider-unicom/  # 中国联通云盘适配层
+│   ├── provider-telecom/ # 中国电信云盘适配层
+│   ├── provider-mobile/  # 中国移动云盘适配层
+│   ├── provider-onedrive/ # OneDrive 备份后端适配层
+│   └── replication-engine/ # 异步复制任务队列
+├── deploy/
+│   └── Containerfile
+├── docs/
+│   ├── architecture.md
+│   ├── agent-packaging.md
+│   ├── compatibility-matrix.md
+│   ├── detailed-plan.md
+│   ├── github-publication.md
+│   ├── ports.md
+│   ├── provider-matrix.md
+│   ├── s3-compatibility.md
+│   └── roadmap.md
+└── scripts/
+    └── run-dev.sh
+```
+
+后续计划中的 crate:
+
+- `auth-broker`
+- `mcp-server`
+- `admin-api`
+- `admin-ui-web`
+- `admin-ui-tui`
+- `skills/carrier-cloud-blob-gateway/`
+
+公开仓库基础资产:
+
+- [LICENSE](/home/walky/carrier-cloud-blob-gateway/LICENSE)
+- [.github/workflows/ci.yml](/home/walky/carrier-cloud-blob-gateway/.github/workflows/ci.yml)
+- [Dockerfile](/home/walky/carrier-cloud-blob-gateway/deploy/Dockerfile)
+- [Containerfile](/home/walky/carrier-cloud-blob-gateway/deploy/Containerfile)
+
+## 快速启动
+
+```bash
+cd /home/walky/carrier-cloud-blob-gateway
+cp config/example.env .env.local
+sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" .env.local
+sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-token#" .env.local
+./scripts/run-dev.sh
+```
+
+当前默认监听地址为 `127.0.0.1:61080`，该端口规划为本地 S3 兼容数据面入口。
+
+规划中的同步拓扑:
+
+- `CCBG_PRIMARY_PROVIDER` 指定唯一写入主云盘
+- `CCBG_SYNC_TARGETS` 指定异步同步目标，支持其他运营商和 `onedrive`
+- `onedrive` 默认应包含在同步目标中，作为最终 fallback 备份层
+
+当前已落地的拓扑与复制骨架:
+
+- `policy-engine` 负责校验 `primary/sync/fallback` 约束
+- `gatewayd` 在 `PutObject` / `DeleteObject` 成功后会入队复制任务，并由后台 worker 消费
+- `metadata-store` 使用 SQLite 持久化复制任务与状态摘要，并会裁剪多余的 `completed/failed` 历史，只保留 fallback 必需的最新对象状态和全部 pending job
+- `replication-engine` 当前负责内存队列、最近任务记录和启动时 pending job 恢复，最近历史条数可通过环境变量限制
+- `provider-onedrive` 已支持显式 token 模式下的 Graph 最小读写删与 bucket-folder 映射
+
+规划中的端口分配:
+
+- S3 API: `61080`
+- Admin Web UI: `61081`
+- OneDrive OAuth 本地回调: `61082`
+- Metrics / 扩展健康检查: `61083`
+- MCP Streamable HTTP: `61084`（可选，默认优先 stdio）
+
+## 数据面目标
+
+正式目标是兼容 S3 API，而不是长期保留自定义 `/v1/...` 接口。
+
+一期规划中的 S3 子集:
+
+- `ListBuckets`
+- `HeadBucket`
+- `ListObjectsV2`
+- `HeadObject`
+- `GetObject`
+- `PutObject`
+- `DeleteObject`
+
+后续规划:
+
+- `Multipart Upload`
+- `CopyObject`
+- `Presigned URL`
+
+## 当前已实现接口
+
+已接入的本地 S3 兼容子集:
+
+- `GET /` -> `ListBuckets`
+- `HEAD /<bucket>` -> `HeadBucket`
+- `GET /<bucket>?list-type=2&prefix=<prefix>&max-keys=<n>` -> `ListObjectsV2`
+- `HEAD /<bucket>/<key>` -> `HeadObject`
+- `GET /<bucket>/<key>` -> `GetObject`
+- `PUT /<bucket>/<key>` -> `PutObject`
+- `DELETE /<bucket>/<key>` -> `DeleteObject`
+
+保留的内部调试接口:
+
+- `GET /healthz`
+- `GET /__ccbg`
+- `GET /__ccbg/providers`
+- `GET /__ccbg/replication`
+- `GET /v1/containers`
+- `GET /v1/objects?container=<name>&prefix=<prefix>&limit=<n>`
+
+当前 S3 兼容实现边界:
+
+- 仅验证 header-based SigV4
+- 仅保证 `path-style` bucket 访问
+- 暂未支持 `Presigned URL`
+- 暂未支持 `Multipart Upload`
+- OneDrive 当前通过 `root_prefix/<bucket>/<key>` 映射到单个 drive 命名空间
+- 读请求当前会先尝试 primary provider，失败后按 `fallback_read_order` 尝试 sync targets
+- 当响应来自备份侧时，会附带 `x-ccbg-source-provider` 和 `x-ccbg-fallback-from`
+- 当前自动化测试已覆盖 `stub` backend 与 OneDrive mock Graph；运营商 provider 仍未完成真实读写
+
+当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker 已经落地；后续仍需补 per-target 细粒度状态、重试退避和 OneDrive OAuth broker。
+
+一期平台兼容边界:
+
+- `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`: 完整宿主目标
+- `OpenWRT arm64`: 轻量宿主目标，当前采用 `sqlite-host` 路线
+- `STM32`: 客户端目标，不承载完整 daemon
+- `ESP32-S3`: 默认客户端目标，后续按 `tiny-state-client` 或 `relay-lite` 子集演进，详见 `docs/esp32-s3-profile.md`
+
+## 轻量设备资源边界
+
+- `OpenWRT host` 当前可行的关键，不是把 SQLite 完全去掉，而是同时限制对象大小、并发数、内存中的 recent history，以及 SQLite 的历史保留上限。
+- `SQLite` 在这里不是最省内存的状态后端，但在 Linux/OpenWRT host 上仍是当前最稳妥的持久化选择，因为 fallback 判定需要可靠的对象级最新状态。
+- `ESP32-S3` 不应复用当前 `sqlite-host` 方案；后续应拆成更轻的 `tiny-state-client`，只保留极小状态、配置和必要的 ring buffer。
+
+当前新增的轻量化运行参数:
+
+- `CCBG_REPLICATION_RECENT_LIMIT`
+- `CCBG_METADATA_SNAPSHOT_RECENT_LIMIT`
+- `CCBG_METADATA_COMPLETED_HISTORY_LIMIT`
+- `CCBG_METADATA_FAILED_HISTORY_LIMIT`
+
+## 认证边界
+
+- 支持 `CCBG_UNICOM_TOKEN` / `CCBG_UNICOM_TOKEN_FILE`
+- 支持 `CCBG_TELECOM_TOKEN` / `CCBG_TELECOM_TOKEN_FILE`
+- 支持 `CCBG_MOBILE_TOKEN` / `CCBG_MOBILE_TOKEN_FILE`
+- 支持 `CCBG_ONEDRIVE_TOKEN` / `CCBG_ONEDRIVE_TOKEN_FILE`
+- 规划补齐 OneDrive 官方授权流
+- 成品规划支持 MCP 封装与 Skill 封装
+- 不实现浏览器会话自动抓取
+- 不在代码里写死账号密码、Cookie、refresh token
+
+如果必须依赖网页会话，建议由你手工在浏览器开发者工具中确认请求头，再以环境变量或受限文件方式注入本服务。
+
+## 文档
+
+- 架构说明见 `docs/architecture.md`
+- Agent 交付封装见 `docs/agent-packaging.md`
+- 云盘认证新手指南见 `docs/auth-step-by-step.md`
+- 一期兼容矩阵见 `docs/compatibility-matrix.md`
+- 详细规划见 `docs/detailed-plan.md`
+- ESP32-S3 运行档位见 `docs/esp32-s3-profile.md`
+- OpenWRT Host 档位见 `docs/openwrt-host-profile.md`
+- 资源预算与算法模型见 `docs/resource-budget.md`
+- GitHub 发布规划见 `docs/github-publication.md`
+- 端口策略见 `docs/ports.md`
+- provider 差异矩阵见 `docs/provider-matrix.md`
+- S3 兼容规划见 `docs/s3-compatibility.md`
+- 分阶段规划见 `docs/roadmap.md`
