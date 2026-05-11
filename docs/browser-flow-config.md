@@ -28,6 +28,7 @@
 并且现在已经有了最小的“目录级 loader + 查询接口”基础:
 
 - `blob-core::BrowserFlowCatalogCollection` 可以从 `config/browser-flows/` 目录批量加载 catalog，并按 `provider/surface` 查找
+- `blob-core::BrowserFlowCatalog::bind_flow(...)` / `BrowserFlowCatalogCollection::bind_flow(...)` 可以把 `flows[].inputs`、`runtime.*` 和 `preset_refs` 绑定成一份已解析模板的执行计划
 - `gatewayd` 只读暴露:
   - `GET /api/browser-flows/catalogs`
   - `GET /api/browser-flows/catalog?provider=unicom&surface=pan.wo.cn-web`
@@ -126,6 +127,6 @@
 
 这份最小结构已经能支撑继续扩展，下一批优先项应该是:
 
-1. 给真正的 CDP / `auth-capture` 执行层接入这套 catalog loader，而不是再手写 provider-specific 文件路径。
+1. 给真正的 CDP / `auth-capture` 执行层接入这套 catalog loader 和 `bind_flow(...)` 解析结果，而不是再手写 provider-specific 文件路径和模板替换。
 2. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。
 3. 继续补联通 family/private space 变体，以及后续电信/移动 provider 的网页 flow catalog。

@@ -148,6 +148,31 @@ pub struct BrowserFlow {
     pub notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BrowserFlowBindingContext {
+    #[serde(default)]
+    pub inputs: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub runtime: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BoundBrowserFlowPlan {
+    pub provider: String,
+    pub surface: String,
+    pub flow: BrowserFlow,
+    #[serde(default)]
+    pub presets: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub pages: Vec<BrowserFlowPage>,
+    #[serde(default)]
+    pub elements: Vec<BrowserFlowElement>,
+    #[serde(default)]
+    pub requests: Vec<BrowserFlowRequest>,
+    #[serde(default)]
+    pub operations: Vec<BrowserFlowOperation>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserFlowInput {
     pub id: String,
@@ -276,6 +301,111 @@ impl BrowserFlowCatalog {
 
     pub fn find_flow(&self, flow_id: &str) -> Option<&BrowserFlow> {
         self.flows.iter().find(|flow| flow.id == flow_id)
+    }
+
+    pub fn bind_flow(
+        &self,
+        flow_id: &str,
+        context: &BrowserFlowBindingContext,
+    ) -> Result<BoundBrowserFlowPlan, BlobError> {
+        let flow = self
+            .find_flow(flow_id)
+            .ok_or_else(|| BlobError::NotFound(format!("browser flow not found: {flow_id}")))?;
+        validate_required_input_values(flow, &context.inputs)?;
+
+        let mut bound_flow = flow.clone();
+        bind_flow_templates(&mut bound_flow, context)?;
+
+        let mut referenced_page_ids = BTreeSet::from([bound_flow.start_page.clone()]);
+        let mut referenced_element_ids = BTreeSet::new();
+        let mut referenced_request_ids = BTreeSet::new();
+        let mut referenced_operation_ids = BTreeSet::new();
+
+        for step in &bound_flow.steps {
+            match step {
+                BrowserFlowStep::Navigate { wait_for_page, .. } => {
+                    if let Some(page) = wait_for_page {
+                        referenced_page_ids.insert(page.clone());
+                    }
+                }
+                BrowserFlowStep::Click { element, .. }
+                | BrowserFlowStep::SetInput { element, .. }
+                | BrowserFlowStep::SetFiles { element, .. }
+                | BrowserFlowStep::DispatchEvents { element, .. } => {
+                    referenced_element_ids.insert(element.clone());
+                }
+                BrowserFlowStep::InvokeOperation { operation, .. } => {
+                    referenced_operation_ids.insert(operation.clone());
+                }
+                BrowserFlowStep::WaitForRequest { request, .. } => {
+                    referenced_request_ids.insert(request.clone());
+                }
+                BrowserFlowStep::WaitForPage { page, .. } => {
+                    referenced_page_ids.insert(page.clone());
+                }
+                BrowserFlowStep::Wait { .. } => {}
+            }
+        }
+
+        for request in &bound_flow.expected_requests {
+            referenced_request_ids.insert(request.clone());
+        }
+
+        let mut presets = BTreeMap::new();
+        for preset_ref in &bound_flow.preset_refs {
+            let value = self.presets.get(preset_ref).ok_or_else(|| {
+                BlobError::Configuration(format!(
+                    "flow {} references unknown preset {}",
+                    bound_flow.id, preset_ref
+                ))
+            })?;
+            presets.insert(preset_ref.clone(), bind_json_value(value, context)?);
+        }
+
+        let mut elements = Vec::new();
+        for element in &self.elements {
+            if referenced_element_ids.contains(&element.id) {
+                let bound = bind_element(element, context)?;
+                referenced_page_ids.insert(bound.page.clone());
+                elements.push(bound);
+            }
+        }
+
+        let mut operations = Vec::new();
+        for operation in &self.operations {
+            if referenced_operation_ids.contains(&operation.id) {
+                let bound = bind_operation(operation, context)?;
+                if let Some(page) = &bound.page {
+                    referenced_page_ids.insert(page.clone());
+                }
+                operations.push(bound);
+            }
+        }
+
+        let mut requests = Vec::new();
+        for request in &self.requests {
+            if referenced_request_ids.contains(&request.id) {
+                requests.push(bind_request(request, context)?);
+            }
+        }
+
+        let mut pages = Vec::new();
+        for page in &self.pages {
+            if referenced_page_ids.contains(&page.id) {
+                pages.push(bind_page(page, context)?);
+            }
+        }
+
+        Ok(BoundBrowserFlowPlan {
+            provider: self.provider.clone(),
+            surface: self.surface.clone(),
+            flow: bound_flow,
+            presets,
+            pages,
+            elements,
+            requests,
+            operations,
+        })
     }
 
     pub fn validate(&self) -> Result<(), BlobError> {
@@ -627,6 +757,22 @@ impl BrowserFlowCatalogCollection {
             .find(|entry| entry.catalog.provider == provider && entry.catalog.surface == surface)
             .map(|entry| &entry.catalog)
     }
+
+    pub fn bind_flow(
+        &self,
+        provider: &str,
+        surface: &str,
+        flow_id: &str,
+        context: &BrowserFlowBindingContext,
+    ) -> Result<BoundBrowserFlowPlan, BlobError> {
+        self.get(provider, surface)
+            .ok_or_else(|| {
+                BlobError::NotFound(format!(
+                    "browser flow catalog not found for {provider}/{surface}"
+                ))
+            })?
+            .bind_flow(flow_id, context)
+    }
 }
 
 impl BrowserFlowStep {
@@ -674,14 +820,254 @@ const fn default_true() -> bool {
     true
 }
 
+fn validate_required_input_values(
+    flow: &BrowserFlow,
+    inputs: &BTreeMap<String, Value>,
+) -> Result<(), BlobError> {
+    for input in &flow.inputs {
+        if !input.required {
+            continue;
+        }
+        let value = inputs.get(&input.id).ok_or_else(|| {
+            BlobError::Configuration(format!(
+                "missing required browser flow input {} for flow {}",
+                input.id, flow.id
+            ))
+        })?;
+        if !value_is_present(value) {
+            return Err(BlobError::Configuration(format!(
+                "required browser flow input {} for flow {} must not be empty",
+                input.id, flow.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn value_is_present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.trim().is_empty(),
+        _ => true,
+    }
+}
+
+fn bind_flow_templates(
+    flow: &mut BrowserFlow,
+    context: &BrowserFlowBindingContext,
+) -> Result<(), BlobError> {
+    for step in &mut flow.steps {
+        match step {
+            BrowserFlowStep::Navigate { url, .. } => {
+                *url = bind_string_template(url, context)?;
+            }
+            BrowserFlowStep::SetInput { value_template, .. } => {
+                *value_template = bind_string_template(value_template, context)?;
+            }
+            _ => {}
+        }
+    }
+
+    for output in &mut flow.outputs {
+        output.source = bind_string_template(&output.source, context)?;
+    }
+
+    Ok(())
+}
+
+fn bind_page(
+    page: &BrowserFlowPage,
+    context: &BrowserFlowBindingContext,
+) -> Result<BrowserFlowPage, BlobError> {
+    let mut bound = page.clone();
+    for pattern in &mut bound.url_patterns {
+        *pattern = bind_string_template(pattern, context)?;
+    }
+    Ok(bound)
+}
+
+fn bind_element(
+    element: &BrowserFlowElement,
+    context: &BrowserFlowBindingContext,
+) -> Result<BrowserFlowElement, BlobError> {
+    let mut bound = element.clone();
+    for selector in &mut bound.selectors {
+        selector.value = bind_string_template(&selector.value, context)?;
+        if let Some(text_contains) = &mut selector.text_contains {
+            *text_contains = bind_string_template(text_contains, context)?;
+        }
+    }
+    Ok(bound)
+}
+
+fn bind_request(
+    request: &BrowserFlowRequest,
+    context: &BrowserFlowBindingContext,
+) -> Result<BrowserFlowRequest, BlobError> {
+    let mut bound = request.clone();
+    bound.url_pattern = bind_string_template(&bound.url_pattern, context)?;
+    for header in &mut bound.required_headers {
+        if let Some(value_template) = &mut header.value_template {
+            *value_template = bind_string_template(value_template, context)?;
+        }
+    }
+    for field in &mut bound.required_fields {
+        *field = bind_string_template(field, context)?;
+    }
+    Ok(bound)
+}
+
+fn bind_operation(
+    operation: &BrowserFlowOperation,
+    context: &BrowserFlowBindingContext,
+) -> Result<BrowserFlowOperation, BlobError> {
+    let mut bound = operation.clone();
+    bound.source = bind_string_template(&bound.source, context)?;
+    Ok(bound)
+}
+
+fn bind_json_value(value: &Value, context: &BrowserFlowBindingContext) -> Result<Value, BlobError> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(value.clone()),
+        Value::String(raw) => bind_template_value(raw, context),
+        Value::Array(items) => Ok(Value::Array(
+            items
+                .iter()
+                .map(|item| bind_json_value(item, context))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Value::Object(map) => {
+            let mut bound = serde_json::Map::with_capacity(map.len());
+            for (key, value) in map {
+                bound.insert(key.clone(), bind_json_value(value, context)?);
+            }
+            Ok(Value::Object(bound))
+        }
+    }
+}
+
+fn bind_string_template(
+    raw: &str,
+    context: &BrowserFlowBindingContext,
+) -> Result<String, BlobError> {
+    match bind_template_value(raw, context)? {
+        Value::Null => Ok(String::new()),
+        Value::String(value) => Ok(value),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::Array(_) | Value::Object(_) => Err(BlobError::Configuration(format!(
+            "template {raw:?} resolved to a non-scalar JSON value"
+        ))),
+    }
+}
+
+fn bind_template_value(raw: &str, context: &BrowserFlowBindingContext) -> Result<Value, BlobError> {
+    #[derive(Debug)]
+    enum Segment {
+        Literal(String),
+        Placeholder { token: String, value: Value },
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = raw[cursor..].find("{{") {
+        let start = cursor + relative_start;
+        let token_start = start + 2;
+        let relative_end = raw[token_start..].find("}}").ok_or_else(|| {
+            BlobError::Configuration(format!("unterminated browser flow template: {raw}"))
+        })?;
+        let token_end = token_start + relative_end;
+        if start > cursor {
+            segments.push(Segment::Literal(raw[cursor..start].to_string()));
+        }
+        let token = raw[token_start..token_end].trim().to_string();
+        let value = lookup_template_value(&token, context)?;
+        segments.push(Segment::Placeholder { token, value });
+        cursor = token_end + 2;
+    }
+
+    if segments.is_empty() {
+        return Ok(Value::String(raw.to_string()));
+    }
+
+    if cursor < raw.len() {
+        segments.push(Segment::Literal(raw[cursor..].to_string()));
+    }
+
+    if segments.len() == 1 {
+        if let Segment::Placeholder { value, .. } = &segments[0] {
+            return Ok(value.clone());
+        }
+    }
+
+    let mut rendered = String::new();
+    for segment in segments {
+        match segment {
+            Segment::Literal(value) => rendered.push_str(&value),
+            Segment::Placeholder { token, value } => {
+                rendered.push_str(&template_scalar_to_string(&token, &value)?);
+            }
+        }
+    }
+
+    Ok(Value::String(rendered))
+}
+
+fn lookup_template_value(
+    token: &str,
+    context: &BrowserFlowBindingContext,
+) -> Result<Value, BlobError> {
+    let (namespace, key) = token.split_once('.').ok_or_else(|| {
+        BlobError::Configuration(format!(
+            "unsupported browser flow template reference {token}; expected inputs.<id> or runtime.<id>"
+        ))
+    })?;
+    if key.trim().is_empty() {
+        return Err(BlobError::Configuration(format!(
+            "unsupported browser flow template reference {token}; missing key"
+        )));
+    }
+
+    let value = match namespace {
+        "inputs" => context.inputs.get(key),
+        "runtime" => context.runtime.get(key),
+        other => {
+            return Err(BlobError::Configuration(format!(
+                "unsupported browser flow template namespace {other} in {token}"
+            )));
+        }
+    };
+
+    value.cloned().ok_or_else(|| {
+        BlobError::Configuration(format!("missing browser flow {namespace} value: {key}"))
+    })
+}
+
+fn template_scalar_to_string(token: &str, value: &Value) -> Result<String, BlobError> {
+    match value {
+        Value::Null => Err(BlobError::Configuration(format!(
+            "browser flow template {token} resolved to null"
+        ))),
+        Value::String(value) => Ok(value.clone()),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) => Ok(value.to_string()),
+        Value::Array(_) | Value::Object(_) => Err(BlobError::Configuration(format!(
+            "browser flow template {token} resolved to a non-scalar JSON value"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{BrowserFlowCatalog, BrowserFlowCatalogCollection};
+    use serde_json::Value;
+
+    use super::{BrowserFlowBindingContext, BrowserFlowCatalog, BrowserFlowCatalogCollection};
     use crate::BlobError;
 
     fn temp_catalog_dir(name: &str) -> std::path::PathBuf {
@@ -832,5 +1218,118 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn browser_flow_catalog_bind_flow_resolves_templates_and_presets() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([
+                (
+                    "phone_number".to_string(),
+                    Value::String("18500001111".to_string()),
+                ),
+                ("sms_code".to_string(), Value::String("123456".to_string())),
+                (
+                    "family_id".to_string(),
+                    Value::String("family-42".to_string()),
+                ),
+                (
+                    "ps_token".to_string(),
+                    Value::String("private-token".to_string()),
+                ),
+                (
+                    "local_file".to_string(),
+                    Value::String("/tmp/example.txt".to_string()),
+                ),
+            ]),
+            runtime: BTreeMap::from([
+                (
+                    "batch_no".to_string(),
+                    Value::String("batch-100".to_string()),
+                ),
+                (
+                    "directory_id".to_string(),
+                    Value::String("dir-200".to_string()),
+                ),
+                (
+                    "private_space_type".to_string(),
+                    Value::String("4".to_string()),
+                ),
+                (
+                    "access_token".to_string(),
+                    Value::String("token-300".to_string()),
+                ),
+            ]),
+        };
+
+        let plan = catalog
+            .bind_flow("unicom_personal_root_upload", &context)
+            .expect("flow binding should succeed");
+
+        assert_eq!(plan.provider, "unicom");
+        assert_eq!(plan.surface, "pan.wo.cn-web");
+        assert_eq!(plan.flow.id, "unicom_personal_root_upload");
+        assert_eq!(plan.requests.len(), 3);
+        assert!(plan.requests.iter().any(|request| request.id == "upload2c"
+            && request.required_headers.iter().any(|header| {
+                header.name == "origin"
+                    && header.value_template.as_deref() == Some("https://pan.wo.cn")
+            })));
+        assert_eq!(
+            plan.presets
+                .get("family_upload_context")
+                .and_then(|value| value.get("familyId"))
+                .and_then(Value::as_str),
+            Some("family-42")
+        );
+        assert_eq!(
+            plan.presets
+                .get("private_upload_context")
+                .and_then(|value| value.get("psToken"))
+                .and_then(Value::as_str),
+            Some("private-token")
+        );
+    }
+
+    #[test]
+    fn browser_flow_catalog_bind_flow_rejects_missing_required_input() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+
+        let error = catalog
+            .bind_flow("unicom_sms_login", &BrowserFlowBindingContext::default())
+            .expect_err("missing required flow inputs should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("missing required browser flow input phone_number")
+        );
+    }
+
+    #[test]
+    fn browser_flow_catalog_bind_flow_rejects_missing_runtime_placeholder_value() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([(
+                "local_file".to_string(),
+                Value::String("/tmp/example.txt".to_string()),
+            )]),
+            runtime: BTreeMap::new(),
+        };
+
+        let error = catalog
+            .bind_flow("unicom_personal_root_upload", &context)
+            .expect_err("missing runtime template value should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("missing browser flow runtime value: batch_no")
+        );
     }
 }
