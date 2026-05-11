@@ -24,8 +24,9 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blob_core::{
     BlobBackend, BlobError, BrowserFlow, BrowserFlowBindingContext, BrowserFlowCatalog,
     BrowserFlowCatalogCollection, BrowserFlowExecutionReport, BrowserFlowExecutor,
-    BrowserFlowSession, BrowserFlowSessionExecutor, DryRunBrowserFlowExecutor, ListObjectsRequest,
-    OutboundIpFamily, PutObjectRequest, StubBackend, TokenSource,
+    BrowserFlowInput, BrowserFlowInputKind, BrowserFlowSession, BrowserFlowSessionExecutor,
+    DryRunBrowserFlowExecutor, ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend,
+    TokenSource,
 };
 use browser_cdp::{CdpBrowserFlowSession, CdpConnectionConfig};
 use hmac::{Hmac, Mac};
@@ -129,6 +130,7 @@ struct AuthBrokerState {
     pending_pkce: Arc<Mutex<HashMap<String, PendingPkceLogin>>>,
     device_flows: Arc<Mutex<HashMap<String, DeviceFlowRecord>>>,
     capture_prompts: Arc<Mutex<HashMap<String, AuthCapturePrompt>>>,
+    browser_flow_sessions: Arc<Mutex<HashMap<String, BrowserFlowAuthSession>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +175,9 @@ enum AuthPromptFieldKind {
 struct AuthCapturePrompt {
     prompt_id: String,
     provider: String,
+    session_id: Option<String>,
+    flow_id: Option<String>,
+    input_id: Option<String>,
     title: String,
     message: String,
     field_label: String,
@@ -188,6 +193,12 @@ struct AuthCapturePrompt {
 #[derive(Debug, Clone, Deserialize)]
 struct AuthCapturePromptCreateInput {
     provider: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    flow_id: Option<String>,
+    #[serde(default)]
+    input_id: Option<String>,
     title: String,
     message: String,
     field_label: String,
@@ -391,6 +402,8 @@ struct BrowserFlowSessionRunInput {
     surface: String,
     flow_id: String,
     #[serde(default)]
+    auth_session_id: Option<String>,
+    #[serde(default)]
     inputs: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     runtime: BTreeMap<String, serde_json::Value>,
@@ -407,10 +420,25 @@ struct BrowserFlowSessionRunPayload {
     provider: String,
     surface: String,
     flow_id: String,
+    auth_session_id: Option<String>,
+    status: String,
+    #[serde(default)]
+    prompts: Vec<AuthCapturePrompt>,
     cdp_endpoint_url: String,
     cdp_target_selector: Option<String>,
     cdp_target_timeout_ms: Option<u64>,
-    report: BrowserFlowExecutionReport,
+    report: Option<BrowserFlowExecutionReport>,
+}
+
+#[derive(Debug, Clone)]
+struct BrowserFlowAuthSession {
+    session_id: String,
+    provider: String,
+    surface: String,
+    flow_id: String,
+    inputs: BTreeMap<String, serde_json::Value>,
+    runtime: BTreeMap<String, serde_json::Value>,
+    updated_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -591,6 +619,7 @@ impl AuthBrokerState {
             pending_pkce: Arc::new(Mutex::new(HashMap::new())),
             device_flows: Arc::new(Mutex::new(HashMap::new())),
             capture_prompts: Arc::new(Mutex::new(HashMap::new())),
+            browser_flow_sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -722,6 +751,9 @@ impl AuthCapturePrompt {
         Self {
             prompt_id: random_urlsafe_token(16),
             provider: input.provider.trim().to_string(),
+            session_id: normalize_secret_field(input.session_id),
+            flow_id: normalize_secret_field(input.flow_id),
+            input_id: normalize_secret_field(input.input_id),
             title: input.title.trim().to_string(),
             message: input.message.trim().to_string(),
             field_label: input.field_label.trim().to_string(),
@@ -746,6 +778,44 @@ impl AuthCapturePrompt {
         let mut copy = self.clone();
         copy.answer_value = None;
         copy
+    }
+}
+
+impl BrowserFlowAuthSession {
+    fn new(
+        session_id: String,
+        provider: String,
+        surface: String,
+        flow_id: String,
+        inputs: BTreeMap<String, serde_json::Value>,
+        runtime: BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        let now = current_unix_ms();
+        Self {
+            session_id,
+            provider,
+            surface,
+            flow_id,
+            inputs,
+            runtime,
+            updated_at_unix_ms: now,
+        }
+    }
+
+    fn apply_request(
+        &mut self,
+        provider: String,
+        surface: String,
+        flow_id: String,
+        inputs: BTreeMap<String, serde_json::Value>,
+        runtime: BTreeMap<String, serde_json::Value>,
+    ) {
+        self.provider = provider;
+        self.surface = surface;
+        self.flow_id = flow_id;
+        self.inputs.extend(inputs);
+        self.runtime.extend(runtime);
+        self.updated_at_unix_ms = current_unix_ms();
     }
 }
 
@@ -1768,6 +1838,26 @@ fn current_auth_capture_policy_payload(state: &AppState) -> AuthCapturePolicyPay
     current_auth_capture_policy(state).payload()
 }
 
+fn browser_flow_catalog_and_flow<'a>(
+    state: &'a AppState,
+    provider: &str,
+    surface: &str,
+    flow_id: &str,
+) -> Result<(&'a BrowserFlowCatalog, &'a BrowserFlow), BlobError> {
+    let catalog = state
+        .browser_flow_catalogs
+        .get(provider, surface)
+        .ok_or_else(|| {
+            BlobError::NotFound(format!(
+                "browser flow catalog not found for {provider}/{surface}"
+            ))
+        })?;
+    let flow = catalog
+        .find_flow(flow_id)
+        .ok_or_else(|| BlobError::NotFound(format!("browser flow not found: {flow_id}")))?;
+    Ok((catalog, flow))
+}
+
 fn require_browser_flow_coordinates(
     provider: &str,
     surface: &str,
@@ -1813,6 +1903,163 @@ fn resolve_browser_flow_cdp_config(
         target_selector,
         target_timeout_ms,
     })
+}
+
+fn auth_prompt_field_kind_for_input(input: &BrowserFlowInput) -> AuthPromptFieldKind {
+    let haystack = format!(
+        "{} {} {}",
+        input.id,
+        input.label,
+        input.description.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase();
+
+    if haystack.contains("sms") || haystack.contains("验证码") {
+        return AuthPromptFieldKind::SmsCode;
+    }
+    if haystack.contains("phone") || haystack.contains("mobile") || haystack.contains("手机号") {
+        return AuthPromptFieldKind::PhoneNumber;
+    }
+    if haystack.contains("captcha") || haystack.contains("图形码") {
+        return AuthPromptFieldKind::Captcha;
+    }
+
+    match input.kind {
+        BrowserFlowInputKind::Secret => AuthPromptFieldKind::Password,
+        BrowserFlowInputKind::Text
+        | BrowserFlowInputKind::File
+        | BrowserFlowInputKind::RuntimeValue => AuthPromptFieldKind::Text,
+    }
+}
+
+fn value_is_present(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(value) => !value.trim().is_empty(),
+        serde_json::Value::Array(values) => !values.is_empty(),
+        serde_json::Value::Object(values) => !values.is_empty(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => true,
+    }
+}
+
+fn merge_answered_prompts_into_inputs(
+    state: &AppState,
+    session_id: &str,
+    inputs: &mut BTreeMap<String, serde_json::Value>,
+) {
+    let prompts = state
+        .auth
+        .capture_prompts
+        .lock()
+        .expect("auth capture prompt store poisoned");
+    for prompt in prompts.values() {
+        if prompt.session_id.as_deref() != Some(session_id) || !prompt.answer_present {
+            continue;
+        }
+        let Some(input_id) = prompt.input_id.as_deref() else {
+            continue;
+        };
+        if inputs.contains_key(input_id) {
+            continue;
+        }
+        if let Some(value) = prompt.answer_value.as_deref() {
+            inputs.insert(
+                input_id.to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+    }
+}
+
+fn upsert_browser_flow_auth_session(
+    state: &AppState,
+    session_id: Option<String>,
+    provider: String,
+    surface: String,
+    flow_id: String,
+    inputs: BTreeMap<String, serde_json::Value>,
+    runtime: BTreeMap<String, serde_json::Value>,
+) -> BrowserFlowAuthSession {
+    let session_id = normalize_secret_field(session_id).unwrap_or_else(|| random_urlsafe_token(16));
+    let mut sessions = state
+        .auth
+        .browser_flow_sessions
+        .lock()
+        .expect("browser flow auth session store poisoned");
+    let session = sessions.entry(session_id.clone()).or_insert_with(|| {
+        BrowserFlowAuthSession::new(
+            session_id.clone(),
+            provider.clone(),
+            surface.clone(),
+            flow_id.clone(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+    });
+    session.apply_request(provider, surface, flow_id, inputs, runtime);
+    session.clone()
+}
+
+fn missing_required_browser_flow_inputs<'a>(
+    flow: &'a BrowserFlow,
+    inputs: &BTreeMap<String, serde_json::Value>,
+) -> Vec<&'a BrowserFlowInput> {
+    flow.inputs
+        .iter()
+        .filter(|input| input.required)
+        .filter(|input| {
+            inputs
+                .get(&input.id)
+                .is_none_or(|value| !value_is_present(value))
+        })
+        .collect()
+}
+
+fn ensure_auth_capture_prompts_for_inputs(
+    state: &AppState,
+    session: &BrowserFlowAuthSession,
+    missing_inputs: &[&BrowserFlowInput],
+) -> Vec<AuthCapturePrompt> {
+    let mut prompts = state
+        .auth
+        .capture_prompts
+        .lock()
+        .expect("auth capture prompt store poisoned");
+    let mut created_or_existing = Vec::with_capacity(missing_inputs.len());
+
+    for input in missing_inputs {
+        if let Some(existing) = prompts
+            .values()
+            .find(|prompt| {
+                prompt.session_id.as_deref() == Some(session.session_id.as_str())
+                    && prompt.input_id.as_deref() == Some(input.id.as_str())
+                    && prompt.status == "pending"
+            })
+            .cloned()
+        {
+            created_or_existing.push(existing.sanitized());
+            continue;
+        }
+
+        let prompt = AuthCapturePrompt::from_input(AuthCapturePromptCreateInput {
+            provider: session.provider.clone(),
+            session_id: Some(session.session_id.clone()),
+            flow_id: Some(session.flow_id.clone()),
+            input_id: Some(input.id.clone()),
+            title: format!("{} Input Required", session.flow_id),
+            message: input.description.clone().unwrap_or_else(|| {
+                format!("Provide {} to continue this browser flow.", input.label)
+            }),
+            field_label: input.label.clone(),
+            field_kind: auth_prompt_field_kind_for_input(input),
+            placeholder: None,
+        });
+        let sanitized = prompt.sanitized();
+        prompts.insert(prompt.prompt_id.clone(), prompt);
+        created_or_existing.push(sanitized);
+    }
+
+    created_or_existing
 }
 
 async fn execute_browser_flow_session<S>(
@@ -3613,17 +3860,57 @@ async fn run_browser_flow_session(
     State(state): State<AppState>,
     Json(input): Json<BrowserFlowSessionRunInput>,
 ) -> Result<Json<BrowserFlowSessionRunPayload>, ApiError> {
+    let cdp_request = BrowserFlowSessionRunInput {
+        provider: input.provider.clone(),
+        surface: input.surface.clone(),
+        flow_id: input.flow_id.clone(),
+        auth_session_id: input.auth_session_id.clone(),
+        inputs: BTreeMap::new(),
+        runtime: BTreeMap::new(),
+        cdp_endpoint_url: input.cdp_endpoint_url.clone(),
+        cdp_target_selector: input.cdp_target_selector.clone(),
+        cdp_target_timeout_ms: input.cdp_target_timeout_ms,
+    };
     let (provider, surface, flow_id) =
         require_browser_flow_coordinates(&input.provider, &input.surface, &input.flow_id)?;
-    let cdp = resolve_browser_flow_cdp_config(&state, &input)?;
+    let (_, flow) = browser_flow_catalog_and_flow(&state, &provider, &surface, &flow_id)?;
+    let auth_session = upsert_browser_flow_auth_session(
+        &state,
+        input.auth_session_id.clone(),
+        provider.clone(),
+        surface.clone(),
+        flow_id.clone(),
+        input.inputs,
+        input.runtime,
+    );
+    let mut merged_inputs = auth_session.inputs.clone();
+    merge_answered_prompts_into_inputs(&state, &auth_session.session_id, &mut merged_inputs);
+    let missing_inputs = missing_required_browser_flow_inputs(flow, &merged_inputs);
+    if !missing_inputs.is_empty() {
+        let prompts =
+            ensure_auth_capture_prompts_for_inputs(&state, &auth_session, &missing_inputs);
+        return Ok(Json(BrowserFlowSessionRunPayload {
+            provider,
+            surface,
+            flow_id,
+            auth_session_id: Some(auth_session.session_id),
+            status: "awaiting_input".to_string(),
+            prompts,
+            cdp_endpoint_url: String::new(),
+            cdp_target_selector: None,
+            cdp_target_timeout_ms: None,
+            report: None,
+        }));
+    }
+    let cdp = resolve_browser_flow_cdp_config(&state, &cdp_request)?;
     let session = CdpBrowserFlowSession::connect(&cdp).await?;
     let report = execute_browser_flow_session(
         state.browser_flow_catalogs.as_ref(),
         &provider,
         &surface,
         &flow_id,
-        input.inputs,
-        input.runtime,
+        merged_inputs,
+        auth_session.runtime.clone(),
         session,
     )
     .await?;
@@ -3632,10 +3919,13 @@ async fn run_browser_flow_session(
         provider,
         surface,
         flow_id,
+        auth_session_id: Some(auth_session.session_id),
+        status: "completed".to_string(),
+        prompts: Vec::new(),
         cdp_endpoint_url: cdp.endpoint_url,
         cdp_target_selector: cdp.target_selector,
         cdp_target_timeout_ms: cdp.target_timeout_ms,
-        report,
+        report: Some(report),
     }))
 }
 
@@ -6969,6 +7259,102 @@ mod tests {
         assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
     }
 
+    #[test]
+    fn auth_capture_prompts_fill_missing_browser_flow_inputs() {
+        let state = test_state();
+        let session = upsert_browser_flow_auth_session(
+            &state,
+            Some("auth-session-1".to_string()),
+            "unicom".to_string(),
+            "pan.wo.cn-web".to_string(),
+            "unicom_sms_login".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let (_, flow) =
+            browser_flow_catalog_and_flow(&state, "unicom", "pan.wo.cn-web", "unicom_sms_login")
+                .expect("flow should exist");
+        let missing_inputs = missing_required_browser_flow_inputs(flow, &session.inputs);
+        let prompts = ensure_auth_capture_prompts_for_inputs(&state, &session, &missing_inputs);
+
+        assert_eq!(prompts.len(), 2);
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt.input_id.as_deref() == Some("phone_number"))
+        );
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt.input_id.as_deref() == Some("sms_code"))
+        );
+
+        let mut store = state
+            .auth
+            .capture_prompts
+            .lock()
+            .expect("auth capture prompt store poisoned");
+        for prompt in store.values_mut() {
+            if prompt.session_id.as_deref() != Some("auth-session-1") {
+                continue;
+            }
+            match prompt.input_id.as_deref() {
+                Some("phone_number") => prompt.answer("18513581767".to_string()),
+                Some("sms_code") => prompt.answer("288750".to_string()),
+                _ => {}
+            }
+        }
+        drop(store);
+
+        let mut merged = BTreeMap::new();
+        merge_answered_prompts_into_inputs(&state, "auth-session-1", &mut merged);
+        assert_eq!(
+            merged.get("phone_number"),
+            Some(&serde_json::Value::String("18513581767".to_string()))
+        );
+        assert_eq!(
+            merged.get("sms_code"),
+            Some(&serde_json::Value::String("288750".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_flow_session_run_returns_prompts_when_inputs_are_missing() {
+        let state = test_state();
+
+        let Json(payload) = run_browser_flow_session(
+            State(state.clone()),
+            Json(BrowserFlowSessionRunInput {
+                provider: "unicom".to_string(),
+                surface: "pan.wo.cn-web".to_string(),
+                flow_id: "unicom_sms_login".to_string(),
+                auth_session_id: Some("auth-session-2".to_string()),
+                inputs: BTreeMap::new(),
+                runtime: BTreeMap::new(),
+                cdp_endpoint_url: None,
+                cdp_target_selector: None,
+                cdp_target_timeout_ms: None,
+            }),
+        )
+        .await
+        .expect("session run should return prompt payload");
+
+        assert_eq!(payload.status, "awaiting_input");
+        assert_eq!(payload.auth_session_id.as_deref(), Some("auth-session-2"));
+        assert!(payload.report.is_none());
+        assert_eq!(payload.prompts.len(), 2);
+        assert!(payload.cdp_endpoint_url.is_empty());
+
+        let Json(prompts) = list_auth_capture_prompts(State(state))
+            .await
+            .expect("prompt list should succeed");
+        assert!(
+            prompts
+                .iter()
+                .any(|prompt| prompt.session_id.as_deref() == Some("auth-session-2"))
+        );
+    }
+
     #[tokio::test]
     async fn browser_flow_session_executor_runs_upload_flow_with_mock_session() {
         let state = test_state();
@@ -7050,6 +7436,7 @@ mod tests {
                 provider: "unicom".to_string(),
                 surface: "pan.wo.cn-web".to_string(),
                 flow_id: "unicom_sms_login".to_string(),
+                auth_session_id: None,
                 inputs: BTreeMap::new(),
                 runtime: BTreeMap::new(),
                 cdp_endpoint_url: None,
@@ -7071,6 +7458,7 @@ mod tests {
                 provider: "unicom".to_string(),
                 surface: "pan.wo.cn-web".to_string(),
                 flow_id: "unicom_sms_login".to_string(),
+                auth_session_id: None,
                 inputs: BTreeMap::new(),
                 runtime: BTreeMap::new(),
                 cdp_endpoint_url: Some("http://127.0.0.1:9333".to_string()),

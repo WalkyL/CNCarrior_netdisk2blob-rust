@@ -90,6 +90,7 @@
 - 已支持在网页中直接修改 `auth-capture` sidecar 地址、LLM endpoint / model，以及 provider 独立凭证
 - 已支持交互式“验证输入队列”占位能力，后续可供手机号 / 短信码 / 验证码输入
 - 已支持 `POST /api/browser-flows/session-run`，可用控制面默认 CDP 配置或请求级覆盖配置直接执行一条浏览器 flow
+- 当 flow 缺少必填人工输入时，`session-run` 现在会先落一条 `auth_session_id` 会话、自动创建 prompts，并返回 `awaiting_input`，而不是立即失败
 - 输出健康检查、日志、后续指标和审计信息
 
 ### `provider-onedrive`

@@ -43,9 +43,11 @@
 - `gatewayd` 现在也暴露一个最小真实 session 执行入口:
   - `POST /api/browser-flows/session-run`
   - body 里显式传 `provider`、`surface`、`flow_id`、`inputs`、`runtime`
+  - 可选传 `auth_session_id`，把多次请求收口到同一条人工认证会话
   - 可选覆盖 `cdp_endpoint_url`、`cdp_target_selector`、`cdp_target_timeout_ms`
   - 如果请求里不传，会回退到 control-plane 保存的 auth-capture CDP 配置
   - 底层 transport 统一走 `browser-cdp` crate，不绑定某个具体浏览器品牌
+  - 如果缺少必填 `inputs.*`，当前会返回 `status=awaiting_input` 并自动创建对应的 auth-capture prompts；待提示项回答后，可带同一个 `auth_session_id` 重试
 
 当前 schema version 为 `1`。
 
