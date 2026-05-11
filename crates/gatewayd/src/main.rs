@@ -2248,11 +2248,36 @@ fn browser_flow_prerequisite_is_satisfied(
     if prerequisite_flow.id != prerequisite_flow_id {
         return false;
     }
-    prerequisite_flow.outputs.iter().all(|output| {
+    browser_flow_outputs_are_present(prerequisite_flow, runtime)
+}
+
+fn browser_flow_outputs_are_present(
+    flow: &BrowserFlow,
+    runtime: &BTreeMap<String, serde_json::Value>,
+) -> bool {
+    flow.outputs.iter().all(|output| {
         runtime
             .get(&output.id)
             .is_some_and(|value| value_is_present(value))
     })
+}
+
+fn browser_flow_auth_session_snapshot(
+    state: &AppState,
+    session_id: &str,
+) -> Result<BrowserFlowAuthSession, ApiError> {
+    state
+        .auth
+        .browser_flow_sessions
+        .lock()
+        .expect("browser flow auth session store poisoned")
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::from(BlobError::NotFound(format!(
+                "browser flow auth session not found: {session_id}"
+            )))
+        })
 }
 
 async fn execute_browser_flow_plan_with_output_capture(
@@ -2299,22 +2324,49 @@ async fn run_browser_flow_prerequisite_if_needed(
         return Ok(());
     };
 
-    let (_, prerequisite_flow) =
+    let (_, direct_prerequisite_flow) =
         browser_flow_catalog_and_flow(state, provider, surface, prerequisite_flow_id)?;
-    if browser_flow_prerequisite_is_satisfied(flow, prerequisite_flow, session_runtime) {
+    if browser_flow_prerequisite_is_satisfied(flow, direct_prerequisite_flow, session_runtime) {
         return Ok(());
     }
 
-    let plan = browser_flow_plan(
-        state.browser_flow_catalogs.as_ref(),
-        provider,
-        surface,
-        prerequisite_flow_id,
-        merged_inputs.clone(),
-        session_runtime.clone(),
-    )?;
-    let _ =
-        execute_browser_flow_plan_with_output_capture(state, session_id, &plan, session).await?;
+    let mut prerequisite_chain = Vec::new();
+    let mut cursor_flow_id = Some(prerequisite_flow_id.to_string());
+    let mut seen_prerequisites = HashSet::new();
+    while let Some(current_flow_id) = cursor_flow_id.take() {
+        if !seen_prerequisites.insert(current_flow_id.clone()) {
+            return Err(ApiError::from(BlobError::Configuration(format!(
+                "browser flow prerequisite cycle detected while executing {current_flow_id}"
+            ))));
+        }
+        let (_, current_flow) =
+            browser_flow_catalog_and_flow(state, provider, surface, &current_flow_id)?;
+        prerequisite_chain.push(current_flow_id);
+        cursor_flow_id = current_flow.prerequisite_flow_id.clone();
+    }
+
+    prerequisite_chain.reverse();
+    let mut current_runtime = session_runtime.clone();
+    for prerequisite_flow_id in prerequisite_chain {
+        let (_, prerequisite_flow) =
+            browser_flow_catalog_and_flow(state, provider, surface, &prerequisite_flow_id)?;
+        if browser_flow_outputs_are_present(prerequisite_flow, &current_runtime) {
+            continue;
+        }
+
+        let plan = browser_flow_plan(
+            state.browser_flow_catalogs.as_ref(),
+            provider,
+            surface,
+            &prerequisite_flow_id,
+            merged_inputs.clone(),
+            current_runtime.clone(),
+        )?;
+        let _ = execute_browser_flow_plan_with_output_capture(state, session_id, &plan, session)
+            .await?;
+        current_runtime = browser_flow_auth_session_snapshot(state, session_id)?.runtime;
+    }
+
     Ok(())
 }
 
@@ -4192,19 +4244,8 @@ async fn run_browser_flow_session(
         &session,
     )
     .await?;
-    let session_after_prerequisite = state
-        .auth
-        .browser_flow_sessions
-        .lock()
-        .expect("browser flow auth session store poisoned")
-        .get(&auth_session.session_id)
-        .cloned()
-        .ok_or_else(|| {
-            ApiError::from(BlobError::NotFound(format!(
-                "browser flow auth session not found: {}",
-                auth_session.session_id
-            )))
-        })?;
+    let session_after_prerequisite =
+        browser_flow_auth_session_snapshot(&state, &auth_session.session_id)?;
     let plan = browser_flow_plan(
         state.browser_flow_catalogs.as_ref(),
         &provider,
@@ -7516,7 +7557,7 @@ mod tests {
         assert!(
             catalogs
                 .iter()
-                .any(|entry| entry.provider == "unicom" && entry.flow_count >= 7)
+                .any(|entry| entry.provider == "unicom" && entry.flow_count >= 9)
         );
 
         let Json(catalog) = get_browser_flow_catalog(
@@ -7903,6 +7944,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn capture_browser_flow_outputs_reads_current_session_runtime_values() {
+        let state = test_state();
+        let plan = browser_flow_plan(
+            state.browser_flow_catalogs.as_ref(),
+            "unicom",
+            "pan.wo.cn-web",
+            "unicom_capture_current_session",
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("capture current session flow plan should bind");
+        let reader = RecordingBrowserFlowOutputReader {
+            values: Arc::new(Mutex::new(HashMap::from([
+                (
+                    "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.token ?? null; })()".to_string(),
+                    serde_json::Value::String("token-current".to_string()),
+                ),
+                (
+                    "(() => sessionStorage.getItem('familyId') || null)()".to_string(),
+                    serde_json::Value::String("family-current".to_string()),
+                ),
+                (
+                    "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.clientId ?? null; })()".to_string(),
+                    serde_json::Value::String("1001000021".to_string()),
+                ),
+            ]))),
+            current_url: Arc::new(Mutex::new(Some(
+                "https://pan.wo.cn/pan/file_list/all".to_string(),
+            ))),
+        };
+
+        let captured = capture_browser_flow_outputs(&plan, &reader)
+            .await
+            .expect("current session output capture should succeed");
+
+        assert_eq!(
+            captured.get("access_token"),
+            Some(&serde_json::Value::String("token-current".to_string()))
+        );
+        assert_eq!(
+            captured.get("family_id"),
+            Some(&serde_json::Value::String("family-current".to_string()))
+        );
+        assert_eq!(
+            captured.get("client_id"),
+            Some(&serde_json::Value::String("1001000021".to_string()))
+        );
+        assert_eq!(
+            captured.get("current_url"),
+            Some(&serde_json::Value::String(
+                "https://pan.wo.cn/pan/file_list/all".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn browser_flow_auth_session_runtime_is_reused_by_follow_up_flow() {
         let state = test_state();
@@ -7973,6 +8070,13 @@ mod tests {
             "unicom_prepare_personal_root_upload",
         )
         .expect("prepare flow should exist");
+        let (_, capture_flow) = browser_flow_catalog_and_flow(
+            &state,
+            "unicom",
+            "pan.wo.cn-web",
+            "unicom_capture_current_session",
+        )
+        .expect("capture flow should exist");
 
         assert!(!browser_flow_prerequisite_is_satisfied(
             upload_flow,
@@ -7998,6 +8102,35 @@ mod tests {
                 (
                     "personal_space_type".to_string(),
                     serde_json::Value::String("0".to_string()),
+                ),
+            ]),
+        ));
+
+        assert!(!browser_flow_prerequisite_is_satisfied(
+            prepare_flow,
+            capture_flow,
+            &BTreeMap::new(),
+        ));
+
+        assert!(browser_flow_prerequisite_is_satisfied(
+            prepare_flow,
+            capture_flow,
+            &BTreeMap::from([
+                (
+                    "access_token".to_string(),
+                    serde_json::Value::String("token-300".to_string()),
+                ),
+                (
+                    "family_id".to_string(),
+                    serde_json::Value::String("family-42".to_string()),
+                ),
+                (
+                    "client_id".to_string(),
+                    serde_json::Value::String("1001000021".to_string()),
+                ),
+                (
+                    "current_url".to_string(),
+                    serde_json::Value::String("https://pan.wo.cn/pan/file_list/all".to_string()),
                 ),
             ]),
         ));

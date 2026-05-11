@@ -51,7 +51,7 @@
   - 如果缺少必填 `inputs.*`，当前会返回 `status=awaiting_input` 并自动创建对应的 auth-capture prompts；待提示项回答后，可带同一个 `auth_session_id` 重试
   - `GET /api/browser-flows/session/{session_id}` 可轮询当前会话的 `pending/awaiting_input/answered/resumed/completed/failed` 状态、关联 prompts、最近 report 和 last_error
   - 当 flow 成功完成后，`gatewayd` 当前会把 `flows[].outputs` 里的 `script_value` / `url` 输出写回同一条 auth session 的 `runtime`，供后续复用同一个 `auth_session_id` 的 flow 继续绑定 `{{runtime.*}}`
-  - 当 flow 声明了 `prerequisite_flow_id`，`gatewayd` 会在同一条 `auth_session_id` 和同一个 CDP page session 内先执行 prerequisite flow，再执行主 flow
+  - 当 flow 声明了 `prerequisite_flow_id`，`gatewayd` 会在同一条 `auth_session_id` 和同一个 CDP page session 内递归执行 prerequisite chain，再执行主 flow
   - 当前这一步还没有实现完整的 `response_field` / `request_field` 抓取；先覆盖登录后页面内可直接读取的 token / URL / store state
 
 当前 schema version 为 `1`。
@@ -80,16 +80,17 @@
 
 ## 联通样例现在覆盖了什么
 
-当前联通样例覆盖八条主路径，其中 personal root 上传已按当前执行器能力拆成“准备 uploader 上下文”和“真正附加文件上传”两段:
+当前联通样例覆盖九条主路径，其中 personal root 上传已按当前执行器能力拆成“当前会话抓取”“准备 uploader 上下文”和“真正附加文件上传”三段:
 
 1. `unicom_sms_login`
-2. `unicom_prepare_personal_root_upload`
-3. `unicom_personal_root_upload`
-4. `unicom_create_directory`
-5. `unicom_delete_entry`
-6. `unicom_rename_entry`
-7. `unicom_copy_entry`
-8. `unicom_move_entry`
+2. `unicom_capture_current_session`
+3. `unicom_prepare_personal_root_upload`
+4. `unicom_personal_root_upload`
+5. `unicom_create_directory`
+6. `unicom_delete_entry`
+7. `unicom_rename_entry`
+8. `unicom_copy_entry`
+9. `unicom_move_entry`
 
 其中上传流程记录了一个关键约束:
 
@@ -110,6 +111,7 @@
 - family/private upload context 还没有拆成独立 flow
 - 在它们的 uploader 上下文、额外 token 和页面切换动作完成实测前，不再通过一个泛化 upload flow 预先要求额外 runtime
 - `unicom_prepare_personal_root_upload` 负责调用页面的 `goUpload(false)` 并把 `batch_no`、`directory_id`、`personal_space_type` 写回同一条 auth session runtime
+- `unicom_capture_current_session` 负责在已登录的 `file_list_all` 页面上直接抓取 `access_token`、`family_id`、`client_id` 和 `current_url`
 - `unicom_personal_root_upload` 负责在这条已准备好的 uploader 上下文里附加本地文件并等待真实上传请求
 
 目录创建、删除、重命名、复制、移动这些写路径当前也已经有了实测事实:

@@ -697,6 +697,7 @@
       "title": "Unicom Prepare Personal Root Upload",
       "purpose": "Open the page uploader and capture the personal-root upload context that the web client initializes before any file is attached.",
       "start_page": "file_list_all",
+      "prerequisite_flow_id": "unicom_capture_current_session",
       "steps": [
         {
           "kind": "invoke_operation",
@@ -730,6 +731,54 @@
       "notes": [
         "Validated on 2026-05-12 against the logged-in personal root page by calling goUpload(false) without attaching a file.",
         "This preparatory flow exists so later upload flows can reuse the initialized uploader context through auth-session runtime values."
+      ]
+    },
+    {
+      "id": "unicom_capture_current_session",
+      "title": "Unicom Capture Current Session",
+      "purpose": "Capture the current authenticated personal file-list session from an already logged-in page without replaying the SMS login flow.",
+      "start_page": "file_list_all",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-file-list-page",
+          "page": "file_list_all",
+          "timeout_ms": 5000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "access_token",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.token ?? null; })()",
+          "redact": true,
+          "description": "Access token captured from the current file-list Vuex user store."
+        },
+        {
+          "id": "family_id",
+          "kind": "script_value",
+          "source": "(() => sessionStorage.getItem('familyId') || null)()",
+          "redact": false,
+          "description": "Family space identifier exposed in sessionStorage for the current page session."
+        },
+        {
+          "id": "client_id",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.clientId ?? null; })()",
+          "redact": false,
+          "description": "Client identifier from the current file-list Vuex user store."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the already logged-in page target."
+        }
+      ],
+      "notes": [
+        "Use this flow when the CDP target is already logged in and sitting on the personal file list page.",
+        "This avoids forcing a fresh SMS login just to populate auth-session runtime values."
       ]
     },
     {
@@ -798,7 +847,8 @@
         }
       ],
       "notes": [
-        "Run unicom_prepare_personal_root_upload first on the same auth_session_id so batch_no, directory_id, and personal_space_type are captured from the live page uploader state.",
+        "When batch_no, directory_id, or personal_space_type are missing, gatewayd now auto-runs unicom_prepare_personal_root_upload on the same auth_session_id and CDP page session.",
+        "unicom_prepare_personal_root_upload in turn auto-runs unicom_capture_current_session when access_token and related session fields have not been captured yet.",
         "This flow is intentionally scoped to personal root upload; family/private variants should be modelled as separate flows once their uploader contexts are captured end-to-end.",
         "If upload2C form fields or the global uploader component change, update the request descriptor and JS operations here before rewriting provider code."
       ]

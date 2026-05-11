@@ -6,7 +6,7 @@
 
 当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、session 持久化与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通与电信 provider 已打通真实目录列举和下载，只写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置，以及给短信码/手机号/验证码之类交互式认证步骤预留的“验证输入队列”。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
-针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖短信登录、个人空间上传、目录创建/删除/重命名/复制/移动这七条真实验证过的网页流程。
+针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程。
 
 浏览器执行层当前统一收口到标准 CDP，而不是绑定某个浏览器品牌。`browser-cdp` crate 负责连接可配置的 CDP endpoint、选择 page target、执行基础页面动作，`gatewayd` 则提供 catalog 查询、dry-run 和最小真实 session 执行入口，便于后续把 auth-capture 编排继续外挂出来。
 
@@ -198,7 +198,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `POST /api/browser-flows/dry-run`
 - `POST /api/browser-flows/session-run`
 
-其中 `session-run` 会优先使用请求体里的 `cdp_endpoint_url` / `cdp_target_selector` / `cdp_target_timeout_ms`，未提供时回退到控制面保存的 `CCBG_AUTH_CAPTURE_CDP_*` 对应配置。这一层的目标是兼容任意支持 CDP 的浏览器或远端 browser host，而不是只兼容 Edge。
+其中 `session-run` 会优先使用请求体里的 `cdp_endpoint_url` / `cdp_target_selector` / `cdp_target_timeout_ms`，未提供时回退到控制面保存的 `CCBG_AUTH_CAPTURE_CDP_*` 对应配置。这一层的目标是兼容任意支持 CDP 的浏览器或远端 browser host，而不是只兼容 Edge。若 flow 声明了 `prerequisite_flow_id`，`gatewayd` 现在会在同一条 `auth_session_id` 和同一个 CDP page session 内递归执行 prerequisite 链，再执行主 flow。
 
 ## 认证边界
 

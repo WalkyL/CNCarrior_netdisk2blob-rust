@@ -767,6 +767,28 @@ impl BrowserFlowCatalog {
             }
         }
 
+        let prerequisite_by_flow = self
+            .flows
+            .iter()
+            .map(|flow| (flow.id.as_str(), flow.prerequisite_flow_id.as_deref()))
+            .collect::<BTreeMap<_, _>>();
+        for flow in &self.flows {
+            let mut seen_prerequisites = BTreeSet::new();
+            let mut cursor = flow.prerequisite_flow_id.as_deref();
+            while let Some(prerequisite_flow_id) = cursor {
+                if !seen_prerequisites.insert(prerequisite_flow_id) {
+                    return Err(BlobError::Configuration(format!(
+                        "flow {} participates in a prerequisite cycle at {}",
+                        flow.id, prerequisite_flow_id
+                    )));
+                }
+                cursor = prerequisite_by_flow
+                    .get(prerequisite_flow_id)
+                    .copied()
+                    .flatten();
+            }
+        }
+
         Ok(())
     }
 }
@@ -1979,7 +2001,13 @@ mod tests {
 
         assert_eq!(catalog.provider, "unicom");
         assert_eq!(catalog.surface, "pan.wo.cn-web");
-        assert_eq!(catalog.flows.len(), 8);
+        assert_eq!(catalog.flows.len(), 9);
+        assert!(
+            catalog
+                .flows
+                .iter()
+                .any(|flow| flow.id == "unicom_capture_current_session")
+        );
         assert!(
             catalog
                 .flows
@@ -2066,6 +2094,77 @@ mod tests {
             error
                 .to_string()
                 .contains("references unknown element login.missing")
+        );
+    }
+
+    #[test]
+    fn browser_flow_catalog_rejects_prerequisite_cycles() {
+        let raw = r#"{
+          "schema_version": 1,
+          "provider": "example",
+          "surface": "example-web",
+          "base_url": "https://example.com",
+          "pages": [
+            {
+              "id": "root",
+              "title": "Root",
+              "url_patterns": ["https://example.com/*"]
+            }
+          ],
+          "elements": [
+            {
+              "id": "root.button",
+              "page": "root",
+              "role": "button",
+              "required": true,
+              "selectors": [
+                {
+                  "engine": "css",
+                  "value": "button"
+                }
+              ]
+            }
+          ],
+          "requests": [],
+          "operations": [],
+          "flows": [
+            {
+              "id": "flow_a",
+              "title": "Flow A",
+              "purpose": "Cycle test",
+              "start_page": "root",
+              "prerequisite_flow_id": "flow_b",
+              "steps": [
+                {
+                  "kind": "click",
+                  "id": "click-a",
+                  "element": "root.button"
+                }
+              ]
+            },
+            {
+              "id": "flow_b",
+              "title": "Flow B",
+              "purpose": "Cycle test",
+              "start_page": "root",
+              "prerequisite_flow_id": "flow_a",
+              "steps": [
+                {
+                  "kind": "click",
+                  "id": "click-b",
+                  "element": "root.button"
+                }
+              ]
+            }
+          ]
+        }"#;
+
+        let error = BrowserFlowCatalog::from_json_str(raw)
+            .expect_err("catalog should reject prerequisite cycles");
+        assert!(
+            error
+                .to_string()
+                .contains("participates in a prerequisite cycle")
         );
     }
 
@@ -2218,6 +2317,48 @@ mod tests {
                 .outputs
                 .iter()
                 .any(|output| output.id == "personal_space_type")
+        );
+        assert_eq!(
+            plan.flow.prerequisite_flow_id.as_deref(),
+            Some("unicom_capture_current_session")
+        );
+    }
+
+    #[test]
+    fn browser_flow_catalog_bind_flow_capture_current_session_exposes_runtime_outputs() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext::default();
+
+        let plan = catalog
+            .bind_flow("unicom_capture_current_session", &context)
+            .expect("capture current session flow should bind");
+
+        assert_eq!(plan.flow.outputs.len(), 4);
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "access_token")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "family_id")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "client_id")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "current_url")
         );
     }
 
