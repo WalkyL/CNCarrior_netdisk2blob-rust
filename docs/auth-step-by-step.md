@@ -233,7 +233,8 @@ chmod 600 $HOME/.config/ccbg/credentials/example.token
 - 当前默认 probe 会调用真实文件 API `QueryAllFiles`
 - 现在已经支持把联通云盘根目录映射成单个 S3 bucket: `root`
 - 现在已经支持 `ListBuckets` / `ListObjectsV2` / `/v1/containers` / `/v1/objects`
-- 下载直链与写入接口映射还没有完成
+- 现在已经支持真实下载与对象删除
+- 上传和其余写入接口映射还没有完成
 
 另外，联通桌面站当前已经有一份独立的浏览器流程样例配置:
 
@@ -250,8 +251,8 @@ chmod 600 $HOME/.config/ccbg/credentials/example.token
 
 这意味着:
 
-- 你已经可以用联通 token 在本地列出 bucket 和对象清单
-- 但今天还不能承诺联通云盘真实下载和写入已经完全打通
+- 你已经可以用联通 token 在本地列出 bucket、读取对象并删除对象
+- 但今天还不能承诺联通云盘上传、重命名、复制、移动等 native 写路径已经完全打通
 
 ### 联通云盘 Step by Step
 

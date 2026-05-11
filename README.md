@@ -4,7 +4,7 @@
 
 项目目标是把中国联通、中国电信、中国移动云盘接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商云盘作为唯一写入主云盘，其他被选中的运营商云盘可作为异步同步目标，OneDrive 作为默认备份同步对象，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。源码一期按公开 GitHub 仓库形式发布。
 
-当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、session 持久化与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通与电信 provider 已打通真实目录列举和下载，只写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置，以及给短信码/手机号/验证码之类交互式认证步骤预留的“验证输入队列”。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
+当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、session 持久化与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载和对象删除，其余 native 写入路径待补；电信 provider 已打通真实目录列举和下载，写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置，以及给短信码/手机号/验证码之类交互式认证步骤预留的“验证输入队列”。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
 针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程。
 

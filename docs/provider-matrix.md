@@ -4,7 +4,7 @@
 
 | Provider | 产品 | 角色 | 默认入口 | 认证方式 | 当前状态 |
 | --- | --- | --- | --- | --- | --- |
-| `unicom` | 中国联通云盘 | 主写候选 / 同步候选 | `https://panservice.mail.wo.cn` | 手工 token / cookie 注入 | 已打通桌面站 `QueryAllFiles` 认证、对象列举与真实下载；已探测 personal scope，并可通过 `familyId` 或 `QueryFamilyGroups` 自动发现 family scope；浏览器流程配置已覆盖短信登录、个人空间上传、目录创建/删除/重命名/复制/移动；Rust 写入路径待补 |
+| `unicom` | 中国联通云盘 | 主写候选 / 同步候选 | `https://panservice.mail.wo.cn` | 手工 token / cookie 注入 | 已打通桌面站 `QueryAllFiles` 认证、对象列举、真实下载与 native 对象删除；已探测 personal scope，并可通过 `familyId` 或 `QueryFamilyGroups` 自动发现 family scope；浏览器流程配置已覆盖短信登录、个人空间上传、目录创建/删除/重命名/复制/移动；上传与其余 native 写入路径待补 |
 | `telecom` | 天翼云盘 | 主写候选 / 同步候选 | `https://cloud.189.cn` | 手工 `Browser ID` / cookie 注入，可选 token 兼容备用 | 已打通 `listFiles.action`、对象列举与真实下载；已探测 personal scope，并通过 `getUserInfoForPortal.action` 拉取容量；当前只读，写入待补 |
 | `mobile` | 中国移动云盘 | 主写候选 / 同步候选 | `https://yun.139.com` | 手工 token / cookie 注入 | 已建立适配骨架，待确认实际网页接口 |
 | `onedrive` | Microsoft OneDrive | 默认备份同步目标 / 可选 fallback | Microsoft Graph / OneDrive API | 内置 Web PKCE / Device Code / 手工 token 兜底 | 已支持最小 Graph 读写删、session 文件落盘与自动 refresh token 续期 |

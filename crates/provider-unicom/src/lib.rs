@@ -31,6 +31,7 @@ const QUERY_FAMILY_GROUPS_OPERATION: &str = "QueryFamilyGroups";
 const GET_DOWNLOAD_URL_OPERATION: &str = "GetDownloadUrl";
 const GET_DOWNLOAD_URL_V2_OPERATION: &str = "GetDownloadUrlV2";
 const GET_DOWNLOAD_URL_V3_OPERATION: &str = "GetDownloadUrlV3";
+const DELETE_FILE_OPERATION: &str = "DeleteFile";
 const DOWNLOAD_URL_OPERATIONS: [&str; 3] = [
     GET_DOWNLOAD_URL_OPERATION,
     GET_DOWNLOAD_URL_V2_OPERATION,
@@ -804,6 +805,17 @@ impl UnicomBlobAdapter {
         )))
     }
 
+    async fn delete_file_entry(&self, entry: &QueryAllFilesEntry) -> Result<(), BlobError> {
+        let body = json!({
+            "spaceType": self.configured_space_type()?,
+            "vipLevel": 0,
+            "dirList": [],
+            "fileList": [entry.id.as_str()],
+        });
+        self.dispatch_json(DELETE_FILE_OPERATION, body).await?;
+        Ok(())
+    }
+
     fn download_request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, url)
@@ -920,7 +932,7 @@ impl BlobBackend for UnicomBlobAdapter {
         BackendCapabilities {
             read: true,
             write: false,
-            delete: false,
+            delete: true,
             multipart_upload: false,
         }
     }
@@ -1129,6 +1141,12 @@ impl BlobBackend for UnicomBlobAdapter {
             .await?;
 
         Ok(ObjectPayload { info, body })
+    }
+
+    async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+        self.validate_container(container)?;
+        let (entry, _) = self.resolve_object_entry(key).await?;
+        self.delete_file_entry(&entry).await
     }
 }
 
@@ -1831,7 +1849,7 @@ async fn response_to_error(response: Response, action: &str) -> BlobError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         sync::{Arc, Mutex},
     };
 
@@ -1849,11 +1867,11 @@ mod tests {
     };
 
     use super::{
-        APP_QUERY_USER_OPERATION, GET_DOWNLOAD_URL_OPERATION, GET_DOWNLOAD_URL_V2_OPERATION,
-        GET_DOWNLOAD_URL_V3_OPERATION, QUERY_ALL_FILES_OPERATION, QUERY_FAMILY_GROUPS_OPERATION,
-        UNICOM_ROOT_CONTAINER, UnicomBlobAdapter, UnicomConfig, aes_cbc_decrypt_base64,
-        aes_cbc_encrypt_base64, build_api_user_dispatcher_payload, build_wohome_dispatcher_payload,
-        dispatcher_sign,
+        APP_QUERY_USER_OPERATION, DELETE_FILE_OPERATION, GET_DOWNLOAD_URL_OPERATION,
+        GET_DOWNLOAD_URL_V2_OPERATION, GET_DOWNLOAD_URL_V3_OPERATION, QUERY_ALL_FILES_OPERATION,
+        QUERY_FAMILY_GROUPS_OPERATION, UNICOM_ROOT_CONTAINER, UnicomBlobAdapter, UnicomConfig,
+        aes_cbc_decrypt_base64, aes_cbc_encrypt_base64, build_api_user_dispatcher_payload,
+        build_wohome_dispatcher_payload, dispatcher_sign,
     };
     use serde_json::{Value, json};
 
@@ -1866,6 +1884,7 @@ mod tests {
         entries_by_parent: Arc<BTreeMap<String, Vec<Value>>>,
         file_bodies_by_id: Arc<BTreeMap<String, Vec<u8>>>,
         download_routes_by_operation: Arc<MockDownloadRoutes>,
+        deleted_ids: Arc<Mutex<BTreeSet<String>>>,
         requests: Arc<Mutex<Vec<Value>>>,
     }
 
@@ -1910,6 +1929,7 @@ mod tests {
                 entries_by_parent: Arc::new(entries_by_parent),
                 file_bodies_by_id: Arc::new(file_bodies_by_id),
                 download_routes_by_operation: Arc::new(download_routes_by_operation),
+                deleted_ids: Arc::new(Mutex::new(BTreeSet::new())),
                 requests: requests.clone(),
             };
 
@@ -2011,8 +2031,14 @@ mod tests {
                     .or_else(|| state.entries_by_parent.get(parent_directory_id))
                     .cloned()
                     .unwrap_or_default();
+                let deleted_ids = state.deleted_ids.lock().expect("mock deleted id set");
                 let files = entries
                     .into_iter()
+                    .filter(|entry| {
+                        !entry["id"]
+                            .as_str()
+                            .is_some_and(|id| deleted_ids.contains(id))
+                    })
                     .skip(page_num * page_size)
                     .take(page_size)
                     .collect::<Vec<_>>();
@@ -2072,6 +2098,27 @@ mod tests {
                     ),
                     None => ("9999", "系统异常", None),
                 }
+            }
+            DELETE_FILE_OPERATION => {
+                let dir_ids = request_body["dirList"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<_>>();
+                let file_ids = request_body["fileList"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<_>>();
+                let mut deleted_ids = state.deleted_ids.lock().expect("mock deleted id set");
+                for id in dir_ids.iter().chain(file_ids.iter()) {
+                    deleted_ids.insert(id.clone());
+                }
+                ("0000", "成功", Some(json!({ "deleted": true })))
             }
             other => panic!("unexpected mock dispatcher operation: {other}"),
         };
@@ -2565,5 +2612,38 @@ mod tests {
             .find(|request| request["__operation"] == GET_DOWNLOAD_URL_V2_OPERATION)
             .expect("GetDownloadUrlV2 request should be recorded");
         assert_eq!(v2_request["fidList"][0], "fid-alpha");
+    }
+
+    #[tokio::test]
+    async fn delete_object_uses_native_delete_file_dispatcher() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        assert!(adapter.capabilities().delete);
+
+        adapter
+            .delete_object(UNICOM_ROOT_CONTAINER, "docs/alpha.txt")
+            .await
+            .expect("delete mock Unicom object");
+
+        let error = adapter
+            .head_object(UNICOM_ROOT_CONTAINER, "docs/alpha.txt")
+            .await
+            .expect_err("deleted object should no longer resolve");
+        assert!(matches!(error, blob_core::BlobError::NotFound(_)));
+
+        let requests = server.requests();
+        let delete_request = requests
+            .iter()
+            .find(|request| request["__operation"] == DELETE_FILE_OPERATION)
+            .expect("DeleteFile request should be recorded");
+        assert_eq!(delete_request["spaceType"], "0");
+        assert_eq!(delete_request["vipLevel"], 0);
+        assert_eq!(delete_request["dirList"], Value::Array(vec![]));
+        assert_eq!(
+            delete_request["fileList"],
+            Value::Array(vec![json!("file-alpha")])
+        );
     }
 }
