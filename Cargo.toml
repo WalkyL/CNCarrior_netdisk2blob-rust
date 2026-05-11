@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/blob-core",
+    "crates/browser-cdp",
     "crates/gatewayd",
     "crates/metadata-store",
     "crates/policy-engine",
@@ -24,6 +25,7 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["json"] }
 base64 = "0.22"
 cbc = "0.1"
+futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
 md5 = { package = "md-5", version = "0.10" }
@@ -36,6 +38,7 @@ serde_json = "1.0"
 sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

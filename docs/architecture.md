@@ -61,6 +61,13 @@
 - 定义容器、对象、健康状态、错误模型
 - 定义 `BlobBackend` trait
 - 为 HTTP 层与上游适配层提供稳定边界
+- 定义浏览器流程执行的通用抽象，例如 `BrowserFlowSession`，让真实浏览器 transport 可以独立实现
+
+### `browser-cdp`
+
+- 基于 Chrome DevTools Protocol 提供标准浏览器 transport 适配层
+- 负责可配置的 CDP endpoint、target 选择、websocket 会话和基础页面动作
+- 目标是兼容任何支持 CDP 的浏览器，而不是绑定 Edge/Chrome 的某个私有集成
 
 ### `provider-unicom` / `provider-telecom` / `provider-mobile`
 

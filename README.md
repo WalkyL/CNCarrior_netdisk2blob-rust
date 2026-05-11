@@ -30,6 +30,7 @@ carrier-cloud-blob-gateway/
 │   └── example.env
 ├── crates/
 │   ├── blob-core/        # 抽象对象存储模型与错误定义
+│   ├── browser-cdp/      # 基于 Chrome DevTools Protocol 的浏览器执行适配层
 │   ├── gatewayd/         # 本地 HTTP 服务入口
 │   ├── metadata-store/   # SQLite 元数据与复制状态持久化
 │   ├── policy-engine/    # primary/sync/fallback 拓扑校验
