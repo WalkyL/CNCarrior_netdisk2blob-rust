@@ -6,7 +6,7 @@
 
 当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、session 持久化与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载和对象删除，其余 native 写入路径待补；电信 provider 已打通真实目录列举和下载，写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置，以及给短信码/手机号/验证码之类交互式认证步骤预留的“验证输入队列”。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
-针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程。
+针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。对已经证明稳定、但仍然可能有静态字段微调的 provider-native 能力，则额外放进 `config/provider-capabilities/*.json`，把 dispatcher 操作名和默认请求体固定项沉淀成可替换组件。对“每个云盘后续还要自动探测哪些账号、作用域、读写路径事实”，则额外放进 `config/provider-probes/*.json`。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程，并为 native `CreateDirectory` / `DeleteFile` 和后续自动探测项维护独立 catalog。
 
 浏览器执行层当前统一收口到标准 CDP，而不是绑定某个浏览器品牌。`browser-cdp` crate 负责连接可配置的 CDP endpoint、选择 page target、执行基础页面动作，`gatewayd` 则提供 catalog 查询、dry-run 和最小真实 session 执行入口，便于后续把 auth-capture 编排继续外挂出来。
 
@@ -29,6 +29,8 @@
 carrier-cloud-blob-gateway/
 ├── config/
 │   ├── browser-flows/   # provider 网页流程描述，供 CDP/auth-capture 执行层复用
+│   ├── provider-capabilities/ # provider-native 能力描述，供稳定请求执行层复用
+│   ├── provider-probes/ # 每个 provider 的自动探测项描述
 │   └── example.env
 ├── crates/
 │   ├── blob-core/        # 抽象对象存储模型与错误定义
@@ -53,6 +55,7 @@ carrier-cloud-blob-gateway/
 │   ├── github-publication.md
 │   ├── ports.md
 │   ├── provider-matrix.md
+│   ├── provider-probes.md
 │   ├── s3-compatibility.md
 │   └── roadmap.md
 ├── tools/

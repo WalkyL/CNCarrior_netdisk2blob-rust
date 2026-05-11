@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "provider": "unicom",
+  "description": "Stable dispatcher-backed native capability catalog for China Unicom Cloud Drive. Keep mutable request defaults here so provider code only owns execution, auth, encryption, and error handling.",
+  "capabilities": [
+    {
+      "id": "create_directory",
+      "dispatcher_operation": "CreateDirectory",
+      "body_defaults": {
+        "isCouldRepeat": 1
+      },
+      "notes": [
+        "spaceType, parentDirectoryId, and directoryName are injected by provider-unicom at runtime."
+      ]
+    },
+    {
+      "id": "delete_file",
+      "dispatcher_operation": "DeleteFile",
+      "body_defaults": {
+        "vipLevel": 0,
+        "dirList": [],
+        "fileList": []
+      },
+      "notes": [
+        "spaceType and target ids are injected by provider-unicom at runtime."
+      ]
+    }
+  ]
+}

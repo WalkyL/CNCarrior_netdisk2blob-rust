@@ -4747,6 +4747,9 @@ fn build_backend(config: &AppConfig, provider: ProviderId) -> Result<DynBackend,
                     .or_else(|| env_opt("CCBG_UNICOM_FAMILY_ID")),
                 family_space_type: env_or("CCBG_UNICOM_FAMILY_SPACE_TYPE", "1"),
                 family_root_directory_id: env_or("CCBG_UNICOM_FAMILY_ROOT_DIRECTORY_ID", "0"),
+                native_capability_catalog_path: env_opt(
+                    "CCBG_UNICOM_NATIVE_CAPABILITY_CATALOG_FILE",
+                ),
             })?))
         }
         ProviderId::Telecom => {

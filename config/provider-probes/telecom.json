@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "provider": "telecom",
+  "description": "Probe catalog for China Telecom Tianyi Cloud Drive.",
+  "probe_items": [
+    {
+      "id": "capture_browser_identity",
+      "status": "confirmed",
+      "category": "auth",
+      "transport": "manual_or_browser_capture",
+      "goal": "Capture Browser ID and cookie session required by current telecom provider requests.",
+      "prerequisites": [
+        "logged_in_browser"
+      ],
+      "artifacts": [
+        "browser_id",
+        "cookie_header"
+      ],
+      "config_targets": [
+        "CCBG_TELECOM_BROWSER_ID",
+        "CCBG_TELECOM_COOKIE_HEADER"
+      ],
+      "notes": [
+        "Current provider primarily depends on Browser ID plus cookies."
+      ]
+    },
+    {
+      "id": "personal_root_listing",
+      "status": "confirmed",
+      "category": "native_read",
+      "transport": "native_http",
+      "goal": "Verify listFiles.action can enumerate the configured root folder.",
+      "prerequisites": [
+        "browser_id",
+        "cookie_header"
+      ],
+      "artifacts": [
+        "root_folder_id",
+        "page_size",
+        "root_entry_count"
+      ],
+      "config_targets": [
+        "CCBG_TELECOM_ROOT_FOLDER_ID"
+      ],
+      "notes": [
+        "Current default root folder is -11."
+      ]
+    },
+    {
+      "id": "capacity_probe",
+      "status": "confirmed",
+      "category": "metadata",
+      "transport": "native_http",
+      "goal": "Verify getUserInfoForPortal.action and recover capacity metrics.",
+      "prerequisites": [
+        "browser_id",
+        "cookie_header"
+      ],
+      "artifacts": [
+        "capacity_total_bytes",
+        "capacity_used_bytes"
+      ],
+      "config_targets": [],
+      "notes": [
+        "Used by current telecom health path."
+      ]
+    },
+    {
+      "id": "native_download",
+      "status": "confirmed",
+      "category": "native_read",
+      "transport": "native_http",
+      "goal": "Verify a listed telecom file can be resolved and downloaded.",
+      "prerequisites": [
+        "personal_root_listing"
+      ],
+      "artifacts": [
+        "download_url",
+        "file_id"
+      ],
+      "config_targets": [],
+      "notes": [
+        "Download is already working in provider-telecom."
+      ]
+    },
+    {
+      "id": "write_path_discovery",
+      "status": "planned",
+      "category": "native_write",
+      "transport": "browser_capture_or_manual",
+      "goal": "Discover stable directory creation, delete, rename, copy, move, and upload paths for telecom.",
+      "prerequisites": [
+        "logged_in_browser"
+      ],
+      "artifacts": [
+        "dispatcher_or_http_endpoints",
+        "request_defaults",
+        "dynamic_fields"
+      ],
+      "config_targets": [
+        "future config/provider-capabilities/telecom-native.json"
+      ],
+      "notes": [
+        "Telecom write path is not yet implemented in Rust provider."
+      ]
+    }
+  ]
+}

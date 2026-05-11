@@ -77,6 +77,8 @@
 - 联通当前已支持目录遍历、文件下载与对象删除；电信当前已支持目录遍历与文件下载
 - 后续继续扩展写入、分片上传、断点续传
 - 对于来自真实浏览器/CDP 的页面元素、流程和请求形状，优先沉淀到浏览器流程配置层，而不是把页面细节直接硬编码到 provider crate
+- 对于已经稳定下来的 native dispatcher 动作，优先把操作名、默认字段和值约束沉淀到 `config/provider-capabilities/*.json`，让 provider crate 只保留执行器、鉴权、加密和错误归类
+- 对于账号发现、作用域发现、下载/上传/写路径确认这类“后续要自动探测”的目标，优先沉淀到 `config/provider-probes/*.json`，让控制面和 sidecar 后续直接消费同一份探测清单
 
 ### `gatewayd`
 

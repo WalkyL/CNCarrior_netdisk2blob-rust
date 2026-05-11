@@ -147,12 +147,26 @@
 
 - `browser-flow` 负责“怎么在浏览器里完成流程”
 - `provider-unicom` 负责“怎么在服务里表达联通对象读写能力”
+- `provider-capabilities` 负责“哪些已经稳定的 native 请求可以配置化复用”
+- `provider-probes` 负责“后续自动探测应该逐项确认哪些事实”
 
 当后续联通写路径真正落进 Rust provider 时，优先复用这层产出的稳定事实:
 
 - 上传前必须准备的上下文
 - `upload2C` 的关键字段
 - `CreateDirectory` / `DeleteFile` / `RenameFileOrDirectory` / `CopyFile` / `MoveFile` 这类动作的请求形状
+
+当前仓库已经开始把其中一部分稳定动作继续下沉到独立 capability catalog，例如:
+
+- [config/provider-capabilities/unicom-native.json](/home/walky/workspaces/carrier-cloud-blob-gateway/config/provider-capabilities/unicom-native.json:1)
+
+这类文件适合承载:
+
+- dispatcher 操作名
+- 默认静态字段
+- capability id 到稳定请求模板的映射
+
+这样网页小改版时，优先改 `browser-flows`；若只是 stable native 动作的静态字段微调，则优先改 `provider-capabilities`，而不是直接改 Rust provider。
 
 ## 下一步建议
 

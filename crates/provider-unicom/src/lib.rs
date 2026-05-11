@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -31,7 +32,6 @@ const QUERY_FAMILY_GROUPS_OPERATION: &str = "QueryFamilyGroups";
 const GET_DOWNLOAD_URL_OPERATION: &str = "GetDownloadUrl";
 const GET_DOWNLOAD_URL_V2_OPERATION: &str = "GetDownloadUrlV2";
 const GET_DOWNLOAD_URL_V3_OPERATION: &str = "GetDownloadUrlV3";
-const DELETE_FILE_OPERATION: &str = "DeleteFile";
 const DOWNLOAD_URL_OPERATIONS: [&str; 3] = [
     GET_DOWNLOAD_URL_OPERATION,
     GET_DOWNLOAD_URL_V2_OPERATION,
@@ -39,6 +39,12 @@ const DOWNLOAD_URL_OPERATIONS: [&str; 3] = [
 ];
 const QUERY_ALL_FILES_ROOT_DIRECTORY_ID: &str = "0";
 const DEFAULT_QUERY_ALL_FILES_PAGE_SIZE: usize = 200;
+const UNICOM_NATIVE_CAPABILITY_SCHEMA_VERSION: u32 = 1;
+#[allow(dead_code)]
+const NATIVE_CAPABILITY_CREATE_DIRECTORY: &str = "create_directory";
+const NATIVE_CAPABILITY_DELETE_FILE: &str = "delete_file";
+const DEFAULT_UNICOM_NATIVE_CAPABILITY_CATALOG_JSON: &str =
+    include_str!("../../../config/provider-capabilities/unicom-native.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnicomConfig {
@@ -61,11 +67,13 @@ pub struct UnicomConfig {
     pub family_id: Option<String>,
     pub family_space_type: String,
     pub family_root_directory_id: String,
+    pub native_capability_catalog_path: Option<String>,
 }
 
 pub struct UnicomBlobAdapter {
     config: UnicomConfig,
     client: reqwest::Client,
+    native_capabilities: BTreeMap<String, UnicomNativeCapabilitySpec>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +114,25 @@ struct DispatcherCallResult {
     code: String,
     description: Option<String>,
     data: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UnicomNativeCapabilityCatalog {
+    schema_version: u32,
+    provider: String,
+    #[serde(rename = "description", default)]
+    _description: Option<String>,
+    capabilities: Vec<UnicomNativeCapabilitySpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UnicomNativeCapabilitySpec {
+    id: String,
+    dispatcher_operation: String,
+    #[serde(default)]
+    body_defaults: Map<String, Value>,
+    #[serde(rename = "notes", default)]
+    _notes: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -213,9 +240,12 @@ impl AuthProbeStyle {
 
 impl UnicomBlobAdapter {
     pub fn new(config: UnicomConfig) -> Result<Self, BlobError> {
+        let native_capabilities =
+            load_unicom_native_capabilities(config.native_capability_catalog_path.as_deref())?;
         Ok(Self {
             client: build_http_client(&config)?,
             config,
+            native_capabilities,
         })
     }
 
@@ -391,6 +421,17 @@ impl UnicomBlobAdapter {
         } else {
             value
         }
+    }
+
+    fn native_capability(
+        &self,
+        capability_id: &str,
+    ) -> Result<&UnicomNativeCapabilitySpec, BlobError> {
+        self.native_capabilities.get(capability_id).ok_or_else(|| {
+            BlobError::Configuration(format!(
+                "missing Unicom native capability in catalog: {capability_id}"
+            ))
+        })
     }
 
     async fn dispatch_json(
@@ -596,6 +637,21 @@ impl UnicomBlobAdapter {
         self.dispatch_json(QUERY_FAMILY_GROUPS_OPERATION, json!({}))
             .await
             .map(|result| result.data)
+    }
+
+    async fn dispatch_native_capability(
+        &self,
+        capability_id: &str,
+        body_overrides: Map<String, Value>,
+    ) -> Result<DispatcherCallResult, BlobError> {
+        let capability = self.native_capability(capability_id)?;
+        let mut body = capability.body_defaults.clone();
+        body.extend(body_overrides);
+        self.dispatch_json(
+            capability.dispatcher_operation.as_str(),
+            Value::Object(body),
+        )
+        .await
     }
 
     async fn resolved_family_id(&self) -> Result<Option<String>, BlobError> {
@@ -805,14 +861,78 @@ impl UnicomBlobAdapter {
         )))
     }
 
+    #[allow(dead_code)]
+    async fn create_directory_entry(
+        &self,
+        parent_directory_id: &str,
+        directory_name: &str,
+    ) -> Result<QueryAllFilesEntry, BlobError> {
+        let mut body = Map::new();
+        body.insert(
+            "spaceType".to_string(),
+            Value::String(self.configured_space_type()?),
+        );
+        body.insert(
+            "parentDirectoryId".to_string(),
+            Value::String(parent_directory_id.to_string()),
+        );
+        body.insert(
+            "directoryName".to_string(),
+            Value::String(directory_name.to_string()),
+        );
+
+        self.dispatch_native_capability(NATIVE_CAPABILITY_CREATE_DIRECTORY, body)
+            .await?;
+        self.find_child_entry(
+            parent_directory_id,
+            directory_name,
+            QueryAllFilesEntryKind::Directory,
+        )
+        .await
+    }
+
+    #[allow(dead_code)]
+    async fn ensure_directory_path(&self, path: &str) -> Result<String, BlobError> {
+        let normalized = normalize_object_key(path);
+        if normalized.is_empty() {
+            return Ok(QUERY_ALL_FILES_ROOT_DIRECTORY_ID.to_string());
+        }
+
+        let mut parent_directory_id = QUERY_ALL_FILES_ROOT_DIRECTORY_ID.to_string();
+        for segment in normalized.split('/') {
+            let directory = match self
+                .find_child_entry(
+                    &parent_directory_id,
+                    segment,
+                    QueryAllFilesEntryKind::Directory,
+                )
+                .await
+            {
+                Ok(entry) => entry,
+                Err(BlobError::NotFound(_)) => {
+                    self.create_directory_entry(&parent_directory_id, segment)
+                        .await?
+                }
+                Err(error) => return Err(error),
+            };
+            parent_directory_id = directory.id;
+        }
+
+        Ok(parent_directory_id)
+    }
+
     async fn delete_file_entry(&self, entry: &QueryAllFilesEntry) -> Result<(), BlobError> {
-        let body = json!({
-            "spaceType": self.configured_space_type()?,
-            "vipLevel": 0,
-            "dirList": [],
-            "fileList": [entry.id.as_str()],
-        });
-        self.dispatch_json(DELETE_FILE_OPERATION, body).await?;
+        let mut body = Map::new();
+        body.insert(
+            "spaceType".to_string(),
+            Value::String(self.configured_space_type()?),
+        );
+        body.insert(
+            "fileList".to_string(),
+            Value::Array(vec![Value::String(entry.id.clone())]),
+        );
+        self.dispatch_native_capability(NATIVE_CAPABILITY_DELETE_FILE, body)
+            .await?;
         Ok(())
     }
 
@@ -1766,6 +1886,74 @@ fn build_http_client(config: &UnicomConfig) -> Result<reqwest::Client, BlobError
     })
 }
 
+fn load_unicom_native_capabilities(
+    path: Option<&str>,
+) -> Result<BTreeMap<String, UnicomNativeCapabilitySpec>, BlobError> {
+    let path = path.map(str::trim).filter(|value| !value.is_empty());
+    let (raw, source_label) = match path {
+        Some(path) => (
+            fs::read_to_string(path).map_err(|error| {
+                BlobError::Configuration(format!(
+                    "failed to read Unicom native capability catalog {path}: {error}"
+                ))
+            })?,
+            path.to_string(),
+        ),
+        None => (
+            DEFAULT_UNICOM_NATIVE_CAPABILITY_CATALOG_JSON.to_string(),
+            "embedded default".to_string(),
+        ),
+    };
+
+    let catalog = serde_json::from_str::<UnicomNativeCapabilityCatalog>(&raw).map_err(|error| {
+        BlobError::Configuration(format!(
+            "invalid Unicom native capability catalog {source_label}: {error}"
+        ))
+    })?;
+
+    if catalog.schema_version != UNICOM_NATIVE_CAPABILITY_SCHEMA_VERSION {
+        return Err(BlobError::Configuration(format!(
+            "unsupported Unicom native capability catalog schema_version={} from {source_label}",
+            catalog.schema_version
+        )));
+    }
+
+    if catalog.provider.trim() != "unicom" {
+        return Err(BlobError::Configuration(format!(
+            "unexpected Unicom native capability catalog provider={} from {source_label}",
+            catalog.provider
+        )));
+    }
+
+    let mut capabilities = BTreeMap::new();
+    for capability in catalog.capabilities {
+        let capability_id = capability.id.trim().to_string();
+        if capability_id.is_empty() {
+            return Err(BlobError::Configuration(format!(
+                "Unicom native capability catalog {source_label} contains an empty capability id"
+            )));
+        }
+
+        let dispatcher_operation = capability.dispatcher_operation.trim();
+        if dispatcher_operation.is_empty() {
+            return Err(BlobError::Configuration(format!(
+                "Unicom native capability catalog {source_label} contains an empty dispatcher_operation for capability {capability_id}"
+            )));
+        }
+
+        if capabilities
+            .insert(capability_id.clone(), capability)
+            .is_some()
+        {
+            return Err(BlobError::Configuration(format!(
+                "duplicate Unicom native capability id in catalog {source_label}: {capability_id}"
+            )));
+        }
+    }
+
+    Ok(capabilities)
+}
+
 fn aes_cbc_encrypt_base64(plaintext: &str, secret: &str) -> Result<String, BlobError> {
     let key = normalize_aes128_secret(secret)?;
     let iv = normalize_aes128_iv()?;
@@ -1867,13 +2055,16 @@ mod tests {
     };
 
     use super::{
-        APP_QUERY_USER_OPERATION, DELETE_FILE_OPERATION, GET_DOWNLOAD_URL_OPERATION,
-        GET_DOWNLOAD_URL_V2_OPERATION, GET_DOWNLOAD_URL_V3_OPERATION, QUERY_ALL_FILES_OPERATION,
-        QUERY_FAMILY_GROUPS_OPERATION, UNICOM_ROOT_CONTAINER, UnicomBlobAdapter, UnicomConfig,
-        aes_cbc_decrypt_base64, aes_cbc_encrypt_base64, build_api_user_dispatcher_payload,
-        build_wohome_dispatcher_payload, dispatcher_sign,
+        APP_QUERY_USER_OPERATION, GET_DOWNLOAD_URL_OPERATION, GET_DOWNLOAD_URL_V2_OPERATION,
+        GET_DOWNLOAD_URL_V3_OPERATION, QUERY_ALL_FILES_OPERATION, QUERY_FAMILY_GROUPS_OPERATION,
+        UNICOM_ROOT_CONTAINER, UnicomBlobAdapter, UnicomConfig, aes_cbc_decrypt_base64,
+        aes_cbc_encrypt_base64, build_api_user_dispatcher_payload, build_wohome_dispatcher_payload,
+        dispatcher_sign,
     };
     use serde_json::{Value, json};
+
+    const CREATE_DIRECTORY_OPERATION: &str = "CreateDirectory";
+    const DELETE_FILE_OPERATION: &str = "DeleteFile";
 
     type MockDownloadRoutes = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -1884,6 +2075,8 @@ mod tests {
         entries_by_parent: Arc<BTreeMap<String, Vec<Value>>>,
         file_bodies_by_id: Arc<BTreeMap<String, Vec<u8>>>,
         download_routes_by_operation: Arc<MockDownloadRoutes>,
+        created_entries_by_parent: Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
+        next_created_directory_id: Arc<Mutex<u64>>,
         deleted_ids: Arc<Mutex<BTreeSet<String>>>,
         requests: Arc<Mutex<Vec<Value>>>,
     }
@@ -1929,6 +2122,8 @@ mod tests {
                 entries_by_parent: Arc::new(entries_by_parent),
                 file_bodies_by_id: Arc::new(file_bodies_by_id),
                 download_routes_by_operation: Arc::new(download_routes_by_operation),
+                created_entries_by_parent: Arc::new(Mutex::new(BTreeMap::new())),
+                next_created_directory_id: Arc::new(Mutex::new(0)),
                 deleted_ids: Arc::new(Mutex::new(BTreeSet::new())),
                 requests: requests.clone(),
             };
@@ -1979,6 +2174,13 @@ mod tests {
         ])
     }
 
+    fn mock_entry_name(entry: &Value) -> Option<&str> {
+        entry["name"]
+            .as_str()
+            .or_else(|| entry["directoryName"].as_str())
+            .or_else(|| entry["fileName"].as_str())
+    }
+
     async fn mock_dispatcher(
         State(state): State<MockDispatcherState>,
         Json(payload): Json<Value>,
@@ -2025,12 +2227,21 @@ mod tests {
                     parent_directory_id.to_string()
                 };
 
-                let entries = state
+                let mut entries = state
                     .entries_by_parent
                     .get(&scoped_parent_key)
                     .or_else(|| state.entries_by_parent.get(parent_directory_id))
                     .cloned()
                     .unwrap_or_default();
+                if let Some(created_entries) = state
+                    .created_entries_by_parent
+                    .lock()
+                    .expect("mock created entries")
+                    .get(&scoped_parent_key)
+                    .cloned()
+                {
+                    entries.extend(created_entries);
+                }
                 let deleted_ids = state.deleted_ids.lock().expect("mock deleted id set");
                 let files = entries
                     .into_iter()
@@ -2097,6 +2308,82 @@ mod tests {
                         })])),
                     ),
                     None => ("9999", "系统异常", None),
+                }
+            }
+            CREATE_DIRECTORY_OPERATION => {
+                let parent_directory_id = request_body["parentDirectoryId"]
+                    .as_str()
+                    .expect("parentDirectoryId in mock create request");
+                let directory_name = request_body["directoryName"]
+                    .as_str()
+                    .expect("directoryName in mock create request");
+                let space_type = request_body["spaceType"].as_str().unwrap_or("0");
+                let family_id = request_body["familyId"].as_str().unwrap_or("");
+                let scoped_parent_key = if space_type == "1" && !family_id.is_empty() {
+                    format!("family:{family_id}:{parent_directory_id}")
+                } else {
+                    parent_directory_id.to_string()
+                };
+
+                let mut visible_entries = state
+                    .entries_by_parent
+                    .get(&scoped_parent_key)
+                    .or_else(|| state.entries_by_parent.get(parent_directory_id))
+                    .cloned()
+                    .unwrap_or_default();
+                if let Some(created_entries) = state
+                    .created_entries_by_parent
+                    .lock()
+                    .expect("mock created entries")
+                    .get(&scoped_parent_key)
+                    .cloned()
+                {
+                    visible_entries.extend(created_entries);
+                }
+
+                if let Some(existing) = visible_entries.into_iter().find(|entry| {
+                    entry["type"].as_u64() == Some(0)
+                        && mock_entry_name(entry).is_some_and(|name| name == directory_name)
+                }) {
+                    (
+                        "0000",
+                        "成功",
+                        Some(json!({
+                            "id": existing["id"].clone(),
+                            "directoryName": directory_name,
+                        })),
+                    )
+                } else {
+                    let mut next_id = state
+                        .next_created_directory_id
+                        .lock()
+                        .expect("mock next created directory id");
+                    *next_id += 1;
+                    let created_id = format!("created-dir-{}", *next_id);
+                    drop(next_id);
+
+                    let created_entry = json!({
+                        "id": created_id,
+                        "name": directory_name,
+                        "type": 0,
+                        "parentDirectoryId": parent_directory_id,
+                    });
+                    state
+                        .created_entries_by_parent
+                        .lock()
+                        .expect("mock created entries")
+                        .entry(scoped_parent_key)
+                        .or_default()
+                        .push(created_entry.clone());
+
+                    (
+                        "0000",
+                        "成功",
+                        Some(json!({
+                            "id": created_entry["id"].clone(),
+                            "directoryName": directory_name,
+                        })),
+                    )
                 }
             }
             DELETE_FILE_OPERATION => {
@@ -2187,6 +2474,7 @@ mod tests {
             family_id: None,
             family_space_type: "1".to_string(),
             family_root_directory_id: "0".to_string(),
+            native_capability_catalog_path: None,
         })
         .expect("unicom test adapter should build")
     }
@@ -2612,6 +2900,56 @@ mod tests {
             .find(|request| request["__operation"] == GET_DOWNLOAD_URL_V2_OPERATION)
             .expect("GetDownloadUrlV2 request should be recorded");
         assert_eq!(v2_request["fidList"][0], "fid-alpha");
+    }
+
+    #[tokio::test]
+    async fn ensure_directory_path_reuses_existing_directories_without_create_calls() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        let directory_id = adapter
+            .ensure_directory_path("docs/nested")
+            .await
+            .expect("existing directory path should resolve");
+        assert_eq!(directory_id, "dir-nested");
+
+        let create_requests = server
+            .requests()
+            .into_iter()
+            .filter(|request| request["__operation"] == CREATE_DIRECTORY_OPERATION)
+            .collect::<Vec<_>>();
+        assert!(create_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_directory_path_creates_missing_segments_via_native_catalog() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        let directory_id = adapter
+            .ensure_directory_path("docs/incoming/2026")
+            .await
+            .expect("missing directory path should be created");
+        assert_eq!(directory_id, "created-dir-2");
+
+        let requests = server.requests();
+        let create_requests = requests
+            .iter()
+            .filter(|request| request["__operation"] == CREATE_DIRECTORY_OPERATION)
+            .collect::<Vec<_>>();
+        assert_eq!(create_requests.len(), 2);
+
+        assert_eq!(create_requests[0]["isCouldRepeat"], 1);
+        assert_eq!(create_requests[0]["spaceType"], "0");
+        assert_eq!(create_requests[0]["parentDirectoryId"], "dir-docs");
+        assert_eq!(create_requests[0]["directoryName"], "incoming");
+
+        assert_eq!(create_requests[1]["isCouldRepeat"], 1);
+        assert_eq!(create_requests[1]["spaceType"], "0");
+        assert_eq!(create_requests[1]["parentDirectoryId"], "created-dir-1");
+        assert_eq!(create_requests[1]["directoryName"], "2026");
     }
 
     #[tokio::test]
