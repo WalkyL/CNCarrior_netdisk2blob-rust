@@ -51,6 +51,7 @@
   - 如果缺少必填 `inputs.*`，当前会返回 `status=awaiting_input` 并自动创建对应的 auth-capture prompts；待提示项回答后，可带同一个 `auth_session_id` 重试
   - `GET /api/browser-flows/session/{session_id}` 可轮询当前会话的 `pending/awaiting_input/answered/resumed/completed/failed` 状态、关联 prompts、最近 report 和 last_error
   - 当 flow 成功完成后，`gatewayd` 当前会把 `flows[].outputs` 里的 `script_value` / `url` 输出写回同一条 auth session 的 `runtime`，供后续复用同一个 `auth_session_id` 的 flow 继续绑定 `{{runtime.*}}`
+  - 当 flow 声明了 `prerequisite_flow_id`，`gatewayd` 会在同一条 `auth_session_id` 和同一个 CDP page session 内先执行 prerequisite flow，再执行主 flow
   - 当前这一步还没有实现完整的 `response_field` / `request_field` 抓取；先覆盖登录后页面内可直接读取的 token / URL / store state
 
 当前 schema version 为 `1`。

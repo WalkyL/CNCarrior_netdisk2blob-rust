@@ -2237,6 +2237,87 @@ fn browser_flow_plan(
     )
 }
 
+fn browser_flow_prerequisite_is_satisfied(
+    flow: &BrowserFlow,
+    prerequisite_flow: &BrowserFlow,
+    runtime: &BTreeMap<String, serde_json::Value>,
+) -> bool {
+    let Some(prerequisite_flow_id) = flow.prerequisite_flow_id.as_deref() else {
+        return true;
+    };
+    if prerequisite_flow.id != prerequisite_flow_id {
+        return false;
+    }
+    prerequisite_flow.outputs.iter().all(|output| {
+        runtime
+            .get(&output.id)
+            .is_some_and(|value| value_is_present(value))
+    })
+}
+
+async fn execute_browser_flow_plan_with_output_capture(
+    state: &AppState,
+    session_id: &str,
+    plan: &blob_core::BoundBrowserFlowPlan,
+    session: &CdpBrowserFlowSession,
+) -> Result<BrowserFlowExecutionReport, ApiError> {
+    let report = BrowserFlowSessionExecutor::new(session.clone())
+        .execute(plan)
+        .await
+        .map_err(|error| {
+            let _ = update_browser_flow_auth_session(state, session_id, |auth_session| {
+                auth_session.set_failed(&error);
+            });
+            ApiError::from(error)
+        })?;
+
+    let captured_runtime = capture_browser_flow_outputs(plan, session)
+        .await
+        .map_err(|error| {
+            let _ = update_browser_flow_auth_session(state, session_id, |auth_session| {
+                auth_session.set_failed(&error);
+            });
+            ApiError::from(error)
+        })?;
+    let _ = merge_browser_flow_auth_session_runtime(state, session_id, captured_runtime)
+        .map_err(ApiError::from)?;
+
+    Ok(report)
+}
+
+async fn run_browser_flow_prerequisite_if_needed(
+    state: &AppState,
+    provider: &str,
+    surface: &str,
+    flow: &BrowserFlow,
+    session_id: &str,
+    merged_inputs: &BTreeMap<String, serde_json::Value>,
+    session_runtime: &BTreeMap<String, serde_json::Value>,
+    session: &CdpBrowserFlowSession,
+) -> Result<(), ApiError> {
+    let Some(prerequisite_flow_id) = flow.prerequisite_flow_id.as_deref() else {
+        return Ok(());
+    };
+
+    let (_, prerequisite_flow) =
+        browser_flow_catalog_and_flow(state, provider, surface, prerequisite_flow_id)?;
+    if browser_flow_prerequisite_is_satisfied(flow, prerequisite_flow, session_runtime) {
+        return Ok(());
+    }
+
+    let plan = browser_flow_plan(
+        state.browser_flow_catalogs.as_ref(),
+        provider,
+        surface,
+        prerequisite_flow_id,
+        merged_inputs.clone(),
+        session_runtime.clone(),
+    )?;
+    let _ =
+        execute_browser_flow_plan_with_output_capture(state, session_id, &plan, session).await?;
+    Ok(())
+}
+
 async fn capture_browser_flow_outputs(
     plan: &blob_core::BoundBrowserFlowPlan,
     session: &impl BrowserFlowOutputReader,
@@ -4099,52 +4180,49 @@ async fn run_browser_flow_session(
         session.set_status(BROWSER_FLOW_AUTH_SESSION_STATUS_RESUMED);
     })?;
     let cdp = resolve_browser_flow_cdp_config(&state, &cdp_request)?;
+    let session = CdpBrowserFlowSession::connect(&cdp).await?;
+    run_browser_flow_prerequisite_if_needed(
+        &state,
+        &provider,
+        &surface,
+        flow,
+        &auth_session.session_id,
+        &merged_inputs,
+        &auth_session.runtime,
+        &session,
+    )
+    .await?;
+    let session_after_prerequisite = state
+        .auth
+        .browser_flow_sessions
+        .lock()
+        .expect("browser flow auth session store poisoned")
+        .get(&auth_session.session_id)
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::from(BlobError::NotFound(format!(
+                "browser flow auth session not found: {}",
+                auth_session.session_id
+            )))
+        })?;
     let plan = browser_flow_plan(
         state.browser_flow_catalogs.as_ref(),
         &provider,
         &surface,
         &flow_id,
         merged_inputs,
-        auth_session.runtime.clone(),
+        session_after_prerequisite.runtime.clone(),
     )?;
-    let session = CdpBrowserFlowSession::connect(&cdp).await?;
-    let report = BrowserFlowSessionExecutor::new(session.clone())
-        .execute(&plan)
-        .await;
-    let report = match report {
-        Ok(report) => {
-            let captured_runtime = match capture_browser_flow_outputs(&plan, &session).await {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    let _ = update_browser_flow_auth_session(
-                        &state,
-                        &auth_session.session_id,
-                        |session| {
-                            session.set_failed(&error);
-                        },
-                    )?;
-                    return Err(ApiError::from(error));
-                }
-            };
-            let _ = merge_browser_flow_auth_session_runtime(
-                &state,
-                &auth_session.session_id,
-                captured_runtime,
-            )?;
-            let _ =
-                update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
-                    session.set_completed(report.clone());
-                })?;
-            report
-        }
-        Err(error) => {
-            let _ =
-                update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
-                    session.set_failed(&error);
-                })?;
-            return Err(ApiError::from(error));
-        }
-    };
+    let report = execute_browser_flow_plan_with_output_capture(
+        &state,
+        &auth_session.session_id,
+        &plan,
+        &session,
+    )
+    .await?;
+    let _ = update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
+        session.set_completed(report.clone());
+    })?;
 
     Ok(Json(BrowserFlowSessionRunPayload {
         provider,
@@ -7479,38 +7557,14 @@ mod tests {
                 provider: "unicom".to_string(),
                 surface: "pan.wo.cn-web".to_string(),
                 flow_id: "unicom_personal_root_upload".to_string(),
-                inputs: BTreeMap::from([
-                    (
-                        "local_file".to_string(),
-                        serde_json::Value::String("/tmp/example.txt".to_string()),
-                    ),
-                    (
-                        "family_id".to_string(),
-                        serde_json::Value::String("family-42".to_string()),
-                    ),
-                    (
-                        "ps_token".to_string(),
-                        serde_json::Value::String("private-token".to_string()),
-                    ),
-                ]),
-                runtime: BTreeMap::from([
-                    (
-                        "batch_no".to_string(),
-                        serde_json::Value::String("batch-100".to_string()),
-                    ),
-                    (
-                        "directory_id".to_string(),
-                        serde_json::Value::String("dir-200".to_string()),
-                    ),
-                    (
-                        "private_space_type".to_string(),
-                        serde_json::Value::String("4".to_string()),
-                    ),
-                    (
-                        "access_token".to_string(),
-                        serde_json::Value::String("token-300".to_string()),
-                    ),
-                ]),
+                inputs: BTreeMap::from([(
+                    "local_file".to_string(),
+                    serde_json::Value::String("/tmp/example.txt".to_string()),
+                )]),
+                runtime: BTreeMap::from([(
+                    "access_token".to_string(),
+                    serde_json::Value::String("token-300".to_string()),
+                )]),
             }),
         )
         .await
@@ -7900,6 +7954,53 @@ mod tests {
             access_header.value_template.as_deref(),
             Some("token-from-login")
         );
+    }
+
+    #[test]
+    fn upload_flow_prerequisite_is_detected_from_runtime_state() {
+        let state = test_state();
+        let (_, upload_flow) = browser_flow_catalog_and_flow(
+            &state,
+            "unicom",
+            "pan.wo.cn-web",
+            "unicom_personal_root_upload",
+        )
+        .expect("upload flow should exist");
+        let (_, prepare_flow) = browser_flow_catalog_and_flow(
+            &state,
+            "unicom",
+            "pan.wo.cn-web",
+            "unicom_prepare_personal_root_upload",
+        )
+        .expect("prepare flow should exist");
+
+        assert!(!browser_flow_prerequisite_is_satisfied(
+            upload_flow,
+            prepare_flow,
+            &BTreeMap::from([(
+                "access_token".to_string(),
+                serde_json::Value::String("token-300".to_string()),
+            )]),
+        ));
+
+        assert!(browser_flow_prerequisite_is_satisfied(
+            upload_flow,
+            prepare_flow,
+            &BTreeMap::from([
+                (
+                    "batch_no".to_string(),
+                    serde_json::Value::String("batch-123".to_string()),
+                ),
+                (
+                    "directory_id".to_string(),
+                    serde_json::Value::String("0".to_string()),
+                ),
+                (
+                    "personal_space_type".to_string(),
+                    serde_json::Value::String("0".to_string()),
+                ),
+            ]),
+        ));
     }
 
     #[test]

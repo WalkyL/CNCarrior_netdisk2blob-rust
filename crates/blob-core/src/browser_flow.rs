@@ -136,6 +136,8 @@ pub struct BrowserFlow {
     pub purpose: String,
     pub start_page: String,
     #[serde(default)]
+    pub prerequisite_flow_id: Option<String>,
+    #[serde(default)]
     pub preset_refs: Vec<String>,
     #[serde(default)]
     pub inputs: Vec<BrowserFlowInput>,
@@ -576,7 +578,6 @@ impl BrowserFlowCatalog {
         }
 
         let flow_ids = collect_unique_ids("flow", self.flows.iter().map(|flow| flow.id.as_str()))?;
-        let _ = flow_ids;
         for flow in &self.flows {
             ensure_non_empty("flow.id", flow.id.as_str())?;
             ensure_non_empty("flow.title", flow.title.as_str())?;
@@ -586,6 +587,21 @@ impl BrowserFlowCatalog {
                     "flow {} references unknown start page {}",
                     flow.id, flow.start_page
                 )));
+            }
+            if let Some(prerequisite_flow_id) = flow.prerequisite_flow_id.as_deref() {
+                ensure_non_empty("flow.prerequisite_flow_id", prerequisite_flow_id)?;
+                if prerequisite_flow_id == flow.id {
+                    return Err(BlobError::Configuration(format!(
+                        "flow {} must not reference itself as prerequisite_flow_id",
+                        flow.id
+                    )));
+                }
+                if !flow_ids.contains(prerequisite_flow_id) {
+                    return Err(BlobError::Configuration(format!(
+                        "flow {} references unknown prerequisite flow {}",
+                        flow.id, prerequisite_flow_id
+                    )));
+                }
             }
             if flow.steps.is_empty() {
                 return Err(BlobError::Configuration(format!(
@@ -2129,6 +2145,10 @@ mod tests {
                     && header.value_template.as_deref() == Some("https://pan.wo.cn")
             })));
         assert!(plan.presets.is_empty());
+        assert_eq!(
+            plan.flow.prerequisite_flow_id.as_deref(),
+            Some("unicom_prepare_personal_root_upload")
+        );
     }
 
     #[test]
@@ -2390,7 +2410,10 @@ mod tests {
             .bind_flow("unicom_personal_root_upload", &context)
             .expect("flow binding should succeed");
         let prepare_plan = catalog
-            .bind_flow("unicom_prepare_personal_root_upload", &BrowserFlowBindingContext::default())
+            .bind_flow(
+                "unicom_prepare_personal_root_upload",
+                &BrowserFlowBindingContext::default(),
+            )
             .expect("prepare flow binding should succeed");
 
         assert_eq!(

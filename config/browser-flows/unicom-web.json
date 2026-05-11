@@ -737,6 +737,7 @@
       "title": "Unicom Personal Root Upload",
       "purpose": "Attach a local file to the already-prepared personal-root uploader and watch the real upload2C request rather than synthesizing an incomplete multipart form in Rust.",
       "start_page": "file_list_all",
+      "prerequisite_flow_id": "unicom_prepare_personal_root_upload",
       "inputs": [
         {
           "id": "local_file",
