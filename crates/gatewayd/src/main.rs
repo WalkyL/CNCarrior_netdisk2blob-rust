@@ -22,8 +22,8 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blob_core::{
-    BlobBackend, BlobError, ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend,
-    TokenSource,
+    BlobBackend, BlobError, BrowserFlow, BrowserFlowCatalog, BrowserFlowCatalogCollection,
+    ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend, TokenSource,
 };
 use hmac::{Hmac, Mac};
 use metadata_store::{
@@ -71,6 +71,7 @@ struct AppState {
     metadata_store: Arc<MetadataStore>,
     auth: Arc<AuthBrokerState>,
     control_plane: Arc<Mutex<ControlPlaneState>>,
+    browser_flow_catalogs: Arc<BrowserFlowCatalogCollection>,
 }
 
 #[derive(Clone)]
@@ -327,6 +328,36 @@ struct AdminStatusPayload {
     onedrive_auth: OneDriveAuthStatusPayload,
     onedrive_policy: OnedrivePolicy,
     auth_capture_policy: AuthCapturePolicyPayload,
+    browser_flow_catalogs: Vec<BrowserFlowCatalogSummaryPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowCatalogSummaryPayload {
+    provider: String,
+    surface: String,
+    flow_count: usize,
+    source_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowCatalogPayload {
+    provider: String,
+    surface: String,
+    source_path: String,
+    catalog: BrowserFlowCatalog,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowPayload {
+    provider: String,
+    surface: String,
+    flow: BrowserFlow,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BrowserFlowCatalogQuery {
+    provider: String,
+    surface: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -384,6 +415,7 @@ struct AppConfig {
     auth_callback_bind_addr: SocketAddr,
     control_plane_file: String,
     credentials_dir: String,
+    browser_flow_catalog_dir: String,
     topology: TopologyPolicy,
     s3_access_key_id: String,
     s3_secret_access_key: String,
@@ -737,6 +769,10 @@ impl AppConfig {
             auth_callback_bind_addr,
             control_plane_file: env_or("CCBG_CONTROL_PLANE_FILE", "./data/control-plane.json"),
             credentials_dir: env_or("CCBG_CREDENTIALS_DIR", "./data/provider-credentials"),
+            browser_flow_catalog_dir: env_or(
+                "CCBG_BROWSER_FLOW_CATALOG_DIR",
+                "./config/browser-flows",
+            ),
             topology,
             s3_access_key_id: env_or("CCBG_S3_ACCESS_KEY_ID", "ccbg"),
             s3_secret_access_key: env_or("CCBG_S3_SECRET_ACCESS_KEY", "change-me"),
@@ -1033,6 +1069,10 @@ async fn main() -> Result<()> {
     )?;
     config.topology = control_plane.topology.clone();
     let config = Arc::new(config);
+    let browser_flow_catalogs = Arc::new(
+        BrowserFlowCatalogCollection::from_json_dir(&config.browser_flow_catalog_dir)
+            .context("failed to load browser flow catalogs")?,
+    );
     let backends =
         build_all_backends(&config).context("failed to build provider backend registry")?;
     let primary_provider_name = control_plane.topology.primary_provider.as_str();
@@ -1093,6 +1133,7 @@ async fn main() -> Result<()> {
         metadata_store,
         auth: Arc::new(AuthBrokerState::new()),
         control_plane: Arc::new(Mutex::new(control_plane)),
+        browser_flow_catalogs,
     };
     spawn_replication_workers(state.clone(), config.replication_workers);
     spawn_admin_services(state.clone())
@@ -1129,6 +1170,7 @@ async fn main() -> Result<()> {
         admin_bind_addr = %config.admin_bind_addr,
         auth_callback_bind_addr = %config.auth_callback_bind_addr,
         control_plane_file = %config.control_plane_file,
+        browser_flow_catalog_dir = %config.browser_flow_catalog_dir,
         primary_provider = primary_provider_name,
         backend = backend_name,
         metadata_db_path = %config.metadata_db_path,
@@ -1168,6 +1210,15 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         )
         .route("/api/providers/{provider}/test", post(test_provider))
         .route("/api/object-status", get(inspect_object_status))
+        .route(
+            "/api/browser-flows/catalogs",
+            get(list_browser_flow_catalogs),
+        )
+        .route("/api/browser-flows/catalog", get(get_browser_flow_catalog))
+        .route(
+            "/api/browser-flows/flow/{flow_id}",
+            get(get_browser_flow_by_id),
+        )
         .route(
             "/api/policy/onedrive",
             get(get_onedrive_policy).post(update_onedrive_policy),
@@ -1641,6 +1692,22 @@ fn current_auth_capture_policy(state: &AppState) -> AuthCapturePolicy {
 
 fn current_auth_capture_policy_payload(state: &AppState) -> AuthCapturePolicyPayload {
     current_auth_capture_policy(state).payload()
+}
+
+fn browser_flow_catalog_summary_payloads(
+    state: &AppState,
+) -> Vec<BrowserFlowCatalogSummaryPayload> {
+    state
+        .browser_flow_catalogs
+        .entries()
+        .iter()
+        .map(|entry| BrowserFlowCatalogSummaryPayload {
+            provider: entry.catalog.provider.clone(),
+            surface: entry.catalog.surface.clone(),
+            flow_count: entry.catalog.flows.len(),
+            source_path: entry.source_path.display().to_string(),
+        })
+        .collect()
 }
 
 fn runtime_topology_payload(topology: &TopologyPolicy) -> RuntimeTopologyPayload {
@@ -3152,6 +3219,7 @@ async fn admin_status(State(state): State<AppState>) -> Result<Json<AdminStatusP
         onedrive_auth,
         onedrive_policy: current_onedrive_policy(&state),
         auth_capture_policy: current_auth_capture_policy_payload(&state),
+        browser_flow_catalogs: browser_flow_catalog_summary_payloads(&state),
     }))
 }
 
@@ -3285,6 +3353,71 @@ async fn inspect_object_status(
         gateway_fallback_from,
         gateway_error,
         provider_states,
+    }))
+}
+
+async fn list_browser_flow_catalogs(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<BrowserFlowCatalogSummaryPayload>>, ApiError> {
+    Ok(Json(browser_flow_catalog_summary_payloads(&state)))
+}
+
+async fn get_browser_flow_catalog(
+    State(state): State<AppState>,
+    Query(query): Query<BrowserFlowCatalogQuery>,
+) -> Result<Json<BrowserFlowCatalogPayload>, ApiError> {
+    let provider = query.provider.trim();
+    let surface = query.surface.trim();
+    if provider.is_empty() || surface.is_empty() {
+        return Err(
+            BlobError::Configuration("provider and surface are both required".to_string()).into(),
+        );
+    }
+
+    let entry = state
+        .browser_flow_catalogs
+        .entries()
+        .iter()
+        .find(|entry| entry.catalog.provider == provider && entry.catalog.surface == surface)
+        .ok_or_else(|| {
+            BlobError::NotFound(format!(
+                "browser flow catalog not found for {provider}/{surface}"
+            ))
+        })?;
+
+    Ok(Json(BrowserFlowCatalogPayload {
+        provider: entry.catalog.provider.clone(),
+        surface: entry.catalog.surface.clone(),
+        source_path: entry.source_path.display().to_string(),
+        catalog: entry.catalog.clone(),
+    }))
+}
+
+async fn get_browser_flow_by_id(
+    State(state): State<AppState>,
+    Path(flow_id): Path<String>,
+) -> Result<Json<BrowserFlowPayload>, ApiError> {
+    let flow_id = flow_id.trim();
+    if flow_id.is_empty() {
+        return Err(BlobError::Configuration("flow_id is required".to_string()).into());
+    }
+
+    let entry = state
+        .browser_flow_catalogs
+        .entries()
+        .iter()
+        .find(|entry| entry.catalog.find_flow(flow_id).is_some())
+        .ok_or_else(|| BlobError::NotFound(format!("browser flow not found: {flow_id}")))?;
+    let flow = entry
+        .catalog
+        .find_flow(flow_id)
+        .expect("flow should exist after lookup")
+        .clone();
+
+    Ok(Json(BrowserFlowPayload {
+        provider: entry.catalog.provider.clone(),
+        surface: entry.catalog.surface.clone(),
+        flow,
     }))
 }
 
@@ -6004,6 +6137,10 @@ mod tests {
             replication_mode: ReplicationMode::AsyncBackup,
         })
         .expect("test topology should validate");
+        let browser_flow_catalog_dir = FsPath::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/browser-flows")
+            .display()
+            .to_string();
 
         Arc::new(AppConfig {
             bind_addr: "127.0.0.1:61080".parse().expect("test addr should parse"),
@@ -6014,6 +6151,7 @@ mod tests {
                 .expect("callback addr should parse"),
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
             credentials_dir: temp_db_path().replace(".db", "-provider-credentials"),
+            browser_flow_catalog_dir,
             topology,
             s3_access_key_id: "ccbg-test".to_string(),
             s3_secret_access_key: "ccbg-secret".to_string(),
@@ -6085,6 +6223,10 @@ mod tests {
                 },
                 auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
             })),
+            browser_flow_catalogs: Arc::new(
+                BrowserFlowCatalogCollection::from_json_dir(&config.browser_flow_catalog_dir)
+                    .expect("test browser flow catalogs should load"),
+            ),
         }
     }
 
@@ -6355,10 +6497,57 @@ mod tests {
         assert_eq!(status.replication_state.persisted.pending_count, 0);
         assert!(
             status
+                .browser_flow_catalogs
+                .iter()
+                .any(|entry| entry.provider == "unicom" && entry.surface == "pan.wo.cn-web")
+        );
+        assert!(
+            status
                 .alerts
                 .iter()
                 .any(|alert| alert.title.contains("Replication workers"))
         );
+    }
+
+    #[tokio::test]
+    async fn browser_flow_catalog_listing_and_lookup_work() {
+        let state = test_state();
+
+        let Json(catalogs) = list_browser_flow_catalogs(State(state.clone()))
+            .await
+            .expect("catalog listing should succeed");
+        assert!(
+            catalogs
+                .iter()
+                .any(|entry| entry.provider == "unicom" && entry.flow_count >= 7)
+        );
+
+        let Json(catalog) = get_browser_flow_catalog(
+            State(state),
+            Query(BrowserFlowCatalogQuery {
+                provider: "unicom".to_string(),
+                surface: "pan.wo.cn-web".to_string(),
+            }),
+        )
+        .await
+        .expect("catalog lookup should succeed");
+        assert_eq!(catalog.provider, "unicom");
+        assert_eq!(catalog.surface, "pan.wo.cn-web");
+        assert!(catalog.catalog.find_flow("unicom_copy_entry").is_some());
+    }
+
+    #[tokio::test]
+    async fn browser_flow_lookup_by_id_returns_expected_flow() {
+        let state = test_state();
+
+        let Json(payload) =
+            get_browser_flow_by_id(State(state), Path("unicom_move_entry".to_string()))
+                .await
+                .expect("flow lookup should succeed");
+        assert_eq!(payload.provider, "unicom");
+        assert_eq!(payload.surface, "pan.wo.cn-web");
+        assert_eq!(payload.flow.id, "unicom_move_entry");
+        assert_eq!(payload.flow.start_page, "file_list_all");
     }
 
     #[test]

@@ -25,6 +25,14 @@
 - Rust 类型: [crates/blob-core/src/browser_flow.rs](/home/walky/workspaces/carrier-cloud-blob-gateway/crates/blob-core/src/browser_flow.rs:1)
 - 联通样例: [config/browser-flows/unicom-web.json](/home/walky/workspaces/carrier-cloud-blob-gateway/config/browser-flows/unicom-web.json:1)
 
+并且现在已经有了最小的“目录级 loader + 查询接口”基础:
+
+- `blob-core::BrowserFlowCatalogCollection` 可以从 `config/browser-flows/` 目录批量加载 catalog，并按 `provider/surface` 查找
+- `gatewayd` 只读暴露:
+  - `GET /api/browser-flows/catalogs`
+  - `GET /api/browser-flows/catalog?provider=unicom&surface=pan.wo.cn-web`
+  - `GET /api/browser-flows/flow/{flow_id}`
+
 当前 schema version 为 `1`。
 
 ## 配置文件表达什么
@@ -118,6 +126,6 @@
 
 这份最小结构已经能支撑继续扩展，下一批优先项应该是:
 
-1. 给执行层增加“按 catalog 驱动 CDP”的 loader。
+1. 给真正的 CDP / `auth-capture` 执行层接入这套 catalog loader，而不是再手写 provider-specific 文件路径。
 2. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。
 3. 继续补联通 family/private space 变体，以及后续电信/移动 provider 的网页 flow catalog。

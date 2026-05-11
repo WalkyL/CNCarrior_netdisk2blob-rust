@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,17 @@ pub struct BrowserFlowCatalog {
     pub operations: Vec<BrowserFlowOperation>,
     #[serde(default)]
     pub flows: Vec<BrowserFlow>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BrowserFlowCatalogDirectoryEntry {
+    pub source_path: PathBuf,
+    pub catalog: BrowserFlowCatalog,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BrowserFlowCatalogCollection {
+    entries: Vec<BrowserFlowCatalogDirectoryEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -261,6 +272,10 @@ impl BrowserFlowCatalog {
             ))
         })?;
         Self::from_json_slice(&raw)
+    }
+
+    pub fn find_flow(&self, flow_id: &str) -> Option<&BrowserFlow> {
+        self.flows.iter().find(|flow| flow.id == flow_id)
     }
 
     pub fn validate(&self) -> Result<(), BlobError> {
@@ -562,6 +577,58 @@ impl BrowserFlowCatalog {
     }
 }
 
+impl BrowserFlowCatalogCollection {
+    pub fn from_json_dir(dir: impl AsRef<Path>) -> Result<Self, BlobError> {
+        let dir = dir.as_ref();
+        let mut json_paths = fs::read_dir(dir)
+            .map_err(|error| {
+                BlobError::Configuration(format!(
+                    "failed to read browser flow catalog directory {}: {error}",
+                    dir.display()
+                ))
+            })?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .extension()
+                        .and_then(|value| value.to_str())
+                        .is_some_and(|value| value.eq_ignore_ascii_case("json"))
+            })
+            .collect::<Vec<_>>();
+        json_paths.sort();
+
+        let mut entries = Vec::with_capacity(json_paths.len());
+        let mut seen_catalog_keys = BTreeSet::new();
+        for path in json_paths {
+            let catalog = BrowserFlowCatalog::from_json_file(&path)?;
+            let key = format!("{}/{}", catalog.provider, catalog.surface);
+            if !seen_catalog_keys.insert(key.clone()) {
+                return Err(BlobError::Configuration(format!(
+                    "duplicate browser flow catalog detected for {key}"
+                )));
+            }
+            entries.push(BrowserFlowCatalogDirectoryEntry {
+                source_path: path,
+                catalog,
+            });
+        }
+
+        Ok(Self { entries })
+    }
+
+    pub fn entries(&self) -> &[BrowserFlowCatalogDirectoryEntry] {
+        &self.entries
+    }
+
+    pub fn get(&self, provider: &str, surface: &str) -> Option<&BrowserFlowCatalog> {
+        self.entries
+            .iter()
+            .find(|entry| entry.catalog.provider == provider && entry.catalog.surface == surface)
+            .map(|entry| &entry.catalog)
+    }
+}
+
 impl BrowserFlowStep {
     pub fn id(&self) -> &str {
         match self {
@@ -609,7 +676,26 @@ const fn default_true() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::BrowserFlowCatalog;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{BrowserFlowCatalog, BrowserFlowCatalogCollection};
+    use crate::BlobError;
+
+    fn temp_catalog_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("blob-core-{name}-{nanos}"))
+    }
+
+    fn unicom_catalog_fixture_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/browser-flows/unicom-web.json")
+    }
 
     #[test]
     fn unicom_browser_flow_catalog_parses_and_validates() {
@@ -707,5 +793,44 @@ mod tests {
                 .to_string()
                 .contains("references unknown element login.missing")
         );
+    }
+
+    #[test]
+    fn browser_flow_catalog_collection_loads_directory_and_supports_lookup() {
+        let dir = temp_catalog_dir("catalog-collection");
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        let path = dir.join("unicom-web.json");
+        fs::copy(unicom_catalog_fixture_path(), &path).expect("fixture catalog should copy");
+
+        let collection = BrowserFlowCatalogCollection::from_json_dir(&dir)
+            .expect("catalog collection should load");
+        assert_eq!(collection.entries().len(), 1);
+        let catalog = collection
+            .get("unicom", "pan.wo.cn-web")
+            .expect("unicom catalog should be found");
+        assert!(catalog.find_flow("unicom_move_entry").is_some());
+        assert_eq!(collection.entries()[0].source_path, path);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn browser_flow_catalog_collection_rejects_duplicate_provider_surface_pairs() {
+        let dir = temp_catalog_dir("catalog-duplicate");
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        let source = unicom_catalog_fixture_path();
+        fs::copy(&source, dir.join("a.json")).expect("first fixture should copy");
+        fs::copy(&source, dir.join("b.json")).expect("second fixture should copy");
+
+        let error = BrowserFlowCatalogCollection::from_json_dir(&dir)
+            .expect_err("duplicate provider/surface should fail");
+        assert!(matches!(error, BlobError::Configuration(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate browser flow catalog detected for unicom/pan.wo.cn-web")
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
