@@ -1963,7 +1963,7 @@ mod tests {
 
         assert_eq!(catalog.provider, "unicom");
         assert_eq!(catalog.surface, "pan.wo.cn-web");
-        assert_eq!(catalog.flows.len(), 7);
+        assert_eq!(catalog.flows.len(), 8);
         assert!(
             catalog
                 .flows
@@ -2170,6 +2170,38 @@ mod tests {
     }
 
     #[test]
+    fn browser_flow_catalog_bind_flow_prepare_upload_captures_runtime_outputs() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext::default();
+
+        let plan = catalog
+            .bind_flow("unicom_prepare_personal_root_upload", &context)
+            .expect("prepare upload flow should bind");
+
+        assert_eq!(plan.flow.outputs.len(), 3);
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "batch_no")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "directory_id")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "personal_space_type")
+        );
+    }
+
+    #[test]
     fn dry_run_executor_reports_expected_upload_steps() {
         let raw = include_str!("../../../config/browser-flows/unicom-web.json");
         let catalog = BrowserFlowCatalog::from_json_str(raw)
@@ -2205,28 +2237,31 @@ mod tests {
             ]
         );
         assert_eq!(report.steps.len(), plan.flow.steps.len());
-        assert_eq!(report.steps[0].step_id, "open-uploader");
-        assert_eq!(report.steps[0].step_kind, "invoke_operation");
+        assert_eq!(report.steps[0].step_id, "attach-local-file");
+        assert_eq!(report.steps[0].step_kind, "set_files");
         assert_eq!(
             report.steps[0].status,
             BrowserFlowExecutionStepStatus::Planned
         );
         assert_eq!(
-            report.steps[0].detail.get("operation"),
+            report.steps[0].detail.get("element"),
             Some(&Value::String(
-                "file_list.open_personal_uploader".to_string()
+                "file_list.global_uploader_input".to_string()
             ))
         );
         assert_eq!(
-            report.steps[0].detail.get("operation_kind"),
-            Some(&Value::String("javascript".to_string()))
-        );
-        assert_eq!(
-            report.steps[1].detail.get("input_present"),
+            report.steps[0].detail.get("input_present"),
             Some(&Value::Bool(true))
         );
         assert_eq!(
-            report.steps[3].detail.get("request_method"),
+            report.steps[1].detail.get("events"),
+            Some(&Value::Array(vec![
+                Value::String("input".to_string()),
+                Value::String("change".to_string())
+            ]))
+        );
+        assert_eq!(
+            report.steps[2].detail.get("request_method"),
             Some(&Value::String("POST".to_string()))
         );
     }
@@ -2351,27 +2386,32 @@ mod tests {
                 ),
             ]),
         };
-        let plan = catalog
+        let upload_plan = catalog
             .bind_flow("unicom_personal_root_upload", &context)
             .expect("flow binding should succeed");
+        let prepare_plan = catalog
+            .bind_flow("unicom_prepare_personal_root_upload", &BrowserFlowBindingContext::default())
+            .expect("prepare flow binding should succeed");
 
         assert_eq!(
-            plan.find_request("upload2c")
+            upload_plan
+                .find_request("upload2c")
                 .map(|request| request.method.as_str()),
             Some("POST")
         );
         assert_eq!(
-            plan.find_operation("file_list.open_personal_uploader")
+            prepare_plan
+                .find_operation("file_list.open_personal_uploader")
                 .map(|operation| operation.kind),
-            Some(super::BrowserFlowOperationKind::Javascript)
+            Some(crate::BrowserFlowOperationKind::Javascript)
         );
         assert_eq!(
-            plan.input_value("local_file"),
+            upload_plan.input_value("local_file"),
             Some(&Value::String("/tmp/example.txt".to_string()))
         );
-        assert!(plan.find_request("missing").is_none());
-        assert!(plan.find_operation("missing").is_none());
-        assert!(plan.input_value("missing").is_none());
+        assert!(upload_plan.find_request("missing").is_none());
+        assert!(prepare_plan.find_operation("missing").is_none());
+        assert!(upload_plan.input_value("missing").is_none());
     }
 
     #[test]

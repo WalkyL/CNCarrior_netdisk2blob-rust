@@ -7520,10 +7520,10 @@ mod tests {
         assert_eq!(payload.surface, "pan.wo.cn-web");
         assert_eq!(payload.flow_id, "unicom_personal_root_upload");
         assert_eq!(payload.report.flow_id, "unicom_personal_root_upload");
-        assert_eq!(payload.report.step_count, 5);
-        assert_eq!(payload.report.steps[0].step_id, "open-uploader");
+        assert_eq!(payload.report.step_count, 4);
+        assert_eq!(payload.report.steps[0].step_id, "attach-local-file");
         assert_eq!(
-            payload.report.steps[3].detail.get("request_method"),
+            payload.report.steps[2].detail.get("request_method"),
             Some(&serde_json::Value::String("POST".to_string()))
         );
     }
@@ -7724,11 +7724,10 @@ mod tests {
         .expect("browser flow session run should succeed");
 
         assert_eq!(report.flow_id, "unicom_personal_root_upload");
-        assert_eq!(report.step_count, 5);
+        assert_eq!(report.step_count, 4);
         assert_eq!(
             session.actions(),
             vec![
-                "invoke_operation:file_list.open_personal_uploader".to_string(),
                 "set_files:file_list.global_uploader_input:/tmp/example.txt".to_string(),
                 "dispatch_events:file_list.global_uploader_input:input,change".to_string(),
                 "wait_for_request:upload2c:60000".to_string(),
@@ -7799,6 +7798,54 @@ mod tests {
             Some(&serde_json::Value::String(
                 "https://pan.wo.cn/pan/file_list/all".to_string()
             ))
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_browser_flow_outputs_reads_prepare_upload_runtime_values() {
+        let state = test_state();
+        let plan = browser_flow_plan(
+            state.browser_flow_catalogs.as_ref(),
+            "unicom",
+            "pan.wo.cn-web",
+            "unicom_prepare_personal_root_upload",
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+        .expect("prepare upload flow plan should bind");
+        let reader = RecordingBrowserFlowOutputReader {
+            values: Arc::new(Mutex::new(HashMap::from([
+                (
+                    "(() => { const root = document.querySelector('.uploader-container'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); return vm?.params?.fileInfo?.batchNo ?? null; })()".to_string(),
+                    serde_json::Value::String("batch-123".to_string()),
+                ),
+                (
+                    "(() => { const root = document.querySelector('.uploader-container'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); return vm?.params?.fileInfo?.directoryId ?? null; })()".to_string(),
+                    serde_json::Value::String("0".to_string()),
+                ),
+                (
+                    "(() => { const root = document.querySelector('.uploader-container'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); return vm?.params?.fileInfo?.spaceType ?? null; })()".to_string(),
+                    serde_json::Value::String("0".to_string()),
+                ),
+            ]))),
+            current_url: Arc::new(Mutex::new(None)),
+        };
+
+        let captured = capture_browser_flow_outputs(&plan, &reader)
+            .await
+            .expect("prepare upload output capture should succeed");
+
+        assert_eq!(
+            captured.get("batch_no"),
+            Some(&serde_json::Value::String("batch-123".to_string()))
+        );
+        assert_eq!(
+            captured.get("directory_id"),
+            Some(&serde_json::Value::String("0".to_string()))
+        );
+        assert_eq!(
+            captured.get("personal_space_type"),
+            Some(&serde_json::Value::String("0".to_string()))
         );
     }
 
