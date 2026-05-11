@@ -79,7 +79,7 @@
 
 ## 联通样例现在覆盖了什么
 
-当前联通样例覆盖七条真实验证过的主路径:
+当前联通样例覆盖七条主路径，其中 personal root 上传已按当前执行器能力收口:
 
 1. `unicom_sms_login`
 2. `unicom_personal_root_upload`
@@ -98,10 +98,15 @@
 这是为了复用网页自身已经准备好的:
 
 - `params.fileInfo`
-- `directoryId`
-- `spaceType`
+- 页面内已初始化的 `directoryId`
+- 页面内已初始化的 `spaceType`
 - 加密后的 `fileInfo`
 - uploader 内部续传/分片逻辑
+
+当前 checked-in 的上传 flow 只承诺 personal root 路径。
+
+- family/private upload context 还没有拆成独立 flow
+- 在它们的 uploader 上下文、额外 token 和页面切换动作完成实测前，不再通过一个泛化 upload flow 预先要求额外 runtime
 
 目录创建、删除、重命名、复制、移动这些写路径当前也已经有了实测事实:
 

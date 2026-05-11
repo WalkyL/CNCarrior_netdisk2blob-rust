@@ -21,15 +21,15 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+#[cfg(test)]
+use blob_core::BrowserFlowSession;
 use blob_core::{
     BlobBackend, BlobError, BrowserFlow, BrowserFlowBindingContext, BrowserFlowCatalog,
     BrowserFlowCatalogCollection, BrowserFlowExecutionReport, BrowserFlowExecutor,
     BrowserFlowInput, BrowserFlowInputKind, BrowserFlowOutputKind, BrowserFlowSessionExecutor,
-    DryRunBrowserFlowExecutor, ListObjectsRequest, OutboundIpFamily, PutObjectRequest,
-    StubBackend, TokenSource,
+    DryRunBrowserFlowExecutor, ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend,
+    TokenSource,
 };
-#[cfg(test)]
-use blob_core::BrowserFlowSession;
 use browser_cdp::{CdpBrowserFlowSession, CdpConnectionConfig};
 use hmac::{Hmac, Mac};
 use metadata_store::{
@@ -7708,38 +7708,14 @@ mod tests {
             "unicom",
             "pan.wo.cn-web",
             "unicom_personal_root_upload",
-            BTreeMap::from([
-                (
-                    "local_file".to_string(),
-                    serde_json::Value::String("/tmp/example.txt".to_string()),
-                ),
-                (
-                    "family_id".to_string(),
-                    serde_json::Value::String("family-42".to_string()),
-                ),
-                (
-                    "ps_token".to_string(),
-                    serde_json::Value::String("private-token".to_string()),
-                ),
-            ]),
-            BTreeMap::from([
-                (
-                    "batch_no".to_string(),
-                    serde_json::Value::String("batch-100".to_string()),
-                ),
-                (
-                    "directory_id".to_string(),
-                    serde_json::Value::String("dir-200".to_string()),
-                ),
-                (
-                    "private_space_type".to_string(),
-                    serde_json::Value::String("4".to_string()),
-                ),
-                (
-                    "access_token".to_string(),
-                    serde_json::Value::String("token-300".to_string()),
-                ),
-            ]),
+            BTreeMap::from([(
+                "local_file".to_string(),
+                serde_json::Value::String("/tmp/example.txt".to_string()),
+            )]),
+            BTreeMap::from([(
+                "access_token".to_string(),
+                serde_json::Value::String("token-300".to_string()),
+            )]),
             RecordingBrowserFlowSession {
                 actions: session.actions.clone(),
             },

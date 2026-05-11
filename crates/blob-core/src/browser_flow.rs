@@ -2105,36 +2105,14 @@ mod tests {
                 ),
                 ("sms_code".to_string(), Value::String("123456".to_string())),
                 (
-                    "family_id".to_string(),
-                    Value::String("family-42".to_string()),
-                ),
-                (
-                    "ps_token".to_string(),
-                    Value::String("private-token".to_string()),
-                ),
-                (
                     "local_file".to_string(),
                     Value::String("/tmp/example.txt".to_string()),
                 ),
             ]),
-            runtime: BTreeMap::from([
-                (
-                    "batch_no".to_string(),
-                    Value::String("batch-100".to_string()),
-                ),
-                (
-                    "directory_id".to_string(),
-                    Value::String("dir-200".to_string()),
-                ),
-                (
-                    "private_space_type".to_string(),
-                    Value::String("4".to_string()),
-                ),
-                (
-                    "access_token".to_string(),
-                    Value::String("token-300".to_string()),
-                ),
-            ]),
+            runtime: BTreeMap::from([(
+                "access_token".to_string(),
+                Value::String("token-300".to_string()),
+            )]),
         };
 
         let plan = catalog
@@ -2150,20 +2128,7 @@ mod tests {
                 header.name == "origin"
                     && header.value_template.as_deref() == Some("https://pan.wo.cn")
             })));
-        assert_eq!(
-            plan.presets
-                .get("family_upload_context")
-                .and_then(|value| value.get("familyId"))
-                .and_then(Value::as_str),
-            Some("family-42")
-        );
-        assert_eq!(
-            plan.presets
-                .get("private_upload_context")
-                .and_then(|value| value.get("psToken"))
-                .and_then(Value::as_str),
-            Some("private-token")
-        );
+        assert!(plan.presets.is_empty());
     }
 
     #[test]
@@ -2183,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_flow_catalog_bind_flow_rejects_missing_runtime_placeholder_value() {
+    fn browser_flow_catalog_bind_flow_upload_only_requires_access_token_runtime() {
         let raw = include_str!("../../../config/browser-flows/unicom-web.json");
         let catalog = BrowserFlowCatalog::from_json_str(raw)
             .expect("unicom browser flow catalog should parse and validate");
@@ -2192,17 +2157,16 @@ mod tests {
                 "local_file".to_string(),
                 Value::String("/tmp/example.txt".to_string()),
             )]),
-            runtime: BTreeMap::new(),
+            runtime: BTreeMap::from([(
+                "access_token".to_string(),
+                Value::String("token-300".to_string()),
+            )]),
         };
 
-        let error = catalog
+        let plan = catalog
             .bind_flow("unicom_personal_root_upload", &context)
-            .expect_err("missing runtime template value should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("missing browser flow runtime value: batch_no")
-        );
+            .expect("personal root upload should bind with access_token only");
+        assert_eq!(plan.flow.id, "unicom_personal_root_upload");
     }
 
     #[test]
@@ -2211,38 +2175,14 @@ mod tests {
         let catalog = BrowserFlowCatalog::from_json_str(raw)
             .expect("unicom browser flow catalog should parse and validate");
         let context = BrowserFlowBindingContext {
-            inputs: BTreeMap::from([
-                (
-                    "local_file".to_string(),
-                    Value::String("/tmp/example.txt".to_string()),
-                ),
-                (
-                    "family_id".to_string(),
-                    Value::String("family-42".to_string()),
-                ),
-                (
-                    "ps_token".to_string(),
-                    Value::String("private-token".to_string()),
-                ),
-            ]),
-            runtime: BTreeMap::from([
-                (
-                    "batch_no".to_string(),
-                    Value::String("batch-100".to_string()),
-                ),
-                (
-                    "directory_id".to_string(),
-                    Value::String("dir-200".to_string()),
-                ),
-                (
-                    "private_space_type".to_string(),
-                    Value::String("4".to_string()),
-                ),
-                (
-                    "access_token".to_string(),
-                    Value::String("token-300".to_string()),
-                ),
-            ]),
+            inputs: BTreeMap::from([(
+                "local_file".to_string(),
+                Value::String("/tmp/example.txt".to_string()),
+            )]),
+            runtime: BTreeMap::from([(
+                "access_token".to_string(),
+                Value::String("token-300".to_string()),
+            )]),
         };
         let plan = catalog
             .bind_flow("unicom_personal_root_upload", &context)

@@ -9,31 +9,7 @@
     "Placeholders such as {{inputs.sms_code}} and {{runtime.access_token}} are symbolic and must be resolved at runtime by the browser automation layer.",
     "When pan.wo.cn changes its DOM, update this file first before changing Rust provider logic."
   ],
-  "presets": {
-    "personal_root_upload_context": {
-      "spaceType": "0",
-      "directoryId": "0",
-      "batchNo": "{{runtime.batch_no}}",
-      "fileName": "",
-      "fileSize": ""
-    },
-    "family_upload_context": {
-      "spaceType": "1",
-      "directoryId": "{{runtime.directory_id}}",
-      "familyId": "{{inputs.family_id}}",
-      "batchNo": "{{runtime.batch_no}}",
-      "fileName": "",
-      "fileSize": ""
-    },
-    "private_upload_context": {
-      "spaceType": "{{runtime.private_space_type}}",
-      "directoryId": "{{runtime.directory_id}}",
-      "psToken": "{{inputs.ps_token}}",
-      "batchNo": "{{runtime.batch_no}}",
-      "fileName": "",
-      "fileSize": ""
-    }
-  },
+  "presets": {},
   "pages": [
     {
       "id": "login",
@@ -721,11 +697,6 @@
       "title": "Unicom Personal Root Upload",
       "purpose": "Open the page uploader, inject a local file, and watch the real upload2C request rather than synthesizing an incomplete multipart form in Rust.",
       "start_page": "file_list_all",
-      "preset_refs": [
-        "personal_root_upload_context",
-        "family_upload_context",
-        "private_upload_context"
-      ],
       "inputs": [
         {
           "id": "local_file",
@@ -733,21 +704,6 @@
           "kind": "file",
           "required": true,
           "description": "Absolute path of the file that should be attached to the hidden uploader input."
-        },
-        {
-          "id": "family_id",
-          "label": "Family ID",
-          "kind": "runtime_value",
-          "required": false,
-          "description": "Optional family-space identifier when the caller switches to family upload presets."
-        },
-        {
-          "id": "ps_token",
-          "label": "Private Space Token",
-          "kind": "secret",
-          "required": false,
-          "secret": true,
-          "description": "Private-space token observed in the page context for private uploads."
         }
       ],
       "steps": [
@@ -806,7 +762,7 @@
         }
       ],
       "notes": [
-        "The checked-in preset refs cover personal, family, and private upload contexts, but only personal root upload was executed end-to-end on 2026-05-11.",
+        "This flow is intentionally scoped to personal root upload; family/private variants should be modelled as separate flows once their uploader contexts are captured end-to-end.",
         "If upload2C form fields or the global uploader component change, update the request descriptor and JS operations here before rewriting provider code."
       ]
     },
