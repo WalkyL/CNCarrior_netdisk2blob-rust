@@ -46,10 +46,15 @@
 
 当前进展:
 
-- `provider-onedrive` 已落最小可用 Graph 后端，支持显式 token 模式下的健康检查、列举、读写删
+- `provider-onedrive` 已落最小可用 Graph 后端，支持 Graph 健康检查、列举、读写删
 - `metadata-store` 已落 SQLite 持久化层，可保存并恢复 pending replication jobs
 - `replication-engine` 已接入后台 worker，`PutObject` / `DeleteObject` 后会入队并消费
-- OneDrive OAuth broker、对象级状态细化和重试策略仍待实现
+- `gatewayd` 已补最小 OneDrive auth broker:
+  - Web `Authorization Code + PKCE`
+  - Terminal `Device Code Flow`
+  - session 文件落盘
+  - provider 侧自动 refresh token 续期
+- 对象级状态已支持按 target 汇总与按对象查询；更完整的死信、人工重试入口和更细粒度策略仍待实现
 
 交付物:
 
@@ -73,7 +78,7 @@
 
 ## Phase 4: 多目标同步
 
-- 为同一对象引入 per-target 复制状态
+- 扩展 per-target 复制状态到更完整的人工重试 / 死信运维闭环
 - 支持把其他运营商账号作为异步同步目标
 - 明确 fallback 读取顺序
 
@@ -100,6 +105,8 @@
 - 先交付 Web UI
 - 支持 OneDrive 连接、运营商 provider 测试、复制队列与告警展示
 - 支持设置 primary provider 与 sync targets
+- 支持 auth-broker / LLM endpoint 配置
+- 支持把手机号 / 短信验证码 / 图形验证码 等交互式认证输入回显到网页
 - 预留 TUI 的共用控制面接口
 
 交付物:
@@ -107,6 +114,7 @@
 - 浏览器内完成 OneDrive 连接
 - 浏览器内查看 provider 健康状态和告警
 - 浏览器内查看对象复制状态
+- 浏览器内能响应运营商登录时的交互式输入步骤
 
 ## Phase 7: 多运营商扩展
 

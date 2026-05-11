@@ -16,7 +16,7 @@
 
 如果目标是让产品覆盖 `ESP32-S3`，正确做法不是“硬塞当前 daemon 到 MCU”，而是把产品拆成不同运行档位。
 
-所有平台的 RAM / Flash 预算推导见 [resource-budget.md](/home/walky/carrier-cloud-blob-gateway/docs/resource-budget.md)。
+所有平台的 RAM / Flash 预算推导见 [resource-budget.md](resource-budget.md)。
 
 ## 当前代码的硬约束
 

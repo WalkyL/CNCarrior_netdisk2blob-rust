@@ -4,7 +4,7 @@
 
 项目目标是把中国联通、中国电信、中国移动云盘接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商云盘作为唯一写入主云盘，其他被选中的运营商云盘可作为异步同步目标，OneDrive 作为默认备份同步对象，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。源码一期按公开 GitHub 仓库形式发布。
 
-当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的最小 Graph 读写实现。当前状态是: OneDrive 已支持显式 access token 注入下的健康检查、容器映射、对象读写删与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；三家运营商 provider 仍是配置和健康检查骨架。认证部分仅支持由操作者显式提供 token 或通过后续控制平面完成授权，不在服务内实现浏览器会话拦截、Cookie 窃取或自动凭据抓取。
+当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、session 持久化与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通与电信 provider 已打通真实目录列举和下载，只写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置，以及给短信码/手机号/验证码之类交互式认证步骤预留的“验证输入队列”。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
 当前针对轻量设备的策略也已明确: `OpenWRT` 优先作为 host 服务宿主，默认通过 `CCBG_MAX_IN_MEMORY_OBJECT_BYTES` 控制非流式对象路径的峰值内存，并通过 SQLite 元数据保留上限控制 flash 增长；`ESP32-S3` 默认按 `client-only` 兼容处理，只有在确认资源充足时才考虑更小功能集的 relay 形态，后续元数据应走更轻量的 `tiny-state-client` 路线而不是继续复用完整 SQLite 宿主形态。
 
@@ -41,12 +41,15 @@ carrier-cloud-blob-gateway/
 │   ├── architecture.md
 │   ├── agent-packaging.md
 │   ├── compatibility-matrix.md
+│   ├── component-dependency-map.md
 │   ├── detailed-plan.md
 │   ├── github-publication.md
 │   ├── ports.md
 │   ├── provider-matrix.md
 │   ├── s3-compatibility.md
 │   └── roadmap.md
+├── tools/
+│   └── component-ast-map/ # cargo metadata + syn AST 依赖图生成器
 └── scripts/
     └── run-dev.sh
 ```
@@ -62,15 +65,15 @@ carrier-cloud-blob-gateway/
 
 公开仓库基础资产:
 
-- [LICENSE](/home/walky/carrier-cloud-blob-gateway/LICENSE)
-- [.github/workflows/ci.yml](/home/walky/carrier-cloud-blob-gateway/.github/workflows/ci.yml)
-- [Dockerfile](/home/walky/carrier-cloud-blob-gateway/deploy/Dockerfile)
-- [Containerfile](/home/walky/carrier-cloud-blob-gateway/deploy/Containerfile)
+- [LICENSE](LICENSE)
+- [.github/workflows/ci.yml](.github/workflows/ci.yml)
+- [Dockerfile](deploy/Dockerfile)
+- [Containerfile](deploy/Containerfile)
 
 ## 快速启动
 
 ```bash
-cd /home/walky/carrier-cloud-blob-gateway
+cd /path/to/carrier-cloud-blob-gateway
 cp config/example.env .env.local
 sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" .env.local
 sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-token#" .env.local
@@ -153,7 +156,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - 当响应来自备份侧时，会附带 `x-ccbg-source-provider` 和 `x-ccbg-fallback-from`
 - 当前自动化测试已覆盖 `stub` backend 与 OneDrive mock Graph；运营商 provider 仍未完成真实读写
 
-当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker 已经落地；后续仍需补 per-target 细粒度状态、重试退避和 OneDrive OAuth broker。
+当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要与基础重试退避已经落地；后续仍需补更完整的死信 / 人工重试入口和 OneDrive OAuth broker。
 
 一期平台兼容边界:
 
@@ -171,17 +174,26 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 当前新增的轻量化运行参数:
 
 - `CCBG_REPLICATION_RECENT_LIMIT`
+- `CCBG_REPLICATION_MAX_ATTEMPTS`
+- `CCBG_REPLICATION_BASE_RETRY_DELAY_MS`
+- `CCBG_REPLICATION_MAX_RETRY_DELAY_MS`
 - `CCBG_METADATA_SNAPSHOT_RECENT_LIMIT`
 - `CCBG_METADATA_COMPLETED_HISTORY_LIMIT`
 - `CCBG_METADATA_FAILED_HISTORY_LIMIT`
+- `CCBG_*_IP_FAMILY`
+- `CCBG_AUTH_CAPTURE_*`
 
 ## 认证边界
 
 - 支持 `CCBG_UNICOM_TOKEN` / `CCBG_UNICOM_TOKEN_FILE`
 - 支持 `CCBG_TELECOM_TOKEN` / `CCBG_TELECOM_TOKEN_FILE`
+- 支持 `CCBG_TELECOM_BROWSER_ID` / `CCBG_TELECOM_BROWSER_ID_FILE`
+- 支持 `CCBG_TELECOM_COOKIE_HEADER` / `CCBG_TELECOM_COOKIE_HEADER_FILE`
 - 支持 `CCBG_MOBILE_TOKEN` / `CCBG_MOBILE_TOKEN_FILE`
 - 支持 `CCBG_ONEDRIVE_TOKEN` / `CCBG_ONEDRIVE_TOKEN_FILE`
-- 规划补齐 OneDrive 官方授权流
+- 支持 `CCBG_UNICOM_IP_FAMILY` / `CCBG_TELECOM_IP_FAMILY` / `CCBG_MOBILE_IP_FAMILY`
+- 支持 `CCBG_AUTH_CAPTURE_BROKER_URL`、`CCBG_AUTH_CAPTURE_LLM_ENDPOINT`、`CCBG_AUTH_CAPTURE_LLM_MODEL_ID`、`CCBG_AUTH_CAPTURE_LLM_API_KEY`
+- 支持 `CCBG_ONEDRIVE_CLIENT_ID`、`CCBG_ONEDRIVE_REDIRECT_URL`、`CCBG_ONEDRIVE_SESSION_FILE` 搭配内置 Web PKCE / Device Code 授权
 - 成品规划支持 MCP 封装与 Skill 封装
 - 不实现浏览器会话自动抓取
 - 不在代码里写死账号密码、Cookie、refresh token
@@ -193,6 +205,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - 架构说明见 `docs/architecture.md`
 - Agent 交付封装见 `docs/agent-packaging.md`
 - 云盘认证新手指南见 `docs/auth-step-by-step.md`
+- 组件依赖图见 `docs/component-dependency-map.md`
 - 一期兼容矩阵见 `docs/compatibility-matrix.md`
 - 详细规划见 `docs/detailed-plan.md`
 - ESP32-S3 运行档位见 `docs/esp32-s3-profile.md`
@@ -203,3 +216,5 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - provider 差异矩阵见 `docs/provider-matrix.md`
 - S3 兼容规划见 `docs/s3-compatibility.md`
 - 分阶段规划见 `docs/roadmap.md`
+- 重新生成组件依赖图:
+  `cargo run --manifest-path tools/component-ast-map/Cargo.toml -- --workspace-root . --output docs/component-dependency-map.md --json-output docs/component-dependency-map.json`

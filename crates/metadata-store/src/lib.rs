@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
@@ -15,9 +16,22 @@ use thiserror::Error;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetadataSnapshot {
     pub pending_count: usize,
+    pub retry_scheduled_count: usize,
     pub completed_count: usize,
     pub failed_count: usize,
+    pub target_statuses: Vec<MetadataTargetStatus>,
     pub recent_jobs: Vec<ReplicationJob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MetadataTargetStatus {
+    pub target: String,
+    pub queued_count: usize,
+    pub pending_count: usize,
+    pub retry_scheduled_count: usize,
+    pub completed_count: usize,
+    pub failed_count: usize,
+    pub latest_job: Option<ReplicationJob>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +127,10 @@ impl MetadataStore {
         transaction.commit().map_err(MetadataError::Sqlite)
     }
 
+    pub fn save_job(&self, job: &ReplicationJob) -> Result<(), MetadataError> {
+        self.enqueue_jobs(std::slice::from_ref(job))
+    }
+
     pub fn load_pending_jobs(
         &self,
         limit: Option<usize>,
@@ -120,16 +138,16 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         let sql = match limit {
             Some(_) => {
-                "SELECT job_id, target, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
                  FROM replication_jobs
-                 WHERE status = 'pending'
+                 WHERE status IN ('pending', 'retry_scheduled')
                  ORDER BY job_id ASC
                  LIMIT ?1"
             }
             None => {
-                "SELECT job_id, target, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
                  FROM replication_jobs
-                 WHERE status = 'pending'
+                 WHERE status IN ('pending', 'retry_scheduled')
                  ORDER BY job_id ASC"
             }
         };
@@ -171,7 +189,7 @@ impl MetadataStore {
         let updated = transaction
             .execute(
                 "UPDATE replication_jobs
-                 SET status = ?1, attempts = ?2, last_error = ?3
+                 SET status = ?1, attempts = ?2, last_error = ?3, next_attempt_at_unix_ms = NULL
                  WHERE job_id = ?4",
                 params![
                     status.as_str(),
@@ -201,13 +219,16 @@ impl MetadataStore {
 
     pub fn snapshot(&self, recent_limit: usize) -> Result<MetadataSnapshot, MetadataError> {
         let connection = self.connection.lock().expect("metadata store poisoned");
-        let pending_count = count_by_status(&connection, ReplicationStatus::Pending)?;
+        let pending_count = count_pending_like(&connection)?;
+        let retry_scheduled_count =
+            count_by_status(&connection, ReplicationStatus::RetryScheduled)?;
         let completed_count = count_by_status(&connection, ReplicationStatus::Completed)?;
         let failed_count = count_by_status(&connection, ReplicationStatus::Failed)?;
+        let target_statuses = target_statuses(&connection)?;
 
         let mut statement = connection
             .prepare(
-                "SELECT job_id, target, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
                  FROM replication_jobs
                  ORDER BY job_id DESC
                  LIMIT ?1",
@@ -221,8 +242,10 @@ impl MetadataStore {
 
         Ok(MetadataSnapshot {
             pending_count,
+            retry_scheduled_count,
             completed_count,
             failed_count,
+            target_statuses,
             recent_jobs,
         })
     }
@@ -236,7 +259,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         connection
             .query_row(
-                "SELECT job_id, target, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
                  FROM replication_jobs
                  WHERE target = ?1 AND bucket = ?2 AND key = ?3
                  ORDER BY job_id DESC
@@ -256,7 +279,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         let mut statement = connection
             .prepare(
-                "SELECT jobs.job_id, jobs.target, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.last_error
+                "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
                  FROM replication_jobs jobs
                  INNER JOIN (
                     SELECT key, MAX(job_id) AS max_job_id
@@ -276,6 +299,31 @@ impl MetadataStore {
             .map_err(MetadataError::Sqlite)
     }
 
+    pub fn fallback_readable_buckets(&self, target: &str) -> Result<Vec<String>, MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        let mut statement = connection
+            .prepare(
+                "SELECT DISTINCT jobs.bucket
+                 FROM replication_jobs jobs
+                 INNER JOIN (
+                    SELECT bucket, key, MAX(job_id) AS max_job_id
+                    FROM replication_jobs
+                    WHERE target = ?1
+                    GROUP BY bucket, key
+                 ) latest
+                 ON latest.max_job_id = jobs.job_id
+                 WHERE jobs.operation = 'put' AND jobs.status = 'completed'
+                 ORDER BY jobs.bucket ASC",
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        statement
+            .query_map([target], |row| row.get::<_, String>(0))
+            .map_err(MetadataError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MetadataError::Sqlite)
+    }
+
     fn init_schema(&self) -> Result<(), MetadataError> {
         let connection = self.connection.lock().expect("metadata store poisoned");
         connection
@@ -283,6 +331,7 @@ impl MetadataStore {
                 "CREATE TABLE IF NOT EXISTS replication_jobs (
                     job_id INTEGER PRIMARY KEY,
                     target TEXT NOT NULL,
+                    source_provider TEXT NULL,
                     operation TEXT NOT NULL,
                     bucket TEXT NOT NULL,
                     key TEXT NOT NULL,
@@ -292,13 +341,45 @@ impl MetadataStore {
                     status TEXT NOT NULL,
                     attempts INTEGER NOT NULL,
                     enqueued_at_unix_ms INTEGER NOT NULL,
+                    next_attempt_at_unix_ms INTEGER NULL,
                     last_error TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_replication_jobs_status_job_id
                     ON replication_jobs(status, job_id);",
             )
-            .map_err(MetadataError::Sqlite)
+            .map_err(MetadataError::Sqlite)?;
+        ensure_replication_jobs_column(&connection, "source_provider", "TEXT NULL").and_then(|_| {
+            ensure_replication_jobs_column(&connection, "next_attempt_at_unix_ms", "INTEGER NULL")
+        })
     }
+}
+
+fn ensure_replication_jobs_column(
+    connection: &Connection,
+    column_name: &str,
+    definition: &str,
+) -> Result<(), MetadataError> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(replication_jobs)")
+        .map_err(MetadataError::Sqlite)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(MetadataError::Sqlite)?;
+    let existing = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(MetadataError::Sqlite)?;
+
+    if existing.iter().any(|column| column == column_name) {
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            &format!("ALTER TABLE replication_jobs ADD COLUMN {column_name} {definition}"),
+            [],
+        )
+        .map_err(MetadataError::Sqlite)?;
+    Ok(())
 }
 
 fn prune_history(
@@ -398,11 +479,12 @@ fn upsert_job(connection: &Connection, job: &ReplicationJob) -> Result<(), Metad
     connection
         .execute(
             "INSERT INTO replication_jobs (
-                job_id, target, operation, bucket, key, etag, size, content_type,
-                status, attempts, enqueued_at_unix_ms, last_error
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                job_id, target, source_provider, operation, bucket, key, etag, size, content_type,
+                status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(job_id) DO UPDATE SET
                 target = excluded.target,
+                source_provider = excluded.source_provider,
                 operation = excluded.operation,
                 bucket = excluded.bucket,
                 key = excluded.key,
@@ -412,10 +494,12 @@ fn upsert_job(connection: &Connection, job: &ReplicationJob) -> Result<(), Metad
                 status = excluded.status,
                 attempts = excluded.attempts,
                 enqueued_at_unix_ms = excluded.enqueued_at_unix_ms,
+                next_attempt_at_unix_ms = excluded.next_attempt_at_unix_ms,
                 last_error = excluded.last_error",
             params![
                 job.job_id as i64,
                 job.target,
+                job.source_provider,
                 job.operation.as_str(),
                 job.object.bucket,
                 job.object.key,
@@ -425,6 +509,7 @@ fn upsert_job(connection: &Connection, job: &ReplicationJob) -> Result<(), Metad
                 job.status.as_str(),
                 i64::from(job.attempts),
                 job.enqueued_at_unix_ms as i64,
+                job.next_attempt_at_unix_ms.map(|value| value as i64),
                 job.last_error,
             ],
         )
@@ -437,7 +522,8 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplicationJob> {
     Ok(ReplicationJob {
         job_id: row.get::<_, i64>(0)? as u64,
         target: row.get(1)?,
-        operation: ReplicationOperation::parse(&row.get::<_, String>(2)?).map_err(|error| {
+        source_provider: row.get(2)?,
+        operation: ReplicationOperation::parse(&row.get::<_, String>(3)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 0,
                 rusqlite::types::Type::Text,
@@ -445,23 +531,38 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplicationJob> {
             )
         })?,
         object: ReplicationObjectRef {
-            bucket: row.get(3)?,
-            key: row.get(4)?,
-            etag: row.get(5)?,
-            size: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
-            content_type: row.get(7)?,
+            bucket: row.get(4)?,
+            key: row.get(5)?,
+            etag: row.get(6)?,
+            size: row.get::<_, Option<i64>>(7)?.map(|value| value as u64),
+            content_type: row.get(8)?,
         },
-        status: ReplicationStatus::parse(&row.get::<_, String>(8)?).map_err(|error| {
+        status: ReplicationStatus::parse(&row.get::<_, String>(9)?).map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
                 0,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
         })?,
-        attempts: row.get::<_, i64>(9)? as u32,
-        enqueued_at_unix_ms: row.get::<_, i64>(10)? as u128,
-        last_error: row.get(11)?,
+        attempts: row.get::<_, i64>(10)? as u32,
+        enqueued_at_unix_ms: row.get::<_, i64>(11)? as u128,
+        next_attempt_at_unix_ms: row.get::<_, Option<i64>>(12)?.map(|value| value as u128),
+        last_error: row.get(13)?,
     })
+}
+
+fn count_pending_like(connection: &Connection) -> Result<usize, MetadataError> {
+    let count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM replication_jobs WHERE status IN ('pending', 'retry_scheduled')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(MetadataError::Sqlite)?
+        .unwrap_or(0);
+
+    Ok(count as usize)
 }
 
 fn count_by_status(
@@ -479,6 +580,61 @@ fn count_by_status(
         .unwrap_or(0);
 
     Ok(count as usize)
+}
+
+fn target_statuses(connection: &Connection) -> Result<Vec<MetadataTargetStatus>, MetadataError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+             FROM replication_jobs jobs
+             INNER JOIN (
+                 SELECT target, bucket, key, MAX(job_id) AS max_job_id
+                 FROM replication_jobs
+                 GROUP BY target, bucket, key
+             ) latest
+             ON latest.max_job_id = jobs.job_id
+             ORDER BY jobs.target ASC, jobs.job_id DESC",
+        )
+        .map_err(MetadataError::Sqlite)?;
+    let jobs = statement
+        .query_map([], row_to_job)
+        .map_err(MetadataError::Sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(MetadataError::Sqlite)?;
+
+    let mut grouped = BTreeMap::<String, MetadataTargetStatus>::new();
+    for job in jobs {
+        let entry = grouped
+            .entry(job.target.clone())
+            .or_insert_with(|| MetadataTargetStatus {
+                target: job.target.clone(),
+                queued_count: 0,
+                pending_count: 0,
+                retry_scheduled_count: 0,
+                completed_count: 0,
+                failed_count: 0,
+                latest_job: Some(job.clone()),
+            });
+
+        if entry.latest_job.is_none() {
+            entry.latest_job = Some(job.clone());
+        }
+
+        match job.status {
+            ReplicationStatus::Pending => {
+                entry.queued_count += 1;
+                entry.pending_count += 1;
+            }
+            ReplicationStatus::RetryScheduled => {
+                entry.queued_count += 1;
+                entry.retry_scheduled_count += 1;
+            }
+            ReplicationStatus::Completed => entry.completed_count += 1,
+            ReplicationStatus::Failed => entry.failed_count += 1,
+        }
+    }
+
+    Ok(grouped.into_values().collect())
 }
 
 #[derive(Debug, Error)]
@@ -523,6 +679,7 @@ mod tests {
         ReplicationJob {
             job_id,
             target: "onedrive".to_string(),
+            source_provider: Some("unicom".to_string()),
             operation: ReplicationOperation::Put,
             object: ReplicationObjectRef {
                 bucket: "bucket-a".to_string(),
@@ -534,6 +691,7 @@ mod tests {
             status: ReplicationStatus::Pending,
             attempts: 0,
             enqueued_at_unix_ms: 1234,
+            next_attempt_at_unix_ms: None,
             last_error: None,
         }
     }
@@ -567,6 +725,7 @@ mod tests {
 
         let snapshot = store.snapshot(10).expect("snapshot should load");
         assert_eq!(snapshot.pending_count, 0);
+        assert_eq!(snapshot.retry_scheduled_count, 0);
         assert_eq!(snapshot.failed_count, 1);
         assert_eq!(snapshot.recent_jobs[0].job_id, 7);
         assert_eq!(
@@ -673,6 +832,7 @@ mod tests {
             .map(|job| job.job_id)
             .collect();
         assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.retry_scheduled_count, 0);
         assert_eq!(snapshot.completed_count, 1);
         assert_eq!(snapshot.failed_count, 1);
         assert!(remaining_ids.contains(&completed_latest.job_id));
@@ -680,6 +840,106 @@ mod tests {
         assert!(remaining_ids.contains(&pending.job_id));
         assert!(!remaining_ids.contains(&1));
         assert!(!remaining_ids.contains(&3));
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn fallback_readable_buckets_only_include_latest_completed_puts() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut bucket_a_put = sample_job(20);
+        bucket_a_put.object.bucket = "bucket-a".to_string();
+        bucket_a_put.object.key = "memory/one.json".to_string();
+        bucket_a_put.status = ReplicationStatus::Completed;
+
+        let mut bucket_b_put = sample_job(21);
+        bucket_b_put.object.bucket = "bucket-b".to_string();
+        bucket_b_put.object.key = "memory/two.json".to_string();
+        bucket_b_put.status = ReplicationStatus::Completed;
+
+        let mut bucket_b_delete = sample_job(22);
+        bucket_b_delete.object.bucket = "bucket-b".to_string();
+        bucket_b_delete.object.key = "memory/two.json".to_string();
+        bucket_b_delete.operation = ReplicationOperation::Delete;
+        bucket_b_delete.status = ReplicationStatus::Pending;
+
+        store
+            .enqueue_jobs(&[bucket_a_put, bucket_b_put, bucket_b_delete])
+            .expect("jobs should persist");
+
+        let buckets = store
+            .fallback_readable_buckets("onedrive")
+            .expect("fallback buckets should load");
+        assert_eq!(buckets, vec!["bucket-a".to_string()]);
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn snapshot_includes_per_target_latest_status_counts() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut onedrive_completed = sample_job(30);
+        onedrive_completed.status = ReplicationStatus::Completed;
+        onedrive_completed.object.key = "done.txt".to_string();
+
+        let mut onedrive_retry = sample_job(31);
+        onedrive_retry.object.key = "retry.txt".to_string();
+        onedrive_retry.status = ReplicationStatus::RetryScheduled;
+        onedrive_retry.attempts = 1;
+        onedrive_retry.next_attempt_at_unix_ms = Some(9_999);
+        onedrive_retry.last_error = Some("temporary upstream outage".to_string());
+
+        let mut telecom_failed = sample_job(32);
+        telecom_failed.target = "telecom".to_string();
+        telecom_failed.object.key = "failed.txt".to_string();
+        telecom_failed.status = ReplicationStatus::Failed;
+        telecom_failed.last_error = Some("permanent auth error".to_string());
+
+        store
+            .enqueue_jobs(&[
+                onedrive_completed.clone(),
+                onedrive_retry.clone(),
+                telecom_failed.clone(),
+            ])
+            .expect("jobs should persist");
+
+        let snapshot = store.snapshot(10).expect("snapshot should load");
+        assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.retry_scheduled_count, 1);
+        assert_eq!(snapshot.completed_count, 1);
+        assert_eq!(snapshot.failed_count, 1);
+        assert_eq!(snapshot.target_statuses.len(), 2);
+
+        let onedrive = snapshot
+            .target_statuses
+            .iter()
+            .find(|status| status.target == "onedrive")
+            .expect("onedrive target status should exist");
+        assert_eq!(onedrive.queued_count, 1);
+        assert_eq!(onedrive.pending_count, 0);
+        assert_eq!(onedrive.retry_scheduled_count, 1);
+        assert_eq!(onedrive.completed_count, 1);
+        assert_eq!(onedrive.failed_count, 0);
+        assert_eq!(onedrive.latest_job.as_ref().map(|job| job.job_id), Some(31));
+
+        let telecom = snapshot
+            .target_statuses
+            .iter()
+            .find(|status| status.target == "telecom")
+            .expect("telecom target status should exist");
+        assert_eq!(telecom.queued_count, 0);
+        assert_eq!(telecom.failed_count, 1);
+        assert_eq!(
+            telecom
+                .latest_job
+                .as_ref()
+                .and_then(|job| job.last_error.clone()),
+            Some("permanent auth error".to_string())
+        );
 
         fs::remove_file(db_path).ok();
     }

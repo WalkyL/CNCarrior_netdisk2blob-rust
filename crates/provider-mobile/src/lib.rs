@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use blob_core::{
     BackendCapabilities, BlobBackend, BlobError, ContainerInfo, HealthStatus, ListObjectsRequest,
-    ObjectInfo, ServiceHealth, TokenSource,
+    ObjectInfo, OutboundIpFamily, ServiceHealth, StorageScopeHealth, StorageScopeKind, TokenSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct MobileConfig {
     pub base_url: String,
     pub token_source: TokenSource,
+    pub outbound_ip_family: OutboundIpFamily,
     pub cookie_header: Option<String>,
     pub user_agent: String,
     pub request_timeout_secs: u64,
@@ -43,6 +44,10 @@ impl BlobBackend for MobileBlobAdapter {
         let mut notes = vec![
             format!("base_url={}", self.config.base_url),
             format!("auth_source={}", self.config.token_source.describe()),
+            format!(
+                "outbound_ip_family={}",
+                self.config.outbound_ip_family.as_str()
+            ),
             "provider scaffold only; upstream endpoint mapping not implemented".to_string(),
             "browser-session interception is intentionally out of scope".to_string(),
         ];
@@ -59,6 +64,19 @@ impl BlobBackend for MobileBlobAdapter {
             backend: self.name().to_string(),
             status,
             capabilities: self.capabilities(),
+            scopes: vec![StorageScopeHealth {
+                id: "personal".to_string(),
+                label: "Personal Cloud".to_string(),
+                kind: StorageScopeKind::Personal,
+                writable: false,
+                root: None,
+                container: None,
+                object_count: None,
+                capacity: None,
+                notes: vec![
+                    "provider scaffold only; storage scope routing not implemented yet".to_string(),
+                ],
+            }],
             notes,
         })
     }

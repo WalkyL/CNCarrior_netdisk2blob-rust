@@ -61,8 +61,8 @@
 
 参考:
 
-- [openwrt-host-profile.md](/home/walky/carrier-cloud-blob-gateway/docs/openwrt-host-profile.md)
-- [resource-budget.md](/home/walky/carrier-cloud-blob-gateway/docs/resource-budget.md)
+- [openwrt-host-profile.md](openwrt-host-profile.md)
+- [resource-budget.md](resource-budget.md)
 
 ### 客户端兼容
 
@@ -103,8 +103,8 @@ STM32 一期兼容的正确解释是:
 - 二进制协议或串口桥接
 - 极小内存占用的对象上传下载适配层
 
-如果目标进一步扩展到 `ESP32-S3`，请额外参考 [esp32-s3-profile.md](/home/walky/carrier-cloud-blob-gateway/docs/esp32-s3-profile.md)。该档位默认仍不应承载完整 daemon。
-所有平台的 RAM / Flash 预算推导见 [resource-budget.md](/home/walky/carrier-cloud-blob-gateway/docs/resource-budget.md)。
+如果目标进一步扩展到 `ESP32-S3`，请额外参考 [esp32-s3-profile.md](esp32-s3-profile.md)。该档位默认仍不应承载完整 daemon。
+所有平台的 RAM / Flash 预算推导见 [resource-budget.md](resource-budget.md)。
 
 ## 容器兼容要求
 
@@ -116,13 +116,13 @@ STM32 一期兼容的正确解释是:
 
 ### Docker
 
-- 默认使用 [Dockerfile](/home/walky/carrier-cloud-blob-gateway/deploy/Dockerfile)
+- 默认使用 [Dockerfile](../deploy/Dockerfile)
 - 支持多阶段构建
 - 适合开发和 CI 验证
 
 ### Podman
 
-- 默认使用 [Containerfile](/home/walky/carrier-cloud-blob-gateway/deploy/Containerfile)
+- 默认使用 [Containerfile](../deploy/Containerfile)
 - 兼容 rootless 模式
 - 适合软路由和更保守的宿主环境
 

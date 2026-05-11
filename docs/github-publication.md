@@ -14,10 +14,10 @@
 
 ## 当前发布资产
 
-- MIT 许可证: [LICENSE](/home/walky/carrier-cloud-blob-gateway/LICENSE)
-- GitHub Actions CI: [.github/workflows/ci.yml](/home/walky/carrier-cloud-blob-gateway/.github/workflows/ci.yml)
-- Docker 构建入口: [Dockerfile](/home/walky/carrier-cloud-blob-gateway/deploy/Dockerfile)
-- Podman 构建入口: [Containerfile](/home/walky/carrier-cloud-blob-gateway/deploy/Containerfile)
+- MIT 许可证: [LICENSE](../LICENSE)
+- GitHub Actions CI: [.github/workflows/ci.yml](../.github/workflows/ci.yml)
+- Docker 构建入口: [Dockerfile](../deploy/Dockerfile)
+- Podman 构建入口: [Containerfile](../deploy/Containerfile)
 
 ## 仓库结构要求
 

@@ -173,7 +173,7 @@
 
 ### 当前 OpenWRT 档位的可操作估算
 
-如果采用 [openwrt-lite.env](/home/walky/carrier-cloud-blob-gateway/config/openwrt-lite.env):
+如果采用 [openwrt-lite.env](../config/openwrt-lite.env):
 
 - `L = 4 MiB`
 - `R = 1`

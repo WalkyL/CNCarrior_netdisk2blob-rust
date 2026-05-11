@@ -72,7 +72,7 @@ pub struct TopologyInput {
     pub replication_mode: ReplicationMode,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyPolicy {
     pub primary_provider: ProviderId,
     pub sync_targets: Vec<ProviderId>,
@@ -90,7 +90,7 @@ impl TopologyPolicy {
         }
 
         let mut sync_targets = dedup_preserve_order(input.sync_targets);
-        let mut fallback_read_order = dedup_preserve_order(input.fallback_read_order);
+        let fallback_read_order = dedup_preserve_order(input.fallback_read_order);
 
         for provider in &sync_targets {
             if !provider.can_be_sync_target() {
@@ -110,10 +110,6 @@ impl TopologyPolicy {
 
         if sync_targets.is_empty() && input.onedrive_enabled {
             sync_targets.push(ProviderId::Onedrive);
-        }
-
-        if fallback_read_order.is_empty() {
-            fallback_read_order = sync_targets.clone();
         }
 
         for provider in &fallback_read_order {
@@ -218,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_add_onedrive_when_enabled() {
+    fn defaults_add_onedrive_sync_target_when_enabled() {
         let topology = TopologyPolicy::from_input(TopologyInput {
             primary_provider: ProviderId::Unicom,
             sync_targets: Vec::new(),
@@ -229,7 +225,25 @@ mod tests {
         .expect("topology should validate");
 
         assert_eq!(topology.sync_targets, vec![ProviderId::Onedrive]);
-        assert_eq!(topology.fallback_read_order, vec![ProviderId::Onedrive]);
+        assert!(topology.fallback_read_order.is_empty());
+    }
+
+    #[test]
+    fn fallback_can_be_empty_even_with_sync_targets() {
+        let topology = TopologyPolicy::from_input(TopologyInput {
+            primary_provider: ProviderId::Telecom,
+            sync_targets: vec![ProviderId::Mobile, ProviderId::Onedrive],
+            fallback_read_order: Vec::new(),
+            onedrive_enabled: true,
+            replication_mode: ReplicationMode::AsyncBackup,
+        })
+        .expect("topology should validate");
+
+        assert_eq!(
+            topology.sync_targets,
+            vec![ProviderId::Mobile, ProviderId::Onedrive]
+        );
+        assert!(topology.fallback_read_order.is_empty());
     }
 
     #[test]

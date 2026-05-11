@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, env, fs, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    env, fs,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    sync::Mutex,
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -25,6 +30,38 @@ pub struct ServiceHealth {
     pub backend: String,
     pub status: HealthStatus,
     pub capabilities: BackendCapabilities,
+    #[serde(default)]
+    pub scopes: Vec<StorageScopeHealth>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageScopeKind {
+    Personal,
+    Family,
+    Shared,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageCapacity {
+    pub total_bytes: Option<u64>,
+    pub used_bytes: Option<u64>,
+    pub free_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageScopeHealth {
+    pub id: String,
+    pub label: String,
+    pub kind: StorageScopeKind,
+    pub writable: bool,
+    pub root: Option<String>,
+    pub container: Option<String>,
+    pub object_count: Option<u64>,
+    pub capacity: Option<StorageCapacity>,
+    #[serde(default)]
     pub notes: Vec<String>,
 }
 
@@ -88,6 +125,15 @@ pub enum TokenSource {
     Static { bearer: String },
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundIpFamily {
+    #[default]
+    Auto,
+    Ipv4,
+    Ipv6,
+}
+
 impl TokenSource {
     pub fn describe(&self) -> &'static str {
         match self {
@@ -116,6 +162,35 @@ impl TokenSource {
                     Ok(bearer.trim().to_string())
                 }
             }
+        }
+    }
+}
+
+impl OutboundIpFamily {
+    pub fn parse(raw: &str) -> Result<Self, BlobError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(Self::Auto),
+            "ipv4" => Ok(Self::Ipv4),
+            "ipv6" => Ok(Self::Ipv6),
+            other => Err(BlobError::Configuration(format!(
+                "unsupported outbound IP family: {other}; expected auto, ipv4, or ipv6"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+        }
+    }
+
+    pub fn local_address(self) -> Option<IpAddr> {
+        match self {
+            Self::Auto => None,
+            Self::Ipv4 => Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            Self::Ipv6 => Some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
         }
     }
 }
@@ -223,6 +298,17 @@ impl BlobBackend for StubBackend {
             backend: self.name().to_string(),
             status: HealthStatus::Degraded,
             capabilities: self.capabilities(),
+            scopes: vec![StorageScopeHealth {
+                id: "local".to_string(),
+                label: "Local Stub".to_string(),
+                kind: StorageScopeKind::Unknown,
+                writable: true,
+                root: Some("placeholder".to_string()),
+                container: Some("placeholder".to_string()),
+                object_count: Some(1),
+                capacity: None,
+                notes: vec!["in-memory development backend".to_string()],
+            }],
             notes: vec!["stub backend enabled; no upstream attached".to_string()],
         })
     }

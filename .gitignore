@@ -1,4 +1,5 @@
 /target
+/tools/component-ast-map/target/
 /dist
 data/
 /.env

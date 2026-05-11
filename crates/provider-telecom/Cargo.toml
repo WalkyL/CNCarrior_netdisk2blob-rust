@@ -7,4 +7,11 @@ version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 blob-core = { path = "../blob-core" }
+md5 = { workspace = true }
+reqwest = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }

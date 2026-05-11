@@ -170,7 +170,7 @@ gatewayd (S3 API :61080)
   +--> skill package
 ```
 
-## 规划中的模块清单
+## 模块清单与当前实现状态
 
 ### `gatewayd`
 
@@ -205,7 +205,8 @@ gatewayd (S3 API :61080)
 - 最终 fallback 读取
 - 删除传播
 - 当前最小实现使用 `root_prefix/<bucket>/<key>` 映射到单个 OneDrive drive
-- 当前认证入口为显式 access token 或 token file 注入
+- 当前认证入口已支持显式 access token、token file、OAuth session file、Web `Authorization Code + PKCE`、Terminal `Device Code Flow`
+- access token 过期后使用 refresh token 自动续期并回写 session file
 
 ### `metadata-store`
 
@@ -216,11 +217,14 @@ gatewayd (S3 API :61080)
 
 - 维护 outbox / job queue
 - 异步把数据推送到 sync targets
+- 每个 job 记录创建时的 `source provider`
 - 管理失败重试和死信任务
 
 ### `auth-broker`
 
+- 当前已以内嵌模式落在 `gatewayd`
 - 统一 OneDrive 授权和运营商连接状态管理
+- 当前已管理 PKCE state、Device Code flow 状态和 OneDrive session 落盘
 - 给 Web UI、TUI 和后端 provider 提供统一认证视图
 
 ### `admin-api`
@@ -233,12 +237,18 @@ gatewayd (S3 API :61080)
 ### `admin-ui-web`
 
 - 默认管理入口
-- 用户通过浏览器连接设备完成授权与查看告警
+- 当前最小版本已可通过浏览器启动 OneDrive Web 授权并查看基础状态
+- 当前应支持在浏览器中热切换主写 / sync target / fallback 拓扑
+- 当前已可在浏览器中直接修改 OneDrive async backup / fallback 开关，以及 `memory_only` bucket/prefix 作用域
+- 当前已可在浏览器中按 provider 查看、修改并热注入独立认证材料
+- provider 凭证按 `CCBG_CREDENTIALS_DIR/{provider}.json` 独立落盘
+- 后续补完整告警、复制队列和对象状态界面
 
 ### `admin-ui-tui`
 
 - SSH/串口/控制台环境下的备用管理入口
-- 用于诊断、手工注入 token、查看队列和手动切主
+- 当前可先通过 Device Code + 配置文件完成终端场景接入
+- 后续补专用 TUI，用于诊断、手工注入 token、查看队列和手动切主
 
 ### `deploy/Dockerfile` / `deploy/Containerfile`
 
@@ -289,8 +299,21 @@ gatewayd (S3 API :61080)
 
 - 手工注入 token
 - 手工注入 cookie header
+- 通过 Admin Web 写入各 provider 独立凭证文件并立即热生效
 - 连通性测试与状态校验
 - 记录过期时间、上次成功时间、最近错误
+
+当前落盘规划:
+
+- `unicom.json`
+- `telecom.json`
+- `mobile.json`
+- `onedrive.json`
+
+字段边界:
+
+- 联通 / 电信 / 移动: `token`、`cookie_header`
+- OneDrive: `client_id`、`tenant`、`drive_id`、`redirect_url`、可选 `token`
 
 明确不做:
 
@@ -382,7 +405,7 @@ gatewayd (S3 API :61080)
 1. 默认从主 provider 读取
 2. 如果主 provider 不健康或被熔断，按 fallback 顺序检查 sync targets
 3. 若对象已复制到对应 target，则读取该 target
-4. 默认把 OneDrive 作为最后的 fallback 备份目标
+4. OneDrive 可作为最后的 fallback 备份目标，但是否启用由用户控制
 5. 若对象未复制完成，返回明确错误，并附带告警信息
 
 ### 删除流程
@@ -405,7 +428,7 @@ gatewayd (S3 API :61080)
 1. `primary provider` 只能是 `unicom | telecom | mobile` 之一。
 2. `sync targets` 可包含其他运营商和 `onedrive`。
 3. `onedrive` 默认应加入 `sync targets`。
-4. fallback 读取顺序默认优先已配置的运营商 sync targets，最后是 `onedrive`。
+4. fallback 读取顺序应由用户显式配置；留空表示仅做异步同步，不启用 fallback 读取。
 
 ## fallback 策略
 
@@ -570,7 +593,7 @@ skills/
 
 - 明确统一配置模型
 - 落地 SQLite 元数据层
-- 预留 OneDrive provider 接口
+- 接入 OneDrive provider 与最小 auth broker
 - 明确 primary provider / sync targets 模型
 - 完成端口策略和部署模型
 - 明确一期平台兼容矩阵和 GitHub 发布要求
@@ -596,6 +619,7 @@ skills/
 - `provider-onedrive` 已建立最小 Graph 读写实现，支持健康检查、列举、读写删
 - `metadata-store` 已基于 SQLite 落盘复制任务
 - `gatewayd` 已在写入/删除后创建复制任务，并由后台 worker 消费
+- `gatewayd` 已补最小内建控制面，包含 Admin HTML 首页、OneDrive Web `Authorization Code + PKCE`、OneDrive Terminal `Device Code Flow`、OAuth callback listener、session 文件落盘和 provider 侧自动 refresh token 续期
 
 验收标准:
 
@@ -638,16 +662,28 @@ skills/
 - 本地 Agent 能通过 MCP 调用核心对象操作
 - Skill 能正确指导 Agent 使用复制状态和 fallback 语义
 
-### Phase 6: Admin UX
+### Phase 6: Admin UX 扩展
 
 - 落地 `admin-api`
 - 先交付 Web UI
 - 支持 OneDrive 授权、provider 测试、队列查看、告警查看
 
+当前进展:
+
+- `gatewayd` 已提供最小 HTML 管理页
+- 已提供 `/api/status` 与 OneDrive auth status / start / poll 接口
+- 浏览器内完成 OneDrive 连接已可用
+- 主写 / sync / fallback 拓扑已支持在控制面中立即热切换
+- 已提供 OneDrive 作用域策略入口，可限制只把 Hermes / OpenClaw memory bucket 或 prefix 复制 / fallback 到 OneDrive
+- 已提供 provider 健康卡片、按 provider 的即时测试动作、复制队列概览、最近 job 历史和基础告警摘要
+- 已提供对象级状态视图，可按 bucket/key 查看主写对象、各 sync target 的存在性、fallback gate、最新复制 job 和当前 gateway 读路径
+- 更细粒度的 provider 探针、对象级 diff/批量视图和专用 TUI 仍待补齐
+
 验收标准:
 
 - 用户可在浏览器中完成 OneDrive 连接
 - 用户可在页面中查看 provider 健康状态与复制队列
+- TUI 与更完整 Web dashboard 可覆盖无浏览器或低带宽运维场景
 
 ### Phase 7: 多 provider 扩展
 
@@ -682,10 +718,10 @@ skills/
 4. 软路由和 ARM 设备的 CPU、IO、内存都要求复制队列与缓存实现足够克制。
 5. 如果运营商存在 IP、UA、Cookie 强绑定，容器迁移时要尽量保持外部环境一致。
 
-## 推荐的第一阶段执行顺序
+## 推荐的后续执行顺序
 
-1. 固化配置模型和端口策略
-2. 新建 `provider-onedrive`、`metadata-store`、`policy-engine`
-3. 先打通联通只读链路
-4. 再补联通写入与异步复制
-5. 再做 Web UI 和 OneDrive 授权闭环
+1. 先把主写热切换与 `source provider` 绑定 job 的闭环做稳
+2. 补齐 Admin Web 的 provider 测试、复制队列和告警视图
+3. 开始 `mcp-server` 的 stdio 版本，并固定 tools/resources/prompts 面
+4. 基于 MCP 交付首版 Skill
+5. 再扩到电信、移动和更完整的多目标同步

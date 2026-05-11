@@ -71,9 +71,9 @@
 
 ## OpenWRT 建议配置
 
-推荐从 [openwrt-lite.env](/home/walky/carrier-cloud-blob-gateway/config/openwrt-lite.env) 起步。
+推荐从 [openwrt-lite.env](../config/openwrt-lite.env) 起步。
 
-资源预算和算法推导见 [resource-budget.md](/home/walky/carrier-cloud-blob-gateway/docs/resource-budget.md)。
+资源预算和算法推导见 [resource-budget.md](resource-budget.md)。
 
 关键建议:
 

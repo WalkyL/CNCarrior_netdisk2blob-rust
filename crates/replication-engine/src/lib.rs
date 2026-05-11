@@ -10,7 +10,7 @@ use std::{
 use policy_engine::TopologyPolicy;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplicationOperation {
     Put,
@@ -34,10 +34,11 @@ impl ReplicationOperation {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplicationStatus {
     Pending,
+    RetryScheduled,
     Completed,
     Failed,
 }
@@ -46,6 +47,7 @@ impl ReplicationStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::RetryScheduled => "retry_scheduled",
             Self::Completed => "completed",
             Self::Failed => "failed",
         }
@@ -54,6 +56,7 @@ impl ReplicationStatus {
     pub fn parse(value: &str) -> Result<Self, ReplicationParseError> {
         match value.trim().to_ascii_lowercase().as_str() {
             "pending" => Ok(Self::Pending),
+            "retry_scheduled" => Ok(Self::RetryScheduled),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
             other => Err(ReplicationParseError::UnknownStatus(other.to_string())),
@@ -61,7 +64,7 @@ impl ReplicationStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicationObjectRef {
     pub bucket: String,
     pub key: String,
@@ -70,21 +73,26 @@ pub struct ReplicationObjectRef {
     pub content_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicationJob {
     pub job_id: u64,
     pub target: String,
+    #[serde(default)]
+    pub source_provider: Option<String>,
     pub operation: ReplicationOperation,
     pub object: ReplicationObjectRef,
     pub status: ReplicationStatus,
     pub attempts: u32,
     pub enqueued_at_unix_ms: u128,
+    #[serde(default)]
+    pub next_attempt_at_unix_ms: Option<u128>,
     pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicationSnapshot {
     pub pending_count: usize,
+    pub retry_scheduled_count: usize,
     pub recent_count: usize,
     pub pending_jobs: Vec<ReplicationJob>,
     pub recent_jobs: Vec<ReplicationJob>,
@@ -114,6 +122,7 @@ impl ReplicationEngine {
     pub fn enqueue_put(
         &self,
         topology: &TopologyPolicy,
+        source_provider: Option<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
         etag: Option<String>,
@@ -122,6 +131,7 @@ impl ReplicationEngine {
     ) -> Vec<ReplicationJob> {
         self.enqueue_jobs(
             topology,
+            source_provider,
             ReplicationOperation::Put,
             ReplicationObjectRef {
                 bucket: bucket.into(),
@@ -136,11 +146,13 @@ impl ReplicationEngine {
     pub fn enqueue_delete(
         &self,
         topology: &TopologyPolicy,
+        source_provider: Option<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> Vec<ReplicationJob> {
         self.enqueue_jobs(
             topology,
+            source_provider,
             ReplicationOperation::Delete,
             ReplicationObjectRef {
                 bucket: bucket.into(),
@@ -160,21 +172,48 @@ impl ReplicationEngine {
         pending.iter().cloned().collect()
     }
 
-    pub fn pop_next(&self) -> Option<ReplicationJob> {
+    pub fn pop_next_ready(&self) -> Option<ReplicationJob> {
+        self.pop_next_ready_at(now_unix_ms())
+    }
+
+    pub fn pop_next_ready_at(&self, now_unix_ms: u128) -> Option<ReplicationJob> {
         let mut pending = self
             .pending_jobs
             .lock()
             .expect("replication queue poisoned");
-        pending.pop_front()
+        let queue_len = pending.len();
+        for _ in 0..queue_len {
+            let Some(job) = pending.pop_front() else {
+                return None;
+            };
+            let Some(next_attempt_at) = job.next_attempt_at_unix_ms else {
+                return Some(job);
+            };
+            if next_attempt_at <= now_unix_ms {
+                return Some(job);
+            }
+            pending.push_back(job);
+        }
+        None
+    }
+
+    pub fn schedule_retry(&self, job: ReplicationJob) {
+        let mut pending = self
+            .pending_jobs
+            .lock()
+            .expect("replication queue poisoned");
+        pending.push_back(job);
     }
 
     pub fn record_completed(&self, mut job: ReplicationJob) {
         job.status = ReplicationStatus::Completed;
+        job.next_attempt_at_unix_ms = None;
         self.push_recent(job);
     }
 
     pub fn record_failed(&self, mut job: ReplicationJob, error: impl Into<String>) {
         job.status = ReplicationStatus::Failed;
+        job.next_attempt_at_unix_ms = None;
         job.last_error = Some(error.into());
         self.push_recent(job);
     }
@@ -185,9 +224,14 @@ impl ReplicationEngine {
             .lock()
             .expect("replication queue poisoned");
         let recent = self.recent_jobs.lock().expect("replication queue poisoned");
+        let retry_scheduled_count = pending
+            .iter()
+            .filter(|job| matches!(job.status, ReplicationStatus::RetryScheduled))
+            .count();
 
         ReplicationSnapshot {
             pending_count: pending.len(),
+            retry_scheduled_count,
             recent_count: recent.len(),
             pending_jobs: pending.iter().cloned().collect(),
             recent_jobs: recent.clone(),
@@ -217,6 +261,7 @@ impl ReplicationEngine {
     fn enqueue_jobs(
         &self,
         topology: &TopologyPolicy,
+        source_provider: Option<String>,
         operation: ReplicationOperation,
         object: ReplicationObjectRef,
     ) -> Vec<ReplicationJob> {
@@ -230,11 +275,13 @@ impl ReplicationEngine {
             let job = ReplicationJob {
                 job_id: self.next_job_id.fetch_add(1, Ordering::Relaxed),
                 target: target.as_str().to_string(),
+                source_provider: source_provider.clone(),
                 operation: operation.clone(),
                 object: object.clone(),
                 status: ReplicationStatus::Pending,
                 attempts: 0,
                 enqueued_at_unix_ms: now_unix_ms(),
+                next_attempt_at_unix_ms: None,
                 last_error: None,
             };
             pending.push_back(job.clone());
@@ -274,7 +321,10 @@ pub enum ReplicationParseError {
 mod tests {
     use policy_engine::{ProviderId, ReplicationMode, TopologyInput, TopologyPolicy};
 
-    use super::{ReplicationEngine, ReplicationOperation, ReplicationStatus};
+    use super::{
+        ReplicationEngine, ReplicationJob, ReplicationObjectRef, ReplicationOperation,
+        ReplicationStatus,
+    };
 
     fn topology() -> TopologyPolicy {
         TopologyPolicy::from_input(TopologyInput {
@@ -292,6 +342,7 @@ mod tests {
         let engine = ReplicationEngine::new();
         let jobs = engine.enqueue_put(
             &topology(),
+            Some("unicom".to_string()),
             "bucket-a",
             "hello.txt",
             Some("etag-1".to_string()),
@@ -302,23 +353,88 @@ mod tests {
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].target, "telecom");
         assert_eq!(jobs[1].target, "onedrive");
+        assert_eq!(jobs[0].source_provider.as_deref(), Some("unicom"));
         assert!(matches!(jobs[0].operation, ReplicationOperation::Put));
     }
 
     #[test]
     fn completed_jobs_move_to_recent_history() {
         let engine = ReplicationEngine::with_recent_limit(4);
-        engine.enqueue_delete(&topology(), "bucket-a", "old.txt");
+        engine.enqueue_delete(
+            &topology(),
+            Some("unicom".to_string()),
+            "bucket-a",
+            "old.txt",
+        );
 
-        let job = engine.pop_next().expect("job should exist");
+        let job = engine.pop_next_ready().expect("job should exist");
         engine.record_completed(job);
 
         let snapshot = engine.snapshot();
         assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.retry_scheduled_count, 0);
         assert_eq!(snapshot.recent_count, 1);
         assert!(matches!(
             snapshot.recent_jobs[0].status,
             ReplicationStatus::Completed
         ));
+    }
+
+    #[test]
+    fn retry_scheduled_jobs_wait_until_due_before_dequeue() {
+        let engine = ReplicationEngine::with_recent_limit(4);
+        engine.restore_pending(vec![
+            ReplicationJob {
+                job_id: 1,
+                target: "onedrive".to_string(),
+                source_provider: Some("unicom".to_string()),
+                operation: ReplicationOperation::Put,
+                object: ReplicationObjectRef {
+                    bucket: "bucket-a".to_string(),
+                    key: "later.txt".to_string(),
+                    etag: None,
+                    size: Some(4),
+                    content_type: Some("text/plain".to_string()),
+                },
+                status: ReplicationStatus::RetryScheduled,
+                attempts: 1,
+                enqueued_at_unix_ms: 100,
+                next_attempt_at_unix_ms: Some(2_000),
+                last_error: Some("temporary upstream outage".to_string()),
+            },
+            ReplicationJob {
+                job_id: 2,
+                target: "telecom".to_string(),
+                source_provider: Some("unicom".to_string()),
+                operation: ReplicationOperation::Put,
+                object: ReplicationObjectRef {
+                    bucket: "bucket-a".to_string(),
+                    key: "ready.txt".to_string(),
+                    etag: None,
+                    size: Some(4),
+                    content_type: Some("text/plain".to_string()),
+                },
+                status: ReplicationStatus::Pending,
+                attempts: 0,
+                enqueued_at_unix_ms: 101,
+                next_attempt_at_unix_ms: None,
+                last_error: None,
+            },
+        ]);
+
+        let first = engine
+            .pop_next_ready_at(1_500)
+            .expect("ready job should be dequeued first");
+        assert_eq!(first.job_id, 2);
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.retry_scheduled_count, 1);
+        assert_eq!(snapshot.pending_jobs[0].job_id, 1);
+
+        let retry = engine
+            .pop_next_ready_at(2_000)
+            .expect("retry job should become ready when due");
+        assert_eq!(retry.job_id, 1);
     }
 }

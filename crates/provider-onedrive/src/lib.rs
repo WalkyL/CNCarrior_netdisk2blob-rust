@@ -1,9 +1,14 @@
-use std::time::Duration;
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use blob_core::{
     BackendCapabilities, BlobBackend, BlobError, ContainerInfo, HealthStatus, ListObjectsRequest,
-    ObjectInfo, ObjectPayload, PutObjectRequest, PutObjectResult, ServiceHealth, TokenSource,
+    ObjectInfo, ObjectPayload, PutObjectRequest, PutObjectResult, ServiceHealth,
+    StorageScopeHealth, StorageScopeKind, TokenSource,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{
@@ -12,6 +17,10 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
+
+pub const DEFAULT_ONEDRIVE_AUTH_BASE_URL: &str = "https://login.microsoftonline.com";
+pub const DEFAULT_ONEDRIVE_SCOPES: &str = "offline_access Files.ReadWrite User.Read openid profile";
+const SESSION_REFRESH_SKEW_SECS: u64 = 120;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OneDriveConfig {
@@ -22,6 +31,9 @@ pub struct OneDriveConfig {
     pub redirect_url: Option<String>,
     pub drive_id: Option<String>,
     pub graph_base_url: String,
+    pub auth_base_url: String,
+    pub scopes: String,
+    pub session_file: Option<String>,
     pub token_source: TokenSource,
     pub root_prefix: Option<String>,
     pub user_agent: String,
@@ -66,6 +78,27 @@ struct DriveItemCollection {
     next_link: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OneDriveOAuthSession {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub token_type: String,
+    pub scope: Option<String>,
+    pub expires_at_unix: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthTokenResponse {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    token_type: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    expires_in: Option<u64>,
+}
+
 impl OneDriveBlobAdapter {
     pub fn new(config: OneDriveConfig) -> Self {
         Self {
@@ -99,6 +132,39 @@ impl OneDriveBlobAdapter {
 
     fn graph_base_url(&self) -> &str {
         self.config.graph_base_url.trim_end_matches('/')
+    }
+
+    fn auth_base_url(&self) -> &str {
+        self.config.auth_base_url.trim_end_matches('/')
+    }
+
+    fn auth_tenant(&self) -> &str {
+        let trimmed = self.config.tenant.trim();
+        if trimmed.is_empty() {
+            "common"
+        } else {
+            trimmed
+        }
+    }
+
+    pub fn token_endpoint_url(&self) -> String {
+        format!(
+            "{}/{}/oauth2/v2.0/token",
+            self.auth_base_url(),
+            encode_segment(self.auth_tenant())
+        )
+    }
+
+    pub fn authorization_endpoint_url(&self) -> String {
+        format!(
+            "{}/{}/oauth2/v2.0/authorize",
+            self.auth_base_url(),
+            encode_segment(self.auth_tenant())
+        )
+    }
+
+    pub fn scope_string(&self) -> String {
+        normalize_scope_string(&self.config.scopes)
     }
 
     fn drive_root_url(&self) -> String {
@@ -182,8 +248,12 @@ impl OneDriveBlobAdapter {
             .join("/"))
     }
 
-    fn request(&self, method: Method, url: &str) -> Result<reqwest::RequestBuilder, BlobError> {
-        let token = self.config.token_source.load()?;
+    async fn request(
+        &self,
+        method: Method,
+        url: &str,
+    ) -> Result<reqwest::RequestBuilder, BlobError> {
+        let token = self.load_access_token().await?;
 
         Ok(self
             .client
@@ -193,9 +263,139 @@ impl OneDriveBlobAdapter {
             .timeout(self.timeout()))
     }
 
+    fn token_storage_candidates(&self) -> Vec<String> {
+        let mut candidates = Vec::new();
+        if let Some(path) = self
+            .config
+            .session_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            candidates.push(path.to_string());
+        }
+
+        if let TokenSource::File { path } = &self.config.token_source {
+            if !candidates.iter().any(|candidate| candidate == path) {
+                candidates.push(path.clone());
+            }
+        }
+
+        candidates
+    }
+
+    async fn load_access_token(&self) -> Result<String, BlobError> {
+        for path in self.token_storage_candidates() {
+            match fs::read_to_string(&path) {
+                Ok(raw) => {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+
+                    if let Some(session) = decode_stored_oauth_session(trimmed) {
+                        return self
+                            .resolve_session_access_token(Some(path.as_str()), session)
+                            .await;
+                    }
+
+                    return Ok(trimmed.to_string());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(BlobError::Configuration(format!(
+                        "failed to read OneDrive token file {path}: {error}"
+                    )));
+                }
+            }
+        }
+
+        self.config.token_source.load()
+    }
+
+    async fn resolve_session_access_token(
+        &self,
+        storage_path: Option<&str>,
+        session: OneDriveOAuthSession,
+    ) -> Result<String, BlobError> {
+        if !session.needs_refresh(SESSION_REFRESH_SKEW_SECS) {
+            return Ok(session.access_token);
+        }
+
+        let Some(storage_path) = storage_path else {
+            return Err(BlobError::Configuration(
+                "OneDrive OAuth session is expired and no writable session file is configured"
+                    .to_string(),
+            ));
+        };
+
+        let refreshed = self.refresh_session(&session).await?;
+        persist_oauth_session(storage_path, &refreshed)?;
+        Ok(refreshed.access_token.clone())
+    }
+
+    async fn refresh_session(
+        &self,
+        session: &OneDriveOAuthSession,
+    ) -> Result<OneDriveOAuthSession, BlobError> {
+        let refresh_token = session
+            .refresh_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                BlobError::Configuration(
+                    "OneDrive OAuth session is expired and has no refresh token".to_string(),
+                )
+            })?;
+        let client_id = self
+            .config
+            .client_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                BlobError::Configuration(
+                    "CCBG_ONEDRIVE_CLIENT_ID is required to refresh OneDrive OAuth sessions"
+                        .to_string(),
+                )
+            })?;
+        let scope = self.scope_string();
+
+        let action = "refresh OneDrive OAuth session";
+        let response = self
+            .client
+            .post(self.token_endpoint_url())
+            .header(USER_AGENT, self.config.user_agent.as_str())
+            .form(&[
+                ("client_id", client_id),
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+                ("scope", scope.as_str()),
+            ])
+            .timeout(self.timeout())
+            .send()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+
+        if !response.status().is_success() {
+            return Err(response_to_error(response, action).await);
+        }
+
+        let token_response = response
+            .json::<OAuthTokenResponse>()
+            .await
+            .map_err(|error| {
+                BlobError::Upstream(format!("{action} returned invalid JSON: {error}"))
+            })?;
+
+        token_response.into_session(session.refresh_token.as_deref())
+    }
+
     async fn get_json<T: DeserializeOwned>(&self, url: &str, action: &str) -> Result<T, BlobError> {
         let response = self
-            .request(Method::GET, url)?
+            .request(Method::GET, url)
+            .await?
             .header(ACCEPT, "application/json")
             .send()
             .await
@@ -220,7 +420,8 @@ impl OneDriveBlobAdapter {
         action: &str,
     ) -> Result<Option<T>, BlobError> {
         let response = self
-            .request(Method::GET, url)?
+            .request(Method::GET, url)
+            .await?
             .header(ACCEPT, "application/json")
             .send()
             .await
@@ -247,7 +448,8 @@ impl OneDriveBlobAdapter {
         action: &str,
     ) -> Result<DriveItemResponse, BlobError> {
         let response = self
-            .request(Method::PUT, url)?
+            .request(Method::PUT, url)
+            .await?
             .header(
                 CONTENT_TYPE,
                 content_type.unwrap_or("application/octet-stream"),
@@ -268,7 +470,8 @@ impl OneDriveBlobAdapter {
 
     async fn get_bytes(&self, url: &str, action: &str) -> Result<Vec<u8>, BlobError> {
         let response = self
-            .request(Method::GET, url)?
+            .request(Method::GET, url)
+            .await?
             .send()
             .await
             .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
@@ -292,7 +495,8 @@ impl OneDriveBlobAdapter {
 
     async fn delete_item_by_id(&self, item_id: &str, action: &str) -> Result<(), BlobError> {
         let response = self
-            .request(Method::DELETE, &self.item_url(item_id))?
+            .request(Method::DELETE, &self.item_url(item_id))
+            .await?
             .send()
             .await
             .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
@@ -411,7 +615,8 @@ impl OneDriveBlobAdapter {
         });
 
         let response = self
-            .request(Method::POST, &url)?
+            .request(Method::POST, &url)
+            .await?
             .header(ACCEPT, "application/json")
             .json(&body)
             .send()
@@ -441,7 +646,7 @@ impl OneDriveBlobAdapter {
             return HealthStatus::Unavailable;
         }
 
-        if let Err(error) = self.config.token_source.load() {
+        if let Err(error) = self.load_access_token().await {
             notes.push(error.to_string());
             return HealthStatus::Unavailable;
         }
@@ -519,6 +724,8 @@ impl BlobBackend for OneDriveBlobAdapter {
                 self.normalized_root_prefix()
                     .unwrap_or_else(|| "<drive-root>".to_string())
             ),
+            format!("auth_base_url={}", self.config.auth_base_url),
+            format!("scopes={}", self.scope_string()),
         ];
 
         if let Some(client_id) = self
@@ -539,12 +746,36 @@ impl BlobBackend for OneDriveBlobAdapter {
             notes.push(format!("redirect_url={redirect_url}"));
         }
 
+        if let Some(session_file) = self
+            .config
+            .session_file
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            notes.push(format!("session_file={session_file}"));
+        }
+
         let status = self.health_status(&mut notes).await;
 
         Ok(ServiceHealth {
             backend: self.name().to_string(),
             status,
             capabilities: self.capabilities(),
+            scopes: vec![StorageScopeHealth {
+                id: self
+                    .config
+                    .drive_id
+                    .clone()
+                    .unwrap_or_else(|| "default-drive".to_string()),
+                label: "OneDrive".to_string(),
+                kind: StorageScopeKind::Personal,
+                writable: true,
+                root: self.normalized_root_prefix(),
+                container: None,
+                object_count: None,
+                capacity: None,
+                notes: vec!["microsoft graph drive scope".to_string()],
+            }],
             notes,
         })
     }
@@ -703,6 +934,45 @@ impl DriveItemResponse {
     }
 }
 
+impl OneDriveOAuthSession {
+    pub fn needs_refresh(&self, skew_secs: u64) -> bool {
+        match self.expires_at_unix {
+            Some(expires_at) => current_unix_time_secs().saturating_add(skew_secs) >= expires_at,
+            None => false,
+        }
+    }
+}
+
+impl OAuthTokenResponse {
+    fn into_session(
+        self,
+        previous_refresh_token: Option<&str>,
+    ) -> Result<OneDriveOAuthSession, BlobError> {
+        let access_token = self.access_token.trim();
+        if access_token.is_empty() {
+            return Err(BlobError::Upstream(
+                "OneDrive OAuth token response did not include a usable access_token".to_string(),
+            ));
+        }
+
+        Ok(OneDriveOAuthSession {
+            access_token: access_token.to_string(),
+            refresh_token: self
+                .refresh_token
+                .or_else(|| previous_refresh_token.map(ToString::to_string)),
+            token_type: self
+                .token_type
+                .unwrap_or_else(|| "Bearer".to_string())
+                .trim()
+                .to_string(),
+            scope: self.scope.map(|value| value.trim().to_string()),
+            expires_at_unix: self
+                .expires_in
+                .map(|expires_in| current_unix_time_secs().saturating_add(expires_in)),
+        })
+    }
+}
+
 fn ensure_non_empty(value: &str, label: &str) -> Result<(), BlobError> {
     if value.trim().is_empty() {
         Err(BlobError::Configuration(format!("{label} cannot be empty")))
@@ -769,6 +1039,70 @@ fn join_relative_key(prefix: &str, name: &str) -> String {
     }
 }
 
+fn normalize_scope_string(value: &str) -> String {
+    let normalized = value
+        .split(|char: char| char.is_ascii_whitespace() || char == ',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if normalized.is_empty() {
+        DEFAULT_ONEDRIVE_SCOPES.to_string()
+    } else {
+        normalized
+    }
+}
+
+pub fn decode_stored_oauth_session(raw: &str) -> Option<OneDriveOAuthSession> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+
+    serde_json::from_str::<OneDriveOAuthSession>(trimmed).ok()
+}
+
+pub fn persist_oauth_session(path: &str, session: &OneDriveOAuthSession) -> Result<(), BlobError> {
+    let parent = Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| {
+            BlobError::Configuration(format!(
+                "OneDrive session file path has no parent directory: {path}"
+            ))
+        })?;
+    fs::create_dir_all(parent).map_err(|error| {
+        BlobError::Configuration(format!(
+            "failed to create OneDrive session directory {}: {error}",
+            parent.display()
+        ))
+    })?;
+
+    let payload = serde_json::to_vec_pretty(session).map_err(|error| {
+        BlobError::Upstream(format!("failed to encode OneDrive OAuth session: {error}"))
+    })?;
+    let temp_path = format!("{path}.tmp");
+    fs::write(&temp_path, payload).map_err(|error| {
+        BlobError::Configuration(format!(
+            "failed to write OneDrive session temp file {temp_path}: {error}"
+        ))
+    })?;
+    fs::rename(&temp_path, path).map_err(|error| {
+        BlobError::Configuration(format!(
+            "failed to replace OneDrive session file {path}: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn current_unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 fn trim_response_body(body: &str) -> String {
     let trimmed = body.trim();
     if trimmed.is_empty() {
@@ -804,7 +1138,7 @@ mod tests {
         extract::{OriginalUri, State},
         http::{HeaderMap, Method, StatusCode},
         response::{IntoResponse, Response},
-        routing::get,
+        routing::{get, post},
     };
     use percent_encoding::percent_decode_str;
     use serde_json::{Value, json};
@@ -1041,6 +1375,7 @@ mod tests {
             };
 
             let app = Router::new()
+                .route("/common/oauth2/v2.0/token", post(mock_token_handler))
                 .route(
                     "/v1.0/{*path}",
                     get(mock_graph_handler)
@@ -1079,7 +1414,8 @@ mod tests {
         if headers
             .get("authorization")
             .and_then(|value| value.to_str().ok())
-            != Some("Bearer test-token")
+            .filter(|value| *value == "Bearer test-token" || *value == "Bearer refreshed-token")
+            .is_none()
         {
             return (StatusCode::UNAUTHORIZED, "missing bearer token").into_response();
         }
@@ -1193,6 +1529,34 @@ mod tests {
         }
     }
 
+    async fn mock_token_handler(body: Bytes) -> Response {
+        let body = String::from_utf8(body.to_vec()).expect("token body should be utf-8");
+        let params = body
+            .split('&')
+            .filter_map(|part| part.split_once('='))
+            .map(|(key, value)| (decode_segment(key), decode_segment(value)))
+            .collect::<BTreeMap<_, _>>();
+
+        match (
+            params.get("grant_type").map(String::as_str),
+            params.get("refresh_token").map(String::as_str),
+        ) {
+            (Some("refresh_token"), Some("refresh-me")) => Json(json!({
+                "access_token": "refreshed-token",
+                "refresh_token": "refresh-me-2",
+                "token_type": "Bearer",
+                "scope": DEFAULT_ONEDRIVE_SCOPES,
+                "expires_in": 3600
+            }))
+            .into_response(),
+            _ => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "invalid_grant" })),
+            )
+                .into_response(),
+        }
+    }
+
     fn decode_graph_path(path: &str, prefix: &str, suffix: &str) -> String {
         decode_segment(
             path.trim_start_matches(prefix)
@@ -1214,6 +1578,9 @@ mod tests {
             redirect_url: Some("http://127.0.0.1:61082/auth/onedrive/callback".to_string()),
             drive_id: None,
             graph_base_url: base_url.to_string(),
+            auth_base_url: base_url.trim_end_matches("/v1.0").to_string(),
+            scopes: DEFAULT_ONEDRIVE_SCOPES.to_string(),
+            session_file: None,
             token_source: TokenSource::Static {
                 bearer: "test-token".to_string(),
             },
@@ -1221,6 +1588,17 @@ mod tests {
             user_agent: "carrier-cloud-blob-gateway-test".to_string(),
             request_timeout_secs: 5,
         }
+    }
+
+    fn temp_session_path() -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "ccbg-onedrive-session-{}-{}.json",
+                std::process::id(),
+                current_unix_time_secs()
+            ))
+            .display()
+            .to_string()
     }
 
     #[tokio::test]
@@ -1333,5 +1711,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a.txt".to_string(), "nested/b.txt".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn expired_session_file_refreshes_and_persists_new_tokens() {
+        let server = MockServer::start().await;
+        let session_file = temp_session_path();
+        persist_oauth_session(
+            &session_file,
+            &OneDriveOAuthSession {
+                access_token: "expired-token".to_string(),
+                refresh_token: Some("refresh-me".to_string()),
+                token_type: "Bearer".to_string(),
+                scope: Some(DEFAULT_ONEDRIVE_SCOPES.to_string()),
+                expires_at_unix: Some(current_unix_time_secs().saturating_sub(60)),
+            },
+        )
+        .expect("session file should persist");
+
+        let mut config = test_config(&server.base_url);
+        config.session_file = Some(session_file.clone());
+        config.token_source = TokenSource::EnvVar {
+            key: "UNUSED_ONEDRIVE_TOKEN".to_string(),
+        };
+        let adapter = OneDriveBlobAdapter::new(config);
+
+        let health = adapter.health().await.expect("health should succeed");
+        assert!(
+            !matches!(health.status, HealthStatus::Unavailable),
+            "unexpected health notes: {:?}",
+            health.notes
+        );
+
+        let stored = fs::read_to_string(&session_file).expect("session file should read");
+        let stored =
+            decode_stored_oauth_session(&stored).expect("session file should decode as JSON");
+        assert_eq!(stored.access_token, "refreshed-token");
+        assert_eq!(stored.refresh_token.as_deref(), Some("refresh-me-2"));
+
+        let _ = fs::remove_file(session_file);
     }
 }
