@@ -143,6 +143,7 @@ struct CdpObservedRequest {
     url: String,
 }
 
+#[derive(Clone)]
 pub struct CdpBrowserFlowSession {
     connection: Arc<CdpConnection>,
 }
@@ -313,6 +314,22 @@ impl CdpBrowserFlowSession {
             BlobError::Upstream("missing Runtime.evaluate result payload".to_string())
         })?;
         extract_runtime_value(&result)
+    }
+
+    pub async fn current_url(&self) -> Result<Option<String>, BlobError> {
+        if let Some(url) = self.connection.events.lock().await.current_url.clone() {
+            return Ok(Some(url));
+        }
+
+        match self.evaluate_value("location.href").await? {
+            Value::String(href) => {
+                let mut events = self.connection.events.lock().await;
+                events.current_url = Some(href.clone());
+                Ok(Some(href))
+            }
+            Value::Null => Ok(None),
+            _ => Ok(None),
+        }
     }
 
     async fn resolve_node_id(&self, element: &BrowserFlowElement) -> Result<i64, BlobError> {

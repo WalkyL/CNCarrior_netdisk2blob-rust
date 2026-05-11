@@ -681,6 +681,36 @@
         "api_user_app_login_by_mobile",
         "api_user_app_query_user"
       ],
+      "outputs": [
+        {
+          "id": "access_token",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.token ?? null; })()",
+          "redact": true,
+          "description": "Access token captured from the post-login Vuex user store for follow-up dispatcher requests."
+        },
+        {
+          "id": "family_id",
+          "kind": "script_value",
+          "source": "(() => sessionStorage.getItem('familyId') || null)()",
+          "redact": false,
+          "description": "Family space identifier exposed in sessionStorage after a successful login."
+        },
+        {
+          "id": "client_id",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.clientId ?? null; })()",
+          "redact": false,
+          "description": "Client identifier from the post-login Vuex user store."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL after the login flow reaches the file list page."
+        }
+      ],
       "notes": [
         "The flow intentionally keeps the SMS code as a runtime input; it should come from the operator or a control-plane verification queue.",
         "If the login page text or tab component changes, selectors in the login.* elements should be updated before touching the execution engine."

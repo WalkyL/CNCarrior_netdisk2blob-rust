@@ -24,10 +24,12 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blob_core::{
     BlobBackend, BlobError, BrowserFlow, BrowserFlowBindingContext, BrowserFlowCatalog,
     BrowserFlowCatalogCollection, BrowserFlowExecutionReport, BrowserFlowExecutor,
-    BrowserFlowInput, BrowserFlowInputKind, BrowserFlowSession, BrowserFlowSessionExecutor,
-    DryRunBrowserFlowExecutor, ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend,
-    TokenSource,
+    BrowserFlowInput, BrowserFlowInputKind, BrowserFlowOutputKind, BrowserFlowSessionExecutor,
+    DryRunBrowserFlowExecutor, ListObjectsRequest, OutboundIpFamily, PutObjectRequest,
+    StubBackend, TokenSource,
 };
+#[cfg(test)]
+use blob_core::BrowserFlowSession;
 use browser_cdp::{CdpBrowserFlowSession, CdpConnectionConfig};
 use hmac::{Hmac, Mac};
 use metadata_store::{
@@ -464,6 +466,15 @@ struct BrowserFlowAuthSessionPayload {
     prompts: Vec<AuthCapturePrompt>,
     report: Option<BrowserFlowExecutionReport>,
     last_error: Option<String>,
+}
+
+#[async_trait::async_trait]
+trait BrowserFlowOutputReader {
+    async fn evaluate_output_script(
+        &self,
+        expression: &str,
+    ) -> Result<serde_json::Value, BlobError>;
+    async fn read_current_url(&self) -> Result<Option<String>, BlobError>;
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2081,6 +2092,16 @@ fn update_browser_flow_auth_session(
     Ok(session.clone())
 }
 
+fn merge_browser_flow_auth_session_runtime(
+    state: &AppState,
+    session_id: &str,
+    runtime: BTreeMap<String, serde_json::Value>,
+) -> Result<BrowserFlowAuthSession, BlobError> {
+    update_browser_flow_auth_session(state, session_id, |session| {
+        session.runtime.extend(runtime);
+    })
+}
+
 fn upsert_browser_flow_auth_session(
     state: &AppState,
     session_id: Option<String>,
@@ -2172,6 +2193,7 @@ fn ensure_auth_capture_prompts_for_inputs(
     created_or_existing
 }
 
+#[cfg(test)]
 async fn execute_browser_flow_session<S>(
     catalogs: &BrowserFlowCatalogCollection,
     provider: &str,
@@ -2195,6 +2217,64 @@ where
     BrowserFlowSessionExecutor::new(session)
         .execute(&plan)
         .await
+}
+
+fn browser_flow_plan(
+    catalogs: &BrowserFlowCatalogCollection,
+    provider: &str,
+    surface: &str,
+    flow_id: &str,
+    inputs: BTreeMap<String, serde_json::Value>,
+    runtime: BTreeMap<String, serde_json::Value>,
+) -> Result<blob_core::BoundBrowserFlowPlan, BlobError> {
+    let (provider, surface, flow_id) =
+        require_browser_flow_coordinates(provider, surface, flow_id)?;
+    catalogs.bind_flow(
+        &provider,
+        &surface,
+        &flow_id,
+        &BrowserFlowBindingContext { inputs, runtime },
+    )
+}
+
+async fn capture_browser_flow_outputs(
+    plan: &blob_core::BoundBrowserFlowPlan,
+    session: &impl BrowserFlowOutputReader,
+) -> Result<BTreeMap<String, serde_json::Value>, BlobError> {
+    let mut captured = BTreeMap::new();
+    for output in &plan.flow.outputs {
+        let value = match output.kind {
+            BrowserFlowOutputKind::ScriptValue => {
+                session.evaluate_output_script(&output.source).await?
+            }
+            BrowserFlowOutputKind::Url => match session.read_current_url().await? {
+                Some(url) => serde_json::Value::String(url),
+                None => serde_json::Value::Null,
+            },
+            BrowserFlowOutputKind::RequestHeader
+            | BrowserFlowOutputKind::RequestField
+            | BrowserFlowOutputKind::ResponseField
+            | BrowserFlowOutputKind::DomText => continue,
+        };
+        if !matches!(value, serde_json::Value::Null) {
+            captured.insert(output.id.clone(), value);
+        }
+    }
+    Ok(captured)
+}
+
+#[async_trait::async_trait]
+impl BrowserFlowOutputReader for CdpBrowserFlowSession {
+    async fn evaluate_output_script(
+        &self,
+        expression: &str,
+    ) -> Result<serde_json::Value, BlobError> {
+        self.evaluate_value(expression).await
+    }
+
+    async fn read_current_url(&self) -> Result<Option<String>, BlobError> {
+        self.current_url().await
+    }
 }
 
 fn browser_flow_catalog_summary_payloads(
@@ -4019,19 +4099,38 @@ async fn run_browser_flow_session(
         session.set_status(BROWSER_FLOW_AUTH_SESSION_STATUS_RESUMED);
     })?;
     let cdp = resolve_browser_flow_cdp_config(&state, &cdp_request)?;
-    let session = CdpBrowserFlowSession::connect(&cdp).await?;
-    let report = execute_browser_flow_session(
+    let plan = browser_flow_plan(
         state.browser_flow_catalogs.as_ref(),
         &provider,
         &surface,
         &flow_id,
         merged_inputs,
         auth_session.runtime.clone(),
-        session,
-    )
-    .await;
+    )?;
+    let session = CdpBrowserFlowSession::connect(&cdp).await?;
+    let report = BrowserFlowSessionExecutor::new(session.clone())
+        .execute(&plan)
+        .await;
     let report = match report {
         Ok(report) => {
+            let captured_runtime = match capture_browser_flow_outputs(&plan, &session).await {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = update_browser_flow_auth_session(
+                        &state,
+                        &auth_session.session_id,
+                        |session| {
+                            session.set_failed(&error);
+                        },
+                    )?;
+                    return Err(ApiError::from(error));
+                }
+            };
+            let _ = merge_browser_flow_auth_session_runtime(
+                &state,
+                &auth_session.session_id,
+                captured_runtime,
+            )?;
             let _ =
                 update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
                     session.set_completed(report.clone());
@@ -6753,6 +6852,12 @@ mod tests {
         actions: Arc<Mutex<Vec<String>>>,
     }
 
+    #[derive(Debug, Clone, Default)]
+    struct RecordingBrowserFlowOutputReader {
+        values: Arc<Mutex<HashMap<String, serde_json::Value>>>,
+        current_url: Arc<Mutex<Option<String>>>,
+    }
+
     impl RecordingBrowserFlowSession {
         fn actions(&self) -> Vec<String> {
             self.actions
@@ -6766,6 +6871,33 @@ mod tests {
                 .lock()
                 .expect("recording browser flow session poisoned")
                 .push(action);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserFlowOutputReader for RecordingBrowserFlowOutputReader {
+        async fn evaluate_output_script(
+            &self,
+            expression: &str,
+        ) -> Result<serde_json::Value, BlobError> {
+            self.values
+                .lock()
+                .expect("recording browser flow output reader poisoned")
+                .get(expression)
+                .cloned()
+                .ok_or_else(|| {
+                    BlobError::NotFound(format!(
+                        "recording browser flow output not found for expression: {expression}"
+                    ))
+                })
+        }
+
+        async fn read_current_url(&self) -> Result<Option<String>, BlobError> {
+            Ok(self
+                .current_url
+                .lock()
+                .expect("recording browser flow output reader poisoned")
+                .clone())
         }
     }
 
@@ -7626,6 +7758,124 @@ mod tests {
                 "wait_for_request:upload2c:60000".to_string(),
                 "wait_for_request:wohome_query_all_files:30000".to_string(),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_browser_flow_outputs_reads_script_values_and_url() {
+        let state = test_state();
+        let plan = browser_flow_plan(
+            state.browser_flow_catalogs.as_ref(),
+            "unicom",
+            "pan.wo.cn-web",
+            "unicom_sms_login",
+            BTreeMap::from([
+                (
+                    "phone_number".to_string(),
+                    serde_json::Value::String("18513581767".to_string()),
+                ),
+                (
+                    "sms_code".to_string(),
+                    serde_json::Value::String("288750".to_string()),
+                ),
+            ]),
+            BTreeMap::new(),
+        )
+        .expect("login flow plan should bind");
+        let reader = RecordingBrowserFlowOutputReader {
+            values: Arc::new(Mutex::new(HashMap::from([
+                (
+                    "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.token ?? null; })()".to_string(),
+                    serde_json::Value::String("token-123".to_string()),
+                ),
+                (
+                    "(() => sessionStorage.getItem('familyId') || null)()".to_string(),
+                    serde_json::Value::String("family-42".to_string()),
+                ),
+                (
+                    "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.clientId ?? null; })()".to_string(),
+                    serde_json::Value::String("1001000021".to_string()),
+                ),
+            ]))),
+            current_url: Arc::new(Mutex::new(Some(
+                "https://pan.wo.cn/pan/file_list/all".to_string(),
+            ))),
+        };
+
+        let captured = capture_browser_flow_outputs(&plan, &reader)
+            .await
+            .expect("output capture should succeed");
+
+        assert_eq!(
+            captured.get("access_token"),
+            Some(&serde_json::Value::String("token-123".to_string()))
+        );
+        assert_eq!(
+            captured.get("family_id"),
+            Some(&serde_json::Value::String("family-42".to_string()))
+        );
+        assert_eq!(
+            captured.get("client_id"),
+            Some(&serde_json::Value::String("1001000021".to_string()))
+        );
+        assert_eq!(
+            captured.get("current_url"),
+            Some(&serde_json::Value::String(
+                "https://pan.wo.cn/pan/file_list/all".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn browser_flow_auth_session_runtime_is_reused_by_follow_up_flow() {
+        let state = test_state();
+        let session = upsert_browser_flow_auth_session(
+            &state,
+            Some("auth-session-runtime".to_string()),
+            "unicom".to_string(),
+            "pan.wo.cn-web".to_string(),
+            "unicom_sms_login".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let merged = merge_browser_flow_auth_session_runtime(
+            &state,
+            &session.session_id,
+            BTreeMap::from([(
+                "access_token".to_string(),
+                serde_json::Value::String("token-from-login".to_string()),
+            )]),
+        )
+        .expect("runtime merge should succeed");
+        assert_eq!(
+            merged.runtime.get("access_token"),
+            Some(&serde_json::Value::String("token-from-login".to_string()))
+        );
+
+        let plan = browser_flow_plan(
+            state.browser_flow_catalogs.as_ref(),
+            "unicom",
+            "pan.wo.cn-web",
+            "unicom_create_directory",
+            BTreeMap::from([(
+                "directory_name".to_string(),
+                serde_json::Value::String("probe-dir".to_string()),
+            )]),
+            merged.runtime.clone(),
+        )
+        .expect("follow-up flow should bind with reused runtime");
+
+        let request = plan
+            .find_request("wohome_create_directory")
+            .expect("create-directory request should exist");
+        let access_header = request
+            .required_headers
+            .iter()
+            .find(|header| header.name == "accesstoken")
+            .expect("accesstoken header should exist");
+        assert_eq!(
+            access_header.value_template.as_deref(),
+            Some("token-from-login")
         );
     }
 

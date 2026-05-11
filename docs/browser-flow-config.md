@@ -50,6 +50,8 @@
   - 底层 transport 统一走 `browser-cdp` crate，不绑定某个具体浏览器品牌
   - 如果缺少必填 `inputs.*`，当前会返回 `status=awaiting_input` 并自动创建对应的 auth-capture prompts；待提示项回答后，可带同一个 `auth_session_id` 重试
   - `GET /api/browser-flows/session/{session_id}` 可轮询当前会话的 `pending/awaiting_input/answered/resumed/completed/failed` 状态、关联 prompts、最近 report 和 last_error
+  - 当 flow 成功完成后，`gatewayd` 当前会把 `flows[].outputs` 里的 `script_value` / `url` 输出写回同一条 auth session 的 `runtime`，供后续复用同一个 `auth_session_id` 的 flow 继续绑定 `{{runtime.*}}`
+  - 当前这一步还没有实现完整的 `response_field` / `request_field` 抓取；先覆盖登录后页面内可直接读取的 token / URL / store state
 
 当前 schema version 为 `1`。
 
@@ -124,6 +126,7 @@
 3. selector 优先写多候选，而不是只赌一个易碎 class name。
 4. 关键网络请求要把“真正决定成功”的字段写清楚。
 5. 如果页面流程必须先调用某个 JS/Vue 方法，不要把它降级成纯 selector 点击说明。
+6. 对登录态、client id、family id 这类可从页面上下文直接读取的值，优先记录成 `outputs[].kind=script_value`，避免在 provider 代码里二次猜测。
 
 ## 与 provider 代码的边界
 

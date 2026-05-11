@@ -92,6 +92,7 @@
 - 已支持 `POST /api/browser-flows/session-run`，可用控制面默认 CDP 配置或请求级覆盖配置直接执行一条浏览器 flow
 - 当 flow 缺少必填人工输入时，`session-run` 现在会先落一条 `auth_session_id` 会话、自动创建 prompts，并返回 `awaiting_input`，而不是立即失败
 - 已支持 `GET /api/browser-flows/session/{session_id}` 轮询这条人工认证会话的状态、prompts、last_error 和最近 execution report
+- 已支持在 flow 成功执行后把 `script_value` / `url` 类型的 browser-flow outputs 回填到该 auth session 的 `runtime`，供后续复用同一 `auth_session_id` 的 flow 直接消费登录态
 - 输出健康检查、日志、后续指标和审计信息
 
 ### `provider-onedrive`
