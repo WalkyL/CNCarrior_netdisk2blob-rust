@@ -182,9 +182,10 @@ Agent -> Skill -> mcp-server / gatewayd
   - 本地文件注入 access token
   - 本地 session file 注入 OAuth 会话并自动 refresh
 - Auth Capture:
-  - 当前先保存 broker URL、LLM endpoint、LLM model
-  - 当前已预留验证输入队列，用于手机号 / 短信码 / 验证码回显
-  - 后续再把无头浏览器和页面分析独立接入
+- 当前先保存 broker URL、LLM endpoint、LLM model
+- 当前也保存 CDP endpoint、target selector 和 target timeout 这类 transport 配置，用来把 browser flow 执行器收口到标准 CDP，而不是绑定某个具体浏览器
+- 当前已预留验证输入队列，用于手机号 / 短信码 / 验证码回显
+- 后续再把无头浏览器和页面分析独立接入
 
 不纳入自动化范围的方式:
 

@@ -247,6 +247,9 @@ struct OnedrivePolicyInput {
 struct AuthCapturePolicy {
     enabled: bool,
     broker_url: Option<String>,
+    cdp_endpoint_url: Option<String>,
+    cdp_target_selector: Option<String>,
+    cdp_target_timeout_ms: Option<u64>,
     llm_analysis_enabled: bool,
     llm_endpoint: Option<String>,
     llm_model_id: Option<String>,
@@ -258,6 +261,9 @@ struct AuthCapturePolicy {
 struct AuthCapturePolicyPayload {
     enabled: bool,
     broker_url: Option<String>,
+    cdp_endpoint_url: Option<String>,
+    cdp_target_selector: Option<String>,
+    cdp_target_timeout_ms: Option<u64>,
     llm_analysis_enabled: bool,
     llm_endpoint: Option<String>,
     llm_model_id: Option<String>,
@@ -269,6 +275,9 @@ struct AuthCapturePolicyPayload {
 struct AuthCapturePolicyInput {
     enabled: bool,
     broker_url: Option<String>,
+    cdp_endpoint_url: Option<String>,
+    cdp_target_selector: Option<String>,
+    cdp_target_timeout_ms: Option<u64>,
     llm_analysis_enabled: bool,
     llm_endpoint: Option<String>,
     llm_model_id: Option<String>,
@@ -627,6 +636,10 @@ impl AuthCapturePolicy {
         Self {
             enabled: env_bool("CCBG_AUTH_CAPTURE_ENABLED", false),
             broker_url: env_opt("CCBG_AUTH_CAPTURE_BROKER_URL"),
+            cdp_endpoint_url: env_opt("CCBG_AUTH_CAPTURE_CDP_ENDPOINT_URL"),
+            cdp_target_selector: env_opt("CCBG_AUTH_CAPTURE_CDP_TARGET_SELECTOR"),
+            cdp_target_timeout_ms: env_opt("CCBG_AUTH_CAPTURE_CDP_TARGET_TIMEOUT_MS")
+                .and_then(|value| value.parse::<u64>().ok()),
             llm_analysis_enabled: env_bool("CCBG_AUTH_CAPTURE_LLM_ANALYSIS_ENABLED", false),
             llm_endpoint: env_opt("CCBG_AUTH_CAPTURE_LLM_ENDPOINT"),
             llm_model_id: env_opt("CCBG_AUTH_CAPTURE_LLM_MODEL_ID"),
@@ -641,6 +654,9 @@ impl AuthCapturePolicy {
     fn apply_input(&mut self, input: AuthCapturePolicyInput) {
         self.enabled = input.enabled;
         self.broker_url = normalize_secret_field(input.broker_url);
+        self.cdp_endpoint_url = normalize_secret_field(input.cdp_endpoint_url);
+        self.cdp_target_selector = normalize_secret_field(input.cdp_target_selector);
+        self.cdp_target_timeout_ms = input.cdp_target_timeout_ms.filter(|value| *value > 0);
         self.llm_analysis_enabled = input.llm_analysis_enabled;
         self.llm_endpoint = normalize_secret_field(input.llm_endpoint);
         self.llm_model_id = normalize_secret_field(input.llm_model_id);
@@ -656,6 +672,9 @@ impl AuthCapturePolicy {
         AuthCapturePolicyPayload {
             enabled: self.enabled,
             broker_url: self.broker_url.clone(),
+            cdp_endpoint_url: self.cdp_endpoint_url.clone(),
+            cdp_target_selector: self.cdp_target_selector.clone(),
+            cdp_target_timeout_ms: self.cdp_target_timeout_ms,
             llm_analysis_enabled: self.llm_analysis_enabled,
             llm_endpoint: self.llm_endpoint.clone(),
             llm_model_id: self.llm_model_id.clone(),
@@ -2247,6 +2266,12 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       <label><input id="auth-capture-enabled" type="checkbox" /> Enable auth capture sidecar integration</label>
       <label>Auth Broker URL</label>
       <input id="auth-capture-broker-url" type="text" placeholder="http://auth-broker-host:port" />
+      <label>CDP Endpoint URL</label>
+      <input id="auth-capture-cdp-endpoint-url" type="text" placeholder="http://127.0.0.1:9222" />
+      <label>CDP Target Selector</label>
+      <input id="auth-capture-cdp-target-selector" type="text" placeholder="title:pan.wo.cn | url:https://pan.wo.cn/* | ws://..." />
+      <label>CDP Target Timeout (ms)</label>
+      <input id="auth-capture-cdp-target-timeout-ms" type="number" min="1" step="1" placeholder="15000" />
       <label><input id="auth-capture-llm-enabled" type="checkbox" /> Allow LLM-assisted auth analysis</label>
       <label>LLM Endpoint</label>
       <input id="auth-capture-llm-endpoint" type="text" placeholder="http://192.168.1.36:1234/v1" />
@@ -2465,6 +2490,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     function renderAuthCapturePolicy(payload) {{
       document.getElementById('auth-capture-enabled').checked = !!payload.enabled;
       document.getElementById('auth-capture-broker-url').value = payload.broker_url || '';
+      document.getElementById('auth-capture-cdp-endpoint-url').value = payload.cdp_endpoint_url || '';
+      document.getElementById('auth-capture-cdp-target-selector').value = payload.cdp_target_selector || '';
+      document.getElementById('auth-capture-cdp-target-timeout-ms').value = payload.cdp_target_timeout_ms || '';
       document.getElementById('auth-capture-llm-enabled').checked = !!payload.llm_analysis_enabled;
       document.getElementById('auth-capture-llm-endpoint').value = payload.llm_endpoint || '';
       document.getElementById('auth-capture-llm-model-id').value = payload.llm_model_id || '';
@@ -2474,6 +2502,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       const summary = [
         `Capture sidecar: ${{payload.enabled ? 'enabled' : 'disabled'}}`,
         `Broker URL: ${{payload.broker_url || 'not set'}}`,
+        `CDP endpoint: ${{payload.cdp_endpoint_url || 'not set'}}`,
+        `CDP target: ${{payload.cdp_target_selector || 'not set'}}`,
+        `CDP timeout: ${{payload.cdp_target_timeout_ms || 'default'}} ms`,
         `LLM analysis: ${{payload.llm_analysis_enabled ? 'enabled' : 'disabled'}}`,
         `LLM endpoint: ${{payload.llm_endpoint || 'not set'}}`,
         `LLM model: ${{payload.llm_model_id || 'not set'}}`,
@@ -3061,9 +3092,13 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       refreshStatus();
     }}
     async function saveAuthCapturePolicy() {{
+      const rawCdpTimeout = document.getElementById('auth-capture-cdp-target-timeout-ms').value.trim();
       const payload = {{
         enabled: document.getElementById('auth-capture-enabled').checked,
         broker_url: document.getElementById('auth-capture-broker-url').value.trim(),
+        cdp_endpoint_url: document.getElementById('auth-capture-cdp-endpoint-url').value.trim(),
+        cdp_target_selector: document.getElementById('auth-capture-cdp-target-selector').value.trim(),
+        cdp_target_timeout_ms: rawCdpTimeout ? Number(rawCdpTimeout) : null,
         llm_analysis_enabled: document.getElementById('auth-capture-llm-enabled').checked,
         llm_endpoint: document.getElementById('auth-capture-llm-endpoint').value.trim(),
         llm_model_id: document.getElementById('auth-capture-llm-model-id').value.trim(),
@@ -4915,6 +4950,14 @@ fn load_control_plane_state(
                 normalize_prefix_list(&state.onedrive_policy.memory_prefixes);
             state.auth_capture_policy.broker_url =
                 normalize_secret_field(state.auth_capture_policy.broker_url);
+            state.auth_capture_policy.cdp_endpoint_url =
+                normalize_secret_field(state.auth_capture_policy.cdp_endpoint_url);
+            state.auth_capture_policy.cdp_target_selector =
+                normalize_secret_field(state.auth_capture_policy.cdp_target_selector);
+            state.auth_capture_policy.cdp_target_timeout_ms = state
+                .auth_capture_policy
+                .cdp_target_timeout_ms
+                .filter(|value| *value > 0);
             state.auth_capture_policy.llm_endpoint =
                 normalize_secret_field(state.auth_capture_policy.llm_endpoint);
             state.auth_capture_policy.llm_model_id =
@@ -6682,6 +6725,48 @@ mod tests {
         .expect_err("browser flow dry run should reject missing required input");
 
         assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn auth_capture_policy_round_trip_preserves_cdp_fields() {
+        let state = test_state();
+
+        let Json(saved) = update_auth_capture_policy(
+            State(state.clone()),
+            Json(AuthCapturePolicyInput {
+                enabled: true,
+                broker_url: Some("http://auth-broker.internal:61200".to_string()),
+                cdp_endpoint_url: Some("http://127.0.0.1:9222".to_string()),
+                cdp_target_selector: Some("url:https://pan.wo.cn/*".to_string()),
+                cdp_target_timeout_ms: Some(15000),
+                llm_analysis_enabled: true,
+                llm_endpoint: Some("http://llm.internal:1234/v1".to_string()),
+                llm_model_id: Some("test-model".to_string()),
+                llm_api_key: Some("rotate-me".to_string()),
+                clear_llm_api_key: false,
+            }),
+        )
+        .await
+        .expect("auth capture policy update should succeed");
+
+        assert!(saved.enabled);
+        assert_eq!(
+            saved.cdp_endpoint_url.as_deref(),
+            Some("http://127.0.0.1:9222")
+        );
+        assert_eq!(
+            saved.cdp_target_selector.as_deref(),
+            Some("url:https://pan.wo.cn/*")
+        );
+        assert_eq!(saved.cdp_target_timeout_ms, Some(15000));
+        assert!(saved.llm_api_key_present);
+
+        let Json(loaded) = get_auth_capture_policy(State(state))
+            .await
+            .expect("auth capture policy lookup should succeed");
+        assert_eq!(loaded.cdp_endpoint_url, saved.cdp_endpoint_url);
+        assert_eq!(loaded.cdp_target_selector, saved.cdp_target_selector);
+        assert_eq!(loaded.cdp_target_timeout_ms, saved.cdp_target_timeout_ms);
     }
 
     #[test]

@@ -31,6 +31,7 @@
 - `blob-core::BrowserFlowCatalog::bind_flow(...)` / `BrowserFlowCatalogCollection::bind_flow(...)` 可以把 `flows[].inputs`、`runtime.*` 和 `preset_refs` 绑定成一份已解析模板的执行计划
 - `blob-core::DryRunBrowserFlowExecutor` 可以把绑定后的执行计划展开成逐步的 `Planned` 报告，方便在接入真实 CDP 执行层之前先验证 catalog、输入绑定和预期请求
 - `blob-core::BrowserFlowSession` / `BrowserFlowSessionExecutor` 已经定义了真实执行时需要的通用浏览器动作边界，例如 `navigate`、`click`、`set_input`、`set_files`、`wait_for_request`、`wait_for_page`
+- `gatewayd` 的 auth-capture 控制面现在已经能保存 CDP 配置字段，例如 `cdp_endpoint_url`、`cdp_target_selector`、`cdp_target_timeout_ms`，后续真实 transport 将优先消费这些字段，而不是写死某个浏览器
 - `gatewayd` 只读暴露:
   - `GET /api/browser-flows/catalogs`
   - `GET /api/browser-flows/catalog?provider=unicom&surface=pan.wo.cn-web`

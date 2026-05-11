@@ -37,7 +37,7 @@
 
 1. 先给服务配置一个独立的 `CCBG_CREDENTIALS_DIR`。
 2. 再通过 Admin Web 把各 provider 的 token / cookie / OneDrive OAuth 必要字段写入各自 JSON 文件。
-3. 如果后续启用 auth capture sidecar，需要在 Admin Web 的 `Auth Capture / LLM` 卡片里先填好 `Broker URL`，以及可选的 `LLM Endpoint` / `LLM Model ID` / `LLM API Key`。
+3. 如果后续启用 auth capture sidecar，需要在 Admin Web 的 `Auth Capture / LLM` 卡片里先填好 `Broker URL`，以及 CDP 入口配置，例如 `CDP Endpoint URL`、可选 `CDP Target Selector`、可选 `CDP Target Timeout`，再按需填写 `LLM Endpoint` / `LLM Model ID` / `LLM API Key`。
 3. 只有在没有浏览器或不方便打开管理页时，再退回 `*_TOKEN_FILE`。
 
 ## 你需要准备什么
