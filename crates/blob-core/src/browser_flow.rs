@@ -179,6 +179,7 @@ pub struct BoundBrowserFlowPlan {
 #[serde(rename_all = "snake_case")]
 pub enum BrowserFlowExecutionMode {
     DryRun,
+    Session,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -214,6 +215,10 @@ pub struct BrowserFlowExecutionReport {
 
 #[derive(Debug, Clone, Default)]
 pub struct DryRunBrowserFlowExecutor;
+
+pub struct BrowserFlowSessionExecutor<S> {
+    session: S,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserFlowInput {
@@ -819,6 +824,16 @@ impl BrowserFlowCatalogCollection {
 }
 
 impl BoundBrowserFlowPlan {
+    pub fn find_page(&self, page_id: &str) -> Option<&BrowserFlowPage> {
+        self.pages.iter().find(|page| page.id == page_id)
+    }
+
+    pub fn find_element(&self, element_id: &str) -> Option<&BrowserFlowElement> {
+        self.elements
+            .iter()
+            .find(|element| element.id == element_id)
+    }
+
     pub fn find_request(&self, request_id: &str) -> Option<&BrowserFlowRequest> {
         self.requests
             .iter()
@@ -834,6 +849,69 @@ impl BoundBrowserFlowPlan {
     pub fn input_value(&self, input_id: &str) -> Option<&Value> {
         self.context.inputs.get(input_id)
     }
+
+    pub fn input_file_paths(&self, input_id: &str) -> Result<Option<Vec<String>>, BlobError> {
+        let Some(value) = self.input_value(input_id) else {
+            return Ok(None);
+        };
+        browser_flow_file_paths(input_id, value)
+    }
+}
+
+impl<S> BrowserFlowSessionExecutor<S> {
+    pub fn new(session: S) -> Self {
+        Self { session }
+    }
+
+    pub fn session(&self) -> &S {
+        &self.session
+    }
+
+    pub fn into_inner(self) -> S {
+        self.session
+    }
+}
+
+#[async_trait]
+pub trait BrowserFlowSession: Send + Sync {
+    async fn navigate(&self, url: &str) -> Result<(), BlobError>;
+
+    async fn click(&self, element: &BrowserFlowElement) -> Result<(), BlobError>;
+
+    async fn set_input(
+        &self,
+        element: &BrowserFlowElement,
+        value: &str,
+        dispatch_events: &[String],
+    ) -> Result<(), BlobError>;
+
+    async fn invoke_operation(&self, operation: &BrowserFlowOperation) -> Result<(), BlobError>;
+
+    async fn set_files(
+        &self,
+        element: &BrowserFlowElement,
+        paths: &[String],
+    ) -> Result<(), BlobError>;
+
+    async fn dispatch_events(
+        &self,
+        element: &BrowserFlowElement,
+        events: &[String],
+    ) -> Result<(), BlobError>;
+
+    async fn wait_for_request(
+        &self,
+        request: &BrowserFlowRequest,
+        timeout_ms: Option<u64>,
+    ) -> Result<(), BlobError>;
+
+    async fn wait_for_page(
+        &self,
+        page: &BrowserFlowPage,
+        timeout_ms: Option<u64>,
+    ) -> Result<(), BlobError>;
+
+    async fn wait(&self, duration_ms: u64) -> Result<(), BlobError>;
 }
 
 #[async_trait]
@@ -862,6 +940,36 @@ impl BrowserFlowExecutor for DryRunBrowserFlowExecutor {
             .iter()
             .map(|step| dry_run_step_report(plan, step))
             .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(BrowserFlowExecutionReport {
+            mode: self.mode(),
+            provider: plan.provider.clone(),
+            surface: plan.surface.clone(),
+            flow_id: plan.flow.id.clone(),
+            step_count: steps.len(),
+            expected_requests: plan.flow.expected_requests.clone(),
+            steps,
+        })
+    }
+}
+
+#[async_trait]
+impl<S> BrowserFlowExecutor for BrowserFlowSessionExecutor<S>
+where
+    S: BrowserFlowSession,
+{
+    fn mode(&self) -> BrowserFlowExecutionMode {
+        BrowserFlowExecutionMode::Session
+    }
+
+    async fn execute(
+        &self,
+        plan: &BoundBrowserFlowPlan,
+    ) -> Result<BrowserFlowExecutionReport, BlobError> {
+        let mut steps = Vec::with_capacity(plan.flow.steps.len());
+        for step in &plan.flow.steps {
+            steps.push(execute_session_step(plan, &self.session, step).await?);
+        }
 
         Ok(BrowserFlowExecutionReport {
             mode: self.mode(),
@@ -962,7 +1070,9 @@ fn value_is_present(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::String(value) => !value.trim().is_empty(),
-        _ => true,
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        Value::Bool(_) | Value::Number(_) => true,
     }
 }
 
@@ -1171,6 +1281,43 @@ fn template_scalar_to_string(token: &str, value: &Value) -> Result<String, BlobE
     }
 }
 
+fn browser_flow_file_paths(
+    input_id: &str,
+    value: &Value,
+) -> Result<Option<Vec<String>>, BlobError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(path) => {
+            if path.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(vec![path.clone()]))
+            }
+        }
+        Value::Array(items) => {
+            let mut paths = Vec::new();
+            for item in items {
+                let path = item.as_str().ok_or_else(|| {
+                    BlobError::Configuration(format!(
+                        "browser flow file input {input_id} must contain only string paths"
+                    ))
+                })?;
+                if !path.trim().is_empty() {
+                    paths.push(path.to_string());
+                }
+            }
+            if paths.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(paths))
+            }
+        }
+        _ => Err(BlobError::Configuration(format!(
+            "browser flow file input {input_id} must resolve to a string path or array of string paths"
+        ))),
+    }
+}
+
 fn dry_run_step_report(
     plan: &BoundBrowserFlowPlan,
     step: &BrowserFlowStep,
@@ -1193,11 +1340,15 @@ fn dry_run_step_report(
         }
         BrowserFlowStep::SetInput {
             element,
+            value_template,
             dispatch_events,
             ..
         } => {
             detail.insert("element".to_string(), Value::String(element.clone()));
-            detail.insert("value_present".to_string(), Value::Bool(true));
+            detail.insert(
+                "value_present".to_string(),
+                Value::Bool(value_is_present(&Value::String(value_template.clone()))),
+            );
             detail.insert(
                 "dispatch_events".to_string(),
                 Value::Array(dispatch_events.iter().cloned().map(Value::String).collect()),
@@ -1222,12 +1373,19 @@ fn dry_run_step_report(
         BrowserFlowStep::SetFiles {
             element, input_ref, ..
         } => {
+            let file_paths = plan.input_file_paths(input_ref)?;
             detail.insert("element".to_string(), Value::String(element.clone()));
             detail.insert("input_ref".to_string(), Value::String(input_ref.clone()));
             detail.insert(
                 "input_present".to_string(),
-                Value::Bool(plan.input_value(input_ref).is_some()),
+                Value::Bool(file_paths.is_some()),
             );
+            if let Some(file_paths) = file_paths {
+                detail.insert(
+                    "file_count".to_string(),
+                    Value::Number(serde_json::Number::from(file_paths.len())),
+                );
+            }
         }
         BrowserFlowStep::DispatchEvents {
             element, events, ..
@@ -1288,23 +1446,325 @@ fn dry_run_step_report(
     })
 }
 
+async fn execute_session_step<S>(
+    plan: &BoundBrowserFlowPlan,
+    session: &S,
+    step: &BrowserFlowStep,
+) -> Result<BrowserFlowExecutionStepReport, BlobError>
+where
+    S: BrowserFlowSession,
+{
+    let mut report = dry_run_step_report(plan, step)?;
+    match step {
+        BrowserFlowStep::Navigate {
+            url, wait_for_page, ..
+        } => {
+            session.navigate(url).await?;
+            if let Some(page_id) = wait_for_page {
+                session
+                    .wait_for_page(
+                        plan.find_page(page_id).ok_or_else(|| {
+                            missing_bound_reference("page", page_id, &plan.flow.id)
+                        })?,
+                        None,
+                    )
+                    .await?;
+            }
+            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+        }
+        BrowserFlowStep::Click {
+            element, optional, ..
+        } => {
+            let element = plan
+                .find_element(element)
+                .ok_or_else(|| missing_bound_reference("element", element, &plan.flow.id))?;
+            match session.click(element).await {
+                Ok(()) => {
+                    report.status = BrowserFlowExecutionStepStatus::Succeeded;
+                }
+                Err(BlobError::NotFound(_)) if *optional => {
+                    report.status = BrowserFlowExecutionStepStatus::Skipped;
+                    report.detail.insert(
+                        "skip_reason".to_string(),
+                        Value::String("optional_element_not_found".to_string()),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        BrowserFlowStep::SetInput {
+            element,
+            value_template,
+            dispatch_events,
+            ..
+        } => {
+            session
+                .set_input(
+                    plan.find_element(element).ok_or_else(|| {
+                        missing_bound_reference("element", element, &plan.flow.id)
+                    })?,
+                    value_template,
+                    dispatch_events,
+                )
+                .await?;
+            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+        }
+        BrowserFlowStep::InvokeOperation { operation, .. } => {
+            session
+                .invoke_operation(plan.find_operation(operation).ok_or_else(|| {
+                    missing_bound_reference("operation", operation, &plan.flow.id)
+                })?)
+                .await?;
+            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+        }
+        BrowserFlowStep::SetFiles {
+            element, input_ref, ..
+        } => {
+            let Some(file_paths) = plan.input_file_paths(input_ref)? else {
+                report.status = BrowserFlowExecutionStepStatus::Skipped;
+                report.detail.insert(
+                    "skip_reason".to_string(),
+                    Value::String("missing_input".to_string()),
+                );
+                return Ok(report);
+            };
+            session
+                .set_files(
+                    plan.find_element(element).ok_or_else(|| {
+                        missing_bound_reference("element", element, &plan.flow.id)
+                    })?,
+                    &file_paths,
+                )
+                .await?;
+            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+        }
+        BrowserFlowStep::DispatchEvents {
+            element, events, ..
+        } => {
+            session
+                .dispatch_events(
+                    plan.find_element(element).ok_or_else(|| {
+                        missing_bound_reference("element", element, &plan.flow.id)
+                    })?,
+                    events,
+                )
+                .await?;
+            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+        }
+        BrowserFlowStep::WaitForRequest {
+            request,
+            timeout_ms,
+            ..
+        } => {
+            session
+                .wait_for_request(
+                    plan.find_request(request).ok_or_else(|| {
+                        missing_bound_reference("request", request, &plan.flow.id)
+                    })?,
+                    *timeout_ms,
+                )
+                .await?;
+            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+        }
+        BrowserFlowStep::WaitForPage {
+            page, timeout_ms, ..
+        } => {
+            session
+                .wait_for_page(
+                    plan.find_page(page)
+                        .ok_or_else(|| missing_bound_reference("page", page, &plan.flow.id))?,
+                    *timeout_ms,
+                )
+                .await?;
+            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+        }
+        BrowserFlowStep::Wait { duration_ms, .. } => {
+            session.wait(*duration_ms).await?;
+            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+        }
+    }
+
+    Ok(report)
+}
+
+fn missing_bound_reference(kind: &str, id: &str, flow_id: &str) -> BlobError {
+    BlobError::Configuration(format!(
+        "bound browser flow {flow_id} is missing referenced {kind} {id}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, HashSet},
         fs,
+        sync::Mutex,
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use async_trait::async_trait;
     use serde_json::Value;
     use tokio::runtime::Runtime;
 
     use super::{
         BrowserFlowBindingContext, BrowserFlowCatalog, BrowserFlowCatalogCollection,
         BrowserFlowExecutionMode, BrowserFlowExecutionStepStatus, BrowserFlowExecutor,
-        DryRunBrowserFlowExecutor,
+        BrowserFlowSession, BrowserFlowSessionExecutor, DryRunBrowserFlowExecutor,
     };
     use crate::BlobError;
+
+    #[derive(Default)]
+    struct RecordingBrowserFlowSession {
+        actions: Mutex<Vec<String>>,
+        missing_click_elements: Mutex<HashSet<String>>,
+        failing_operation: Mutex<Option<String>>,
+    }
+
+    impl RecordingBrowserFlowSession {
+        fn actions(&self) -> Vec<String> {
+            self.actions
+                .lock()
+                .expect("recorded actions should lock")
+                .clone()
+        }
+
+        fn mark_click_missing(&self, element_id: &str) {
+            self.missing_click_elements
+                .lock()
+                .expect("missing click set should lock")
+                .insert(element_id.to_string());
+        }
+
+        fn fail_operation(&self, operation_id: &str) {
+            *self
+                .failing_operation
+                .lock()
+                .expect("failing operation should lock") = Some(operation_id.to_string());
+        }
+
+        fn record(&self, action: impl Into<String>) {
+            self.actions
+                .lock()
+                .expect("recorded actions should lock")
+                .push(action.into());
+        }
+    }
+
+    #[async_trait]
+    impl BrowserFlowSession for RecordingBrowserFlowSession {
+        async fn navigate(&self, url: &str) -> Result<(), BlobError> {
+            self.record(format!("navigate:{url}"));
+            Ok(())
+        }
+
+        async fn click(&self, element: &super::BrowserFlowElement) -> Result<(), BlobError> {
+            if self
+                .missing_click_elements
+                .lock()
+                .expect("missing click set should lock")
+                .contains(&element.id)
+            {
+                return Err(BlobError::NotFound(format!(
+                    "element not found: {}",
+                    element.id
+                )));
+            }
+            self.record(format!("click:{}", element.id));
+            Ok(())
+        }
+
+        async fn set_input(
+            &self,
+            element: &super::BrowserFlowElement,
+            value: &str,
+            dispatch_events: &[String],
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "set_input:{}:{}:{}",
+                element.id,
+                value,
+                dispatch_events.join(",")
+            ));
+            Ok(())
+        }
+
+        async fn invoke_operation(
+            &self,
+            operation: &super::BrowserFlowOperation,
+        ) -> Result<(), BlobError> {
+            if self
+                .failing_operation
+                .lock()
+                .expect("failing operation should lock")
+                .as_deref()
+                == Some(operation.id.as_str())
+            {
+                return Err(BlobError::Upstream(format!(
+                    "operation failed: {}",
+                    operation.id
+                )));
+            }
+            self.record(format!("invoke_operation:{}", operation.id));
+            Ok(())
+        }
+
+        async fn set_files(
+            &self,
+            element: &super::BrowserFlowElement,
+            paths: &[String],
+        ) -> Result<(), BlobError> {
+            self.record(format!("set_files:{}:{}", element.id, paths.join("|")));
+            Ok(())
+        }
+
+        async fn dispatch_events(
+            &self,
+            element: &super::BrowserFlowElement,
+            events: &[String],
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "dispatch_events:{}:{}",
+                element.id,
+                events.join(",")
+            ));
+            Ok(())
+        }
+
+        async fn wait_for_request(
+            &self,
+            request: &super::BrowserFlowRequest,
+            timeout_ms: Option<u64>,
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "wait_for_request:{}:{}",
+                request.id,
+                timeout_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            ));
+            Ok(())
+        }
+
+        async fn wait_for_page(
+            &self,
+            page: &super::BrowserFlowPage,
+            timeout_ms: Option<u64>,
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "wait_for_page:{}:{}",
+                page.id,
+                timeout_ms
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            ));
+            Ok(())
+        }
+
+        async fn wait(&self, duration_ms: u64) -> Result<(), BlobError> {
+            self.record(format!("wait:{duration_ms}"));
+            Ok(())
+        }
+    }
 
     fn temp_catalog_dir(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -1317,6 +1777,182 @@ mod tests {
     fn unicom_catalog_fixture_path() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../config/browser-flows/unicom-web.json")
+    }
+
+    fn session_executor_catalog() -> BrowserFlowCatalog {
+        BrowserFlowCatalog::from_json_str(
+            r#"{
+              "schema_version": 1,
+              "provider": "example",
+              "surface": "example-web",
+              "base_url": "https://example.com",
+              "pages": [
+                {
+                  "id": "start",
+                  "title": "Start Page",
+                  "url_patterns": ["https://example.com/start"]
+                },
+                {
+                  "id": "done",
+                  "title": "Done Page",
+                  "url_patterns": ["https://example.com/done"]
+                }
+              ],
+              "elements": [
+                {
+                  "id": "form.submit_button",
+                  "page": "start",
+                  "role": "button",
+                  "required": true,
+                  "selectors": [{ "engine": "css", "value": "button[type='submit']" }]
+                },
+                {
+                  "id": "form.name_input",
+                  "page": "start",
+                  "role": "text_input",
+                  "required": true,
+                  "selectors": [{ "engine": "css", "value": "input[name='name']" }]
+                },
+                {
+                  "id": "form.file_input",
+                  "page": "start",
+                  "role": "file_input",
+                  "required": true,
+                  "selectors": [{ "engine": "css", "value": "input[type='file']" }]
+                },
+                {
+                  "id": "form.optional_button",
+                  "page": "start",
+                  "role": "button",
+                  "required": false,
+                  "selectors": [{ "engine": "css", "value": ".optional-button" }]
+                }
+              ],
+              "requests": [
+                {
+                  "id": "save_request",
+                  "method": "POST",
+                  "url_pattern": "https://example.com/api/save",
+                  "required_headers": [],
+                  "required_fields": [],
+                  "success_codes": [200]
+                }
+              ],
+              "operations": [
+                {
+                  "id": "form.prepare_save",
+                  "kind": "javascript",
+                  "source": "window.prepareSave()"
+                }
+              ],
+              "flows": [
+                {
+                  "id": "complete_flow",
+                  "title": "Complete Flow",
+                  "purpose": "Exercise session executor",
+                  "start_page": "start",
+                  "inputs": [
+                    {
+                      "id": "name",
+                      "label": "Name",
+                      "kind": "text",
+                      "required": true
+                    },
+                    {
+                      "id": "files",
+                      "label": "Files",
+                      "kind": "file",
+                      "required": true
+                    }
+                  ],
+                  "steps": [
+                    {
+                      "kind": "navigate",
+                      "id": "open-start",
+                      "url": "https://example.com/start",
+                      "wait_for_page": "start"
+                    },
+                    {
+                      "kind": "set_input",
+                      "id": "fill-name",
+                      "element": "form.name_input",
+                      "value_template": "{{inputs.name}}",
+                      "dispatch_events": ["input", "change"]
+                    },
+                    {
+                      "kind": "set_files",
+                      "id": "attach-files",
+                      "element": "form.file_input",
+                      "input_ref": "files"
+                    },
+                    {
+                      "kind": "dispatch_events",
+                      "id": "fire-file-events",
+                      "element": "form.file_input",
+                      "events": ["input", "change"]
+                    },
+                    {
+                      "kind": "invoke_operation",
+                      "id": "prepare-save",
+                      "operation": "form.prepare_save"
+                    },
+                    {
+                      "kind": "click",
+                      "id": "submit-form",
+                      "element": "form.submit_button"
+                    },
+                    {
+                      "kind": "wait_for_request",
+                      "id": "wait-save-request",
+                      "request": "save_request",
+                      "timeout_ms": 30000
+                    },
+                    {
+                      "kind": "wait_for_page",
+                      "id": "wait-done-page",
+                      "page": "done",
+                      "timeout_ms": 4000
+                    },
+                    {
+                      "kind": "wait",
+                      "id": "settle",
+                      "duration_ms": 250
+                    }
+                  ],
+                  "expected_requests": ["save_request"]
+                },
+                {
+                  "id": "optional_flow",
+                  "title": "Optional Flow",
+                  "purpose": "Exercise skipped steps",
+                  "start_page": "start",
+                  "inputs": [
+                    {
+                      "id": "optional_files",
+                      "label": "Optional Files",
+                      "kind": "file",
+                      "required": false
+                    }
+                  ],
+                  "steps": [
+                    {
+                      "kind": "click",
+                      "id": "optional-click",
+                      "element": "form.optional_button",
+                      "optional": true
+                    },
+                    {
+                      "kind": "set_files",
+                      "id": "optional-files",
+                      "element": "form.file_input",
+                      "input_ref": "optional_files"
+                    }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .expect("session executor catalog should parse")
     }
 
     #[test]
@@ -1796,5 +2432,134 @@ mod tests {
         assert!(plan.find_request("missing").is_none());
         assert!(plan.find_operation("missing").is_none());
         assert!(plan.input_value("missing").is_none());
+    }
+
+    #[test]
+    fn session_executor_runs_bound_steps_in_order() {
+        let catalog = session_executor_catalog();
+        let plan = catalog
+            .bind_flow(
+                "complete_flow",
+                &BrowserFlowBindingContext {
+                    inputs: BTreeMap::from([
+                        ("name".to_string(), Value::String("alice".to_string())),
+                        (
+                            "files".to_string(),
+                            Value::Array(vec![
+                                Value::String("/tmp/a.txt".to_string()),
+                                Value::String("/tmp/b.txt".to_string()),
+                            ]),
+                        ),
+                    ]),
+                    runtime: BTreeMap::new(),
+                },
+            )
+            .expect("flow binding should succeed");
+        let executor = BrowserFlowSessionExecutor::new(RecordingBrowserFlowSession::default());
+
+        let report = Runtime::new()
+            .expect("tokio runtime should build")
+            .block_on(executor.execute(&plan))
+            .expect("session execution should succeed");
+
+        assert_eq!(report.mode, BrowserFlowExecutionMode::Session);
+        assert_eq!(report.steps.len(), 9);
+        assert!(
+            report
+                .steps
+                .iter()
+                .all(|step| step.status == BrowserFlowExecutionStepStatus::Succeeded)
+        );
+        assert_eq!(
+            report.steps[2].detail.get("file_count"),
+            Some(&Value::Number(serde_json::Number::from(2usize)))
+        );
+        assert_eq!(
+            executor.session().actions(),
+            vec![
+                "navigate:https://example.com/start".to_string(),
+                "wait_for_page:start:".to_string(),
+                "set_input:form.name_input:alice:input,change".to_string(),
+                "set_files:form.file_input:/tmp/a.txt|/tmp/b.txt".to_string(),
+                "dispatch_events:form.file_input:input,change".to_string(),
+                "invoke_operation:form.prepare_save".to_string(),
+                "click:form.submit_button".to_string(),
+                "wait_for_request:save_request:30000".to_string(),
+                "wait_for_page:done:4000".to_string(),
+                "wait:250".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn session_executor_skips_optional_click_and_missing_file_input() {
+        let catalog = session_executor_catalog();
+        let plan = catalog
+            .bind_flow("optional_flow", &BrowserFlowBindingContext::default())
+            .expect("flow binding should succeed");
+        let executor = BrowserFlowSessionExecutor::new(RecordingBrowserFlowSession::default());
+        executor
+            .session()
+            .mark_click_missing("form.optional_button");
+
+        let report = Runtime::new()
+            .expect("tokio runtime should build")
+            .block_on(executor.execute(&plan))
+            .expect("session execution should succeed");
+
+        assert_eq!(report.steps.len(), 2);
+        assert_eq!(
+            report.steps[0].status,
+            BrowserFlowExecutionStepStatus::Skipped
+        );
+        assert_eq!(
+            report.steps[0].detail.get("skip_reason"),
+            Some(&Value::String("optional_element_not_found".to_string()))
+        );
+        assert_eq!(
+            report.steps[1].status,
+            BrowserFlowExecutionStepStatus::Skipped
+        );
+        assert_eq!(
+            report.steps[1].detail.get("skip_reason"),
+            Some(&Value::String("missing_input".to_string()))
+        );
+        assert!(executor.session().actions().is_empty());
+    }
+
+    #[test]
+    fn session_executor_stops_after_session_error() {
+        let catalog = session_executor_catalog();
+        let plan = catalog
+            .bind_flow(
+                "complete_flow",
+                &BrowserFlowBindingContext {
+                    inputs: BTreeMap::from([
+                        ("name".to_string(), Value::String("alice".to_string())),
+                        ("files".to_string(), Value::String("/tmp/a.txt".to_string())),
+                    ]),
+                    runtime: BTreeMap::new(),
+                },
+            )
+            .expect("flow binding should succeed");
+        let executor = BrowserFlowSessionExecutor::new(RecordingBrowserFlowSession::default());
+        executor.session().fail_operation("form.prepare_save");
+
+        let error = Runtime::new()
+            .expect("tokio runtime should build")
+            .block_on(executor.execute(&plan))
+            .expect_err("session execution should fail");
+
+        assert!(matches!(error, BlobError::Upstream(_)));
+        assert_eq!(
+            executor.session().actions(),
+            vec![
+                "navigate:https://example.com/start".to_string(),
+                "wait_for_page:start:".to_string(),
+                "set_input:form.name_input:alice:input,change".to_string(),
+                "set_files:form.file_input:/tmp/a.txt".to_string(),
+                "dispatch_events:form.file_input:input,change".to_string(),
+            ]
+        );
     }
 }

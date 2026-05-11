@@ -18,8 +18,8 @@ pub use browser_flow::{
     BrowserFlowExecutionStepReport, BrowserFlowExecutionStepStatus, BrowserFlowExecutor,
     BrowserFlowHeaderMatcher, BrowserFlowInput, BrowserFlowInputKind, BrowserFlowOperation,
     BrowserFlowOperationKind, BrowserFlowOutput, BrowserFlowOutputKind, BrowserFlowPage,
-    BrowserFlowRequest, BrowserFlowSelector, BrowserFlowSelectorEngine, BrowserFlowStep,
-    DryRunBrowserFlowExecutor,
+    BrowserFlowRequest, BrowserFlowSelector, BrowserFlowSelectorEngine, BrowserFlowSession,
+    BrowserFlowSessionExecutor, BrowserFlowStep, DryRunBrowserFlowExecutor,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

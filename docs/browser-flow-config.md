@@ -30,6 +30,7 @@
 - `blob-core::BrowserFlowCatalogCollection` 可以从 `config/browser-flows/` 目录批量加载 catalog，并按 `provider/surface` 查找
 - `blob-core::BrowserFlowCatalog::bind_flow(...)` / `BrowserFlowCatalogCollection::bind_flow(...)` 可以把 `flows[].inputs`、`runtime.*` 和 `preset_refs` 绑定成一份已解析模板的执行计划
 - `blob-core::DryRunBrowserFlowExecutor` 可以把绑定后的执行计划展开成逐步的 `Planned` 报告，方便在接入真实 CDP 执行层之前先验证 catalog、输入绑定和预期请求
+- `blob-core::BrowserFlowSession` / `BrowserFlowSessionExecutor` 已经定义了真实执行时需要的通用浏览器动作边界，例如 `navigate`、`click`、`set_input`、`set_files`、`wait_for_request`、`wait_for_page`
 - `gatewayd` 只读暴露:
   - `GET /api/browser-flows/catalogs`
   - `GET /api/browser-flows/catalog?provider=unicom&surface=pan.wo.cn-web`
@@ -136,10 +137,11 @@
 2. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。
 3. 继续补联通 family/private space 变体，以及后续电信/移动 provider 的网页 flow catalog。
 
-目前还没有真实的浏览器执行器落地在仓库里。
+目前还没有真实的 CDP transport / 浏览器 sidecar 落地在仓库里。
 
 换句话说:
 
 - 现在已经可以校验 catalog、加载 catalog、查询 flow、绑定模板、输出 dry-run step report
 - 现在也可以通过 `gatewayd` 直接请求一份 flow 的 dry-run execution report，拿来验证输入是否齐全、预期请求是否匹配
-- 但还没有把 `click/set_input/set_files/wait_for_request` 这些步骤真正驱动到 CDP 会话上
+- 现在已经有了可 mock 的 session executor，可以真正逐步执行这些步骤
+- 但还没有把这个 session executor 接到真实 Edge/CDP 会话或独立 auth-capture sidecar 上
