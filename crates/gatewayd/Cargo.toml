@@ -9,6 +9,7 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 base64 = { workspace = true }
 blob-core = { path = "../blob-core" }
+browser-cdp = { path = "../browser-cdp" }
 hex = { workspace = true }
 hmac = { workspace = true }
 metadata-store = { path = "../metadata-store" }

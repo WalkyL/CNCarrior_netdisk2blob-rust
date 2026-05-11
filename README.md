@@ -8,6 +8,8 @@
 
 针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖短信登录、个人空间上传、目录创建/删除/重命名/复制/移动这七条真实验证过的网页流程。
 
+浏览器执行层当前统一收口到标准 CDP，而不是绑定某个浏览器品牌。`browser-cdp` crate 负责连接可配置的 CDP endpoint、选择 page target、执行基础页面动作，`gatewayd` 则提供 catalog 查询、dry-run 和最小真实 session 执行入口，便于后续把 auth-capture 编排继续外挂出来。
+
 当前针对轻量设备的策略也已明确: `OpenWRT` 优先作为 host 服务宿主，默认通过 `CCBG_MAX_IN_MEMORY_OBJECT_BYTES` 控制非流式对象路径的峰值内存，并通过 SQLite 元数据保留上限控制 flash 增长；`ESP32-S3` 默认按 `client-only` 兼容处理，只有在确认资源充足时才考虑更小功能集的 relay 形态，后续元数据应走更轻量的 `tiny-state-client` 路线而不是继续复用完整 SQLite 宿主形态。
 
 ## 当前目标
@@ -187,6 +189,16 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `CCBG_METADATA_FAILED_HISTORY_LIMIT`
 - `CCBG_*_IP_FAMILY`
 - `CCBG_AUTH_CAPTURE_*`
+
+当前已落地的浏览器流程调试入口:
+
+- `GET /api/browser-flows/catalogs`
+- `GET /api/browser-flows/catalog?provider=<provider>&surface=<surface>`
+- `GET /api/browser-flows/flow/<flow_id>`
+- `POST /api/browser-flows/dry-run`
+- `POST /api/browser-flows/session-run`
+
+其中 `session-run` 会优先使用请求体里的 `cdp_endpoint_url` / `cdp_target_selector` / `cdp_target_timeout_ms`，未提供时回退到控制面保存的 `CCBG_AUTH_CAPTURE_CDP_*` 对应配置。这一层的目标是兼容任意支持 CDP 的浏览器或远端 browser host，而不是只兼容 Edge。
 
 ## 认证边界
 

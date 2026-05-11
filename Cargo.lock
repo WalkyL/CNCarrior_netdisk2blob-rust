@@ -363,6 +363,7 @@ dependencies = [
  "axum",
  "base64",
  "blob-core",
+ "browser-cdp",
  "hex",
  "hmac",
  "metadata-store",

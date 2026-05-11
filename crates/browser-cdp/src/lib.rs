@@ -4,6 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -15,7 +16,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify, oneshot};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async, tungstenite::protocol::Message,
 };
@@ -83,12 +84,6 @@ pub struct CdpTargetDescriptor {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct JsonVersionDescriptor {
-    #[serde(rename = "webSocketDebuggerUrl")]
-    web_socket_debugger_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct JsonTargetDescriptor {
     id: Option<String>,
     title: Option<String>,
@@ -123,6 +118,10 @@ struct CdpMessageEnvelope {
     result: Option<Value>,
     #[serde(default)]
     error: Option<CdpErrorObject>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    params: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,12 +131,27 @@ struct CdpErrorObject {
     message: String,
 }
 
+#[derive(Debug, Clone, Default)]
+struct CdpEventState {
+    current_url: Option<String>,
+    requests: Vec<CdpObservedRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CdpObservedRequest {
+    method: String,
+    url: String,
+}
+
 pub struct CdpBrowserFlowSession {
     connection: Arc<CdpConnection>,
 }
 
 struct CdpConnection {
-    socket: Mutex<CdpSocket>,
+    writer: Mutex<futures_util::stream::SplitSink<CdpSocket, Message>>,
+    pending: Mutex<BTreeMap<u64, oneshot::Sender<Result<Option<Value>, BlobError>>>>,
+    events: Mutex<CdpEventState>,
+    event_notify: Notify,
     next_id: AtomicU64,
 }
 
@@ -149,42 +163,81 @@ impl CdpConnection {
             "method": method,
             "params": params,
         });
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
 
-        let mut socket = self.socket.lock().await;
-        socket
+        if let Err(error) = self
+            .writer
+            .lock()
+            .await
             .send(Message::Text(payload.to_string().into()))
             .await
-            .map_err(|error| {
-                BlobError::Upstream(format!("failed to send CDP command {method}: {error}"))
-            })?;
-
-        loop {
-            let message = socket.next().await.ok_or_else(|| {
-                BlobError::Upstream(format!("cdp socket closed while waiting for {method}"))
-            })?;
-            let message = message.map_err(|error| {
-                BlobError::Upstream(format!(
-                    "failed to receive CDP response for {method}: {error}"
-                ))
-            })?;
-            let Message::Text(text) = message else {
-                continue;
-            };
-            let envelope: CdpMessageEnvelope = serde_json::from_str(&text).map_err(|error| {
-                BlobError::Upstream(format!("invalid CDP payload for {method}: {error}"))
-            })?;
-            if envelope.id != Some(id) {
-                continue;
-            }
-            if let Some(error) = envelope.error {
-                let code = error.code.unwrap_or_default();
-                return Err(BlobError::Upstream(format!(
-                    "cdp command {method} failed ({code}): {}",
-                    error.message
-                )));
-            }
-            return Ok(envelope.result);
+        {
+            self.pending.lock().await.remove(&id);
+            return Err(BlobError::Upstream(format!(
+                "failed to send CDP command {method}: {error}"
+            )));
         }
+
+        rx.await.map_err(|error| {
+            BlobError::Upstream(format!(
+                "cdp response channel closed while waiting for {method}: {error}"
+            ))
+        })?
+    }
+
+    async fn wait_for_request_event(
+        &self,
+        request: &BrowserFlowRequest,
+        timeout_ms: Option<u64>,
+    ) -> Result<(), BlobError> {
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(15_000));
+        let future = async {
+            loop {
+                {
+                    let events = self.events.lock().await;
+                    if events.requests.iter().any(|item| {
+                        item.method.eq_ignore_ascii_case(&request.method)
+                            && wildcard_match(&request.url_pattern, &item.url)
+                    }) {
+                        return Ok(());
+                    }
+                }
+                self.event_notify.notified().await;
+            }
+        };
+        tokio::time::timeout(timeout, future).await.map_err(|_| {
+            BlobError::Upstream(format!(
+                "timed out waiting for CDP request {} {}",
+                request.method, request.url_pattern
+            ))
+        })?
+    }
+
+    async fn wait_for_page_event(
+        &self,
+        page: &BrowserFlowPage,
+        timeout_ms: Option<u64>,
+    ) -> Result<(), BlobError> {
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(15_000));
+        let future = async {
+            loop {
+                {
+                    let events = self.events.lock().await;
+                    if events.current_url.as_deref().is_some_and(|url| {
+                        page.url_patterns
+                            .iter()
+                            .any(|pattern| wildcard_match(pattern, url))
+                    }) {
+                        return Ok(());
+                    }
+                }
+                self.event_notify.notified().await;
+            }
+        };
+        tokio::time::timeout(timeout, future).await.map_err(|_| {
+            BlobError::Upstream(format!("timed out waiting for CDP page {}", page.id))
+        })?
     }
 }
 
@@ -200,18 +253,28 @@ impl CdpBrowserFlowSession {
         let http = HttpClient::builder().build().map_err(|error| {
             BlobError::Upstream(format!("failed to build CDP HTTP client: {error}"))
         })?;
-        let websocket_url =
-            resolve_websocket_url(&http, endpoint_url, config.target_selector.as_deref()).await?;
+        let websocket_url = resolve_websocket_url(
+            &http,
+            endpoint_url,
+            config.target_selector.as_deref(),
+            config.target_timeout_ms,
+        )
+        .await?;
 
         let (socket, _) = connect_async(&websocket_url).await.map_err(|error| {
             BlobError::Upstream(format!(
                 "failed to connect CDP websocket {websocket_url}: {error}"
             ))
         })?;
+        let (writer, reader) = socket.split();
         let connection = Arc::new(CdpConnection {
-            socket: Mutex::new(socket),
+            writer: Mutex::new(writer),
+            pending: Mutex::new(BTreeMap::new()),
+            events: Mutex::new(CdpEventState::default()),
+            event_notify: Notify::new(),
             next_id: AtomicU64::new(1),
         });
+        spawn_reader_task(connection.clone(), reader);
 
         for method in [
             "Page.enable",
@@ -220,6 +283,15 @@ impl CdpBrowserFlowSession {
             "Network.enable",
         ] {
             connection.send_command(method, json!({})).await?;
+        }
+        if let Ok(Value::String(href)) = (CdpBrowserFlowSession {
+            connection: connection.clone(),
+        })
+        .evaluate_value("location.href")
+        .await
+        {
+            let mut events = connection.events.lock().await;
+            events.current_url = Some(href);
         }
 
         Ok(Self { connection })
@@ -244,24 +316,7 @@ impl CdpBrowserFlowSession {
     }
 
     async fn resolve_node_id(&self, element: &BrowserFlowElement) -> Result<i64, BlobError> {
-        let selector = element.selectors.first().ok_or_else(|| {
-            BlobError::Configuration(format!(
-                "browser flow element {} has no selectors",
-                element.id
-            ))
-        })?;
-
-        let expression = match selector.engine {
-            blob_core::BrowserFlowSelectorEngine::Css => {
-                format!("document.querySelector({:?})", selector.value)
-            }
-            blob_core::BrowserFlowSelectorEngine::Javascript => selector.value.clone(),
-            blob_core::BrowserFlowSelectorEngine::Xpath => format!(
-                "document.evaluate({:?}, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue",
-                selector.value
-            ),
-        };
-
+        let expression = javascript_selector_expression(element)?;
         let remote_result = self
             .connection
             .send_command(
@@ -374,43 +429,23 @@ impl BrowserFlowSession for CdpBrowserFlowSession {
     async fn wait_for_request(
         &self,
         request: &BrowserFlowRequest,
-        _timeout_ms: Option<u64>,
+        timeout_ms: Option<u64>,
     ) -> Result<(), BlobError> {
-        let mut filter = BTreeMap::new();
-        filter.insert("method", Value::String(request.method.clone()));
-        filter.insert("url_pattern", Value::String(request.url_pattern.clone()));
-        let expression = format!(
-            "window.__ccbgLastRequestFilter = {}; true",
-            serde_json::to_string(&filter).map_err(|error| {
-                BlobError::Configuration(format!("failed to encode request wait filter: {error}"))
-            })?
-        );
-        self.evaluate_value(&expression).await?;
-        Ok(())
+        self.connection
+            .wait_for_request_event(request, timeout_ms)
+            .await
     }
 
     async fn wait_for_page(
         &self,
         page: &BrowserFlowPage,
-        _timeout_ms: Option<u64>,
+        timeout_ms: Option<u64>,
     ) -> Result<(), BlobError> {
-        let patterns = serde_json::to_string(&page.url_patterns).map_err(|error| {
-            BlobError::Configuration(format!("failed to encode page wait patterns: {error}"))
-        })?;
-        let expression = format!(
-            "(() => {{ const href = location.href; return {patterns}.some(pattern => pattern.endsWith('*') ? href.startsWith(pattern.slice(0, -1)) : href === pattern); }})()"
-        );
-        match self.evaluate_value(&expression).await? {
-            Value::Bool(true) => Ok(()),
-            _ => Err(BlobError::Upstream(format!(
-                "page {} is not active in current CDP target",
-                page.id
-            ))),
-        }
+        self.connection.wait_for_page_event(page, timeout_ms).await
     }
 
     async fn wait(&self, duration_ms: u64) -> Result<(), BlobError> {
-        tokio::time::sleep(std::time::Duration::from_millis(duration_ms)).await;
+        tokio::time::sleep(Duration::from_millis(duration_ms)).await;
         Ok(())
     }
 }
@@ -422,57 +457,176 @@ pub async fn discover_targets(endpoint_url: &str) -> Result<Vec<CdpTargetDescrip
     fetch_targets(&http, endpoint_url).await
 }
 
+fn spawn_reader_task(
+    connection: Arc<CdpConnection>,
+    mut reader: futures_util::stream::SplitStream<CdpSocket>,
+) {
+    tokio::spawn(async move {
+        while let Some(message) = reader.next().await {
+            match message {
+                Ok(Message::Text(text)) => {
+                    let _ = handle_incoming_message(&connection, &text).await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    fail_all_pending(
+                        &connection,
+                        BlobError::Upstream(format!("cdp reader error: {error}")),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+        fail_all_pending(
+            &connection,
+            BlobError::Upstream("cdp websocket reader closed".to_string()),
+        )
+        .await;
+    });
+}
+
+async fn handle_incoming_message(
+    connection: &Arc<CdpConnection>,
+    raw: &str,
+) -> Result<(), BlobError> {
+    let envelope: CdpMessageEnvelope = serde_json::from_str(raw)
+        .map_err(|error| BlobError::Upstream(format!("invalid CDP message: {error}")))?;
+
+    if let Some(id) = envelope.id {
+        if let Some(tx) = connection.pending.lock().await.remove(&id) {
+            let result = if let Some(error) = envelope.error {
+                let code = error.code.unwrap_or_default();
+                Err(BlobError::Upstream(format!(
+                    "cdp command response failed ({code}): {}",
+                    error.message
+                )))
+            } else {
+                Ok(envelope.result)
+            };
+            let _ = tx.send(result);
+        }
+        return Ok(());
+    }
+
+    let Some(method) = envelope.method.as_deref() else {
+        return Ok(());
+    };
+    let params = envelope.params.unwrap_or(Value::Null);
+    record_event_state(connection, method, &params).await;
+    Ok(())
+}
+
+async fn fail_all_pending(connection: &Arc<CdpConnection>, error: BlobError) {
+    let mut pending = connection.pending.lock().await;
+    let drained = std::mem::take(&mut *pending);
+    drop(pending);
+    for (_, tx) in drained {
+        let _ = tx.send(Err(BlobError::Upstream(error.to_string())));
+    }
+}
+
+async fn record_event_state(connection: &Arc<CdpConnection>, method: &str, params: &Value) {
+    let changed = {
+        let mut state = connection.events.lock().await;
+        apply_event_state(&mut state, method, params)
+    };
+    if changed {
+        connection.event_notify.notify_waiters();
+    }
+}
+
+fn parse_network_request(params: &Value) -> Option<CdpObservedRequest> {
+    let request = params.get("request")?;
+    let method = request.get("method")?.as_str()?.to_string();
+    let url = request.get("url")?.as_str()?.to_string();
+    Some(CdpObservedRequest { method, url })
+}
+
+fn apply_event_state(state: &mut CdpEventState, method: &str, params: &Value) -> bool {
+    match method {
+        "Network.requestWillBeSent" => {
+            if let Some(request) = parse_network_request(params) {
+                state.requests.push(request);
+                if state.requests.len() > 128 {
+                    let drain = state.requests.len().saturating_sub(128);
+                    state.requests.drain(0..drain);
+                }
+                true
+            } else {
+                false
+            }
+        }
+        "Page.frameNavigated" => {
+            if let Some(url) = params
+                .get("frame")
+                .and_then(|value| value.get("url"))
+                .and_then(Value::as_str)
+            {
+                state.current_url = Some(url.to_string());
+                true
+            } else {
+                false
+            }
+        }
+        "Page.navigatedWithinDocument" => {
+            if let Some(url) = params.get("url").and_then(Value::as_str) {
+                state.current_url = Some(url.to_string());
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 async fn resolve_websocket_url(
     http: &HttpClient,
     endpoint_url: &str,
     raw_selector: Option<&str>,
+    target_timeout_ms: Option<u64>,
 ) -> Result<String, BlobError> {
     let selector = raw_selector.map(CdpTargetSelector::parse).transpose()?;
     if let Some(CdpTargetSelector::WebSocketDebuggerUrl(url)) = selector.clone() {
-        return Ok(url);
+        return validate_page_websocket_url(&url).map(ToString::to_string);
     }
 
-    if selector.is_none() {
-        if let Some(url) = fetch_browser_websocket_url(http, endpoint_url).await? {
-            return Ok(url);
+    let timeout = target_timeout_ms
+        .filter(|value| *value > 0)
+        .map(Duration::from_millis);
+    let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+    let mut last_error;
+
+    loop {
+        match resolve_websocket_url_once(http, endpoint_url, selector.as_ref()).await {
+            Ok(url) => return Ok(url),
+            Err(error) => last_error = error,
         }
+
+        let Some(deadline) = deadline else {
+            return Err(last_error);
+        };
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
-    let targets = fetch_targets(http, endpoint_url).await?;
-    let target = choose_target(&targets, selector.as_ref())?;
-    target.web_socket_debugger_url.clone().ok_or_else(|| {
-        BlobError::NotFound("selected CDP target does not expose webSocketDebuggerUrl".to_string())
-    })
+    Err(last_error)
 }
 
-async fn fetch_browser_websocket_url(
+async fn resolve_websocket_url_once(
     http: &HttpClient,
     endpoint_url: &str,
-) -> Result<Option<String>, BlobError> {
-    let url = format!("{}/json/version", endpoint_url.trim_end_matches('/'));
-    let descriptor: JsonVersionDescriptor = http
-        .get(&url)
-        .send()
-        .await
-        .map_err(|error| {
-            BlobError::Upstream(format!(
-                "failed to query CDP version endpoint {url}: {error}"
-            ))
-        })?
-        .error_for_status()
-        .map_err(|error| {
-            BlobError::Upstream(format!(
-                "CDP version endpoint {url} returned error: {error}"
-            ))
-        })?
-        .json()
-        .await
-        .map_err(|error| {
-            BlobError::Upstream(format!(
-                "failed to decode CDP version payload {url}: {error}"
-            ))
-        })?;
-    Ok(descriptor.web_socket_debugger_url)
+    selector: Option<&CdpTargetSelector>,
+) -> Result<String, BlobError> {
+    let targets = fetch_targets(http, endpoint_url).await?;
+    let target = choose_target(&targets, selector)?;
+    let url = target.web_socket_debugger_url.clone().ok_or_else(|| {
+        BlobError::NotFound("selected CDP target does not expose webSocketDebuggerUrl".to_string())
+    })?;
+    validate_page_websocket_url(&url).map(ToString::to_string)
 }
 
 async fn fetch_targets(
@@ -596,6 +750,16 @@ fn choose_target(
         .ok_or_else(|| BlobError::NotFound("no matching CDP target found".to_string()))
 }
 
+fn validate_page_websocket_url(url: &str) -> Result<&str, BlobError> {
+    if url.contains("/devtools/browser/") {
+        return Err(BlobError::Configuration(
+            "browser-level CDP websocket is not supported; choose a page target selector instead"
+                .to_string(),
+        ));
+    }
+    Ok(url)
+}
+
 fn wildcard_match(pattern: &str, value: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix('*') {
         value.starts_with(prefix)
@@ -654,9 +818,11 @@ fn extract_runtime_value(payload: &Value) -> Result<Value, BlobError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CdpTargetDescriptor, CdpTargetSelector, choose_target, extract_runtime_value,
-        wildcard_match,
+        CdpEventState, CdpObservedRequest, CdpTargetDescriptor, CdpTargetSelector,
+        apply_event_state, choose_target, extract_runtime_value, parse_network_request,
+        validate_page_websocket_url, wildcard_match,
     };
+    use blob_core::BlobError;
     use serde_json::json;
 
     #[test]
@@ -715,6 +881,13 @@ mod tests {
     }
 
     #[test]
+    fn browser_level_websocket_url_is_rejected() {
+        let error = validate_page_websocket_url("ws://127.0.0.1:9222/devtools/browser/abc")
+            .expect_err("browser-level websocket should be rejected");
+        assert!(matches!(error, BlobError::Configuration(_)));
+    }
+
+    #[test]
     fn wildcard_match_supports_suffix_star() {
         assert!(wildcard_match(
             "https://pan.wo.cn/*",
@@ -735,5 +908,52 @@ mod tests {
             }
         });
         assert_eq!(extract_runtime_value(&payload).unwrap(), json!("ok"));
+    }
+
+    #[test]
+    fn parse_network_request_extracts_method_and_url() {
+        let params = json!({
+            "request": {
+                "method": "POST",
+                "url": "https://panservice.mail.wo.cn/wohome/dispatcher"
+            }
+        });
+        assert_eq!(
+            parse_network_request(&params),
+            Some(CdpObservedRequest {
+                method: "POST".to_string(),
+                url: "https://panservice.mail.wo.cn/wohome/dispatcher".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn apply_event_state_tracks_request_and_page_url() {
+        let mut state = CdpEventState::default();
+
+        assert!(apply_event_state(
+            &mut state,
+            "Network.requestWillBeSent",
+            &json!({
+                "request": {
+                    "method": "POST",
+                    "url": "https://panservice.mail.wo.cn/wohome/dispatcher"
+                }
+            }),
+        ));
+        assert!(apply_event_state(
+            &mut state,
+            "Page.frameNavigated",
+            &json!({
+                "frame": {
+                    "url": "https://pan.wo.cn/pan/file_list/all"
+                }
+            }),
+        ));
+        assert_eq!(state.requests.len(), 1);
+        assert_eq!(
+            state.current_url.as_deref(),
+            Some("https://pan.wo.cn/pan/file_list/all")
+        );
     }
 }

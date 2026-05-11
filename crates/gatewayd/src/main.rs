@@ -24,9 +24,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blob_core::{
     BlobBackend, BlobError, BrowserFlow, BrowserFlowBindingContext, BrowserFlowCatalog,
     BrowserFlowCatalogCollection, BrowserFlowExecutionReport, BrowserFlowExecutor,
-    DryRunBrowserFlowExecutor, ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend,
-    TokenSource,
+    BrowserFlowSession, BrowserFlowSessionExecutor, DryRunBrowserFlowExecutor, ListObjectsRequest,
+    OutboundIpFamily, PutObjectRequest, StubBackend, TokenSource,
 };
+use browser_cdp::{CdpBrowserFlowSession, CdpConnectionConfig};
 use hmac::{Hmac, Mac};
 use metadata_store::{
     MetadataRetentionPolicy, MetadataSnapshot, MetadataStore, MetadataStoreOptions,
@@ -381,6 +382,34 @@ struct BrowserFlowDryRunPayload {
     provider: String,
     surface: String,
     flow_id: String,
+    report: BrowserFlowExecutionReport,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BrowserFlowSessionRunInput {
+    provider: String,
+    surface: String,
+    flow_id: String,
+    #[serde(default)]
+    inputs: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    runtime: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    cdp_endpoint_url: Option<String>,
+    #[serde(default)]
+    cdp_target_selector: Option<String>,
+    #[serde(default)]
+    cdp_target_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowSessionRunPayload {
+    provider: String,
+    surface: String,
+    flow_id: String,
+    cdp_endpoint_url: String,
+    cdp_target_selector: Option<String>,
+    cdp_target_timeout_ms: Option<u64>,
     report: BrowserFlowExecutionReport,
 }
 
@@ -1261,6 +1290,10 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         )
         .route("/api/browser-flows/dry-run", post(run_browser_flow_dry_run))
         .route(
+            "/api/browser-flows/session-run",
+            post(run_browser_flow_session),
+        )
+        .route(
             "/api/policy/onedrive",
             get(get_onedrive_policy).post(update_onedrive_policy),
         )
@@ -1733,6 +1766,78 @@ fn current_auth_capture_policy(state: &AppState) -> AuthCapturePolicy {
 
 fn current_auth_capture_policy_payload(state: &AppState) -> AuthCapturePolicyPayload {
     current_auth_capture_policy(state).payload()
+}
+
+fn require_browser_flow_coordinates(
+    provider: &str,
+    surface: &str,
+    flow_id: &str,
+) -> Result<(String, String, String), BlobError> {
+    let provider = provider.trim();
+    let surface = surface.trim();
+    let flow_id = flow_id.trim();
+    if provider.is_empty() || surface.is_empty() || flow_id.is_empty() {
+        return Err(BlobError::Configuration(
+            "provider, surface, and flow_id are all required".to_string(),
+        ));
+    }
+    Ok((
+        provider.to_string(),
+        surface.to_string(),
+        flow_id.to_string(),
+    ))
+}
+
+fn resolve_browser_flow_cdp_config(
+    state: &AppState,
+    input: &BrowserFlowSessionRunInput,
+) -> Result<CdpConnectionConfig, BlobError> {
+    let policy = current_auth_capture_policy(state);
+    let endpoint_url = normalize_secret_field(input.cdp_endpoint_url.clone())
+        .or(policy.cdp_endpoint_url)
+        .ok_or_else(|| {
+            BlobError::Configuration(
+                "cdp endpoint_url is required; set it in the request or auth-capture policy"
+                    .to_string(),
+            )
+        })?;
+    let target_selector =
+        normalize_secret_field(input.cdp_target_selector.clone()).or(policy.cdp_target_selector);
+    let target_timeout_ms = input
+        .cdp_target_timeout_ms
+        .filter(|value| *value > 0)
+        .or(policy.cdp_target_timeout_ms.filter(|value| *value > 0));
+
+    Ok(CdpConnectionConfig {
+        endpoint_url,
+        target_selector,
+        target_timeout_ms,
+    })
+}
+
+async fn execute_browser_flow_session<S>(
+    catalogs: &BrowserFlowCatalogCollection,
+    provider: &str,
+    surface: &str,
+    flow_id: &str,
+    inputs: BTreeMap<String, serde_json::Value>,
+    runtime: BTreeMap<String, serde_json::Value>,
+    session: S,
+) -> Result<BrowserFlowExecutionReport, BlobError>
+where
+    S: BrowserFlowSession,
+{
+    let (provider, surface, flow_id) =
+        require_browser_flow_coordinates(provider, surface, flow_id)?;
+    let plan = catalogs.bind_flow(
+        &provider,
+        &surface,
+        &flow_id,
+        &BrowserFlowBindingContext { inputs, runtime },
+    )?;
+    BrowserFlowSessionExecutor::new(session)
+        .execute(&plan)
+        .await
 }
 
 fn browser_flow_catalog_summary_payloads(
@@ -3482,20 +3587,13 @@ async fn run_browser_flow_dry_run(
     State(state): State<AppState>,
     Json(input): Json<BrowserFlowDryRunInput>,
 ) -> Result<Json<BrowserFlowDryRunPayload>, ApiError> {
-    let provider = input.provider.trim();
-    let surface = input.surface.trim();
-    let flow_id = input.flow_id.trim();
-    if provider.is_empty() || surface.is_empty() || flow_id.is_empty() {
-        return Err(BlobError::Configuration(
-            "provider, surface, and flow_id are all required".to_string(),
-        )
-        .into());
-    }
+    let (provider, surface, flow_id) =
+        require_browser_flow_coordinates(&input.provider, &input.surface, &input.flow_id)?;
 
     let plan = state.browser_flow_catalogs.bind_flow(
-        provider,
-        surface,
-        flow_id,
+        &provider,
+        &surface,
+        &flow_id,
         &BrowserFlowBindingContext {
             inputs: input.inputs,
             runtime: input.runtime,
@@ -3507,6 +3605,36 @@ async fn run_browser_flow_dry_run(
         provider: plan.provider,
         surface: plan.surface,
         flow_id: plan.flow.id,
+        report,
+    }))
+}
+
+async fn run_browser_flow_session(
+    State(state): State<AppState>,
+    Json(input): Json<BrowserFlowSessionRunInput>,
+) -> Result<Json<BrowserFlowSessionRunPayload>, ApiError> {
+    let (provider, surface, flow_id) =
+        require_browser_flow_coordinates(&input.provider, &input.surface, &input.flow_id)?;
+    let cdp = resolve_browser_flow_cdp_config(&state, &input)?;
+    let session = CdpBrowserFlowSession::connect(&cdp).await?;
+    let report = execute_browser_flow_session(
+        state.browser_flow_catalogs.as_ref(),
+        &provider,
+        &surface,
+        &flow_id,
+        input.inputs,
+        input.runtime,
+        session,
+    )
+    .await?;
+
+    Ok(Json(BrowserFlowSessionRunPayload {
+        provider,
+        surface,
+        flow_id,
+        cdp_endpoint_url: cdp.endpoint_url,
+        cdp_target_selector: cdp.target_selector,
+        cdp_target_timeout_ms: cdp.target_timeout_ms,
         report,
     }))
 }
@@ -6052,11 +6180,15 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
     use axum::body::to_bytes;
-    use blob_core::{BackendCapabilities, ContainerInfo, HealthStatus, ObjectInfo, ServiceHealth};
+    use blob_core::{
+        BackendCapabilities, BrowserFlowElement, BrowserFlowOperation, BrowserFlowPage,
+        BrowserFlowRequest, ContainerInfo, HealthStatus, ObjectInfo, ServiceHealth,
+    };
 
     fn temp_db_path() -> String {
         std::env::temp_dir()
@@ -6166,6 +6298,116 @@ mod tests {
             }
             *remaining -= 1;
             Err(BlobError::Upstream(self.message.clone()))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingBrowserFlowSession {
+        actions: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingBrowserFlowSession {
+        fn actions(&self) -> Vec<String> {
+            self.actions
+                .lock()
+                .expect("recording browser flow session poisoned")
+                .clone()
+        }
+
+        fn record(&self, action: String) {
+            self.actions
+                .lock()
+                .expect("recording browser flow session poisoned")
+                .push(action);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserFlowSession for RecordingBrowserFlowSession {
+        async fn navigate(&self, url: &str) -> Result<(), BlobError> {
+            self.record(format!("navigate:{url}"));
+            Ok(())
+        }
+
+        async fn click(&self, element: &BrowserFlowElement) -> Result<(), BlobError> {
+            self.record(format!("click:{}", element.id));
+            Ok(())
+        }
+
+        async fn set_input(
+            &self,
+            element: &BrowserFlowElement,
+            value: &str,
+            dispatch_events: &[String],
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "set_input:{}:{}:{}",
+                element.id,
+                value,
+                dispatch_events.join(",")
+            ));
+            Ok(())
+        }
+
+        async fn invoke_operation(
+            &self,
+            operation: &BrowserFlowOperation,
+        ) -> Result<(), BlobError> {
+            self.record(format!("invoke_operation:{}", operation.id));
+            Ok(())
+        }
+
+        async fn set_files(
+            &self,
+            element: &BrowserFlowElement,
+            paths: &[String],
+        ) -> Result<(), BlobError> {
+            self.record(format!("set_files:{}:{}", element.id, paths.join("|")));
+            Ok(())
+        }
+
+        async fn dispatch_events(
+            &self,
+            element: &BrowserFlowElement,
+            events: &[String],
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "dispatch_events:{}:{}",
+                element.id,
+                events.join(",")
+            ));
+            Ok(())
+        }
+
+        async fn wait_for_request(
+            &self,
+            request: &BrowserFlowRequest,
+            timeout_ms: Option<u64>,
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "wait_for_request:{}:{}",
+                request.id,
+                timeout_ms.unwrap_or_default()
+            ));
+            Ok(())
+        }
+
+        async fn wait_for_page(
+            &self,
+            page: &BrowserFlowPage,
+            timeout_ms: Option<u64>,
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "wait_for_page:{}:{}",
+                page.id,
+                timeout_ms.unwrap_or_default()
+            ));
+            Ok(())
+        }
+
+        async fn wait(&self, duration_ms: u64) -> Result<(), BlobError> {
+            self.record(format!("wait:{duration_ms}"));
+            Ok(())
         }
     }
 
@@ -6725,6 +6967,124 @@ mod tests {
         .expect_err("browser flow dry run should reject missing required input");
 
         assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn browser_flow_session_executor_runs_upload_flow_with_mock_session() {
+        let state = test_state();
+        let session = RecordingBrowserFlowSession::default();
+
+        let report = execute_browser_flow_session(
+            state.browser_flow_catalogs.as_ref(),
+            "unicom",
+            "pan.wo.cn-web",
+            "unicom_personal_root_upload",
+            BTreeMap::from([
+                (
+                    "local_file".to_string(),
+                    serde_json::Value::String("/tmp/example.txt".to_string()),
+                ),
+                (
+                    "family_id".to_string(),
+                    serde_json::Value::String("family-42".to_string()),
+                ),
+                (
+                    "ps_token".to_string(),
+                    serde_json::Value::String("private-token".to_string()),
+                ),
+            ]),
+            BTreeMap::from([
+                (
+                    "batch_no".to_string(),
+                    serde_json::Value::String("batch-100".to_string()),
+                ),
+                (
+                    "directory_id".to_string(),
+                    serde_json::Value::String("dir-200".to_string()),
+                ),
+                (
+                    "private_space_type".to_string(),
+                    serde_json::Value::String("4".to_string()),
+                ),
+                (
+                    "access_token".to_string(),
+                    serde_json::Value::String("token-300".to_string()),
+                ),
+            ]),
+            RecordingBrowserFlowSession {
+                actions: session.actions.clone(),
+            },
+        )
+        .await
+        .expect("browser flow session run should succeed");
+
+        assert_eq!(report.flow_id, "unicom_personal_root_upload");
+        assert_eq!(report.step_count, 5);
+        assert_eq!(
+            session.actions(),
+            vec![
+                "invoke_operation:file_list.open_personal_uploader".to_string(),
+                "set_files:file_list.global_uploader_input:/tmp/example.txt".to_string(),
+                "dispatch_events:file_list.global_uploader_input:input,change".to_string(),
+                "wait_for_request:upload2c:60000".to_string(),
+                "wait_for_request:wohome_query_all_files:30000".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_flow_session_run_uses_request_or_policy_cdp_config() {
+        let state = test_state();
+        {
+            let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+            control_plane.auth_capture_policy.cdp_endpoint_url =
+                Some("http://127.0.0.1:9222".to_string());
+            control_plane.auth_capture_policy.cdp_target_selector =
+                Some("url:https://pan.wo.cn/*".to_string());
+            control_plane.auth_capture_policy.cdp_target_timeout_ms = Some(15000);
+        }
+
+        let fallback = resolve_browser_flow_cdp_config(
+            &state,
+            &BrowserFlowSessionRunInput {
+                provider: "unicom".to_string(),
+                surface: "pan.wo.cn-web".to_string(),
+                flow_id: "unicom_sms_login".to_string(),
+                inputs: BTreeMap::new(),
+                runtime: BTreeMap::new(),
+                cdp_endpoint_url: None,
+                cdp_target_selector: None,
+                cdp_target_timeout_ms: None,
+            },
+        )
+        .expect("policy-backed cdp config should resolve");
+        assert_eq!(fallback.endpoint_url, "http://127.0.0.1:9222");
+        assert_eq!(
+            fallback.target_selector.as_deref(),
+            Some("url:https://pan.wo.cn/*")
+        );
+        assert_eq!(fallback.target_timeout_ms, Some(15000));
+
+        let override_config = resolve_browser_flow_cdp_config(
+            &state,
+            &BrowserFlowSessionRunInput {
+                provider: "unicom".to_string(),
+                surface: "pan.wo.cn-web".to_string(),
+                flow_id: "unicom_sms_login".to_string(),
+                inputs: BTreeMap::new(),
+                runtime: BTreeMap::new(),
+                cdp_endpoint_url: Some("http://127.0.0.1:9333".to_string()),
+                cdp_target_selector: Some("title:pan.wo.cn".to_string()),
+                cdp_target_timeout_ms: Some(9000),
+            },
+        )
+        .expect("request override cdp config should resolve");
+        assert_eq!(override_config.endpoint_url, "http://127.0.0.1:9333");
+        assert_eq!(
+            override_config.target_selector.as_deref(),
+            Some("title:pan.wo.cn")
+        );
+        assert_eq!(override_config.target_timeout_ms, Some(9000));
     }
 
     #[tokio::test]

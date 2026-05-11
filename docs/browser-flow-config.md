@@ -40,6 +40,12 @@
   - `POST /api/browser-flows/dry-run`
   - body 里显式传 `provider`、`surface`、`flow_id`、`inputs`、`runtime`
   - 返回值只包含执行报告，不回显绑定后的 secret context
+- `gatewayd` 现在也暴露一个最小真实 session 执行入口:
+  - `POST /api/browser-flows/session-run`
+  - body 里显式传 `provider`、`surface`、`flow_id`、`inputs`、`runtime`
+  - 可选覆盖 `cdp_endpoint_url`、`cdp_target_selector`、`cdp_target_timeout_ms`
+  - 如果请求里不传，会回退到 control-plane 保存的 auth-capture CDP 配置
+  - 底层 transport 统一走 `browser-cdp` crate，不绑定某个具体浏览器品牌
 
 当前 schema version 为 `1`。
 
@@ -138,11 +144,12 @@
 2. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。
 3. 继续补联通 family/private space 变体，以及后续电信/移动 provider 的网页 flow catalog。
 
-目前还没有真实的 CDP transport / 浏览器 sidecar 落地在仓库里。
+目前仓库已经有最小可用的真实 CDP transport 和 session 执行链，但还没有完整的 auth-capture 编排层。
 
 换句话说:
 
 - 现在已经可以校验 catalog、加载 catalog、查询 flow、绑定模板、输出 dry-run step report
 - 现在也可以通过 `gatewayd` 直接请求一份 flow 的 dry-run execution report，拿来验证输入是否齐全、预期请求是否匹配
 - 现在已经有了可 mock 的 session executor，可以真正逐步执行这些步骤
-- 但还没有把这个 session executor 接到真实 Edge/CDP 会话或独立 auth-capture sidecar 上
+- 现在已经可以把这个 session executor 接到任意 CDP 兼容浏览器会话上
+- 但还没有把“短信码输入、验证码等待、人工确认、失败恢复”这类 auth-capture 编排完整落成独立 sidecar

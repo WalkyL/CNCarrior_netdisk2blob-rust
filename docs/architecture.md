@@ -67,6 +67,7 @@
 
 - 基于 Chrome DevTools Protocol 提供标准浏览器 transport 适配层
 - 负责可配置的 CDP endpoint、target 选择、websocket 会话和基础页面动作
+- 当前已经支持把 `blob-core::BrowserFlowSessionExecutor` 接到真实 page target，会按浏览器流程配置执行 `navigate/click/set_input/set_files/wait_for_request/wait_for_page`
 - 目标是兼容任何支持 CDP 的浏览器，而不是绑定 Edge/Chrome 的某个私有集成
 
 ### `provider-unicom` / `provider-telecom` / `provider-mobile`
@@ -88,6 +89,7 @@
 - 已支持在网页中直接修改 OneDrive 的 async backup / fallback 开关，以及 `memory_only` 作用域
 - 已支持在网页中直接修改 `auth-capture` sidecar 地址、LLM endpoint / model，以及 provider 独立凭证
 - 已支持交互式“验证输入队列”占位能力，后续可供手机号 / 短信码 / 验证码输入
+- 已支持 `POST /api/browser-flows/session-run`，可用控制面默认 CDP 配置或请求级覆盖配置直接执行一条浏览器 flow
 - 输出健康检查、日志、后续指标和审计信息
 
 ### `provider-onedrive`
@@ -191,6 +193,7 @@ Agent -> Skill -> mcp-server / gatewayd
 - Auth Capture:
 - 当前先保存 broker URL、LLM endpoint、LLM model
 - 当前也保存 CDP endpoint、target selector 和 target timeout 这类 transport 配置，用来把 browser flow 执行器收口到标准 CDP，而不是绑定某个具体浏览器
+- 当前 `gatewayd` 已能直接消费这组 CDP 配置执行最小 flow；后续独立 `auth-broker` 主要补的是短信码/验证码/人工确认/失败恢复编排，而不是另起一套浏览器 transport
 - 当前已预留验证输入队列，用于手机号 / 短信码 / 验证码回显
 - 后续再把无头浏览器和页面分析独立接入
 
