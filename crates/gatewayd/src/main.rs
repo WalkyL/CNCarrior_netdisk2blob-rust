@@ -66,6 +66,12 @@ const DEFAULT_TIMESTAMP: &str = "1970-01-01T00:00:00.000Z";
 const SOURCE_PROVIDER_HEADER: &str = "x-ccbg-source-provider";
 const FALLBACK_FROM_HEADER: &str = "x-ccbg-fallback-from";
 const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+const BROWSER_FLOW_AUTH_SESSION_STATUS_PENDING: &str = "pending";
+const BROWSER_FLOW_AUTH_SESSION_STATUS_AWAITING_INPUT: &str = "awaiting_input";
+const BROWSER_FLOW_AUTH_SESSION_STATUS_ANSWERED: &str = "answered";
+const BROWSER_FLOW_AUTH_SESSION_STATUS_RESUMED: &str = "resumed";
+const BROWSER_FLOW_AUTH_SESSION_STATUS_COMPLETED: &str = "completed";
+const BROWSER_FLOW_AUTH_SESSION_STATUS_FAILED: &str = "failed";
 
 #[derive(Clone)]
 struct AppState {
@@ -436,9 +442,28 @@ struct BrowserFlowAuthSession {
     provider: String,
     surface: String,
     flow_id: String,
+    status: String,
     inputs: BTreeMap<String, serde_json::Value>,
     runtime: BTreeMap<String, serde_json::Value>,
+    created_at_unix_ms: u64,
     updated_at_unix_ms: u64,
+    report: Option<BrowserFlowExecutionReport>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowAuthSessionPayload {
+    session_id: String,
+    provider: String,
+    surface: String,
+    flow_id: String,
+    status: String,
+    created_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
+    #[serde(default)]
+    prompts: Vec<AuthCapturePrompt>,
+    report: Option<BrowserFlowExecutionReport>,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -796,9 +821,13 @@ impl BrowserFlowAuthSession {
             provider,
             surface,
             flow_id,
+            status: BROWSER_FLOW_AUTH_SESSION_STATUS_PENDING.to_string(),
             inputs,
             runtime,
+            created_at_unix_ms: now,
             updated_at_unix_ms: now,
+            report: None,
+            last_error: None,
         }
     }
 
@@ -815,6 +844,32 @@ impl BrowserFlowAuthSession {
         self.flow_id = flow_id;
         self.inputs.extend(inputs);
         self.runtime.extend(runtime);
+        self.updated_at_unix_ms = current_unix_ms();
+        if matches!(
+            self.status.as_str(),
+            BROWSER_FLOW_AUTH_SESSION_STATUS_COMPLETED | BROWSER_FLOW_AUTH_SESSION_STATUS_FAILED
+        ) {
+            self.status = BROWSER_FLOW_AUTH_SESSION_STATUS_PENDING.to_string();
+            self.report = None;
+            self.last_error = None;
+        }
+    }
+
+    fn set_status(&mut self, status: &str) {
+        self.status = status.to_string();
+        self.updated_at_unix_ms = current_unix_ms();
+    }
+
+    fn set_completed(&mut self, report: BrowserFlowExecutionReport) {
+        self.status = BROWSER_FLOW_AUTH_SESSION_STATUS_COMPLETED.to_string();
+        self.report = Some(report);
+        self.last_error = None;
+        self.updated_at_unix_ms = current_unix_ms();
+    }
+
+    fn set_failed(&mut self, error: &BlobError) {
+        self.status = BROWSER_FLOW_AUTH_SESSION_STATUS_FAILED.to_string();
+        self.last_error = Some(error.to_string());
         self.updated_at_unix_ms = current_unix_ms();
     }
 }
@@ -1359,6 +1414,10 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             get(get_browser_flow_by_id),
         )
         .route("/api/browser-flows/dry-run", post(run_browser_flow_dry_run))
+        .route(
+            "/api/browser-flows/session/{session_id}",
+            get(get_browser_flow_session),
+        )
         .route(
             "/api/browser-flows/session-run",
             post(run_browser_flow_session),
@@ -1969,6 +2028,57 @@ fn merge_answered_prompts_into_inputs(
             );
         }
     }
+}
+
+fn auth_session_prompts(state: &AppState, session_id: &str) -> Vec<AuthCapturePrompt> {
+    let mut prompts = state
+        .auth
+        .capture_prompts
+        .lock()
+        .expect("auth capture prompt store poisoned")
+        .values()
+        .filter(|prompt| prompt.session_id.as_deref() == Some(session_id))
+        .cloned()
+        .map(|prompt| prompt.sanitized())
+        .collect::<Vec<_>>();
+    prompts.sort_by_key(|prompt| prompt.created_at_unix_ms);
+    prompts.reverse();
+    prompts
+}
+
+fn browser_flow_auth_session_payload(
+    state: &AppState,
+    session: &BrowserFlowAuthSession,
+) -> BrowserFlowAuthSessionPayload {
+    BrowserFlowAuthSessionPayload {
+        session_id: session.session_id.clone(),
+        provider: session.provider.clone(),
+        surface: session.surface.clone(),
+        flow_id: session.flow_id.clone(),
+        status: session.status.clone(),
+        created_at_unix_ms: session.created_at_unix_ms,
+        updated_at_unix_ms: session.updated_at_unix_ms,
+        prompts: auth_session_prompts(state, &session.session_id),
+        report: session.report.clone(),
+        last_error: session.last_error.clone(),
+    }
+}
+
+fn update_browser_flow_auth_session(
+    state: &AppState,
+    session_id: &str,
+    update: impl FnOnce(&mut BrowserFlowAuthSession),
+) -> Result<BrowserFlowAuthSession, BlobError> {
+    let mut sessions = state
+        .auth
+        .browser_flow_sessions
+        .lock()
+        .expect("browser flow auth session store poisoned");
+    let session = sessions.get_mut(session_id).ok_or_else(|| {
+        BlobError::NotFound(format!("browser flow auth session not found: {session_id}"))
+    })?;
+    update(session);
+    Ok(session.clone())
 }
 
 fn upsert_browser_flow_auth_session(
@@ -3887,6 +3997,9 @@ async fn run_browser_flow_session(
     merge_answered_prompts_into_inputs(&state, &auth_session.session_id, &mut merged_inputs);
     let missing_inputs = missing_required_browser_flow_inputs(flow, &merged_inputs);
     if !missing_inputs.is_empty() {
+        let _ = update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
+            session.set_status(BROWSER_FLOW_AUTH_SESSION_STATUS_AWAITING_INPUT);
+        })?;
         let prompts =
             ensure_auth_capture_prompts_for_inputs(&state, &auth_session, &missing_inputs);
         return Ok(Json(BrowserFlowSessionRunPayload {
@@ -3894,7 +4007,7 @@ async fn run_browser_flow_session(
             surface,
             flow_id,
             auth_session_id: Some(auth_session.session_id),
-            status: "awaiting_input".to_string(),
+            status: BROWSER_FLOW_AUTH_SESSION_STATUS_AWAITING_INPUT.to_string(),
             prompts,
             cdp_endpoint_url: String::new(),
             cdp_target_selector: None,
@@ -3902,6 +4015,9 @@ async fn run_browser_flow_session(
             report: None,
         }));
     }
+    let _ = update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
+        session.set_status(BROWSER_FLOW_AUTH_SESSION_STATUS_RESUMED);
+    })?;
     let cdp = resolve_browser_flow_cdp_config(&state, &cdp_request)?;
     let session = CdpBrowserFlowSession::connect(&cdp).await?;
     let report = execute_browser_flow_session(
@@ -3913,20 +4029,53 @@ async fn run_browser_flow_session(
         auth_session.runtime.clone(),
         session,
     )
-    .await?;
+    .await;
+    let report = match report {
+        Ok(report) => {
+            let _ =
+                update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
+                    session.set_completed(report.clone());
+                })?;
+            report
+        }
+        Err(error) => {
+            let _ =
+                update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
+                    session.set_failed(&error);
+                })?;
+            return Err(ApiError::from(error));
+        }
+    };
 
     Ok(Json(BrowserFlowSessionRunPayload {
         provider,
         surface,
         flow_id,
         auth_session_id: Some(auth_session.session_id),
-        status: "completed".to_string(),
+        status: BROWSER_FLOW_AUTH_SESSION_STATUS_COMPLETED.to_string(),
         prompts: Vec::new(),
         cdp_endpoint_url: cdp.endpoint_url,
         cdp_target_selector: cdp.target_selector,
         cdp_target_timeout_ms: cdp.target_timeout_ms,
         report: Some(report),
     }))
+}
+
+async fn get_browser_flow_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<BrowserFlowAuthSessionPayload>, ApiError> {
+    let session = state
+        .auth
+        .browser_flow_sessions
+        .lock()
+        .expect("browser flow auth session store poisoned")
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| {
+            BlobError::NotFound(format!("browser flow auth session not found: {session_id}"))
+        })?;
+    Ok(Json(browser_flow_auth_session_payload(&state, &session)))
 }
 
 async fn get_onedrive_policy(
@@ -4025,7 +4174,15 @@ async fn reply_auth_capture_prompt(
         BlobError::NotFound(format!("auth capture prompt not found: {prompt_id}"))
     })?;
     prompt.answer(input.value.trim().to_string());
-    Ok(Json(prompt.sanitized()))
+    let sanitized = prompt.sanitized();
+    let session_id = prompt.session_id.clone();
+    drop(prompts);
+    if let Some(session_id) = session_id {
+        let _ = update_browser_flow_auth_session(&state, &session_id, |session| {
+            session.set_status(BROWSER_FLOW_AUTH_SESSION_STATUS_ANSWERED);
+        });
+    }
+    Ok(Json(sanitized))
 }
 
 async fn update_topology(
@@ -7345,13 +7502,67 @@ mod tests {
         assert_eq!(payload.prompts.len(), 2);
         assert!(payload.cdp_endpoint_url.is_empty());
 
-        let Json(prompts) = list_auth_capture_prompts(State(state))
+        let Json(prompts) = list_auth_capture_prompts(State(state.clone()))
             .await
             .expect("prompt list should succeed");
         assert!(
             prompts
                 .iter()
                 .any(|prompt| prompt.session_id.as_deref() == Some("auth-session-2"))
+        );
+
+        let Json(session_payload) =
+            get_browser_flow_session(State(state), Path("auth-session-2".to_string()))
+                .await
+                .expect("session lookup should succeed");
+        assert_eq!(
+            session_payload.status,
+            BROWSER_FLOW_AUTH_SESSION_STATUS_AWAITING_INPUT
+        );
+        assert_eq!(session_payload.prompts.len(), 2);
+        assert!(session_payload.report.is_none());
+    }
+
+    #[tokio::test]
+    async fn replying_to_prompt_marks_browser_flow_session_answered() {
+        let state = test_state();
+        let session = upsert_browser_flow_auth_session(
+            &state,
+            Some("auth-session-3".to_string()),
+            "unicom".to_string(),
+            "pan.wo.cn-web".to_string(),
+            "unicom_sms_login".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let (_, flow) =
+            browser_flow_catalog_and_flow(&state, "unicom", "pan.wo.cn-web", "unicom_sms_login")
+                .expect("flow should exist");
+        let missing_inputs = missing_required_browser_flow_inputs(flow, &session.inputs);
+        let prompts = ensure_auth_capture_prompts_for_inputs(&state, &session, &missing_inputs);
+        let phone_prompt = prompts
+            .iter()
+            .find(|prompt| prompt.input_id.as_deref() == Some("phone_number"))
+            .expect("phone prompt should exist");
+
+        let Json(reply) = reply_auth_capture_prompt(
+            State(state.clone()),
+            Path(phone_prompt.prompt_id.clone()),
+            Json(AuthCapturePromptReplyInput {
+                value: "18513581767".to_string(),
+            }),
+        )
+        .await
+        .expect("reply should succeed");
+        assert_eq!(reply.status, "answered");
+
+        let Json(session_payload) =
+            get_browser_flow_session(State(state), Path("auth-session-3".to_string()))
+                .await
+                .expect("session lookup should succeed");
+        assert_eq!(
+            session_payload.status,
+            BROWSER_FLOW_AUTH_SESSION_STATUS_ANSWERED
         );
     }
 
