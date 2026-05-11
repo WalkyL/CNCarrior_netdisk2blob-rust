@@ -51,10 +51,12 @@
 
 ## 联通样例现在覆盖了什么
 
-当前联通样例覆盖两条真实验证过的主路径:
+当前联通样例覆盖四条真实验证过的主路径:
 
 1. `unicom_sms_login`
 2. `unicom_personal_root_upload`
+3. `unicom_create_directory`
+4. `unicom_delete_entry`
 
 其中上传流程记录了一个关键约束:
 
@@ -69,6 +71,12 @@
 - `spaceType`
 - 加密后的 `fileInfo`
 - uploader 内部续传/分片逻辑
+
+目录创建和删除这两条写路径当前也已经有了实测事实:
+
+- `createDir()` 会组装 `spaceType`、`parentDirectoryId`、`directoryName`
+- `action-dialog.deleteFile()` 会组装 `spaceType`、`vipLevel`、`dirList`、`fileList`
+- 两者最终都走 `/wohome/dispatcher`
 
 ## 维护规则
 
@@ -99,6 +107,6 @@
 
 这份最小结构已经能支撑继续扩展，下一批优先项应该是:
 
-1. 补 `DeleteFile`、`CreateDirectory`、`MoveFile`、`CopyFile` 样例 flow。
+1. 补 `MoveFile`、`CopyFile`、`RenameFileOrDirectory` 样例 flow。
 2. 给执行层增加“按 catalog 驱动 CDP”的 loader。
 3. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。

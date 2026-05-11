@@ -243,6 +243,7 @@ chmod 600 $HOME/.config/ccbg/credentials/example.token
 
 - 短信登录页需要操作的元素
 - 个人空间上传时必须先调用的页面 JS 入口点
+- 目录创建和删除时复用的 Vue 组件入口
 - `upload2C`、`/wohome/dispatcher` 等关键请求的字段要求
 
 后续如果 `pan.wo.cn` 页面小改版，优先改这份配置，而不是直接改 provider 逻辑。

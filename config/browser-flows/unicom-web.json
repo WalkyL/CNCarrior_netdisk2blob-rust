@@ -2,7 +2,7 @@
   "schema_version": 1,
   "provider": "unicom",
   "surface": "pan.wo.cn-web",
-  "description": "Config-driven browser flow descriptor for China Unicom Cloud Drive desktop web login and personal-space upload.",
+  "description": "Config-driven browser flow descriptor for China Unicom Cloud Drive desktop web login, personal-space upload, directory creation, and deletion.",
   "base_url": "https://pan.wo.cn",
   "notes": [
     "This file records selectors, JS entrypoints, and expected network requests without storing live credentials.",
@@ -54,6 +54,16 @@
       ],
       "notes": [
         "The page exposes the uploader file input under #global-uploader-btn after the Vue action entrypoint initializes upload params."
+      ]
+    },
+    {
+      "id": "delete_action_dialog",
+      "title": "Unicom Delete Action Dialog",
+      "url_patterns": [
+        "https://pan.wo.cn/pan/file_list/all"
+      ],
+      "notes": [
+        "The delete confirmation is driven by the action-dialog child component under the file list container."
       ]
     }
   ],
@@ -174,6 +184,22 @@
       ],
       "notes": [
         "The input exists only after the global uploader widget is mounted."
+      ]
+    },
+    {
+      "id": "file_list.new_directory_name_input",
+      "page": "file_list_all",
+      "role": "text_input",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "Array.from(document.querySelectorAll('input')).find(el => (el.placeholder || '').includes('文件夹'))",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "The current implementation prefers the list component method createDir() over direct DOM dialog automation, but this selector is still recorded as a fallback anchor."
       ]
     }
   ],
@@ -318,6 +344,70 @@
         "The successful personal-root upload observed on 2026-05-11 returned fid, fileVersion, and wcFileId directly from upload2C.",
         "fileInfo is not plain JSON on the wire; the runtime must apply the same encryption logic as the web client or delegate to the page uploader component."
       ]
+    },
+    {
+      "id": "wohome_create_directory",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=CreateDirectory",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-11 by calling the file-list component createDir() method with a temporary probe directory.",
+        "The decrypted request body shape recovered from the page method is: isCouldRepeat=1, spaceType, parentDirectoryId, directoryName, plus familyId or psToken when required by the current space."
+      ]
+    },
+    {
+      "id": "wohome_delete_file",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=DeleteFile",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-11 by wiring the action-dialog deleteFile() method to a temporary probe directory.",
+        "The recovered request payload before encryption is: spaceType, vipLevel, dirList, fileList."
+      ]
     }
   ],
   "operations": [
@@ -338,6 +428,24 @@
       "source": "(() => { const root = document.querySelector('.uploader-container'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); if (!vm) { return null; } return { target: vm.options?.target ?? null, params: vm.params ?? null }; })()",
       "notes": [
         "Useful as a diagnostic hook after page revisions to confirm that fileInfo and upload target are still populated."
+      ]
+    },
+    {
+      "id": "file_list.create_directory_via_component",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { const vm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!vm || typeof vm.createDir !== 'function') { throw new Error('file-list createDir not available'); } vm.dirName = '{{inputs.directory_name}}'; return vm.createDir().then(() => ({ cloudType: vm.cloudType, parentDirectoryId: vm.lastRoute?.id ?? '0', requestedDirectoryName: vm.dirName })); })()",
+      "notes": [
+        "The recovered method body constructs { spaceType: cloudType, parentDirectoryId: lastRoute.id, directoryName: dirName } and conditionally adds familyId or psToken."
+      ]
+    },
+    {
+      "id": "file_list.delete_entry_via_action_dialog",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm) { throw new Error('file-list component not available'); } const dialogVm = (listVm.$children || []).find(child => child.$options?.name === 'action-dialog'); if (!dialogVm || typeof dialogVm.deleteFile !== 'function') { throw new Error('action-dialog deleteFile not available'); } const entryName = '{{inputs.entry_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); if (!entry) { throw new Error('entry not found for deletion: ' + entryName); } dialogVm.data = { cloudType: listVm.cloudType, dirIds: entry.type === 0 ? [entry.id] : [], fileIds: entry.type === 0 ? [] : [entry.id] }; return dialogVm.deleteFile().then(() => ({ deletedEntryId: entry.id, deletedEntryType: entry.type, cloudType: listVm.cloudType })); })()",
+      "notes": [
+        "The recovered action-dialog deleteFile() method posts { spaceType: data.cloudType, vipLevel, dirList, fileList } through the DeleteFile dispatcher operation."
       ]
     }
   ],
@@ -534,6 +642,90 @@
       "notes": [
         "The checked-in preset refs cover personal, family, and private upload contexts, but only personal root upload was executed end-to-end on 2026-05-11.",
         "If upload2C form fields or the global uploader component change, update the request descriptor and JS operations here before rewriting provider code."
+      ]
+    },
+    {
+      "id": "unicom_create_directory",
+      "title": "Unicom Create Directory",
+      "purpose": "Create a directory in the current visible file list context by reusing the file-list Vue component rather than reconstructing an encrypted dispatcher payload manually.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "directory_name",
+          "label": "Directory Name",
+          "kind": "text",
+          "required": true,
+          "description": "Name of the directory to create in the current route context."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "create-directory",
+          "operation": "file_list.create_directory_via_component"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-create-directory",
+          "request": "wohome_create_directory",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-directory-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_create_directory",
+        "wohome_query_all_files"
+      ],
+      "notes": [
+        "Validated on 2026-05-11 with a temporary probe directory in personal root.",
+        "This flow currently records the component-driven path because it is more stable than guessing the new-directory dialog DOM."
+      ]
+    },
+    {
+      "id": "unicom_delete_entry",
+      "title": "Unicom Delete Entry",
+      "purpose": "Delete a visible file or directory by driving the action-dialog component with the selected row payload.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "entry_name",
+          "label": "Entry Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible file or directory name in the current list context."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "delete-entry",
+          "operation": "file_list.delete_entry_via_action_dialog"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-delete-file",
+          "request": "wohome_delete_file",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-post-delete-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_delete_file",
+        "wohome_query_all_files"
+      ],
+      "notes": [
+        "Validated on 2026-05-11 against a temporary probe directory created and deleted in personal root.",
+        "The component method can target both directories and files by splitting ids into dirIds and fileIds."
       ]
     }
   ]
