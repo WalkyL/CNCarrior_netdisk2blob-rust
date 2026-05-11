@@ -17,6 +17,11 @@
 - 不自动拦截网页流量
 - 只接受你手工提供的认证材料
 
+补充一点:
+
+- 对需要浏览器辅助的 provider，仓库现在会把识别出来的页面元素、流程步骤和关键请求沉淀到 `config/browser-flows/*.json`
+- 这类文件是给后续 `auth-capture` / CDP 执行层消费的，不保存真实 token、cookie 或验证码
+
 当前支持的输入方式:
 
 - Admin Web 中按 provider 独立保存认证字段
@@ -229,6 +234,18 @@ chmod 600 $HOME/.config/ccbg/credentials/example.token
 - 现在已经支持把联通云盘根目录映射成单个 S3 bucket: `root`
 - 现在已经支持 `ListBuckets` / `ListObjectsV2` / `/v1/containers` / `/v1/objects`
 - 下载直链与写入接口映射还没有完成
+
+另外，联通桌面站当前已经有一份独立的浏览器流程样例配置:
+
+- [config/browser-flows/unicom-web.json](/home/walky/workspaces/carrier-cloud-blob-gateway/config/browser-flows/unicom-web.json:1)
+
+它记录了:
+
+- 短信登录页需要操作的元素
+- 个人空间上传时必须先调用的页面 JS 入口点
+- `upload2C`、`/wohome/dispatcher` 等关键请求的字段要求
+
+后续如果 `pan.wo.cn` 页面小改版，优先改这份配置，而不是直接改 provider 逻辑。
 
 这意味着:
 

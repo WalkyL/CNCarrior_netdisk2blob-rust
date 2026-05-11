@@ -1,3 +1,5 @@
+mod browser_flow;
+
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -8,6 +10,13 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use browser_flow::{
+    BROWSER_FLOW_SCHEMA_VERSION, BrowserFlow, BrowserFlowCatalog, BrowserFlowElement,
+    BrowserFlowHeaderMatcher, BrowserFlowInput, BrowserFlowInputKind, BrowserFlowOperation,
+    BrowserFlowOperationKind, BrowserFlowOutput, BrowserFlowOutputKind, BrowserFlowPage,
+    BrowserFlowRequest, BrowserFlowSelector, BrowserFlowSelectorEngine, BrowserFlowStep,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

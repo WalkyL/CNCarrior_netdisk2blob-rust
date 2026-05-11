@@ -1,0 +1,104 @@
+# 浏览器流程配置
+
+## 为什么要有这层
+
+运营商云盘网页会持续改版，但大多数改动并不值得直接改 Rust provider 逻辑。
+
+这层配置的目标是把下面这些“易变信息”抽出来:
+
+- 页面 URL 和页面角色
+- 关键 DOM 元素的 selector
+- 需要点击、填值、发事件、注入文件的步骤
+- 页面自带 Vue/JS 入口点
+- 应该观察到的关键网络请求和响应字段
+
+这样做的结果是:
+
+- 页面小改版时，优先改 `config/browser-flows/*.json`
+- provider crate 继续只负责稳定的对象存储语义和上游协议
+- 后续 `auth-capture` sidecar / CDP 执行层可以共享同一套流程描述
+
+## 当前结构
+
+当前仓库提供了一个最小可校验模型:
+
+- Rust 类型: [crates/blob-core/src/browser_flow.rs](/home/walky/workspaces/carrier-cloud-blob-gateway/crates/blob-core/src/browser_flow.rs:1)
+- 联通样例: [config/browser-flows/unicom-web.json](/home/walky/workspaces/carrier-cloud-blob-gateway/config/browser-flows/unicom-web.json:1)
+
+当前 schema version 为 `1`。
+
+## 配置文件表达什么
+
+一份浏览器流程配置由这些部分组成:
+
+- `pages`: 页面身份和 URL pattern
+- `elements`: 关键元素和 selector 候选
+- `requests`: 关键请求的 URL、header、字段和成功码
+- `operations`: 页面内 JS/Vue 入口点
+- `flows`: 组合后的业务流程
+
+`flows` 当前支持的步骤类型包括:
+
+- `navigate`
+- `click`
+- `set_input`
+- `invoke_operation`
+- `set_files`
+- `dispatch_events`
+- `wait_for_request`
+- `wait_for_page`
+- `wait`
+
+## 联通样例现在覆盖了什么
+
+当前联通样例覆盖两条真实验证过的主路径:
+
+1. `unicom_sms_login`
+2. `unicom_personal_root_upload`
+
+其中上传流程记录了一个关键约束:
+
+- 必须先调用页面动作组件的 `goUpload(false)`
+- 再向 `#global-uploader-btn input[type=file]` 注入文件
+- 然后等待真实 `upload2C` 请求
+
+这是为了复用网页自身已经准备好的:
+
+- `params.fileInfo`
+- `directoryId`
+- `spaceType`
+- 加密后的 `fileInfo`
+- uploader 内部续传/分片逻辑
+
+## 维护规则
+
+更新这类配置时，遵守下面几条:
+
+1. 不要提交真实 token、cookie、手机号、短信码。
+2. 只保存符号占位符，例如 `{{inputs.sms_code}}`、`{{runtime.access_token}}`。
+3. selector 优先写多候选，而不是只赌一个易碎 class name。
+4. 关键网络请求要把“真正决定成功”的字段写清楚。
+5. 如果页面流程必须先调用某个 JS/Vue 方法，不要把它降级成纯 selector 点击说明。
+
+## 与 provider 代码的边界
+
+这层不是 `provider-unicom` 的替代品。
+
+更准确地说:
+
+- `browser-flow` 负责“怎么在浏览器里完成流程”
+- `provider-unicom` 负责“怎么在服务里表达联通对象读写能力”
+
+当后续联通写路径真正落进 Rust provider 时，优先复用这层产出的稳定事实:
+
+- 上传前必须准备的上下文
+- `upload2C` 的关键字段
+- `CreateDirectory` / `DeleteFile` / `CopyFile` 这类动作的请求形状
+
+## 下一步建议
+
+这份最小结构已经能支撑继续扩展，下一批优先项应该是:
+
+1. 补 `DeleteFile`、`CreateDirectory`、`MoveFile`、`CopyFile` 样例 flow。
+2. 给执行层增加“按 catalog 驱动 CDP”的 loader。
+3. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。

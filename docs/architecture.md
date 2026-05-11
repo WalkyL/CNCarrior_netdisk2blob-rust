@@ -32,6 +32,7 @@
 - 可与 `gatewayd` 同机部署，也可独立部署到另一台 `x86/x64` 主机
 - 负责无头浏览器、网页会话抓取、短信验证码等待、手机号输入和必要的 LLM 辅助分析
 - 通过受控 API 把“需要手机号 / 短信码 / 验证码”的提示推送到 Admin Web，而不是在后台静默卡住
+- 应优先消费 `config/browser-flows/*.json` 这类 provider-specific 流程配置，而不是把 selector 和页面动作写死在执行器代码里
 - 对小内存设备建议只跑 `gateway-lite`，把这层放到另一台设备
 
 ### Admin UX
@@ -67,6 +68,7 @@
 - 管理 token 来源、请求头拼装、错误归类
 - 联通 / 电信当前已支持目录遍历与文件下载
 - 后续继续扩展写入、分片上传、断点续传
+- 对于来自真实浏览器/CDP 的页面元素、流程和请求形状，优先沉淀到浏览器流程配置层，而不是把页面细节直接硬编码到 provider crate
 
 ### `gatewayd`
 
@@ -118,6 +120,13 @@
 - Terminal 模式下启动 Device Code flow 并后台轮询，成功后把 session 落盘
 - 当前实现为内嵌最小控制面，后续如复杂度继续上升再拆分独立 crate
 - 对运营商网页登录，不直接放进 data plane；后续统一走独立 `auth-broker` / sidecar
+
+### `config/browser-flows`
+
+- 存放 provider 网页流程的声明式配置，例如 selector、步骤、JS 入口点和关键请求
+- 当前联通桌面站样例已覆盖短信登录和个人空间上传
+- 这层是为了隔离网页改版风险，供 `auth-capture` sidecar / CDP 执行层消费
+- schema 当前由 `blob-core::BrowserFlowCatalog` 定义
 
 ### 后续扩展模块
 
