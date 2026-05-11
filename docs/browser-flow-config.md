@@ -51,12 +51,15 @@
 
 ## 联通样例现在覆盖了什么
 
-当前联通样例覆盖四条真实验证过的主路径:
+当前联通样例覆盖七条真实验证过的主路径:
 
 1. `unicom_sms_login`
 2. `unicom_personal_root_upload`
 3. `unicom_create_directory`
 4. `unicom_delete_entry`
+5. `unicom_rename_entry`
+6. `unicom_copy_entry`
+7. `unicom_move_entry`
 
 其中上传流程记录了一个关键约束:
 
@@ -72,11 +75,19 @@
 - 加密后的 `fileInfo`
 - uploader 内部续传/分片逻辑
 
-目录创建和删除这两条写路径当前也已经有了实测事实:
+目录创建、删除、重命名、复制、移动这些写路径当前也已经有了实测事实:
 
 - `createDir()` 会组装 `spaceType`、`parentDirectoryId`、`directoryName`
 - `action-dialog.deleteFile()` 会组装 `spaceType`、`vipLevel`、`dirList`、`fileList`
+- `renameFileOrDirectory()` 会组装 `spaceType`、`type`、`fileType`、`id`、`name`
+- `action-dialog.onSubmit()` 在 `copy` 分支会组装 `targetDirId`、`sourceType`、`targetType`、`dirList`、`fileList`
+- `action-dialog.onSubmit()` 在 `move` 分支会组装 `targetDirId`、`sourceType`、`targetType`、`dirList`、`fileList`，家庭空间时还会带 `fromFamilyId`
 - 两者最终都走 `/wohome/dispatcher`
+
+这里还有两个值得固化到配置层的页面约束:
+
+- `copy/move` 不能只伪造 `dirIds/fileIds`，父组件需要先经过 `handleSelectionChange()`，再让 `handleCopy()` / `handleMove()` 从 `multipleSelection` 派生 `dialogData`
+- `move` 提交前页面会先跑一次 `QueryDirectorys` 预查询，因此配置里的 JS operation 保留了一个短暂等待来匹配真实页面节奏
 
 ## 维护规则
 
@@ -101,12 +112,12 @@
 
 - 上传前必须准备的上下文
 - `upload2C` 的关键字段
-- `CreateDirectory` / `DeleteFile` / `CopyFile` 这类动作的请求形状
+- `CreateDirectory` / `DeleteFile` / `RenameFileOrDirectory` / `CopyFile` / `MoveFile` 这类动作的请求形状
 
 ## 下一步建议
 
 这份最小结构已经能支撑继续扩展，下一批优先项应该是:
 
-1. 补 `MoveFile`、`CopyFile`、`RenameFileOrDirectory` 样例 flow。
-2. 给执行层增加“按 catalog 驱动 CDP”的 loader。
-3. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。
+1. 给执行层增加“按 catalog 驱动 CDP”的 loader。
+2. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。
+3. 继续补联通 family/private space 变体，以及后续电信/移动 provider 的网页 flow catalog。

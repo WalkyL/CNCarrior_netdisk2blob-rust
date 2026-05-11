@@ -2,7 +2,7 @@
   "schema_version": 1,
   "provider": "unicom",
   "surface": "pan.wo.cn-web",
-  "description": "Config-driven browser flow descriptor for China Unicom Cloud Drive desktop web login, personal-space upload, directory creation, and deletion.",
+  "description": "Config-driven browser flow descriptor for China Unicom Cloud Drive desktop web login, personal-space upload, directory creation, deletion, rename, copy, and move.",
   "base_url": "https://pan.wo.cn",
   "notes": [
     "This file records selectors, JS entrypoints, and expected network requests without storing live credentials.",
@@ -64,6 +64,16 @@
       ],
       "notes": [
         "The delete confirmation is driven by the action-dialog child component under the file list container."
+      ]
+    },
+    {
+      "id": "copy_move_action_dialog",
+      "title": "Unicom Copy Or Move Action Dialog",
+      "url_patterns": [
+        "https://pan.wo.cn/pan/file_list/all"
+      ],
+      "notes": [
+        "The copy and move flows reuse the action-dialog child component after the parent file-list component populates dialogType and dialogData from the current selection."
       ]
     }
   ],
@@ -408,6 +418,102 @@
         "Observed end-to-end on 2026-05-11 by wiring the action-dialog deleteFile() method to a temporary probe directory.",
         "The recovered request payload before encryption is: spaceType, vipLevel, dirList, fileList."
       ]
+    },
+    {
+      "id": "wohome_rename_file_or_directory",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=RenameFileOrDirectory",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-12 by calling renameFileOrDirectory() against a temporary probe file in personal root.",
+        "The recovered request payload before encryption is: spaceType, type, fileType, id, name, plus familyId or psToken when required by the current space."
+      ]
+    },
+    {
+      "id": "wohome_copy_file",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=CopyFile",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-12 by selecting a temporary probe directory, opening the copy action-dialog, setting currentDir, and submitting through onSubmit().",
+        "The recovered request payload before encryption is: targetDirId, sourceType, targetType, dirList, fileList, plus optional familyId."
+      ]
+    },
+    {
+      "id": "wohome_move_file",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=MoveFile",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-12 by selecting a temporary probe directory, opening the move action-dialog, allowing QueryDirectorys to settle, and then submitting through onSubmit().",
+        "The recovered request payload before encryption is: targetDirId, sourceType, targetType, dirList, fileList, plus optional familyId and fromFamilyId when the source space is family."
+      ]
     }
   ],
   "operations": [
@@ -446,6 +552,36 @@
       "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm) { throw new Error('file-list component not available'); } const dialogVm = (listVm.$children || []).find(child => child.$options?.name === 'action-dialog'); if (!dialogVm || typeof dialogVm.deleteFile !== 'function') { throw new Error('action-dialog deleteFile not available'); } const entryName = '{{inputs.entry_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); if (!entry) { throw new Error('entry not found for deletion: ' + entryName); } dialogVm.data = { cloudType: listVm.cloudType, dirIds: entry.type === 0 ? [entry.id] : [], fileIds: entry.type === 0 ? [] : [entry.id] }; return dialogVm.deleteFile().then(() => ({ deletedEntryId: entry.id, deletedEntryType: entry.type, cloudType: listVm.cloudType })); })()",
       "notes": [
         "The recovered action-dialog deleteFile() method posts { spaceType: data.cloudType, vipLevel, dirList, fileList } through the DeleteFile dispatcher operation."
+      ]
+    },
+    {
+      "id": "file_list.rename_entry_via_component",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm || typeof listVm.renameFileOrDirectory !== 'function') { throw new Error('file-list renameFileOrDirectory not available'); } const entryName = '{{inputs.entry_name}}'; const renamedBase = '{{inputs.new_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); if (!entry) { throw new Error('entry not found for rename: ' + entryName); } return Promise.resolve(listVm.renameFileOrDirectory(entry, renamedBase)).then(() => ({ renamedEntryId: entry.id, renamedEntryType: entry.type, requestedName: renamedBase, fileType: entry.fileType || null, cloudType: listVm.cloudType })); })()",
+      "notes": [
+        "Validated on 2026-05-12 against a temporary probe file in personal root.",
+        "For files, the page method receives a base name and preserves the original extension in the visible file list."
+      ]
+    },
+    {
+      "id": "file_list.copy_entry_via_action_dialog",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "new Promise((resolve, reject) => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm || typeof listVm.handleSelectionChange !== 'function' || typeof listVm.handleCopy !== 'function') { return reject(new Error('file-list copy hooks not available')); } const dialogVm = (listVm.$children || []).find(child => child.$options?.name === 'action-dialog'); if (!dialogVm || typeof dialogVm.onSubmit !== 'function') { return reject(new Error('action-dialog onSubmit not available')); } const entryName = '{{inputs.entry_name}}'; const targetDirName = '{{inputs.target_directory_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); const target = (listVm.tableData || []).find(item => item.type === 0 && (item.name || item.directoryName || item.fileName) === targetDirName); if (!entry) { return reject(new Error('entry not found for copy: ' + entryName)); } if (!target) { return reject(new Error('target directory not found for copy: ' + targetDirName)); } listVm.handleSelectionChange([entry]); listVm.handleCopy(); listVm.$nextTick(() => { dialogVm.currentDir = { id: target.id, currentId: target.id, directoryName: target.name || target.directoryName || target.fileName, spaceType: target.spaceType || listVm.cloudType, familyId: target.familyId || sessionStorage.getItem('familyId') || '' }; Promise.resolve(dialogVm.onSubmit()).then(() => resolve({ copiedEntryId: entry.id, copiedEntryType: entry.type, targetDirId: target.id, targetDirName: target.name || target.directoryName || target.fileName, cloudType: listVm.cloudType })).catch(reject); }); })",
+      "notes": [
+        "Validated on 2026-05-12 against temporary probe directories in personal root.",
+        "The parent component must derive dialogData from multipleSelection via handleSelectionChange() before handleCopy() so dirIds/fileIds stay aligned with the visible selection."
+      ]
+    },
+    {
+      "id": "file_list.move_entry_via_action_dialog",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "new Promise((resolve, reject) => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm || typeof listVm.handleSelectionChange !== 'function' || typeof listVm.handleMove !== 'function') { return reject(new Error('file-list move hooks not available')); } const dialogVm = (listVm.$children || []).find(child => child.$options?.name === 'action-dialog'); if (!dialogVm || typeof dialogVm.onSubmit !== 'function') { return reject(new Error('action-dialog onSubmit not available')); } const entryName = '{{inputs.entry_name}}'; const targetDirName = '{{inputs.target_directory_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); const target = (listVm.tableData || []).find(item => item.type === 0 && (item.name || item.directoryName || item.fileName) === targetDirName); if (!entry) { return reject(new Error('entry not found for move: ' + entryName)); } if (!target) { return reject(new Error('target directory not found for move: ' + targetDirName)); } listVm.handleSelectionChange([entry]); listVm.handleMove(); listVm.$nextTick(() => { setTimeout(() => { dialogVm.type = 'move'; dialogVm.data = { familyId: listVm.dialogData?.familyId, spaceType: listVm.dialogData?.spaceType, fileIds: listVm.dialogData?.fileIds || [], dirIds: listVm.dialogData?.dirIds || [] }; dialogVm.currentDir = { id: target.id, currentId: target.id, directoryName: target.name || target.directoryName || target.fileName, spaceType: target.spaceType || listVm.cloudType, familyId: target.familyId || '' }; Promise.resolve(dialogVm.onSubmit()).then(() => resolve({ movedEntryId: entry.id, movedEntryType: entry.type, targetDirId: target.id, targetDirName: target.name || target.directoryName || target.fileName, cloudType: listVm.cloudType })).catch(reject); }, 1500); }); })",
+      "notes": [
+        "Validated on 2026-05-12 against temporary probe directories in personal root.",
+        "The extra delay mirrors the live page behavior where QueryDirectorys runs before the move dialog is ready to submit."
       ]
     }
   ],
@@ -726,6 +862,146 @@
       "notes": [
         "Validated on 2026-05-11 against a temporary probe directory created and deleted in personal root.",
         "The component method can target both directories and files by splitting ids into dirIds and fileIds."
+      ]
+    },
+    {
+      "id": "unicom_rename_entry",
+      "title": "Unicom Rename Entry",
+      "purpose": "Rename a visible file or directory by reusing the file-list Vue component method that already knows how to encrypt the dispatcher payload.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "entry_name",
+          "label": "Entry Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible file or directory name in the current list context."
+        },
+        {
+          "id": "new_name",
+          "label": "New Name",
+          "kind": "text",
+          "required": true,
+          "description": "Requested new base name. For files, the page keeps the original extension."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "rename-entry",
+          "operation": "file_list.rename_entry_via_component"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-rename-entry",
+          "request": "wohome_rename_file_or_directory",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_rename_file_or_directory"
+      ],
+      "notes": [
+        "Validated on 2026-05-12 with a temporary probe file in personal root.",
+        "The current page implementation does not always issue an immediate QueryAllFiles refresh after rename, so the flow only waits for the dispatcher write."
+      ]
+    },
+    {
+      "id": "unicom_copy_entry",
+      "title": "Unicom Copy Entry",
+      "purpose": "Copy a visible file or directory into another visible directory by driving the file-list selection state and action-dialog submit path.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "entry_name",
+          "label": "Entry Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible file or directory name in the current list context."
+        },
+        {
+          "id": "target_directory_name",
+          "label": "Target Directory Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible directory name in the current list context that should receive the copied entry."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "copy-entry",
+          "operation": "file_list.copy_entry_via_action_dialog"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-copy-file",
+          "request": "wohome_copy_file",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-post-copy-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_copy_file",
+        "wohome_query_all_files"
+      ],
+      "notes": [
+        "Validated on 2026-05-12 with temporary probe directories in personal root.",
+        "The live page also queried QueryDirectorys and QueryFamilyGroups around the copy dialog, but CopyFile plus the root list refresh are the core write-path signals."
+      ]
+    },
+    {
+      "id": "unicom_move_entry",
+      "title": "Unicom Move Entry",
+      "purpose": "Move a visible file or directory into another visible directory by driving the file-list selection state and action-dialog submit path.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "entry_name",
+          "label": "Entry Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible file or directory name in the current list context."
+        },
+        {
+          "id": "target_directory_name",
+          "label": "Target Directory Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible directory name in the current list context that should receive the moved entry."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "move-entry",
+          "operation": "file_list.move_entry_via_action_dialog"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-move-file",
+          "request": "wohome_move_file",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-post-move-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_move_file",
+        "wohome_query_all_files"
+      ],
+      "notes": [
+        "Validated on 2026-05-12 with temporary probe directories in personal root.",
+        "The live page issues a QueryDirectorys preflight before MoveFile, so the operation intentionally waits for the dialog state to settle before submit."
       ]
     }
   ]

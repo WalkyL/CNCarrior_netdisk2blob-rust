@@ -619,7 +619,7 @@ mod tests {
 
         assert_eq!(catalog.provider, "unicom");
         assert_eq!(catalog.surface, "pan.wo.cn-web");
-        assert_eq!(catalog.flows.len(), 4);
+        assert_eq!(catalog.flows.len(), 7);
         assert!(
             catalog
                 .flows
@@ -631,6 +631,24 @@ mod tests {
                 .flows
                 .iter()
                 .any(|flow| flow.id == "unicom_delete_entry")
+        );
+        assert!(
+            catalog
+                .flows
+                .iter()
+                .any(|flow| flow.id == "unicom_rename_entry")
+        );
+        assert!(
+            catalog
+                .flows
+                .iter()
+                .any(|flow| flow.id == "unicom_copy_entry")
+        );
+        assert!(
+            catalog
+                .flows
+                .iter()
+                .any(|flow| flow.id == "unicom_move_entry")
         );
     }
 

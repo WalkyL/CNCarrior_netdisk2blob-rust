@@ -6,7 +6,7 @@
 
 当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、session 持久化与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通与电信 provider 已打通真实目录列举和下载，只写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置，以及给短信码/手机号/验证码之类交互式认证步骤预留的“验证输入队列”。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
-针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。首个样例是联通桌面站 `pan.wo.cn` 的短信登录和个人空间上传流程。
+针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖短信登录、个人空间上传、目录创建/删除/重命名/复制/移动这七条真实验证过的网页流程。
 
 当前针对轻量设备的策略也已明确: `OpenWRT` 优先作为 host 服务宿主，默认通过 `CCBG_MAX_IN_MEMORY_OBJECT_BYTES` 控制非流式对象路径的峰值内存，并通过 SQLite 元数据保留上限控制 flash 增长；`ESP32-S3` 默认按 `client-only` 兼容处理，只有在确认资源充足时才考虑更小功能集的 relay 形态，后续元数据应走更轻量的 `tiny-state-client` 路线而不是继续复用完整 SQLite 宿主形态。
 
