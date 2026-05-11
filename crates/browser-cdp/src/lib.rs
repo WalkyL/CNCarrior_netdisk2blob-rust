@@ -332,7 +332,7 @@ impl CdpBrowserFlowSession {
         }
     }
 
-    async fn resolve_node_id(&self, element: &BrowserFlowElement) -> Result<i64, BlobError> {
+    async fn resolve_object_id(&self, element: &BrowserFlowElement) -> Result<String, BlobError> {
         let expression = javascript_selector_expression(element)?;
         let remote_result = self
             .connection
@@ -348,24 +348,14 @@ impl CdpBrowserFlowSession {
             .ok_or_else(|| {
                 BlobError::Upstream("missing Runtime.evaluate node result payload".to_string())
             })?;
-        let object_id = remote_result
+        remote_result
             .get("result")
             .and_then(|value| value.get("objectId"))
             .and_then(Value::as_str)
             .ok_or_else(|| {
                 BlobError::NotFound(format!("cdp could not resolve DOM node for {}", element.id))
-            })?;
-
-        let node = self
-            .connection
-            .send_command("DOM.requestNode", json!({ "objectId": object_id }))
-            .await?
-            .ok_or_else(|| {
-                BlobError::Upstream("missing DOM.requestNode result payload".to_string())
-            })?;
-        node.get("nodeId")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| BlobError::Upstream("missing DOM.requestNode nodeId".to_string()))
+            })
+            .map(ToString::to_string)
     }
 }
 
@@ -414,12 +404,12 @@ impl BrowserFlowSession for CdpBrowserFlowSession {
         element: &BrowserFlowElement,
         paths: &[String],
     ) -> Result<(), BlobError> {
-        let node_id = self.resolve_node_id(element).await?;
+        let object_id = self.resolve_object_id(element).await?;
         self.connection
             .send_command(
                 "DOM.setFileInputFiles",
                 json!({
-                    "nodeId": node_id,
+                    "objectId": object_id,
                     "files": paths,
                 }),
             )
