@@ -22,8 +22,10 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blob_core::{
-    BlobBackend, BlobError, BrowserFlow, BrowserFlowCatalog, BrowserFlowCatalogCollection,
-    ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend, TokenSource,
+    BlobBackend, BlobError, BrowserFlow, BrowserFlowBindingContext, BrowserFlowCatalog,
+    BrowserFlowCatalogCollection, BrowserFlowExecutionReport, BrowserFlowExecutor,
+    DryRunBrowserFlowExecutor, ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend,
+    TokenSource,
 };
 use hmac::{Hmac, Mac};
 use metadata_store::{
@@ -352,6 +354,25 @@ struct BrowserFlowPayload {
     provider: String,
     surface: String,
     flow: BrowserFlow,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BrowserFlowDryRunInput {
+    provider: String,
+    surface: String,
+    flow_id: String,
+    #[serde(default)]
+    inputs: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    runtime: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowDryRunPayload {
+    provider: String,
+    surface: String,
+    flow_id: String,
+    report: BrowserFlowExecutionReport,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1219,6 +1240,7 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             "/api/browser-flows/flow/{flow_id}",
             get(get_browser_flow_by_id),
         )
+        .route("/api/browser-flows/dry-run", post(run_browser_flow_dry_run))
         .route(
             "/api/policy/onedrive",
             get(get_onedrive_policy).post(update_onedrive_policy),
@@ -3418,6 +3440,39 @@ async fn get_browser_flow_by_id(
         provider: entry.catalog.provider.clone(),
         surface: entry.catalog.surface.clone(),
         flow,
+    }))
+}
+
+async fn run_browser_flow_dry_run(
+    State(state): State<AppState>,
+    Json(input): Json<BrowserFlowDryRunInput>,
+) -> Result<Json<BrowserFlowDryRunPayload>, ApiError> {
+    let provider = input.provider.trim();
+    let surface = input.surface.trim();
+    let flow_id = input.flow_id.trim();
+    if provider.is_empty() || surface.is_empty() || flow_id.is_empty() {
+        return Err(BlobError::Configuration(
+            "provider, surface, and flow_id are all required".to_string(),
+        )
+        .into());
+    }
+
+    let plan = state.browser_flow_catalogs.bind_flow(
+        provider,
+        surface,
+        flow_id,
+        &BrowserFlowBindingContext {
+            inputs: input.inputs,
+            runtime: input.runtime,
+        },
+    )?;
+    let report = DryRunBrowserFlowExecutor.execute(&plan).await?;
+
+    Ok(Json(BrowserFlowDryRunPayload {
+        provider: plan.provider,
+        surface: plan.surface,
+        flow_id: plan.flow.id,
+        report,
     }))
 }
 
@@ -6548,6 +6603,85 @@ mod tests {
         assert_eq!(payload.surface, "pan.wo.cn-web");
         assert_eq!(payload.flow.id, "unicom_move_entry");
         assert_eq!(payload.flow.start_page, "file_list_all");
+    }
+
+    #[tokio::test]
+    async fn browser_flow_dry_run_returns_execution_report() {
+        let state = test_state();
+
+        let Json(payload) = run_browser_flow_dry_run(
+            State(state),
+            Json(BrowserFlowDryRunInput {
+                provider: "unicom".to_string(),
+                surface: "pan.wo.cn-web".to_string(),
+                flow_id: "unicom_personal_root_upload".to_string(),
+                inputs: BTreeMap::from([
+                    (
+                        "local_file".to_string(),
+                        serde_json::Value::String("/tmp/example.txt".to_string()),
+                    ),
+                    (
+                        "family_id".to_string(),
+                        serde_json::Value::String("family-42".to_string()),
+                    ),
+                    (
+                        "ps_token".to_string(),
+                        serde_json::Value::String("private-token".to_string()),
+                    ),
+                ]),
+                runtime: BTreeMap::from([
+                    (
+                        "batch_no".to_string(),
+                        serde_json::Value::String("batch-100".to_string()),
+                    ),
+                    (
+                        "directory_id".to_string(),
+                        serde_json::Value::String("dir-200".to_string()),
+                    ),
+                    (
+                        "private_space_type".to_string(),
+                        serde_json::Value::String("4".to_string()),
+                    ),
+                    (
+                        "access_token".to_string(),
+                        serde_json::Value::String("token-300".to_string()),
+                    ),
+                ]),
+            }),
+        )
+        .await
+        .expect("browser flow dry run should succeed");
+
+        assert_eq!(payload.provider, "unicom");
+        assert_eq!(payload.surface, "pan.wo.cn-web");
+        assert_eq!(payload.flow_id, "unicom_personal_root_upload");
+        assert_eq!(payload.report.flow_id, "unicom_personal_root_upload");
+        assert_eq!(payload.report.step_count, 5);
+        assert_eq!(payload.report.steps[0].step_id, "open-uploader");
+        assert_eq!(
+            payload.report.steps[3].detail.get("request_method"),
+            Some(&serde_json::Value::String("POST".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_flow_dry_run_rejects_missing_required_input() {
+        let state = test_state();
+
+        let error = run_browser_flow_dry_run(
+            State(state),
+            Json(BrowserFlowDryRunInput {
+                provider: "unicom".to_string(),
+                surface: "pan.wo.cn-web".to_string(),
+                flow_id: "unicom_sms_login".to_string(),
+                inputs: BTreeMap::new(),
+                runtime: BTreeMap::new(),
+            }),
+        )
+        .await
+        .expect_err("browser flow dry run should reject missing required input");
+
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
     }
 
     #[test]

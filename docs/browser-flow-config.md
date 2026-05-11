@@ -34,6 +34,10 @@
   - `GET /api/browser-flows/catalogs`
   - `GET /api/browser-flows/catalog?provider=unicom&surface=pan.wo.cn-web`
   - `GET /api/browser-flows/flow/{flow_id}`
+- `gatewayd` 现在还暴露一个服务层 dry-run 入口:
+  - `POST /api/browser-flows/dry-run`
+  - body 里显式传 `provider`、`surface`、`flow_id`、`inputs`、`runtime`
+  - 返回值只包含执行报告，不回显绑定后的 secret context
 
 当前 schema version 为 `1`。
 
@@ -137,4 +141,5 @@
 换句话说:
 
 - 现在已经可以校验 catalog、加载 catalog、查询 flow、绑定模板、输出 dry-run step report
+- 现在也可以通过 `gatewayd` 直接请求一份 flow 的 dry-run execution report，拿来验证输入是否齐全、预期请求是否匹配
 - 但还没有把 `click/set_input/set_files/wait_for_request` 这些步骤真正驱动到 CDP 会话上
