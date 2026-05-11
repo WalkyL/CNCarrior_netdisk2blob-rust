@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -161,6 +162,7 @@ pub struct BoundBrowserFlowPlan {
     pub provider: String,
     pub surface: String,
     pub flow: BrowserFlow,
+    pub context: BrowserFlowBindingContext,
     #[serde(default)]
     pub presets: BTreeMap<String, Value>,
     #[serde(default)]
@@ -172,6 +174,46 @@ pub struct BoundBrowserFlowPlan {
     #[serde(default)]
     pub operations: Vec<BrowserFlowOperation>,
 }
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserFlowExecutionMode {
+    DryRun,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserFlowExecutionStepStatus {
+    Planned,
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrowserFlowExecutionStepReport {
+    pub step_id: String,
+    pub step_kind: String,
+    pub status: BrowserFlowExecutionStepStatus,
+    #[serde(default)]
+    pub detail: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BrowserFlowExecutionReport {
+    pub mode: BrowserFlowExecutionMode,
+    pub provider: String,
+    pub surface: String,
+    pub flow_id: String,
+    pub step_count: usize,
+    #[serde(default)]
+    pub expected_requests: Vec<String>,
+    #[serde(default)]
+    pub steps: Vec<BrowserFlowExecutionStepReport>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DryRunBrowserFlowExecutor;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserFlowInput {
@@ -400,6 +442,7 @@ impl BrowserFlowCatalog {
             provider: self.provider.clone(),
             surface: self.surface.clone(),
             flow: bound_flow,
+            context: context.clone(),
             presets,
             pages,
             elements,
@@ -775,6 +818,63 @@ impl BrowserFlowCatalogCollection {
     }
 }
 
+impl BoundBrowserFlowPlan {
+    pub fn find_request(&self, request_id: &str) -> Option<&BrowserFlowRequest> {
+        self.requests
+            .iter()
+            .find(|request| request.id == request_id)
+    }
+
+    pub fn find_operation(&self, operation_id: &str) -> Option<&BrowserFlowOperation> {
+        self.operations
+            .iter()
+            .find(|operation| operation.id == operation_id)
+    }
+
+    pub fn input_value(&self, input_id: &str) -> Option<&Value> {
+        self.context.inputs.get(input_id)
+    }
+}
+
+#[async_trait]
+pub trait BrowserFlowExecutor: Send + Sync {
+    fn mode(&self) -> BrowserFlowExecutionMode;
+
+    async fn execute(
+        &self,
+        plan: &BoundBrowserFlowPlan,
+    ) -> Result<BrowserFlowExecutionReport, BlobError>;
+}
+
+#[async_trait]
+impl BrowserFlowExecutor for DryRunBrowserFlowExecutor {
+    fn mode(&self) -> BrowserFlowExecutionMode {
+        BrowserFlowExecutionMode::DryRun
+    }
+
+    async fn execute(
+        &self,
+        plan: &BoundBrowserFlowPlan,
+    ) -> Result<BrowserFlowExecutionReport, BlobError> {
+        let steps = plan
+            .flow
+            .steps
+            .iter()
+            .map(|step| dry_run_step_report(plan, step))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(BrowserFlowExecutionReport {
+            mode: self.mode(),
+            provider: plan.provider.clone(),
+            surface: plan.surface.clone(),
+            flow_id: plan.flow.id.clone(),
+            step_count: steps.len(),
+            expected_requests: plan.flow.expected_requests.clone(),
+            steps,
+        })
+    }
+}
+
 impl BrowserFlowStep {
     pub fn id(&self) -> &str {
         match self {
@@ -787,6 +887,20 @@ impl BrowserFlowStep {
             | Self::WaitForRequest { id, .. }
             | Self::WaitForPage { id, .. }
             | Self::Wait { id, .. } => id.as_str(),
+        }
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Navigate { .. } => "navigate",
+            Self::Click { .. } => "click",
+            Self::SetInput { .. } => "set_input",
+            Self::InvokeOperation { .. } => "invoke_operation",
+            Self::SetFiles { .. } => "set_files",
+            Self::DispatchEvents { .. } => "dispatch_events",
+            Self::WaitForRequest { .. } => "wait_for_request",
+            Self::WaitForPage { .. } => "wait_for_page",
+            Self::Wait { .. } => "wait",
         }
     }
 }
@@ -1057,6 +1171,123 @@ fn template_scalar_to_string(token: &str, value: &Value) -> Result<String, BlobE
     }
 }
 
+fn dry_run_step_report(
+    plan: &BoundBrowserFlowPlan,
+    step: &BrowserFlowStep,
+) -> Result<BrowserFlowExecutionStepReport, BlobError> {
+    let mut detail = BTreeMap::new();
+    match step {
+        BrowserFlowStep::Navigate {
+            url, wait_for_page, ..
+        } => {
+            detail.insert("url".to_string(), Value::String(url.clone()));
+            if let Some(page) = wait_for_page {
+                detail.insert("wait_for_page".to_string(), Value::String(page.clone()));
+            }
+        }
+        BrowserFlowStep::Click {
+            element, optional, ..
+        } => {
+            detail.insert("element".to_string(), Value::String(element.clone()));
+            detail.insert("optional".to_string(), Value::Bool(*optional));
+        }
+        BrowserFlowStep::SetInput {
+            element,
+            dispatch_events,
+            ..
+        } => {
+            detail.insert("element".to_string(), Value::String(element.clone()));
+            detail.insert("value_present".to_string(), Value::Bool(true));
+            detail.insert(
+                "dispatch_events".to_string(),
+                Value::Array(dispatch_events.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        BrowserFlowStep::InvokeOperation { operation, .. } => {
+            detail.insert("operation".to_string(), Value::String(operation.clone()));
+            if let Some(bound_operation) = plan.find_operation(operation) {
+                detail.insert(
+                    "operation_kind".to_string(),
+                    Value::String(format!("{:?}", bound_operation.kind).to_ascii_lowercase()),
+                );
+                if let Some(page) = &bound_operation.page {
+                    detail.insert("page".to_string(), Value::String(page.clone()));
+                }
+                detail.insert(
+                    "source_present".to_string(),
+                    Value::Bool(!bound_operation.source.trim().is_empty()),
+                );
+            }
+        }
+        BrowserFlowStep::SetFiles {
+            element, input_ref, ..
+        } => {
+            detail.insert("element".to_string(), Value::String(element.clone()));
+            detail.insert("input_ref".to_string(), Value::String(input_ref.clone()));
+            detail.insert(
+                "input_present".to_string(),
+                Value::Bool(plan.input_value(input_ref).is_some()),
+            );
+        }
+        BrowserFlowStep::DispatchEvents {
+            element, events, ..
+        } => {
+            detail.insert("element".to_string(), Value::String(element.clone()));
+            detail.insert(
+                "events".to_string(),
+                Value::Array(events.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        BrowserFlowStep::WaitForRequest {
+            request,
+            timeout_ms,
+            ..
+        } => {
+            detail.insert("request".to_string(), Value::String(request.clone()));
+            if let Some(bound_request) = plan.find_request(request) {
+                detail.insert(
+                    "request_method".to_string(),
+                    Value::String(bound_request.method.clone()),
+                );
+                detail.insert(
+                    "request_url_pattern".to_string(),
+                    Value::String(bound_request.url_pattern.clone()),
+                );
+            }
+            if let Some(timeout_ms) = timeout_ms {
+                detail.insert(
+                    "timeout_ms".to_string(),
+                    Value::Number(serde_json::Number::from(*timeout_ms)),
+                );
+            }
+        }
+        BrowserFlowStep::WaitForPage {
+            page, timeout_ms, ..
+        } => {
+            detail.insert("page".to_string(), Value::String(page.clone()));
+            if let Some(timeout_ms) = timeout_ms {
+                detail.insert(
+                    "timeout_ms".to_string(),
+                    Value::Number(serde_json::Number::from(*timeout_ms)),
+                );
+            }
+        }
+        BrowserFlowStep::Wait { duration_ms, .. } => {
+            detail.insert(
+                "duration_ms".to_string(),
+                Value::Number(serde_json::Number::from(*duration_ms)),
+            );
+        }
+    }
+
+    Ok(BrowserFlowExecutionStepReport {
+        step_id: step.id().to_string(),
+        step_kind: step.kind_name().to_string(),
+        status: BrowserFlowExecutionStepStatus::Planned,
+        detail,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1066,8 +1297,13 @@ mod tests {
     };
 
     use serde_json::Value;
+    use tokio::runtime::Runtime;
 
-    use super::{BrowserFlowBindingContext, BrowserFlowCatalog, BrowserFlowCatalogCollection};
+    use super::{
+        BrowserFlowBindingContext, BrowserFlowCatalog, BrowserFlowCatalogCollection,
+        BrowserFlowExecutionMode, BrowserFlowExecutionStepStatus, BrowserFlowExecutor,
+        DryRunBrowserFlowExecutor,
+    };
     use crate::BlobError;
 
     fn temp_catalog_dir(name: &str) -> std::path::PathBuf {
@@ -1331,5 +1567,234 @@ mod tests {
                 .to_string()
                 .contains("missing browser flow runtime value: batch_no")
         );
+    }
+
+    #[test]
+    fn dry_run_executor_reports_expected_upload_steps() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([
+                (
+                    "local_file".to_string(),
+                    Value::String("/tmp/example.txt".to_string()),
+                ),
+                (
+                    "family_id".to_string(),
+                    Value::String("family-42".to_string()),
+                ),
+                (
+                    "ps_token".to_string(),
+                    Value::String("private-token".to_string()),
+                ),
+            ]),
+            runtime: BTreeMap::from([
+                (
+                    "batch_no".to_string(),
+                    Value::String("batch-100".to_string()),
+                ),
+                (
+                    "directory_id".to_string(),
+                    Value::String("dir-200".to_string()),
+                ),
+                (
+                    "private_space_type".to_string(),
+                    Value::String("4".to_string()),
+                ),
+                (
+                    "access_token".to_string(),
+                    Value::String("token-300".to_string()),
+                ),
+            ]),
+        };
+        let plan = catalog
+            .bind_flow("unicom_personal_root_upload", &context)
+            .expect("flow binding should succeed");
+
+        let report = Runtime::new()
+            .expect("tokio runtime should build")
+            .block_on(DryRunBrowserFlowExecutor.execute(&plan))
+            .expect("dry run execution should succeed");
+
+        assert_eq!(report.mode, BrowserFlowExecutionMode::DryRun);
+        assert_eq!(report.flow_id, "unicom_personal_root_upload");
+        assert_eq!(report.step_count, plan.flow.steps.len());
+        assert_eq!(
+            report.expected_requests,
+            vec![
+                "upload2c".to_string(),
+                "wohome_query_all_files".to_string(),
+                "member_card_info".to_string()
+            ]
+        );
+        assert_eq!(report.steps.len(), plan.flow.steps.len());
+        assert_eq!(report.steps[0].step_id, "open-uploader");
+        assert_eq!(report.steps[0].step_kind, "invoke_operation");
+        assert_eq!(
+            report.steps[0].status,
+            BrowserFlowExecutionStepStatus::Planned
+        );
+        assert_eq!(
+            report.steps[0].detail.get("operation"),
+            Some(&Value::String(
+                "file_list.open_personal_uploader".to_string()
+            ))
+        );
+        assert_eq!(
+            report.steps[0].detail.get("operation_kind"),
+            Some(&Value::String("javascript".to_string()))
+        );
+        assert_eq!(
+            report.steps[1].detail.get("input_present"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            report.steps[3].detail.get("request_method"),
+            Some(&Value::String("POST".to_string()))
+        );
+    }
+
+    #[test]
+    fn dry_run_executor_marks_missing_optional_file_input_as_absent() {
+        let raw = r#"{
+          "schema_version": 1,
+          "provider": "example",
+          "surface": "example-web",
+          "base_url": "https://example.com",
+          "pages": [
+            {
+              "id": "upload",
+              "title": "Upload Page",
+              "url_patterns": ["https://example.com/upload"]
+            }
+          ],
+          "elements": [
+            {
+              "id": "upload.file_input",
+              "page": "upload",
+              "role": "file_input",
+              "required": true,
+              "selectors": [
+                {
+                  "engine": "css",
+                  "value": "input[type='file']"
+                }
+              ]
+            }
+          ],
+          "requests": [],
+          "operations": [],
+          "flows": [
+            {
+              "id": "optional_file_upload",
+              "title": "Optional File Upload",
+              "purpose": "Exercise dry-run file attachment reporting",
+              "start_page": "upload",
+              "inputs": [
+                {
+                  "id": "optional_file",
+                  "label": "Optional File",
+                  "kind": "file",
+                  "required": false
+                }
+              ],
+              "steps": [
+                {
+                  "kind": "set_files",
+                  "id": "attach-optional-file",
+                  "element": "upload.file_input",
+                  "input_ref": "optional_file"
+                }
+              ]
+            }
+          ]
+        }"#;
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("inline browser flow catalog should parse and validate");
+        let plan = catalog
+            .bind_flow(
+                "optional_file_upload",
+                &BrowserFlowBindingContext::default(),
+            )
+            .expect("flow binding should succeed");
+
+        let report = Runtime::new()
+            .expect("tokio runtime should build")
+            .block_on(DryRunBrowserFlowExecutor.execute(&plan))
+            .expect("dry run execution should succeed");
+
+        assert_eq!(
+            report.steps[0].detail.get("input_present"),
+            Some(&Value::Bool(false))
+        );
+        assert!(
+            report
+                .steps
+                .iter()
+                .all(|step| step.status == BrowserFlowExecutionStepStatus::Planned)
+        );
+    }
+
+    #[test]
+    fn bound_browser_flow_plan_lookups_expose_bound_request_operation_and_input_values() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([
+                (
+                    "local_file".to_string(),
+                    Value::String("/tmp/example.txt".to_string()),
+                ),
+                (
+                    "family_id".to_string(),
+                    Value::String("family-42".to_string()),
+                ),
+                (
+                    "ps_token".to_string(),
+                    Value::String("private-token".to_string()),
+                ),
+            ]),
+            runtime: BTreeMap::from([
+                (
+                    "batch_no".to_string(),
+                    Value::String("batch-100".to_string()),
+                ),
+                (
+                    "directory_id".to_string(),
+                    Value::String("dir-200".to_string()),
+                ),
+                (
+                    "private_space_type".to_string(),
+                    Value::String("4".to_string()),
+                ),
+                (
+                    "access_token".to_string(),
+                    Value::String("token-300".to_string()),
+                ),
+            ]),
+        };
+        let plan = catalog
+            .bind_flow("unicom_personal_root_upload", &context)
+            .expect("flow binding should succeed");
+
+        assert_eq!(
+            plan.find_request("upload2c")
+                .map(|request| request.method.as_str()),
+            Some("POST")
+        );
+        assert_eq!(
+            plan.find_operation("file_list.open_personal_uploader")
+                .map(|operation| operation.kind),
+            Some(super::BrowserFlowOperationKind::Javascript)
+        );
+        assert_eq!(
+            plan.input_value("local_file"),
+            Some(&Value::String("/tmp/example.txt".to_string()))
+        );
+        assert!(plan.find_request("missing").is_none());
+        assert!(plan.find_operation("missing").is_none());
+        assert!(plan.input_value("missing").is_none());
     }
 }
