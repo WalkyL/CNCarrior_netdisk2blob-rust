@@ -254,6 +254,7 @@
   "browser_flow_catalog_dir": "./config/browser-flows",
   "provider_capability_catalog_dir": "./config/provider-capabilities",
   "replication_workers": 2,
+  "data_plane_max_in_flight": 8,
   "object_action_history_limit": 12
 }
 ```
@@ -273,6 +274,7 @@
 - `browser_flow_catalog_dir`: browser flow catalog 目录
 - `provider_capability_catalog_dir`: provider capability catalog 目录
 - `replication_workers`: 复制 worker 数量
+- `data_plane_max_in_flight`: 数据面最大并发处理数；超限时 S3 路径直接返回 `503 ServiceUnavailable`
 - `object_action_history_limit`: 当前共享历史窗口大小
 
 ### 6.2 object_action_history
@@ -397,6 +399,8 @@
   "onedrive_async_backup_enabled": true,
   "onedrive_fallback_enabled": false,
   "replication_workers": 2,
+  "data_plane_max_in_flight": 8,
+  "data_plane_permits_available": 7,
   "pending_jobs": 3,
   "retry_scheduled_jobs": 1,
   "latest_failed_objects": 2,
@@ -432,6 +436,8 @@
 - `onedrive_async_backup_enabled`: OneDrive 是否作为异步备份启用
 - `onedrive_fallback_enabled`: OneDrive fallback 读是否启用
 - `replication_workers`: 当前复制 worker 数量
+- `data_plane_max_in_flight`: 当前数据面并发上限
+- `data_plane_permits_available`: 当前剩余可用 permit 数；如果经常贴近 `0`，说明上限可能过低或宿主负载过高
 - `pending_jobs`: 当前持久化 pending job 数量
 - `retry_scheduled_jobs`: 当前持久化 retry_scheduled job 数量
 - `latest_failed_objects`: 当前 latest-only failed object 数量

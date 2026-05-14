@@ -52,13 +52,15 @@ CCBG_METRICS_BIND_ADDR=127.0.0.1:61083
 1. 替换 `CCBG_S3_SECRET_ACCESS_KEY=change-me`
 2. 把 `Admin Web`、`OAuth Callback`、`Metrics` 维持在回环地址
 3. 控制对象内存上限，例如 `CCBG_MAX_IN_MEMORY_OBJECT_BYTES=4194304`
-4. 限制复制 worker，例如 `CCBG_REPLICATION_WORKERS=1`
-5. 把日志降到 `warn`
+4. 限制数据面并发，例如 `CCBG_DATA_PLANE_MAX_IN_FLIGHT=2`
+5. 限制复制 worker，例如 `CCBG_REPLICATION_WORKERS=1`
+6. 把日志降到 `warn`
 
 推荐起步值:
 
 ```dotenv
 CCBG_MAX_IN_MEMORY_OBJECT_BYTES=4194304
+CCBG_DATA_PLANE_MAX_IN_FLIGHT=2
 CCBG_REPLICATION_WORKERS=1
 CCBG_REPLICATION_RECENT_LIMIT=16
 CCBG_METADATA_SNAPSHOT_RECENT_LIMIT=16
@@ -66,6 +68,8 @@ CCBG_METADATA_COMPLETED_HISTORY_LIMIT=64
 CCBG_METADATA_FAILED_HISTORY_LIMIT=64
 RUST_LOG=warn
 ```
+
+`CCBG_DATA_PLANE_MAX_IN_FLIGHT` 的语义是“同时允许多少个 S3 数据面请求进入实际处理”。超过上限时网关直接返回 `503 ServiceUnavailable`，不会在内存里继续排队。对软路由来说，这比无限并发或应用内排队更稳。
 
 ## 4. OneDrive 建议
 
@@ -85,6 +89,8 @@ RUST_LOG=warn
 1. 先看 `Admin Web` 的 `Operations Overview`
 2. 再看 `Monitoring Summary`、`Latest Failed Objects` 和 `Notify`
 3. 需要对外集成时，再配置 `CCBG_NOTIFY_WEBHOOK_URL`
+
+`Operations Overview` 现在还会显示 `Data plane concurrency: max=<n> | available=<n>`，可以直接看到当前并发上限和剩余 permit。
 
 本机 `/metrics` 只是兼容出口，不建议把“在路由器上再跑 Prometheus server”当默认方案。
 

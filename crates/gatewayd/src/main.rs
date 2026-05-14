@@ -38,7 +38,7 @@ use blob_core::{
     ObjectBody, OutboundIpFamily, PutObjectRequest, RenameObjectRequest, StubBackend, TokenSource,
 };
 use browser_cdp::{CdpBrowserFlowSession, CdpConnectionConfig};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 #[cfg(test)]
 use futures_util::stream;
 use hmac::{Hmac, Mac};
@@ -67,6 +67,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, sleep};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -102,7 +103,12 @@ struct AppState {
     control_plane: Arc<Mutex<ControlPlaneState>>,
     notify_state: Arc<Mutex<NotifyState>>,
     browser_flow_catalogs: Arc<BrowserFlowCatalogCollection>,
+    data_plane_concurrency: Arc<DataPlaneConcurrencyState>,
     started_at_unix_ms: u64,
+}
+
+struct DataPlaneConcurrencyState {
+    semaphore: Arc<Semaphore>,
 }
 
 #[derive(Clone)]
@@ -404,6 +410,7 @@ struct RuntimeStatusPayload {
     browser_flow_catalog_dir: String,
     provider_capability_catalog_dir: String,
     replication_workers: usize,
+    data_plane_max_in_flight: usize,
     object_action_history_limit: usize,
 }
 
@@ -456,6 +463,8 @@ struct OperationsOverviewPayload {
     onedrive_async_backup_enabled: bool,
     onedrive_fallback_enabled: bool,
     replication_workers: usize,
+    data_plane_max_in_flight: usize,
+    data_plane_permits_available: usize,
     pending_jobs: usize,
     retry_scheduled_jobs: usize,
     latest_failed_objects: usize,
@@ -546,6 +555,7 @@ fn runtime_status_payload(state: &AppState) -> RuntimeStatusPayload {
         browser_flow_catalog_dir: state.config.browser_flow_catalog_dir.clone(),
         provider_capability_catalog_dir: state.config.provider_capability_catalog_dir.clone(),
         replication_workers: state.config.replication_workers,
+        data_plane_max_in_flight: state.config.data_plane_max_in_flight,
         object_action_history_limit: state.config.object_action_history_limit,
     }
 }
@@ -578,6 +588,24 @@ fn socket_addr_is_loopback(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
 }
 
+fn try_acquire_data_plane_permit(state: &AppState) -> Result<OwnedSemaphorePermit, S3Error> {
+    state
+        .data_plane_concurrency
+        .semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            S3Error::new(
+                "ServiceUnavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!(
+                    "too many concurrent data-plane requests; try again later (limit={})",
+                    state.config.data_plane_max_in_flight
+                ),
+            )
+        })
+}
+
 fn oldest_job_age_ms<'a>(
     now_unix_ms: u64,
     jobs: impl Iterator<Item = &'a ReplicationJob>,
@@ -597,6 +625,7 @@ fn operations_overview_payload(
     let now_unix_ms = current_unix_ms();
     let topology = runtime_topology(state);
     let onedrive_policy = current_onedrive_policy(state);
+    let data_plane_permits_available = state.data_plane_concurrency.semaphore.available_permits();
 
     OperationsOverviewPayload {
         primary_provider: topology.primary_provider_name(),
@@ -606,6 +635,8 @@ fn operations_overview_payload(
         onedrive_async_backup_enabled: onedrive_policy.replication_enabled,
         onedrive_fallback_enabled: onedrive_policy.fallback_enabled,
         replication_workers: state.config.replication_workers,
+        data_plane_max_in_flight: state.config.data_plane_max_in_flight,
+        data_plane_permits_available,
         pending_jobs: replication_state.persisted.pending_count,
         retry_scheduled_jobs: replication_state.persisted.retry_scheduled_count,
         latest_failed_objects: replication_state.latest_failed_jobs.len(),
@@ -980,6 +1011,7 @@ struct AppConfig {
     metadata_snapshot_recent_limit: usize,
     metadata_retention: MetadataRetentionPolicy,
     replication_workers: usize,
+    data_plane_max_in_flight: usize,
     replication_recent_limit: usize,
     replication_max_attempts: u32,
     replication_base_retry_delay_ms: u64,
@@ -1448,6 +1480,7 @@ impl AppConfig {
                 failed_history_limit: env_usize("CCBG_METADATA_FAILED_HISTORY_LIMIT", 256),
             },
             replication_workers: env_usize("CCBG_REPLICATION_WORKERS", 2),
+            data_plane_max_in_flight: env_usize("CCBG_DATA_PLANE_MAX_IN_FLIGHT", 8).max(1),
             replication_recent_limit: env_usize("CCBG_REPLICATION_RECENT_LIMIT", 64),
             replication_max_attempts: env_u64("CCBG_REPLICATION_MAX_ATTEMPTS", 3) as u32,
             replication_base_retry_delay_ms: env_u64("CCBG_REPLICATION_BASE_RETRY_DELAY_MS", 1_000),
@@ -1905,6 +1938,9 @@ async fn main() -> Result<()> {
             last_error: None,
         })),
         browser_flow_catalogs,
+        data_plane_concurrency: Arc::new(DataPlaneConcurrencyState {
+            semaphore: Arc::new(Semaphore::new(config.data_plane_max_in_flight)),
+        }),
         started_at_unix_ms: current_unix_ms(),
     };
     spawn_replication_workers(state.clone(), config.replication_workers);
@@ -1943,6 +1979,7 @@ async fn main() -> Result<()> {
         admin_bind_addr = %config.admin_bind_addr,
         auth_callback_bind_addr = %config.auth_callback_bind_addr,
         metrics_bind_addr = %config.metrics_bind_addr,
+        data_plane_max_in_flight = config.data_plane_max_in_flight,
         notify_webhook_enabled = config.notify_webhook_url.is_some(),
         notify_webhook_signature_enabled = config.notify_webhook_signing_secret.is_some(),
         notify_poll_interval_seconds = config.notify_poll_interval_seconds,
@@ -3237,6 +3274,17 @@ fn build_admin_alerts(
         });
     }
 
+    if state.config.data_plane_max_in_flight <= 2 {
+        alerts.push(AdminAlertPayload {
+            severity: "warn",
+            title: "Data plane concurrency is set very low".to_string(),
+            detail: format!(
+                "CCBG_DATA_PLANE_MAX_IN_FLIGHT={} | This is safe for tiny routers, but concurrent clients may see 503 responses sooner.",
+                state.config.data_plane_max_in_flight
+            ),
+        });
+    }
+
     if !socket_addr_is_loopback(&state.config.admin_bind_addr) {
         alerts.push(AdminAlertPayload {
             severity: "warn",
@@ -4299,6 +4347,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         `Fallback read order: ${{fallbackReadOrder.length ? fallbackReadOrder.map(providerLabel).join(' -> ') : 'disabled'}}`,
         `OneDrive async backup: ${{overview?.onedrive_async_backup_enabled ? 'enabled' : 'disabled'}}`,
         `OneDrive fallback: ${{overview?.onedrive_fallback_enabled ? 'enabled' : 'disabled'}}`,
+        `Data plane concurrency: max=${{overview?.data_plane_max_in_flight ?? 'n/a'}} | available=${{overview?.data_plane_permits_available ?? 'n/a'}}`,
         `Loopback-only listeners: data=${{overview?.data_plane_loopback_only ? 'yes' : 'no'}} | admin=${{overview?.admin_loopback_only ? 'yes' : 'no'}} | callback=${{overview?.auth_callback_loopback_only ? 'yes' : 'no'}} | metrics=${{overview?.metrics_loopback_only ? 'yes' : 'no'}}`,
         `S3 secret rotated: ${{overview?.s3_secret_uses_default ? 'no' : 'yes'}}`,
         `Replication workers: ${{overview?.replication_workers ?? 'n/a'}}`,
@@ -9168,6 +9217,7 @@ async fn list_buckets(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
     let read = list_containers_with_fallback(&state)
@@ -9201,6 +9251,7 @@ async fn head_bucket(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
     let read_backend = resolve_bucket_read_backend(&state, &bucket)
@@ -9225,6 +9276,7 @@ async fn list_objects_v2(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
     if let Some(list_type) = &query.list_type {
@@ -9308,6 +9360,7 @@ async fn head_object(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
     let read = head_object_with_fallback(&state, &bucket, &key)
@@ -9354,6 +9407,7 @@ async fn get_object(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    let permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
     let resolved = resolve_object_read(&state, &bucket, &key)
@@ -9391,7 +9445,16 @@ async fn get_object(
     }
     apply_read_source_headers(&mut response_headers, resolved.source);
 
-    let body_stream = object.body.into_stream().map_err(std::io::Error::other);
+    // Keep the permit alive until the response body stream is fully consumed.
+    let body_stream = futures_util::stream::unfold(
+        (permit, object.body.into_stream()),
+        |(permit, mut inner)| async move {
+            inner
+                .next()
+                .await
+                .map(|item| (item.map_err(std::io::Error::other), (permit, inner)))
+        },
+    );
     Ok((
         StatusCode::OK,
         response_headers,
@@ -9408,6 +9471,7 @@ async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    let _permit = try_acquire_data_plane_permit(&state)?;
     let content_length = headers
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
@@ -9553,6 +9617,7 @@ async fn delete_object(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
     let (primary_provider, primary_backend) =
         current_primary_backend(&state).map_err(map_backend_error_to_s3)?;
@@ -10303,6 +10368,7 @@ mod tests {
                 failed_history_limit: 256,
             },
             replication_workers: 0,
+            data_plane_max_in_flight: 8,
             replication_recent_limit: 64,
             replication_max_attempts: 3,
             replication_base_retry_delay_ms: 0,
@@ -10375,6 +10441,9 @@ mod tests {
                 BrowserFlowCatalogCollection::from_json_dir(&config.browser_flow_catalog_dir)
                     .expect("test browser flow catalogs should load"),
             ),
+            data_plane_concurrency: Arc::new(DataPlaneConcurrencyState {
+                semaphore: Arc::new(Semaphore::new(config.data_plane_max_in_flight)),
+            }),
             started_at_unix_ms: current_unix_ms().saturating_sub(5_000),
         }
     }
@@ -10752,6 +10821,7 @@ mod tests {
         assert_eq!(health.status, "ok");
         assert!(health.ready);
         assert_eq!(health.runtime.metrics_bind_addr, "127.0.0.1:61083");
+        assert_eq!(health.runtime.data_plane_max_in_flight, 8);
         assert_eq!(health.monitoring.provider_summary.total, 2);
 
         let ready_status = metrics_readyz(State(state.clone()))
@@ -11083,6 +11153,7 @@ mod tests {
         assert_eq!(status.runtime.admin_bind_addr, "127.0.0.1:61081");
         assert_eq!(status.runtime.auth_callback_bind_addr, "127.0.0.1:61082");
         assert_eq!(status.runtime.replication_workers, 0);
+        assert_eq!(status.runtime.data_plane_max_in_flight, 8);
         assert_eq!(status.runtime.object_action_history_limit, 12);
         assert!(status.runtime.started_at_unix_ms > 0);
         assert!(status.runtime.uptime_ms >= 5_000);
@@ -11112,6 +11183,8 @@ mod tests {
         assert_eq!(status.operations_overview.replication_mode, "async_backup");
         assert!(status.operations_overview.onedrive_async_backup_enabled);
         assert!(status.operations_overview.onedrive_fallback_enabled);
+        assert_eq!(status.operations_overview.data_plane_max_in_flight, 8);
+        assert_eq!(status.operations_overview.data_plane_permits_available, 8);
         assert_eq!(status.operations_overview.latest_failed_objects, 1);
         assert_eq!(status.operations_overview.replication_failed_alert_threshold, 1);
         assert_eq!(status.operations_overview.replication_failed_alert_min_age_ms, 0);
@@ -11279,6 +11352,8 @@ mod tests {
             .expect("admin status should succeed");
 
         assert_eq!(status.operations_overview.pending_jobs, 1);
+        assert_eq!(status.operations_overview.data_plane_max_in_flight, 8);
+        assert_eq!(status.operations_overview.data_plane_permits_available, 8);
         assert_eq!(status.operations_overview.latest_failed_objects, 1);
         assert!(
             status
@@ -11343,6 +11418,104 @@ mod tests {
                 .iter()
                 .any(|alert| alert.title.contains("S3 secret is still using the example default"))
         );
+    }
+
+    #[tokio::test]
+    async fn admin_alerts_warn_when_data_plane_concurrency_is_very_low() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).data_plane_max_in_flight = 2;
+        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState {
+            semaphore: Arc::new(Semaphore::new(2)),
+        });
+
+        let Json(status) = admin_status(State(state))
+            .await
+            .expect("admin status should succeed");
+
+        assert_eq!(status.operations_overview.data_plane_max_in_flight, 2);
+        assert_eq!(status.operations_overview.data_plane_permits_available, 2);
+        assert!(
+            status
+                .alerts
+                .iter()
+                .any(|alert| alert.title.contains("Data plane concurrency is set very low"))
+        );
+    }
+
+    #[tokio::test]
+    async fn data_plane_concurrency_rejects_excess_s3_requests_with_503() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).data_plane_max_in_flight = 1;
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held_permit = semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("initial permit should be available");
+        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState { semaphore });
+
+        let uri: Uri = "/".parse().expect("uri should parse");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let error = list_buckets(State(state), Method::GET, OriginalUri(uri), headers)
+            .await
+            .expect_err("request should be rejected when semaphore is exhausted");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let body = String::from_utf8(body.to_vec()).expect("error body should be utf-8");
+        assert!(body.contains("<Code>ServiceUnavailable</Code>"));
+        assert!(body.contains("too many concurrent data-plane requests"));
+        assert!(body.contains("limit=1"));
+
+        drop(held_permit);
+    }
+
+    #[tokio::test]
+    async fn get_object_holds_data_plane_permit_until_body_is_consumed() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).data_plane_max_in_flight = 1;
+        let semaphore = Arc::new(Semaphore::new(1));
+        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState {
+            semaphore: semaphore.clone(),
+        });
+
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend.clone());
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "root".to_string(),
+                key: "docs/stream.txt".to_string(),
+                body: Bytes::from_static(b"stream-body").into(),
+                size: Some(11),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("stream object should be created");
+
+        let uri: Uri = "/root/docs/stream.txt"
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let response = get_object(
+            State(state),
+            Path(("root".to_string(), "docs/stream.txt".to_string())),
+            Method::GET,
+            OriginalUri(uri),
+            headers,
+        )
+        .await
+        .expect("get object should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(semaphore.available_permits(), 0);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body should read");
+        assert_eq!(body.as_ref(), b"stream-body");
+        assert_eq!(semaphore.available_permits(), 1);
     }
 
     #[tokio::test]

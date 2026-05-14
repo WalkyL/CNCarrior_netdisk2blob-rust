@@ -107,6 +107,8 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 
 如果宿主是软路由或 OpenWRT 类设备，先看 [docs/router-deployment-guide.md](/home/walky/carrier-cloud-blob-gateway/docs/router-deployment-guide.md:1)。推荐默认保持 `Admin Web`、`OAuth Callback`、`Metrics` 都只监听 `127.0.0.1`，仅按需要显式开放 `S3 API`。
 
+软路由场景建议同时把 `CCBG_DATA_PLANE_MAX_IN_FLIGHT` 控制在 `2~4`，让数据面在并发超限时直接返回 `503`，而不是在小内存宿主上继续堆积请求。
+
 规划中的同步拓扑:
 
 - `CCBG_PRIMARY_PROVIDER` 指定唯一写入主云盘
@@ -182,6 +184,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - Admin Web 的 `Target Status` 表格现在可对某个 target 的 latest failed jobs 执行 `Retry Failed`
 - Admin Web 现在额外提供 `Latest Failed Objects` 视图，可按 target 过滤当前仍失败的对象，并导出 JSON / CSV
 - Admin Web 现在额外提供 `Operations Overview` 总览卡，集中显示当前主写 provider、异步备份 / fallback 拓扑、复制积压年龄、latest failed object 年龄和 notify 新鲜度
+- `Operations Overview` 还会显示数据面并发上限与当前剩余 permit，便于软路由场景快速判断是否需要继续收紧 `CCBG_DATA_PLANE_MAX_IN_FLIGHT`
 - `Latest Failed Objects` 现已支持对象关键字和时间窗口过滤，`Monitoring Summary` / notify webhook 也会附带当前 latest failed 对象摘要
 - `POST /api/replication/jobs/{job_id}/retry` 只允许重试该对象在对应 target 上“当前最新的一条 failed job”
 - `POST /api/replication/targets/{target}/retry-failed` 只会重试该 target 上“当前仍然是最新状态”的 failed jobs
