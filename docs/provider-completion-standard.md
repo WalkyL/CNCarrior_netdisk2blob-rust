@@ -154,7 +154,7 @@
 当前仍可继续优化，但不再属于“没做到满”:
 
 - `rename` 仍保持“同父目录改名”边界。
-- 共享对象动作历史当前仍是轻量审计模型: 只保留最近 12 条，已支持 operator / object / provider / outcome / action 筛选与 JSON/CSV 导出，但还没有时间范围筛选或外部系统联动。
+- 共享对象动作历史当前仍是轻量审计模型: 只保留最近 12 条，已支持 operator / object / provider / outcome / action / time-window 筛选与 JSON/CSV 导出，但还没有外部系统联动。
 - 缺少真实账号的自动化 E2E 回归。
 
 如果要把 `unicom` 作为正式生产主写 provider 上线，建议最后再走一遍:

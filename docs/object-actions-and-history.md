@@ -36,6 +36,7 @@
 - 服务端持久化共享历史
 - 历史筛选、JSON/CSV 导出、清空
 - operator / ticket / notes 审计字段
+- 控制面自动刷新
 
 当前共享历史的几个关键事实:
 
@@ -227,6 +228,7 @@ OneDrive 当前已经支持:
 - primary provider 筛选
 - operator 筛选
 - bucket/key 检索
+- 时间范围筛选
 - 导出当前筛选结果
 - 导出 CSV
 - 清空整份共享历史
@@ -237,7 +239,24 @@ OneDrive 当前已经支持:
 - 不是“当前浏览器 tab 的私有状态”
 - 不是“某一个操作者的个人历史”
 
-### 5.5 导出
+### 5.5 控制面自动刷新
+
+Admin Web 顶部现在提供:
+
+- `Auto-refresh dashboard`
+- `Refresh Every (s)`
+- `Last refresh` 状态摘要
+
+这套自动刷新默认只轮询 `GET /api/status`，用于持续观察:
+
+- provider health
+- replication queue
+- runtime 摘要
+- 共享历史
+
+为了避免干扰操作中的表单，自动刷新不会在后台每一轮都强制重载 provider credentials 和 pending verification prompts；这些区域仍以手工触发或显式动作后的刷新为主。
+
+### 5.6 导出
 
 点击 `Export Shared History` 会导出一份 JSON 文件。
 
@@ -262,7 +281,7 @@ OneDrive 当前已经支持:
 - 在表格工具里筛选 operator / ticket / object
 - 做阶段性复盘
 
-### 5.6 清空
+### 5.7 清空
 
 点击 `Clear Shared History` 会调用:
 
@@ -424,7 +443,6 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 
 这部分不是“缺功能”，而是后续可以继续增强:
 
-- 支持按时间范围筛选
 - 审计字段与外部变更/告警系统联动
 - 更细粒度的聚合统计视图
 - 接入真实账号 E2E 回归
@@ -432,5 +450,5 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 如果后续要继续提升“联通做到满”的运维质量，优先级最高的是:
 
 1. 真实账号 E2E
-2. 时间范围筛选
-3. 审计字段对接外部系统
+2. 审计字段对接外部系统
+3. 更细粒度聚合视图

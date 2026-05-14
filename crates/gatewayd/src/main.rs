@@ -2992,6 +2992,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     .history-card {{ border:1px solid var(--border); border-radius: 14px; background:#fffef9; padding: 12px; }}
     .history-card h4 {{ margin:0; font-size:15px; }}
     .history-toolbar {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 12px; }}
+    .inline-controls {{ display:flex; flex-wrap:wrap; gap: 12px; align-items:center; margin-top: 12px; }}
   </style>
 </head>
 <body>
@@ -3002,6 +3003,13 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       <a class="cta" href="/api/auth/onedrive/web/start">Connect OneDrive In Browser</a>
       <button class="secondary" id="device-start">Start Device Code</button>
       <button class="secondary" id="reload-status">Refresh Status</button>
+    </div>
+    <div class="inline-controls">
+      <label><input id="status-auto-refresh-enabled" type="checkbox" checked /> Auto-refresh dashboard</label>
+      <label>Refresh Every (s)
+        <input id="status-auto-refresh-interval-seconds" type="number" min="5" step="5" value="15" style="width:96px; margin-left:8px;" />
+      </label>
+      <div id="status-refresh-summary" class="hint">Auto-refreshing dashboard every 15s.</div>
     </div>
     <div class="grid">
       <section class="card">
@@ -3200,6 +3208,14 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
           <label>History Object Filter</label>
           <input id="object-action-history-object-filter" type="text" placeholder="family/shared/note.txt" />
         </div>
+        <div>
+          <label>History Start Time</label>
+          <input id="object-action-history-start-filter" type="datetime-local" />
+        </div>
+        <div>
+          <label>History End Time</label>
+          <input id="object-action-history-end-filter" type="datetime-local" />
+        </div>
       </div>
       <div class="actions">
         <button id="clear-object-action-history" class="secondary" type="button">Clear Shared History</button>
@@ -3359,6 +3375,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     let authPromptState = new Map();
     let objectActionHistory = [];
     let objectActionHistoryLimit = {DEFAULT_OBJECT_ACTION_HISTORY_LIMIT};
+    let statusAutoRefreshTimer = null;
+    let statusRefreshInFlight = false;
+    let lastStatusRefreshUnixMs = null;
 
     function csvToArray(value) {{
       return value.split(',').map(part => part.trim()).filter(Boolean);
@@ -3454,6 +3473,46 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         return `${{minutes}}m ${{seconds}}s`;
       }}
       return `${{seconds}}s`;
+    }}
+    function parseDateTimeLocalToUnixMs(value) {{
+      if (!value) {{
+        return null;
+      }}
+      const parsed = new Date(value).getTime();
+      return Number.isNaN(parsed) ? null : parsed;
+    }}
+    function renderStatusRefreshSummary(errorMessage) {{
+      const enabled = !!document.getElementById('status-auto-refresh-enabled')?.checked;
+      const rawInterval = Number(document.getElementById('status-auto-refresh-interval-seconds')?.value || 15);
+      const intervalSeconds = Number.isFinite(rawInterval) && rawInterval >= 5 ? rawInterval : 15;
+      const parts = [enabled ? `Auto-refreshing dashboard every ${{intervalSeconds}}s.` : 'Auto-refresh paused.'];
+      if (lastStatusRefreshUnixMs) {{
+        parts.push(`Last refresh: ${{formatTimestamp(lastStatusRefreshUnixMs)}}.`);
+      }}
+      if (errorMessage) {{
+        parts.push(`Last error: ${{errorMessage}}.`);
+      }}
+      document.getElementById('status-refresh-summary').textContent = parts.join(' ');
+    }}
+    function stopStatusAutoRefresh() {{
+      if (statusAutoRefreshTimer) {{
+        clearInterval(statusAutoRefreshTimer);
+        statusAutoRefreshTimer = null;
+      }}
+      renderStatusRefreshSummary();
+    }}
+    function startStatusAutoRefresh() {{
+      stopStatusAutoRefresh();
+      const enabled = !!document.getElementById('status-auto-refresh-enabled')?.checked;
+      if (!enabled) {{
+        return;
+      }}
+      const rawInterval = Number(document.getElementById('status-auto-refresh-interval-seconds')?.value || 15);
+      const intervalSeconds = Number.isFinite(rawInterval) && rawInterval >= 5 ? rawInterval : 15;
+      statusAutoRefreshTimer = setInterval(() => {{
+        refreshStatus({{ lightweight: true }});
+      }}, intervalSeconds * 1000);
+      renderStatusRefreshSummary();
     }}
     function renderRuntimeSummary(runtime) {{
       const container = document.getElementById('runtime-summary');
@@ -4102,6 +4161,8 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         provider: document.getElementById('object-action-history-provider-filter').value,
         operator: document.getElementById('object-action-history-operator-filter').value.trim().toLowerCase(),
         object: document.getElementById('object-action-history-object-filter').value.trim().toLowerCase(),
+        start_unix_ms: parseDateTimeLocalToUnixMs(document.getElementById('object-action-history-start-filter').value),
+        end_unix_ms: parseDateTimeLocalToUnixMs(document.getElementById('object-action-history-end-filter').value),
       }};
     }}
     function updateObjectActionHistoryProviderFilter(history) {{
@@ -4137,6 +4198,12 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
           if (!description.includes(filters.object) && !matchesReference) {{
             return false;
           }}
+        }}
+        if (filters.start_unix_ms !== null && Number(entry.executed_at_unix_ms || 0) < filters.start_unix_ms) {{
+          return false;
+        }}
+        if (filters.end_unix_ms !== null && Number(entry.executed_at_unix_ms || 0) > filters.end_unix_ms) {{
+          return false;
         }}
         return true;
       }});
@@ -4205,7 +4272,16 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         return;
       }}
       const filteredHistory = filteredObjectActionHistory(objectActionHistory);
-      summaryNode.textContent = `Showing ${{filteredHistory.length}} of ${{objectActionHistory.length}} recent object action(s) stored on this gateway. Limit=${{objectActionHistoryLimit}}.`;
+      const filters = objectActionHistoryFilters();
+      const timeWindowSummary = [
+        filters.start_unix_ms !== null ? `start=${{formatTimestamp(filters.start_unix_ms)}}` : null,
+        filters.end_unix_ms !== null ? `end=${{formatTimestamp(filters.end_unix_ms)}}` : null,
+      ].filter(Boolean).join(' | ');
+      let summaryText = `Showing ${{filteredHistory.length}} of ${{objectActionHistory.length}} recent object action(s) stored on this gateway. Limit=${{objectActionHistoryLimit}}.`;
+      if (timeWindowSummary) {{
+        summaryText += ` Time window: ${{timeWindowSummary}}.`;
+      }}
+      summaryNode.textContent = summaryText;
       if (!filteredHistory.length) {{
         container.innerHTML = '<div class="object-meta">No shared history entries match the current filters.</div>';
         return;
@@ -4593,7 +4669,11 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       document.getElementById('onedrive-policy').textContent = JSON.stringify(payload, null, 2);
       renderOnedrivePolicySummary(payload);
     }}
-    async function refreshStatus() {{
+    async function refreshStatus(options = {{}}) {{
+      if (statusRefreshInFlight) {{
+        return;
+      }}
+      statusRefreshInFlight = true;
       try {{
         const status = await fetchJson('/api/status');
         runtimeTopologyState = status.runtime_topology || runtimeTopologyState;
@@ -4608,14 +4688,21 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         renderProviderHealth(status.provider_health || []);
         renderReplication(status.replication_state);
         renderObjectActionHistory(status.object_action_history || []);
-        loadDesiredTopology(status.desired_topology);
-        loadOnedrivePolicy(status.onedrive_policy);
-        renderAuthCapturePolicy(status.auth_capture_policy || {{}});
-        await refreshProviderCredentials();
-        await refreshAuthCapturePrompts();
+        if (!options.lightweight) {{
+          loadDesiredTopology(status.desired_topology);
+          loadOnedrivePolicy(status.onedrive_policy);
+          renderAuthCapturePolicy(status.auth_capture_policy || {{}});
+          await refreshProviderCredentials();
+          await refreshAuthCapturePrompts();
+        }}
         renderObjectActionPreview();
+        lastStatusRefreshUnixMs = Date.now();
+        renderStatusRefreshSummary();
       }} catch (error) {{
         document.getElementById('gateway-status').textContent = error.message;
+        renderStatusRefreshSummary(error.message);
+      }} finally {{
+        statusRefreshInFlight = false;
       }}
     }}
     async function startDeviceFlow() {{
@@ -4822,7 +4909,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       }}
       submitAuthCapturePrompt(replyButton.dataset.authPromptReply);
     }});
-    document.getElementById('reload-status').addEventListener('click', refreshStatus);
+    document.getElementById('reload-status').addEventListener('click', () => refreshStatus());
+    document.getElementById('status-auto-refresh-enabled').addEventListener('change', startStatusAutoRefresh);
+    document.getElementById('status-auto-refresh-interval-seconds').addEventListener('change', startStatusAutoRefresh);
     document.getElementById('device-start').addEventListener('click', startDeviceFlow);
     document.getElementById('save-topology').addEventListener('click', saveTopology);
     document.getElementById('save-onedrive-policy').addEventListener('click', saveOnedrivePolicy);
@@ -4839,6 +4928,8 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       'object-action-history-provider-filter',
       'object-action-history-operator-filter',
       'object-action-history-object-filter',
+      'object-action-history-start-filter',
+      'object-action-history-end-filter',
     ].forEach(id => {{
       const eventName = id.endsWith('-filter') && !id.includes('action-filter') && !id.includes('outcome-filter') && !id.includes('provider-filter')
         ? 'input'
@@ -4862,6 +4953,8 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     renderObjectActionEditor();
     renderObjectActionHistory();
     renderTopologyEditor();
+    renderStatusRefreshSummary();
+    startStatusAutoRefresh();
     refreshStatus();
   </script>
 </body>
@@ -10695,6 +10788,9 @@ mod tests {
         assert!(html.contains("<h2>Runtime</h2>"));
         assert!(html.contains("id=\"runtime-summary\""));
         assert!(html.contains("id=\"runtime-json\""));
+        assert!(html.contains("id=\"status-auto-refresh-enabled\""));
+        assert!(html.contains("id=\"status-auto-refresh-interval-seconds\""));
+        assert!(html.contains("id=\"status-refresh-summary\""));
         assert!(html.contains("<h2>Object Actions</h2>"));
         assert!(html.contains("id=\"object-action-kind\""));
         assert!(html.contains("id=\"run-object-action\""));
@@ -10713,13 +10809,18 @@ mod tests {
         assert!(html.contains("id=\"object-action-history-provider-filter\""));
         assert!(html.contains("id=\"object-action-history-operator-filter\""));
         assert!(html.contains("id=\"object-action-history-object-filter\""));
+        assert!(html.contains("id=\"object-action-history-start-filter\""));
+        assert!(html.contains("id=\"object-action-history-end-filter\""));
         assert!(html.contains("renderObjectActionHistory"));
+        assert!(html.contains("startStatusAutoRefresh"));
+        assert!(html.contains("stopStatusAutoRefresh"));
         assert!(html.contains("id=\"clear-object-action-history\""));
         assert!(html.contains("id=\"export-object-action-history\""));
         assert!(html.contains("id=\"export-object-action-history-csv\""));
         assert!(html.contains("Clear Shared History"));
         assert!(html.contains("downloadObjectActionHistory"));
         assert!(html.contains("downloadObjectActionHistoryCsv"));
+        assert!(html.contains("Auto-refreshing dashboard"));
         assert!(html.contains("renderObjectActionHistory(status.object_action_history || [])"));
         assert!(!html.contains("function loadObjectActionHistory("));
         assert!(html.contains("Changes"));
