@@ -437,6 +437,12 @@
 - 按 `x-ccbg-notify-event-id` 做幂等去重
 - 可直接参考 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 与 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)
 
+复制失败告警阈值说明:
+
+- `monitoring.latest_failed_objects` 会完整返回当前 latest-only 失败对象摘要
+- `alerts` 里的复制失败告警则会受 `CCBG_REPLICATION_FAILED_ALERT_THRESHOLD` 和 `CCBG_REPLICATION_FAILED_ALERT_MIN_AGE_MS` 控制
+- 也就是“摘要可见”和“正式告警触发”现在是分开的，方便值守时既看全量现状，又减少瞬时噪声
+
 ### 6.5 object_action_history_limit
 
 类型:
@@ -476,6 +482,26 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 
 - 指定 control-plane 状态文件路径
 - 对象动作共享历史会持久化在这里
+
+### 7.3 CCBG_REPLICATION_FAILED_ALERT_THRESHOLD
+
+用途:
+
+- 控制 latest failed objects 达到多少个时才触发复制失败告警
+
+默认值:
+
+- `1`
+
+### 7.4 CCBG_REPLICATION_FAILED_ALERT_MIN_AGE_MS
+
+用途:
+
+- 控制失败对象至少持续多久后才参与复制失败告警统计
+
+默认值:
+
+- `0`
 
 ## 8. 行为约束
 

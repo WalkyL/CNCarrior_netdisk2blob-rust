@@ -188,6 +188,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `CCBG_NOTIFY_WEBHOOK_URL` 配置后，后台会按 `CCBG_NOTIFY_POLL_INTERVAL_SECONDS` 周期检查 alerts
 - 仅当 alerts 集合发生变化时才发送 webhook，避免轮询风暴
 - webhook 请求体包含 `runtime`、`monitoring` 和 `alerts`
+- 复制失败告警现在支持 `CCBG_REPLICATION_FAILED_ALERT_THRESHOLD` 和 `CCBG_REPLICATION_FAILED_ALERT_MIN_AGE_MS` 两个生产化阈值，避免刚失败就立刻噪声告警
 - webhook 总会附带 `x-ccbg-notify-event-id` 与 `x-ccbg-notify-timestamp`
 - 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，还会附带 `x-ccbg-notify-signature-version=v1` 与 `x-ccbg-notify-signature`
 - 建议接收端按 `event_id + timestamp` 做幂等与时间窗校验；可直接参考 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 和 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)

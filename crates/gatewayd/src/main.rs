@@ -862,6 +862,8 @@ struct AppConfig {
     notify_webhook_url: Option<String>,
     notify_webhook_signing_secret: Option<String>,
     notify_poll_interval_seconds: u64,
+    replication_failed_alert_threshold: usize,
+    replication_failed_alert_min_age_ms: u64,
     control_plane_file: String,
     credentials_dir: String,
     browser_flow_catalog_dir: String,
@@ -1312,6 +1314,15 @@ impl AppConfig {
                 "CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET_FILE",
             ),
             notify_poll_interval_seconds: env_u64("CCBG_NOTIFY_POLL_INTERVAL_SECONDS", 15).max(5),
+            replication_failed_alert_threshold: env_usize(
+                "CCBG_REPLICATION_FAILED_ALERT_THRESHOLD",
+                1,
+            )
+            .max(1),
+            replication_failed_alert_min_age_ms: env_u64(
+                "CCBG_REPLICATION_FAILED_ALERT_MIN_AGE_MS",
+                0,
+            ),
             control_plane_file: env_or("CCBG_CONTROL_PLANE_FILE", "./data/control-plane.json"),
             credentials_dir: env_or("CCBG_CREDENTIALS_DIR", "./data/provider-credentials"),
             browser_flow_catalog_dir: env_or(
@@ -3061,6 +3072,7 @@ fn build_admin_alerts(
 ) -> Vec<AdminAlertPayload> {
     let mut alerts = Vec::new();
     let topology = runtime_topology(state);
+    let now_unix_ms = current_unix_ms();
 
     for provider in provider_health {
         let notes = if provider.health.notes.is_empty() {
@@ -3087,15 +3099,26 @@ fn build_admin_alerts(
         }
     }
 
-    if replication_state.persisted.failed_count > 0 {
+    let matured_failed_objects = replication_state
+        .latest_failed_jobs
+        .iter()
+        .filter(|job| {
+            now_unix_ms.saturating_sub(job.enqueued_at_unix_ms as u64)
+                >= state.config.replication_failed_alert_min_age_ms
+        })
+        .count();
+    if matured_failed_objects >= state.config.replication_failed_alert_threshold {
         alerts.push(AdminAlertPayload {
             severity: "error",
             title: format!(
-                "{} replication jobs failed",
-                replication_state.persisted.failed_count
+                "{} latest failed replication object(s) exceeded alert threshold",
+                matured_failed_objects
             ),
-            detail: "Check the recent replication jobs table for the latest error details."
-                .to_string(),
+            detail: format!(
+                "threshold={} min_age_ms={} | Check Latest Failed Objects or recent replication jobs for details.",
+                state.config.replication_failed_alert_threshold,
+                state.config.replication_failed_alert_min_age_ms
+            ),
         });
     }
 
@@ -10051,6 +10074,8 @@ mod tests {
             notify_webhook_url: None,
             notify_webhook_signing_secret: None,
             notify_poll_interval_seconds: 15,
+            replication_failed_alert_threshold: 1,
+            replication_failed_alert_min_age_ms: 0,
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
             credentials_dir: temp_db_path().replace(".db", "-provider-credentials"),
             browser_flow_catalog_dir,
@@ -10617,7 +10642,11 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
         let received_guard = received.lock().expect("received webhook list poisoned");
         assert_eq!(received_guard.len(), 2);
-        assert!(received_guard[1].body.contains("replication jobs failed"));
+        assert!(
+            received_guard[1]
+                .body
+                .contains("latest failed replication object")
+        );
         assert!(received_guard[1].event_id.is_some());
         assert!(received_guard[1].timestamp.is_some());
         assert!(received_guard[1].signature.is_none());
@@ -10883,6 +10912,96 @@ mod tests {
                 .alerts
                 .iter()
                 .any(|alert| alert.title.contains("Replication workers"))
+        );
+    }
+
+    #[tokio::test]
+    async fn replication_failed_alert_honors_minimum_failure_age() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).replication_failed_alert_min_age_ms = 60_000;
+
+        let now_unix_ms = current_unix_ms();
+        let job = ReplicationJob {
+            job_id: 1,
+            target: ProviderId::Onedrive.as_str().to_string(),
+            source_provider: Some(ProviderId::Stub.as_str().to_string()),
+            operation: ReplicationOperation::Put,
+            object: replication_engine::ReplicationObjectRef {
+                bucket: "root".to_string(),
+                key: "alerts/too-fresh.txt".to_string(),
+                etag: None,
+                size: Some(7),
+                content_type: Some("text/plain".to_string()),
+            },
+            status: ReplicationStatus::Failed,
+            attempts: 1,
+            enqueued_at_unix_ms: u128::from(now_unix_ms.saturating_sub(1_000)),
+            next_attempt_at_unix_ms: None,
+            last_error: Some("temporary outage".to_string()),
+        };
+        state
+            .metadata_store
+            .enqueue_jobs(&[job])
+            .expect("fresh failed job should persist");
+
+        let Json(status) = admin_status(State(state))
+            .await
+            .expect("admin status should succeed");
+
+        assert_eq!(status.monitoring.latest_failed_objects.len(), 1);
+        assert!(
+            status
+                .alerts
+                .iter()
+                .all(|alert| !alert.title.contains("latest failed replication object"))
+        );
+    }
+
+    #[tokio::test]
+    async fn replication_failed_alert_honors_threshold() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).replication_failed_alert_threshold = 2;
+
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "alerts/threshold-one.txt",
+            Some(7),
+            Some("text/plain"),
+        );
+
+        let Json(status_below_threshold) = admin_status(State(state.clone()))
+            .await
+            .expect("admin status should succeed below threshold");
+        assert!(
+            status_below_threshold
+                .alerts
+                .iter()
+                .all(|alert| !alert.title.contains("latest failed replication object"))
+        );
+
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "alerts/threshold-two.txt",
+            Some(7),
+            Some("text/plain"),
+        );
+
+        let Json(status_above_threshold) = admin_status(State(state))
+            .await
+            .expect("admin status should succeed above threshold");
+        assert!(
+            status_above_threshold
+                .alerts
+                .iter()
+                .any(|alert| alert.title.contains("latest failed replication object"))
         );
     }
 

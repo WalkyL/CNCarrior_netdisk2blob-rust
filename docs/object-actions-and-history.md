@@ -310,6 +310,18 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 
 当前这些计数按“每个对象在每个 target 上的最新状态”统计，不会把已经被后续成功 job 覆盖的旧失败继续算进当前失败数。
 
+当前复制失败告警还支持两个环境变量:
+
+- `CCBG_REPLICATION_FAILED_ALERT_THRESHOLD`
+- `CCBG_REPLICATION_FAILED_ALERT_MIN_AGE_MS`
+
+语义是:
+
+- 只有达到阈值数量的 latest failed objects 时，才会触发复制失败告警
+- 只有失败年龄超过 `MIN_AGE_MS` 的对象，才会参与这条告警统计
+
+这两个参数的目的，是避免短暂抖动、瞬时失败或刚入队失败立刻把值守渠道打满。
+
 ### 5.8 Notify
 
 Admin Web 现在额外提供 `Notify` 卡片，显示:
