@@ -228,6 +228,12 @@
 - `provider_health`
 - `replication_state`
 
+`replication_state` 当前除了 `persisted.recent_jobs` 和 `target_statuses`，还会额外返回:
+
+- `latest_failed_jobs`: 只包含“每个 target + bucket + key 当前最新状态仍为 failed”的对象级失败视图
+
+这个字段的用途是给 Admin Web 的 `Latest Failed Objects` 表格和 JSON / CSV 导出使用，避免运维在 `recent_jobs` 历史里手工排除已经被后续成功覆盖的旧失败。
+
 ### 6.1 runtime
 
 类型:

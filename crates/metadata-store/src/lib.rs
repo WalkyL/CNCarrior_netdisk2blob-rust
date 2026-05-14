@@ -433,6 +433,53 @@ impl MetadataStore {
             .map_err(MetadataError::Sqlite)
     }
 
+    pub fn latest_failed_jobs(
+        &self,
+        target: Option<&str>,
+    ) -> Result<Vec<ReplicationJob>, MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        let sql_all = "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+                 FROM replication_jobs jobs
+                 INNER JOIN (
+                    SELECT target, bucket, key, MAX(job_id) AS max_job_id
+                    FROM replication_jobs
+                    GROUP BY target, bucket, key
+                 ) latest
+                 ON latest.max_job_id = jobs.job_id
+                 WHERE jobs.status = 'failed'
+                 ORDER BY jobs.job_id DESC";
+        let sql_target = "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+                 FROM replication_jobs jobs
+                 INNER JOIN (
+                    SELECT target, bucket, key, MAX(job_id) AS max_job_id
+                    FROM replication_jobs
+                    WHERE target = ?1
+                    GROUP BY target, bucket, key
+                 ) latest
+                 ON latest.max_job_id = jobs.job_id
+                 WHERE jobs.target = ?1 AND jobs.status = 'failed'
+                 ORDER BY jobs.job_id DESC";
+
+        let mut statement = connection
+            .prepare(if target.is_some() {
+                sql_target
+            } else {
+                sql_all
+            })
+            .map_err(MetadataError::Sqlite)?;
+        let rows = match target {
+            Some(target) => statement
+                .query_map([target], row_to_job)
+                .map_err(MetadataError::Sqlite)?,
+            None => statement
+                .query_map([], row_to_job)
+                .map_err(MetadataError::Sqlite)?,
+        };
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(MetadataError::Sqlite)
+    }
+
     pub fn fallback_readable_buckets(&self, target: &str) -> Result<Vec<String>, MetadataError> {
         let connection = self.connection.lock().expect("metadata store poisoned");
         let mut statement = connection
@@ -1028,6 +1075,60 @@ mod tests {
         assert_eq!(snapshot.pending_count, 1);
         assert_eq!(snapshot.completed_count, 1);
         assert_eq!(snapshot.failed_count, 1);
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn latest_failed_jobs_only_return_current_failed_object_states() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut latest_failed = sample_job(40);
+        latest_failed.object.key = "failed/latest.txt".to_string();
+        latest_failed.status = ReplicationStatus::Failed;
+        latest_failed.last_error = Some("latest failure".to_string());
+
+        let mut stale_failed = sample_job(41);
+        stale_failed.object.key = "failed/stale.txt".to_string();
+        stale_failed.status = ReplicationStatus::Failed;
+
+        let mut stale_completed = sample_job(42);
+        stale_completed.object.key = "failed/stale.txt".to_string();
+        stale_completed.status = ReplicationStatus::Completed;
+
+        let mut telecom_failed = sample_job(43);
+        telecom_failed.target = "telecom".to_string();
+        telecom_failed.object.key = "failed/telecom.txt".to_string();
+        telecom_failed.status = ReplicationStatus::Failed;
+
+        let mut pending_job = sample_job(44);
+        pending_job.object.key = "failed/pending.txt".to_string();
+        pending_job.status = ReplicationStatus::Pending;
+
+        store
+            .enqueue_jobs(&[
+                latest_failed,
+                stale_failed,
+                stale_completed,
+                telecom_failed,
+                pending_job,
+            ])
+            .expect("jobs should persist");
+
+        let failed_jobs = store
+            .latest_failed_jobs(None)
+            .expect("latest failed jobs should load");
+        assert_eq!(failed_jobs.len(), 2);
+        assert_eq!(failed_jobs[0].job_id, 43);
+        assert_eq!(failed_jobs[1].job_id, 40);
+
+        let onedrive_only = store
+            .latest_failed_jobs(Some("onedrive"))
+            .expect("target-filtered failed jobs should load");
+        assert_eq!(onedrive_only.len(), 1);
+        assert_eq!(onedrive_only[0].job_id, 40);
+        assert_eq!(onedrive_only[0].object.key, "failed/latest.txt");
 
         fs::remove_file(db_path).ok();
     }

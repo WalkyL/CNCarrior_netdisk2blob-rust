@@ -277,11 +277,14 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 
 `Replication Queue -> Target Status` 表格现在还会在某个 target 仍有 latest failed jobs 时显示 `Retry Failed`。
 
+`Replication Queue -> Latest Failed Objects` 现在会列出“当前仍失败”的对象视图，而不是简单按时间回看最近 job 历史。
+
 当前规则:
 
 - 只允许重试 `failed` 状态的 job
 - 只允许重试该 `target + bucket + key` 上当前最新的一条 failed job
 - 按 target 的 `Retry Failed` 只会批量重试该 target 上“当前最新状态仍是 failed”的对象
+- `Latest Failed Objects` 也只展示这些“当前最新状态仍是 failed”的对象
 - 重试后该 job 会重新变成 `pending`
 - 重试会清空 `last_error`、`next_retry`，并重新进入内存队列
 - 已被后续成功、排队或重试中的新 job 覆盖的旧失败，不会被批量重试重新塞回队列
@@ -292,6 +295,7 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 
 - 先在 `Monitoring Summary` 或 `Notify` 中看到复制失败
 - 再到 `Recent Jobs` 或 `Target Status` 查看最新错误
+- 如需导出当前失败对象清单，可直接用 `Latest Failed Objects` 的 JSON / CSV 导出
 - 修正凭证、网络、target 配置后，点 `Retry` 或 `Retry Failed`
 - 观察 `pending / retry / failed` 计数是否回落
 

@@ -1390,6 +1390,7 @@ struct ReplicationStatePayload {
     in_memory: ReplicationSnapshot,
     persisted: MetadataSnapshot,
     target_statuses: Vec<ReplicationTargetStatusPayload>,
+    latest_failed_jobs: Vec<ReplicationJob>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2967,11 +2968,16 @@ fn replication_state_payload(state: &AppState) -> Result<ReplicationStatePayload
         .snapshot(state.config.metadata_snapshot_recent_limit)
         .map_err(|error| BlobError::Upstream(error.to_string()))?;
     let target_statuses = build_replication_target_status_payloads(state, &persisted);
+    let latest_failed_jobs = state
+        .metadata_store
+        .latest_failed_jobs(None)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
 
     Ok(ReplicationStatePayload {
         in_memory: state.replication.snapshot(),
         persisted,
         target_statuses,
+        latest_failed_jobs,
     })
 }
 
@@ -3472,6 +3478,20 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         <h3>Target Status</h3>
         <div id="replication-targets" class="table-wrap"></div>
       </div>
+      <div style="margin-top: 16px;">
+        <h3>Latest Failed Objects</h3>
+        <div class="inline-controls">
+          <label>Target
+            <select id="replication-failed-target-filter">
+              <option value="all">all</option>
+            </select>
+          </label>
+          <button id="export-replication-failed-json" class="secondary" type="button">Export Failed JSON</button>
+          <button id="export-replication-failed-csv" class="secondary" type="button">Export Failed CSV</button>
+        </div>
+        <div id="replication-failed-summary" class="hint">No latest failed objects.</div>
+        <div id="replication-failed" class="table-wrap"></div>
+      </div>
       <div class="queue-layout">
         <div>
           <h3>Pending Jobs</h3>
@@ -3778,6 +3798,13 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     let authPromptState = new Map();
     let objectActionHistory = [];
     let objectActionHistoryLimit = {DEFAULT_OBJECT_ACTION_HISTORY_LIMIT};
+    let latestFailedJobs = [];
+    let replicationStateSnapshot = {{
+      in_memory: {{ pending_jobs: [] }},
+      persisted: {{ recent_jobs: [] }},
+      target_statuses: [],
+      latest_failed_jobs: [],
+    }};
     let statusAutoRefreshTimer = null;
     let statusRefreshInFlight = false;
     let lastStatusRefreshUnixMs = null;
@@ -4292,6 +4319,12 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       if (!replicationState) {{
         return;
       }}
+      replicationStateSnapshot.in_memory = replicationState.in_memory || {{ pending_jobs: [] }};
+      replicationStateSnapshot.persisted = replicationState.persisted || {{ recent_jobs: [] }};
+      replicationStateSnapshot.target_statuses = replicationState.target_statuses || [];
+      replicationStateSnapshot.latest_failed_jobs = replicationState.latest_failed_jobs || [];
+      latestFailedJobs.splice(0, latestFailedJobs.length, ...((replicationState.latest_failed_jobs || [])));
+      updateReplicationFailedTargetFilter(latestFailedJobs);
       document.getElementById('replication-metrics').innerHTML = `
         <div class="metric-card">
           <div>In-memory Pending</div>
@@ -4363,6 +4396,52 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       }}
       renderJobsTable('replication-pending', (replicationState.in_memory.pending_jobs || []).slice(0, 12));
       renderJobsTable('replication-recent', (replicationState.persisted.recent_jobs || []).slice(0, 12));
+
+      const failedJobs = filteredReplicationFailedJobs(latestFailedJobs);
+      const failedSummary = document.getElementById('replication-failed-summary');
+      const failedNode = document.getElementById('replication-failed');
+      const targetFilter = document.getElementById('replication-failed-target-filter').value || 'all';
+      failedSummary.textContent = `${{failedJobs.length}} latest failed object entr${{failedJobs.length === 1 ? 'y' : 'ies'}}${{targetFilter === 'all' ? '' : ` for ${{providerLabel(targetFilter)}}`}}.`;
+      if (!failedJobs.length) {{
+        failedNode.innerHTML = `
+          <table>
+            <tbody>
+              <tr><td>No latest failed objects for the current filter.</td></tr>
+            </tbody>
+          </table>
+        `;
+        return;
+      }}
+      failedNode.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Route</th>
+              <th>Object</th>
+              <th>Attempts</th>
+              <th>Queued</th>
+              <th>Next Retry</th>
+              <th>Error</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${{failedJobs.map(job => `
+              <tr>
+                <td class="mono">${{job.job_id}}</td>
+                <td class="mono">${{escapeHtml(job.source_provider || 'n/a')}} → ${{escapeHtml(job.target)}}</td>
+                <td class="mono">${{escapeHtml(job.object.bucket)}}/${{escapeHtml(job.object.key)}}</td>
+                <td>${{job.attempts || 0}}</td>
+                <td>${{escapeHtml(formatTimestamp(job.enqueued_at_unix_ms))}}</td>
+                <td>${{escapeHtml(formatTimestamp(job.next_attempt_at_unix_ms))}}</td>
+                <td>${{escapeHtml(job.last_error || '') || 'None'}}</td>
+                <td><button class="secondary" type="button" data-retry-replication-job="${{job.job_id}}">Retry</button></td>
+              </tr>
+            `).join('')}}
+          </tbody>
+        </table>
+      `;
     }}
     function renderObjectStatus(payload) {{
       document.getElementById('object-status-json').textContent = JSON.stringify(payload, null, 2);
@@ -4721,6 +4800,66 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     function csvEscape(value) {{
       const raw = value === null || value === undefined ? '' : String(value);
       return `"${{raw.replaceAll('"', '""')}}"`;
+    }}
+    function updateReplicationFailedTargetFilter(jobs) {{
+      const node = document.getElementById('replication-failed-target-filter');
+      const previous = node.value || 'all';
+      const targets = dedupe((jobs || []).map(job => job.target).filter(Boolean));
+      node.innerHTML = ['all', ...targets]
+        .map(target => `<option value="${{escapeHtml(target)}}">${{escapeHtml(target === 'all' ? 'all' : providerLabel(target))}}</option>`)
+        .join('');
+      node.value = targets.includes(previous) || previous === 'all' ? previous : 'all';
+    }}
+    function filteredReplicationFailedJobs(jobs) {{
+      const target = document.getElementById('replication-failed-target-filter').value || 'all';
+      return (jobs || []).filter(job => target === 'all' || job.target === target);
+    }}
+    function downloadReplicationFailedJobs() {{
+      const filtered = filteredReplicationFailedJobs(latestFailedJobs);
+      const payload = {{
+        exported_at: new Date().toISOString(),
+        target_filter: document.getElementById('replication-failed-target-filter').value || 'all',
+        jobs: filtered,
+      }};
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {{ type: 'application/json' }});
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `replication-latest-failed-${{Date.now()}}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setReplicationFeedback(`Exported ${{filtered.length}} latest failed object entr${{filtered.length === 1 ? 'y' : 'ies'}}.`, 'ok');
+    }}
+    function downloadReplicationFailedJobsCsv() {{
+      const filtered = filteredReplicationFailedJobs(latestFailedJobs);
+      const rows = [
+        ['job_id', 'target', 'source_provider', 'operation', 'bucket', 'key', 'attempts', 'queued_at', 'next_retry_at', 'last_error'],
+        ...filtered.map(job => [
+          job.job_id,
+          job.target || '',
+          job.source_provider || '',
+          job.operation || '',
+          job.object?.bucket || '',
+          job.object?.key || '',
+          job.attempts || 0,
+          formatTimestamp(job.enqueued_at_unix_ms),
+          formatTimestamp(job.next_attempt_at_unix_ms),
+          job.last_error || '',
+        ]),
+      ];
+      const csv = rows.map(row => row.map(csvEscape).join(',')).join('\n');
+      const blob = new Blob([csv], {{ type: 'text/csv;charset=utf-8' }});
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `replication-latest-failed-${{Date.now()}}.csv`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setReplicationFeedback(`Exported ${{filtered.length}} latest failed object entr${{filtered.length === 1 ? 'y' : 'ies'}} as CSV.`, 'ok');
     }}
     function downloadObjectActionHistory() {{
       const filtered = filteredObjectActionHistory(objectActionHistory);
@@ -5410,6 +5549,13 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       }}
       retryReplicationJob(button.dataset.retryReplicationJob);
     }});
+    document.getElementById('replication-failed').addEventListener('click', event => {{
+      const button = event.target.closest('button[data-retry-replication-job]');
+      if (!button) {{
+        return;
+      }}
+      retryReplicationJob(button.dataset.retryReplicationJob);
+    }});
     document.getElementById('replication-targets').addEventListener('click', event => {{
       const button = event.target.closest('button[data-retry-replication-target]');
       if (!button) {{
@@ -5448,6 +5594,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     document.getElementById('clear-object-action-history').addEventListener('click', clearObjectActionHistory);
     document.getElementById('export-object-action-history').addEventListener('click', downloadObjectActionHistory);
     document.getElementById('export-object-action-history-csv').addEventListener('click', downloadObjectActionHistoryCsv);
+    document.getElementById('export-replication-failed-json').addEventListener('click', downloadReplicationFailedJobs);
+    document.getElementById('export-replication-failed-csv').addEventListener('click', downloadReplicationFailedJobsCsv);
+    document.getElementById('replication-failed-target-filter').addEventListener('change', () => renderReplication(replicationStateSnapshot));
     [
       'object-action-history-action-filter',
       'object-action-history-outcome-filter',
@@ -11845,10 +11994,17 @@ mod tests {
         assert!(html.contains("id=\"monitoring-failures\""));
         assert!(html.contains("renderMonitoringSummary"));
         assert!(html.contains("id=\"replication-feedback\""));
+        assert!(html.contains("id=\"replication-failed-target-filter\""));
+        assert!(html.contains("id=\"replication-failed-summary\""));
+        assert!(html.contains("id=\"replication-failed\""));
+        assert!(html.contains("id=\"export-replication-failed-json\""));
+        assert!(html.contains("id=\"export-replication-failed-csv\""));
         assert!(html.contains("data-retry-replication-job"));
         assert!(html.contains("retryReplicationJob"));
         assert!(html.contains("data-retry-replication-target"));
         assert!(html.contains("retryFailedReplicationTarget"));
+        assert!(html.contains("downloadReplicationFailedJobs"));
+        assert!(html.contains("downloadReplicationFailedJobsCsv"));
         assert!(html.contains("id=\"status-auto-refresh-enabled\""));
         assert!(html.contains("id=\"status-auto-refresh-interval-seconds\""));
         assert!(html.contains("id=\"status-refresh-summary\""));
@@ -11949,6 +12105,53 @@ mod tests {
         assert_eq!(snapshot.target_statuses.len(), 1);
         assert_eq!(snapshot.target_statuses[0].provider, "onedrive");
         assert_eq!(snapshot.target_statuses[0].queued_count, 1);
+        assert!(snapshot.latest_failed_jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replication_snapshot_exposes_latest_failed_jobs_only() {
+        let state = test_state();
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "failed/current.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "failed/stale.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Completed,
+            "root",
+            "failed/stale.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+
+        let Json(snapshot) = replication_snapshot(State(state))
+            .await
+            .expect("replication snapshot should succeed");
+
+        assert_eq!(snapshot.latest_failed_jobs.len(), 1);
+        assert_eq!(snapshot.latest_failed_jobs[0].target, "onedrive");
+        assert_eq!(
+            snapshot.latest_failed_jobs[0].object.key,
+            "failed/current.txt"
+        );
     }
 
     #[tokio::test]
