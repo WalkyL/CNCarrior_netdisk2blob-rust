@@ -279,6 +279,13 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 
 `Replication Queue -> Latest Failed Objects` 现在会列出“当前仍失败”的对象视图，而不是简单按时间回看最近 job 历史。
 
+这块视图现在额外支持:
+
+- 按 target 过滤
+- 按对象路径 / 错误关键字过滤
+- 按时间窗口过滤
+- JSON / CSV 导出当前筛选结果
+
 当前规则:
 
 - 只允许重试 `failed` 状态的 job
@@ -298,6 +305,8 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 - 如需导出当前失败对象清单，可直接用 `Latest Failed Objects` 的 JSON / CSV 导出
 - 修正凭证、网络、target 配置后，点 `Retry` 或 `Retry Failed`
 - 观察 `pending / retry / failed` 计数是否回落
+
+`Monitoring Summary` 和 notify webhook 现在也会附带一份 `latest failed objects` 摘要，方便外部值守系统直接消费当前失败对象集合，而不是自己从 recent job 历史推断。
 
 当前这些计数按“每个对象在每个 target 上的最新状态”统计，不会把已经被后续成功 job 覆盖的旧失败继续算进当前失败数。
 

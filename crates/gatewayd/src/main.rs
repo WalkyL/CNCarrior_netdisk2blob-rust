@@ -442,6 +442,7 @@ struct MonitoringSummaryPayload {
     provider_summary: MonitoringProviderSummaryPayload,
     replication: MonitoringReplicationSummaryPayload,
     object_actions: MonitoringObjectActionSummaryPayload,
+    latest_failed_objects: Vec<MonitoringFailurePayload>,
     recent_failures: Vec<MonitoringFailurePayload>,
 }
 
@@ -560,6 +561,7 @@ fn monitoring_summary_payload(
     let mut operators = BTreeSet::new();
     let mut last_action_at_unix_ms: Option<u64> = None;
     let mut recent_failures = Vec::new();
+    let mut latest_failed_objects = Vec::new();
 
     for entry in object_action_history {
         if entry.outcome == "success" {
@@ -607,6 +609,29 @@ fn monitoring_summary_payload(
         });
     }
 
+    for job in &replication_state.latest_failed_jobs {
+        latest_failed_objects.push(MonitoringFailurePayload {
+            kind: "replication_job",
+            provider: job.source_provider.clone(),
+            action: Some(job.operation.as_str().to_string()),
+            target: Some(job.target.clone()),
+            object: Some(format!("{}/{}", job.object.bucket, job.object.key)),
+            occurred_at_unix_ms: Some(job.enqueued_at_unix_ms as u64),
+            message: job
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "replication job failed without error detail".to_string()),
+        });
+    }
+
+    latest_failed_objects.sort_by(|left, right| {
+        right
+            .occurred_at_unix_ms
+            .unwrap_or(0)
+            .cmp(&left.occurred_at_unix_ms.unwrap_or(0))
+    });
+    latest_failed_objects.truncate(8);
+
     recent_failures.sort_by(|left, right| {
         right
             .occurred_at_unix_ms
@@ -636,6 +661,7 @@ fn monitoring_summary_payload(
             unique_operators: operators.len(),
             last_action_at_unix_ms,
         },
+        latest_failed_objects,
         recent_failures,
     }
 }
@@ -3486,6 +3512,15 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
               <option value="all">all</option>
             </select>
           </label>
+          <label>Object
+            <input id="replication-failed-object-filter" type="text" placeholder="bucket/key or error" />
+          </label>
+          <label>Start
+            <input id="replication-failed-start-filter" type="datetime-local" />
+          </label>
+          <label>End
+            <input id="replication-failed-end-filter" type="datetime-local" />
+          </label>
           <button id="export-replication-failed-json" class="secondary" type="button">Export Failed JSON</button>
           <button id="export-replication-failed-csv" class="secondary" type="button">Export Failed CSV</button>
         </div>
@@ -3985,6 +4020,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       const providerSummary = monitoring?.provider_summary || {{}};
       const replication = monitoring?.replication || {{}};
       const objectActions = monitoring?.object_actions || {{}};
+      const latestFailedObjects = monitoring?.latest_failed_objects || [];
       summaryNode.innerHTML = `
         <div class="metric-card">
           <div>Open Alerts</div>
@@ -4001,6 +4037,10 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         <div class="metric-card">
           <div>Replication Failed</div>
           <strong>${{escapeHtml(String(replication.failed_jobs ?? 0))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Latest Failed Objects</div>
+          <strong>${{escapeHtml(String(latestFailedObjects.length || 0))}}</strong>
         </div>
         <div class="metric-card">
           <div>Action Failures</div>
@@ -4400,8 +4440,21 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       const failedJobs = filteredReplicationFailedJobs(latestFailedJobs);
       const failedSummary = document.getElementById('replication-failed-summary');
       const failedNode = document.getElementById('replication-failed');
-      const targetFilter = document.getElementById('replication-failed-target-filter').value || 'all';
-      failedSummary.textContent = `${{failedJobs.length}} latest failed object entr${{failedJobs.length === 1 ? 'y' : 'ies'}}${{targetFilter === 'all' ? '' : ` for ${{providerLabel(targetFilter)}}`}}.`;
+      const filters = replicationFailedJobFilters();
+      const summaryParts = [`${{failedJobs.length}} latest failed object entr${{failedJobs.length === 1 ? 'y' : 'ies'}}`];
+      if (filters.target !== 'all') {{
+        summaryParts.push(`for ${{providerLabel(filters.target)}}`);
+      }}
+      if (filters.object) {{
+        summaryParts.push(`matching "${{filters.object}}"`);
+      }}
+      if (filters.start_unix_ms !== null) {{
+        summaryParts.push(`since ${{formatTimestamp(filters.start_unix_ms)}}`);
+      }}
+      if (filters.end_unix_ms !== null) {{
+        summaryParts.push(`until ${{formatTimestamp(filters.end_unix_ms)}}`);
+      }}
+      failedSummary.textContent = `${{summaryParts.join(' ')}}.`;
       if (!failedJobs.length) {{
         failedNode.innerHTML = `
           <table>
@@ -4810,15 +4863,42 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         .join('');
       node.value = targets.includes(previous) || previous === 'all' ? previous : 'all';
     }}
+    function replicationFailedJobFilters() {{
+      return {{
+        target: document.getElementById('replication-failed-target-filter').value || 'all',
+        object: document.getElementById('replication-failed-object-filter').value.trim().toLowerCase(),
+        start_unix_ms: parseDateTimeLocalToUnixMs(document.getElementById('replication-failed-start-filter').value),
+        end_unix_ms: parseDateTimeLocalToUnixMs(document.getElementById('replication-failed-end-filter').value),
+      }};
+    }}
     function filteredReplicationFailedJobs(jobs) {{
-      const target = document.getElementById('replication-failed-target-filter').value || 'all';
-      return (jobs || []).filter(job => target === 'all' || job.target === target);
+      const filters = replicationFailedJobFilters();
+      return (jobs || []).filter(job => {{
+        if (filters.target !== 'all' && job.target !== filters.target) {{
+          return false;
+        }}
+        if (filters.object) {{
+          const objectRef = `${{job.object?.bucket || ''}}/${{job.object?.key || ''}}`.toLowerCase();
+          const error = String(job.last_error || '').toLowerCase();
+          if (!objectRef.includes(filters.object) && !error.includes(filters.object)) {{
+            return false;
+          }}
+        }}
+        const occurredAt = Number(job.enqueued_at_unix_ms || 0);
+        if (filters.start_unix_ms !== null && occurredAt < filters.start_unix_ms) {{
+          return false;
+        }}
+        if (filters.end_unix_ms !== null && occurredAt > filters.end_unix_ms) {{
+          return false;
+        }}
+        return true;
+      }});
     }}
     function downloadReplicationFailedJobs() {{
       const filtered = filteredReplicationFailedJobs(latestFailedJobs);
       const payload = {{
         exported_at: new Date().toISOString(),
-        target_filter: document.getElementById('replication-failed-target-filter').value || 'all',
+        filters: replicationFailedJobFilters(),
         jobs: filtered,
       }};
       const blob = new Blob([JSON.stringify(payload, null, 2)], {{ type: 'application/json' }});
@@ -5597,6 +5677,14 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     document.getElementById('export-replication-failed-json').addEventListener('click', downloadReplicationFailedJobs);
     document.getElementById('export-replication-failed-csv').addEventListener('click', downloadReplicationFailedJobsCsv);
     document.getElementById('replication-failed-target-filter').addEventListener('change', () => renderReplication(replicationStateSnapshot));
+    [
+      'replication-failed-object-filter',
+      'replication-failed-start-filter',
+      'replication-failed-end-filter',
+    ].forEach(id => {{
+      const eventName = id === 'replication-failed-object-filter' ? 'input' : 'change';
+      document.getElementById(id).addEventListener(eventName, () => renderReplication(replicationStateSnapshot));
+    }});
     [
       'object-action-history-action-filter',
       'object-action-history-outcome-filter',
@@ -10767,6 +10855,15 @@ mod tests {
         assert_eq!(status.monitoring.replication.completed_jobs, 0);
         assert_eq!(status.monitoring.object_actions.total_entries, 0);
         assert_eq!(status.monitoring.object_actions.failed_entries, 0);
+        assert_eq!(status.monitoring.latest_failed_objects.len(), 1);
+        assert_eq!(
+            status.monitoring.latest_failed_objects[0].target.as_deref(),
+            Some("onedrive")
+        );
+        assert_eq!(
+            status.monitoring.latest_failed_objects[0].object.as_deref(),
+            Some("root/alerts/failure.txt")
+        );
         assert!(status.monitoring.recent_failures.len() >= 1);
         assert_eq!(status.monitoring.recent_failures[0].kind, "replication_job");
         assert!(status.monitoring.open_alert_count >= 1);
@@ -10787,6 +10884,60 @@ mod tests {
                 .iter()
                 .any(|alert| alert.title.contains("Replication workers"))
         );
+    }
+
+    #[tokio::test]
+    async fn notify_webhook_payload_includes_latest_failed_objects_summary() {
+        let (webhook_url, received, shutdown) = spawn_test_webhook_server().await;
+
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).notify_webhook_url = Some(webhook_url);
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "failed/webhook-summary.txt",
+            Some(11),
+            Some("text/plain"),
+        );
+
+        process_notify_tick(&state)
+            .await
+            .expect("notify webhook should send latest failed summary");
+
+        let request = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let guard = received
+                    .lock()
+                    .expect("received requests should not poison");
+                if let Some(request) = guard.first().cloned() {
+                    break request;
+                }
+                drop(guard);
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("webhook request should arrive");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&request.body).expect("webhook payload should decode");
+        let latest_failed_objects = payload["monitoring"]["latest_failed_objects"]
+            .as_array()
+            .expect("latest failed objects should be an array");
+        assert_eq!(latest_failed_objects.len(), 1);
+        assert_eq!(
+            latest_failed_objects[0]["object"].as_str(),
+            Some("root/failed/webhook-summary.txt")
+        );
+        assert_eq!(
+            latest_failed_objects[0]["target"].as_str(),
+            Some("onedrive")
+        );
+
+        let _ = shutdown.send(());
     }
 
     #[tokio::test]
@@ -11995,6 +12146,9 @@ mod tests {
         assert!(html.contains("renderMonitoringSummary"));
         assert!(html.contains("id=\"replication-feedback\""));
         assert!(html.contains("id=\"replication-failed-target-filter\""));
+        assert!(html.contains("id=\"replication-failed-object-filter\""));
+        assert!(html.contains("id=\"replication-failed-start-filter\""));
+        assert!(html.contains("id=\"replication-failed-end-filter\""));
         assert!(html.contains("id=\"replication-failed-summary\""));
         assert!(html.contains("id=\"replication-failed\""));
         assert!(html.contains("id=\"export-replication-failed-json\""));
@@ -12003,6 +12157,7 @@ mod tests {
         assert!(html.contains("retryReplicationJob"));
         assert!(html.contains("data-retry-replication-target"));
         assert!(html.contains("retryFailedReplicationTarget"));
+        assert!(html.contains("filteredReplicationFailedJobs"));
         assert!(html.contains("downloadReplicationFailedJobs"));
         assert!(html.contains("downloadReplicationFailedJobsCsv"));
         assert!(html.contains("id=\"status-auto-refresh-enabled\""));

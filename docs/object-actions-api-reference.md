@@ -232,7 +232,7 @@
 
 - `latest_failed_jobs`: 只包含“每个 target + bucket + key 当前最新状态仍为 failed”的对象级失败视图
 
-这个字段的用途是给 Admin Web 的 `Latest Failed Objects` 表格和 JSON / CSV 导出使用，避免运维在 `recent_jobs` 历史里手工排除已经被后续成功覆盖的旧失败。
+这个字段的用途是给 Admin Web 的 `Latest Failed Objects` 表格、对象/时间过滤以及 JSON / CSV 导出使用，避免运维在 `recent_jobs` 历史里手工排除已经被后续成功覆盖的旧失败。
 
 ### 6.1 runtime
 
@@ -380,6 +380,7 @@
 - `provider_summary`: provider 健康计数汇总
 - `replication`: 复制任务状态汇总
 - `object_actions`: 对象动作历史汇总
+- `latest_failed_objects`: 当前 latest-only 失败对象摘要，适合 webhook / 外部监控直接消费
 - `recent_failures`: 最近失败事件列表，来源包括失败的对象动作和失败的复制任务
 
 ### 6.4 notify

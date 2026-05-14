@@ -178,6 +178,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - Admin Web 的 `Recent Jobs` 表格现在可对最新 failed replication job 直接执行 `Retry`
 - Admin Web 的 `Target Status` 表格现在可对某个 target 的 latest failed jobs 执行 `Retry Failed`
 - Admin Web 现在额外提供 `Latest Failed Objects` 视图，可按 target 过滤当前仍失败的对象，并导出 JSON / CSV
+- `Latest Failed Objects` 现已支持对象关键字和时间窗口过滤，`Monitoring Summary` / notify webhook 也会附带当前 latest failed 对象摘要
 - `POST /api/replication/jobs/{job_id}/retry` 只允许重试该对象在对应 target 上“当前最新的一条 failed job”
 - `POST /api/replication/targets/{target}/retry-failed` 只会重试该 target 上“当前仍然是最新状态”的 failed jobs
 - 重试会把该 job 重新置回 `pending` 并重新入内存队列
