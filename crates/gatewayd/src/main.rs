@@ -87,6 +87,8 @@ const BROWSER_FLOW_AUTH_SESSION_STATUS_ANSWERED: &str = "answered";
 const BROWSER_FLOW_AUTH_SESSION_STATUS_RESUMED: &str = "resumed";
 const BROWSER_FLOW_AUTH_SESSION_STATUS_COMPLETED: &str = "completed";
 const BROWSER_FLOW_AUTH_SESSION_STATUS_FAILED: &str = "failed";
+const NOTIFY_SIGNATURE_HEADER: &str = "x-ccbg-notify-signature";
+const NOTIFY_TIMESTAMP_HEADER: &str = "x-ccbg-notify-timestamp";
 
 #[derive(Clone)]
 struct AppState {
@@ -414,6 +416,7 @@ struct NotifyState {
 struct NotifyStatusPayload {
     webhook_enabled: bool,
     webhook_url_present: bool,
+    signature_enabled: bool,
     poll_interval_seconds: u64,
     last_alert_hash: Option<String>,
     last_attempt_at_unix_ms: Option<u64>,
@@ -523,6 +526,7 @@ fn current_notify_status_payload(state: &AppState) -> NotifyStatusPayload {
     NotifyStatusPayload {
         webhook_enabled: state.config.notify_webhook_url.is_some(),
         webhook_url_present: state.config.notify_webhook_url.is_some(),
+        signature_enabled: state.config.notify_webhook_signing_secret.is_some(),
         poll_interval_seconds: state.config.notify_poll_interval_seconds,
         last_alert_hash: snapshot.last_alert_hash,
         last_attempt_at_unix_ms: snapshot.last_attempt_at_unix_ms,
@@ -827,6 +831,7 @@ struct AppConfig {
     auth_callback_bind_addr: SocketAddr,
     metrics_bind_addr: SocketAddr,
     notify_webhook_url: Option<String>,
+    notify_webhook_signing_secret: Option<String>,
     notify_poll_interval_seconds: u64,
     control_plane_file: String,
     credentials_dir: String,
@@ -1273,6 +1278,10 @@ impl AppConfig {
             auth_callback_bind_addr,
             metrics_bind_addr,
             notify_webhook_url: env_opt("CCBG_NOTIFY_WEBHOOK_URL"),
+            notify_webhook_signing_secret: env_opt_or_file(
+                "CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET",
+                "CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET_FILE",
+            ),
             notify_poll_interval_seconds: env_u64("CCBG_NOTIFY_POLL_INTERVAL_SECONDS", 15)
                 .max(5),
             control_plane_file: env_or("CCBG_CONTROL_PLANE_FILE", "./data/control-plane.json"),
@@ -1761,6 +1770,7 @@ async fn main() -> Result<()> {
         auth_callback_bind_addr = %config.auth_callback_bind_addr,
         metrics_bind_addr = %config.metrics_bind_addr,
         notify_webhook_enabled = config.notify_webhook_url.is_some(),
+        notify_webhook_signature_enabled = config.notify_webhook_signing_secret.is_some(),
         notify_poll_interval_seconds = config.notify_poll_interval_seconds,
         control_plane_file = %config.control_plane_file,
         browser_flow_catalog_dir = %config.browser_flow_catalog_dir,
@@ -3077,6 +3087,12 @@ fn alerts_fingerprint(alerts: &[AdminAlertPayload]) -> String {
     sha256_hex(&payload)
 }
 
+fn sign_notify_payload(secret: &str, timestamp: u64, body: &[u8]) -> String {
+    let payload_hash = sha256_hex(body);
+    let string_to_sign = format!("{timestamp}.{payload_hash}");
+    hex::encode(hmac_sha256(secret.as_bytes(), string_to_sign.as_bytes()))
+}
+
 async fn notify_loop(state: AppState) {
     loop {
         if let Err(error) = process_notify_tick(&state).await {
@@ -3121,6 +3137,8 @@ async fn process_notify_tick(state: &AppState) -> Result<()> {
         monitoring,
         alerts,
     };
+    let payload_body = serde_json::to_vec(&payload).context("failed to serialize notify webhook payload")?;
+    let timestamp = current_unix_ms();
 
     {
         let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
@@ -3128,11 +3146,18 @@ async fn process_notify_tick(state: &AppState) -> Result<()> {
         notify_state.last_error = None;
     }
 
-    state
+    let mut request = state
         .auth
         .http_client
         .post(webhook_url)
-        .json(&payload)
+        .header(CONTENT_TYPE, "application/json")
+        .header(NOTIFY_TIMESTAMP_HEADER, timestamp.to_string())
+        .body(payload_body.clone());
+    if let Some(secret) = state.config.notify_webhook_signing_secret.as_deref() {
+        let signature = sign_notify_payload(secret, timestamp, &payload_body);
+        request = request.header(NOTIFY_SIGNATURE_HEADER, signature);
+    }
+    request
         .send()
         .await
         .context("notify webhook request failed")?
@@ -9621,6 +9646,7 @@ mod tests {
                 .parse()
                 .expect("metrics addr should parse"),
             notify_webhook_url: None,
+            notify_webhook_signing_secret: None,
             notify_poll_interval_seconds: 15,
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
             credentials_dir: temp_db_path().replace(".db", "-provider-credentials"),
@@ -9713,9 +9739,20 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    struct RecordedWebhookRequest {
+        body: String,
+        signature: Option<String>,
+        timestamp: Option<String>,
+    }
+
     async fn spawn_test_webhook_server(
-    ) -> (String, Arc<Mutex<Vec<String>>>, oneshot::Sender<()>) {
-        let received = Arc::new(Mutex::new(Vec::<String>::new()));
+    ) -> (
+        String,
+        Arc<Mutex<Vec<RecordedWebhookRequest>>>,
+        oneshot::Sender<()>,
+    ) {
+        let received = Arc::new(Mutex::new(Vec::<RecordedWebhookRequest>::new()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test webhook listener should bind");
@@ -9726,12 +9763,29 @@ mod tests {
             any(move |request: Request<Body>| {
                 let received = received_clone.clone();
                 async move {
+                    let signature = request
+                        .headers()
+                        .get(NOTIFY_SIGNATURE_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToString::to_string);
+                    let timestamp = request
+                        .headers()
+                        .get(NOTIFY_TIMESTAMP_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToString::to_string);
                     let bytes = to_bytes(request.into_body(), usize::MAX)
                         .await
                         .expect("webhook request body should read");
                     let body = String::from_utf8(bytes.to_vec())
                         .expect("webhook request body should be utf-8");
-                    received.lock().expect("received webhook list poisoned").push(body);
+                    received
+                        .lock()
+                        .expect("received webhook list poisoned")
+                        .push(RecordedWebhookRequest {
+                            body,
+                            signature,
+                            timestamp,
+                        });
                     StatusCode::NO_CONTENT
                 }
             }),
@@ -10130,13 +10184,53 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
         let received_guard = received.lock().expect("received webhook list poisoned");
         assert_eq!(received_guard.len(), 2);
-        assert!(received_guard[1].contains("replication jobs failed"));
+        assert!(received_guard[1].body.contains("replication jobs failed"));
         drop(received_guard);
 
         let notify_status = current_notify_status_payload(&state);
         assert!(notify_status.webhook_enabled);
+        assert!(!notify_status.signature_enabled);
         assert!(notify_status.last_success_at_unix_ms.is_some());
         assert!(notify_status.last_error.is_none());
+
+        let _ = shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn notify_webhook_includes_hmac_signature_when_secret_is_configured() {
+        let (webhook_url, received, shutdown) = spawn_test_webhook_server().await;
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).notify_webhook_url = Some(webhook_url);
+        Arc::make_mut(&mut state.config).notify_webhook_signing_secret =
+            Some("notify-secret".to_string());
+
+        process_notify_tick(&state)
+            .await
+            .expect("signed notify tick should succeed");
+        sleep(Duration::from_millis(50)).await;
+
+        let received_guard = received.lock().expect("received webhook list poisoned");
+        assert_eq!(received_guard.len(), 1);
+        let request = &received_guard[0];
+        let timestamp = request
+            .timestamp
+            .as_deref()
+            .expect("signed webhook should include timestamp");
+        let timestamp = timestamp
+            .parse::<u64>()
+            .expect("timestamp header should parse");
+        let signature = request
+            .signature
+            .as_deref()
+            .expect("signed webhook should include signature");
+        assert_eq!(
+            signature,
+            sign_notify_payload("notify-secret", timestamp, request.body.as_bytes())
+        );
+        drop(received_guard);
+
+        let notify_status = current_notify_status_payload(&state);
+        assert!(notify_status.signature_enabled);
 
         let _ = shutdown.send(());
     }

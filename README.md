@@ -176,6 +176,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `CCBG_NOTIFY_WEBHOOK_URL` 配置后，后台会按 `CCBG_NOTIFY_POLL_INTERVAL_SECONDS` 周期检查 alerts
 - 仅当 alerts 集合发生变化时才发送 webhook，避免轮询风暴
 - webhook 请求体包含 `runtime`、`monitoring` 和 `alerts`
+- 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，还会附带 `x-ccbg-notify-timestamp` 与 `x-ccbg-notify-signature`
 
 当前 S3 兼容实现边界:
 

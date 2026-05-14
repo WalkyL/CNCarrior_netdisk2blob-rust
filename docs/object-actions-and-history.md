@@ -276,6 +276,7 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 Admin Web 现在额外提供 `Notify` 卡片，显示:
 
 - 是否启用了 `CCBG_NOTIFY_WEBHOOK_URL`
+- 是否启用了 webhook 签名
 - 当前 webhook 轮询间隔
 - 最近一次尝试投递时间
 - 最近一次成功投递时间
@@ -286,6 +287,9 @@ Admin Web 现在额外提供 `Notify` 卡片，显示:
 - 如果 alerts 集合和上一次完全一致，不重复发送
 - 如果 provider 健康、复制失败数或其他告警条件变化，会重新发送一条 webhook
 - webhook 请求体会携带 `runtime`、`monitoring` 和 `alerts`，适合直接接企业微信/飞书/自建中转器
+- 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，请求还会带 `x-ccbg-notify-timestamp`
+- 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，请求还会带 `x-ccbg-notify-signature`
+- 当前签名算法是 `hex(HMAC_SHA256(secret, "<timestamp>.<sha256(body)>"))`
 
 为了避免干扰操作中的表单，自动刷新不会在后台每一轮都强制重载 provider credentials 和 pending verification prompts；这些区域仍以手工触发或显式动作后的刷新为主。
 

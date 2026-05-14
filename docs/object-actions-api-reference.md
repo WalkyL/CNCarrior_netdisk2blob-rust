@@ -302,6 +302,7 @@
 {
   "webhook_enabled": true,
   "webhook_url_present": true,
+  "signature_enabled": true,
   "poll_interval_seconds": 15,
   "last_alert_hash": "6f9d4d2d...",
   "last_attempt_at_unix_ms": 1710000000000,
@@ -319,11 +320,21 @@
 
 - `webhook_enabled`: 当前是否启用了 webhook 外发
 - `webhook_url_present`: 当前是否配置了 webhook URL
+- `signature_enabled`: 当前是否启用了 webhook HMAC 签名
 - `poll_interval_seconds`: 告警轮询间隔
 - `last_alert_hash`: 最近一次成功发送的 alerts 指纹
 - `last_attempt_at_unix_ms`: 最近一次尝试发送时间
 - `last_success_at_unix_ms`: 最近一次发送成功时间
 - `last_error`: 最近一次发送错误
+
+当前若启用了签名，请求头会额外包含:
+
+- `x-ccbg-notify-timestamp`
+- `x-ccbg-notify-signature`
+
+签名算法:
+
+- `hex(HMAC_SHA256(secret, "<timestamp>.<sha256(body)>"))`
 
 ### 4.5 object_action_history_limit
 
