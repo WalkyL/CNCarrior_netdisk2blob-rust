@@ -275,20 +275,24 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 
 `Replication Queue -> Recent Jobs` 表格现在会在符合条件的失败任务旁边显示 `Retry`。
 
+`Replication Queue -> Target Status` 表格现在还会在某个 target 仍有 latest failed jobs 时显示 `Retry Failed`。
+
 当前规则:
 
 - 只允许重试 `failed` 状态的 job
 - 只允许重试该 `target + bucket + key` 上当前最新的一条 failed job
+- 按 target 的 `Retry Failed` 只会批量重试该 target 上“当前最新状态仍是 failed”的对象
 - 重试后该 job 会重新变成 `pending`
 - 重试会清空 `last_error`、`next_retry`，并重新进入内存队列
+- 已被后续成功、排队或重试中的新 job 覆盖的旧失败，不会被批量重试重新塞回队列
 
 这条入口的定位是“修完根因后的人工补偿”，不是批量回放系统。
 
 典型使用方式:
 
 - 先在 `Monitoring Summary` 或 `Notify` 中看到复制失败
-- 再到 `Recent Jobs` 查看最新错误
-- 修正凭证、网络、target 配置后，点 `Retry`
+- 再到 `Recent Jobs` 或 `Target Status` 查看最新错误
+- 修正凭证、网络、target 配置后，点 `Retry` 或 `Retry Failed`
 - 观察 `pending / retry / failed` 计数是否回落
 
 当前这些计数按“每个对象在每个 target 上的最新状态”统计，不会把已经被后续成功 job 覆盖的旧失败继续算进当前失败数。

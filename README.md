@@ -176,7 +176,9 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 当前已落地的复制人工干预能力:
 
 - Admin Web 的 `Recent Jobs` 表格现在可对最新 failed replication job 直接执行 `Retry`
+- Admin Web 的 `Target Status` 表格现在可对某个 target 的 latest failed jobs 执行 `Retry Failed`
 - `POST /api/replication/jobs/{job_id}/retry` 只允许重试该对象在对应 target 上“当前最新的一条 failed job”
+- `POST /api/replication/targets/{target}/retry-failed` 只会重试该 target 上“当前仍然是最新状态”的 failed jobs
 - 重试会把该 job 重新置回 `pending` 并重新入内存队列
 
 当前已落地的外部告警 webhook:
@@ -199,7 +201,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - 当响应来自备份侧时，会附带 `x-ccbg-source-provider` 和 `x-ccbg-fallback-from`
 - 当前自动化测试已覆盖 `stub` backend 与 OneDrive mock Graph；运营商 provider 仍未完成真实读写
 
-当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要、基础重试退避和 latest failed job 人工重试已经落地；复制失败相关监控现在也按“每个对象在每个 target 上的最新状态”统计，避免旧失败在后续成功后继续误报；后续仍需补更完整的死信 / 批量重试入口和 OneDrive OAuth broker。
+当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要、基础重试退避，以及 latest-only 语义的单 job / 按 target 批量人工重试都已经落地；复制失败相关监控现在也按“每个对象在每个 target 上的最新状态”统计，避免旧失败在后续成功后继续误报；后续仍可继续演进更完整的死信体系和 OneDrive OAuth broker。
 
 一期平台兼容边界:
 

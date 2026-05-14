@@ -13,6 +13,7 @@
 - `POST /api/object-actions`
 - `POST /api/object-actions/history/clear`
 - `POST /api/replication/jobs/{job_id}/retry`
+- `POST /api/replication/targets/{target}/retry-failed`
 - `GET /api/status`
 
 当前支持的动作:
@@ -165,7 +166,52 @@
 
 这条接口的目标是“值守时人工恢复”，不是批量补偿系统。
 
-## 5. GET /api/status
+## 5. POST /api/replication/targets/{target}/retry-failed
+
+用途:
+
+- 对某个复制 target 上“当前最新状态仍为 failed”的对象批量执行人工重试
+
+成功返回:
+
+```json
+{
+  "target": "onedrive",
+  "retried_jobs": 2,
+  "jobs": [
+    {
+      "job_id": 42,
+      "status": "pending",
+      "bucket": "root",
+      "key": "docs/report.txt"
+    },
+    {
+      "job_id": 43,
+      "status": "pending",
+      "bucket": "root",
+      "key": "docs/archive.txt"
+    }
+  ]
+}
+```
+
+行为说明:
+
+- `target` 需要是已知 provider 名称，例如 `onedrive` 或 `telecom`
+- 只会扫描这个 target 上每个 `bucket + key` 的最新 job
+- 只有“最新 job 仍是 `failed`”的对象会被重试
+- 已被后续 `completed` / `pending` / `retry_scheduled` 覆盖的旧失败不会被重新入队
+- 重试后这些 job 会被重新置成 `pending` 并重新入内存队列
+- 会清空 `last_error` 和 `next_attempt_at_unix_ms`
+
+失败场景包括:
+
+- `target` 不是合法 provider
+- 元数据存储更新失败
+
+如果当前没有可重试的 latest failed jobs，接口仍返回 `200`，但 `retried_jobs` 会是 `0`。
+
+## 6. GET /api/status
 
 用途:
 
@@ -182,7 +228,7 @@
 - `provider_health`
 - `replication_state`
 
-### 5.1 runtime
+### 6.1 runtime
 
 类型:
 
@@ -222,7 +268,7 @@
 - `replication_workers`: 复制 worker 数量
 - `object_action_history_limit`: 当前共享历史窗口大小
 
-### 5.2 object_action_history
+### 6.2 object_action_history
 
 类型:
 
@@ -277,7 +323,7 @@
 - `warnings`: 预警信息
 - `references`: 被影响对象及变化摘要
 
-### 5.3 monitoring
+### 6.3 monitoring
 
 类型:
 
@@ -330,7 +376,7 @@
 - `object_actions`: 对象动作历史汇总
 - `recent_failures`: 最近失败事件列表，来源包括失败的对象动作和失败的复制任务
 
-### 5.4 notify
+### 6.4 notify
 
 类型:
 
@@ -384,7 +430,7 @@
 - 按 `x-ccbg-notify-event-id` 做幂等去重
 - 可直接参考 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 与 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)
 
-### 5.5 object_action_history_limit
+### 6.5 object_action_history_limit
 
 类型:
 
@@ -403,9 +449,9 @@ Admin Web 会基于 `object_action_history` 做本地筛选和 JSON/CSV 导出�
 CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 ```
 
-## 6. 配置项
+## 7. 配置项
 
-### 6.1 CCBG_OBJECT_ACTION_HISTORY_LIMIT
+### 7.1 CCBG_OBJECT_ACTION_HISTORY_LIMIT
 
 用途:
 
@@ -417,40 +463,40 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 ```
 
-### 6.2 CCBG_CONTROL_PLANE_FILE
+### 7.2 CCBG_CONTROL_PLANE_FILE
 
 用途:
 
 - 指定 control-plane 状态文件路径
 - 对象动作共享历史会持久化在这里
 
-## 7. 行为约束
+## 8. 行为约束
 
-### 7.1 历史来源
+### 8.1 历史来源
 
 - 历史以服务端状态为准
 - 不以浏览器 `localStorage` 为准
 
-### 7.2 截断规则
+### 8.2 截断规则
 
 - 新记录插入头部
 - 超过 `object_action_history_limit` 后，裁剪最旧记录
 
-### 7.3 一致性边界
+### 8.3 一致性边界
 
 - primary provider 动作成功，不代表 backup 已同步完成
 - before/after 检查展示的是当前观察状态
 - fallback 仍受最新复制状态约束
 
-### 7.4 复制人工重试边界
+### 8.4 复制人工重试边界
 
 - `Retry` 不是强制执行通道，只是把 job 重新交给后台 worker
 - 如果根因没修复，job 仍然会再次失败
-- 当前只支持单 job 人工重试，不支持批量重试或按 target 批量清队
+- 当前支持单 job 重试，以及按 target 对 latest failed jobs 的批量重试
 
-## 8. Provider 特殊说明
+## 9. Provider 特殊说明
 
-### 8.1 联通
+### 9.1 联通
 
 当前联通 `rename` 仍有边界:
 
@@ -460,7 +506,7 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 
 - `move`
 
-### 7.2 OneDrive
+### 9.2 OneDrive
 
 当前 OneDrive 对象动作语义:
 
@@ -472,7 +518,7 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 - `rename` 可同时覆盖“改名”和“跨目录移动”
 - `copy` 成功前可能会多一次短暂轮询
 
-## 8. 相关文档
+## 10. 相关文档
 
 - [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)
 - [docs/auth-step-by-step.md](/home/walky/carrier-cloud-blob-gateway/docs/auth-step-by-step.md:1)

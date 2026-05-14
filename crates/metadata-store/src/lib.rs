@@ -281,6 +281,72 @@ impl MetadataStore {
         })
     }
 
+    pub fn retry_failed_jobs_for_target(
+        &self,
+        target: &str,
+        enqueued_at_unix_ms: u128,
+    ) -> Result<Vec<ReplicationJob>, MetadataError> {
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+
+        let failed_jobs = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+                     FROM replication_jobs jobs
+                     INNER JOIN (
+                        SELECT bucket, key, MAX(job_id) AS max_job_id
+                        FROM replication_jobs
+                        WHERE target = ?1
+                        GROUP BY bucket, key
+                     ) latest
+                     ON latest.max_job_id = jobs.job_id
+                     WHERE jobs.target = ?1 AND jobs.status = 'failed'
+                     ORDER BY jobs.job_id ASC",
+                )
+                .map_err(MetadataError::Sqlite)?;
+
+            statement
+                .query_map([target], row_to_job)
+                .map_err(MetadataError::Sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(MetadataError::Sqlite)?
+        };
+
+        for job in &failed_jobs {
+            transaction
+                .execute(
+                    "UPDATE replication_jobs
+                     SET status = ?1,
+                         attempts = 0,
+                         enqueued_at_unix_ms = ?2,
+                         next_attempt_at_unix_ms = NULL,
+                         last_error = NULL
+                     WHERE job_id = ?3",
+                    params![
+                        ReplicationStatus::Pending.as_str(),
+                        enqueued_at_unix_ms as i64,
+                        job.job_id as i64,
+                    ],
+                )
+                .map_err(MetadataError::Sqlite)?;
+        }
+
+        transaction.commit().map_err(MetadataError::Sqlite)?;
+
+        Ok(failed_jobs
+            .into_iter()
+            .map(|job| ReplicationJob {
+                status: ReplicationStatus::Pending,
+                attempts: 0,
+                enqueued_at_unix_ms,
+                next_attempt_at_unix_ms: None,
+                last_error: None,
+                ..job
+            })
+            .collect())
+    }
+
     pub fn apply_retention(&self) -> Result<MetadataPruneResult, MetadataError> {
         let mut connection = self.connection.lock().expect("metadata store poisoned");
         let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
@@ -883,6 +949,85 @@ mod tests {
                 latest_job_id: 21,
             }
         ));
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn retry_failed_jobs_for_target_requeues_only_latest_failed_jobs() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut onedrive_failed = sample_job(30);
+        onedrive_failed.object.key = "retry/only-latest.txt".to_string();
+        onedrive_failed.status = ReplicationStatus::Failed;
+        onedrive_failed.attempts = 2;
+        onedrive_failed.last_error = Some("temporary outage".to_string());
+
+        let mut onedrive_old_failed = sample_job(31);
+        onedrive_old_failed.object.key = "retry/stale.txt".to_string();
+        onedrive_old_failed.status = ReplicationStatus::Failed;
+        onedrive_old_failed.attempts = 1;
+        onedrive_old_failed.last_error = Some("old failure".to_string());
+
+        let mut onedrive_newer_completed = sample_job(32);
+        onedrive_newer_completed.object.key = "retry/stale.txt".to_string();
+        onedrive_newer_completed.status = ReplicationStatus::Completed;
+
+        let mut telecom_failed = sample_job(33);
+        telecom_failed.target = "telecom".to_string();
+        telecom_failed.object.key = "retry/telecom.txt".to_string();
+        telecom_failed.status = ReplicationStatus::Failed;
+        telecom_failed.attempts = 3;
+        telecom_failed.last_error = Some("target offline".to_string());
+
+        store
+            .enqueue_jobs(&[
+                onedrive_failed,
+                onedrive_old_failed,
+                onedrive_newer_completed,
+                telecom_failed,
+            ])
+            .expect("jobs should persist");
+
+        let retried = store
+            .retry_failed_jobs_for_target("onedrive", 9_999)
+            .expect("target batch retry should succeed");
+
+        assert_eq!(retried.len(), 1);
+        assert_eq!(retried[0].job_id, 30);
+        assert!(matches!(retried[0].status, ReplicationStatus::Pending));
+        assert_eq!(retried[0].attempts, 0);
+        assert!(retried[0].last_error.is_none());
+        assert_eq!(retried[0].enqueued_at_unix_ms, 9_999);
+
+        let latest_onedrive = store
+            .latest_job_for_object("onedrive", "bucket-a", "retry/only-latest.txt")
+            .expect("retried onedrive job should load")
+            .expect("retried onedrive job should exist");
+        assert!(matches!(latest_onedrive.status, ReplicationStatus::Pending));
+
+        let stale_onedrive = store
+            .latest_job_for_object("onedrive", "bucket-a", "retry/stale.txt")
+            .expect("stale object job should load")
+            .expect("stale object job should exist");
+        assert_eq!(stale_onedrive.job_id, 32);
+        assert!(matches!(
+            stale_onedrive.status,
+            ReplicationStatus::Completed
+        ));
+
+        let latest_telecom = store
+            .latest_job_for_object("telecom", "bucket-a", "retry/telecom.txt")
+            .expect("telecom job should load")
+            .expect("telecom job should exist");
+        assert_eq!(latest_telecom.job_id, 33);
+        assert!(matches!(latest_telecom.status, ReplicationStatus::Failed));
+
+        let snapshot = store.snapshot(10).expect("snapshot should load");
+        assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.completed_count, 1);
+        assert_eq!(snapshot.failed_count, 1);
 
         fs::remove_file(db_path).ok();
     }

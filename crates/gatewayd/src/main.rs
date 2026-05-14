@@ -1418,6 +1418,21 @@ struct ReplicationRetryPayload {
 }
 
 #[derive(Debug, Serialize)]
+struct ReplicationTargetRetryJobPayload {
+    job_id: u64,
+    status: &'static str,
+    bucket: String,
+    key: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ReplicationTargetRetryPayload {
+    target: String,
+    retried_jobs: usize,
+    jobs: Vec<ReplicationTargetRetryJobPayload>,
+}
+
+#[derive(Debug, Serialize)]
 struct ObjectProviderStatusPayload {
     provider: &'static str,
     label: &'static str,
@@ -1828,6 +1843,10 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         .route(
             "/api/replication/jobs/{job_id}/retry",
             post(retry_replication_job_api),
+        )
+        .route(
+            "/api/replication/targets/{target}/retry-failed",
+            post(retry_replication_target_api),
         )
         .route("/api/control-plane/topology", post(update_topology))
         .route(
@@ -4247,6 +4266,28 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         setReplicationFeedback(error.message, 'warn');
       }}
     }}
+    async function retryFailedReplicationTarget(target) {{
+      setReplicationFeedback(`Retrying latest failed replication jobs for ${{providerLabel(target)}}…`, 'warn');
+      try {{
+        const result = await fetchJson(`/api/replication/targets/${{encodeURIComponent(target)}}/retry-failed`, {{
+          method: 'POST',
+        }});
+        await refreshStatus();
+        if (!result.retried_jobs) {{
+          setReplicationFeedback(`No latest failed jobs to retry for ${{providerLabel(result.target)}}.`, 'ok');
+          return;
+        }}
+        const retriedSummary = (result.jobs || [])
+          .map(job => `${{job.bucket}}/${{job.key}} (#${{job.job_id}})`)
+          .join(', ');
+        setReplicationFeedback(
+          `Requeued ${{result.retried_jobs}} latest failed job(s) for ${{providerLabel(result.target)}}: ${{retriedSummary}}.`,
+          'ok'
+        );
+      }} catch (error) {{
+        setReplicationFeedback(error.message, 'warn');
+      }}
+    }}
     function renderReplication(replicationState) {{
       if (!replicationState) {{
         return;
@@ -4294,6 +4335,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
                 <th>Completed</th>
                 <th>Failed</th>
                 <th>Latest</th>
+                <th>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -4310,6 +4352,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
                       <td>${{target.completed_count || 0}}</td>
                       <td>${{target.failed_count || 0}}</td>
                       <td class="mono">${{escapeHtml(latest)}}</td>
+                      <td>${{(target.failed_count || 0) > 0 ? `<button class="secondary" type="button" data-retry-replication-target="${{target.provider}}">Retry Failed</button>` : ''}}</td>
                     </tr>
                   `;
                 }}).join('')
@@ -5367,6 +5410,13 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       }}
       retryReplicationJob(button.dataset.retryReplicationJob);
     }});
+    document.getElementById('replication-targets').addEventListener('click', event => {{
+      const button = event.target.closest('button[data-retry-replication-target]');
+      if (!button) {{
+        return;
+      }}
+      retryFailedReplicationTarget(button.dataset.retryReplicationTarget);
+    }});
     document.getElementById('provider-credentials-grid').addEventListener('click', event => {{
       const saveButton = event.target.closest('button[data-provider-credential-save]');
       if (saveButton) {{
@@ -5520,6 +5570,38 @@ async fn retry_replication_job_api(
         target: retried_job.target,
         bucket: retried_job.object.bucket,
         key: retried_job.object.key,
+    }))
+}
+
+async fn retry_replication_target_api(
+    State(state): State<AppState>,
+    Path(target): Path<String>,
+) -> Result<Json<ReplicationTargetRetryPayload>, ApiError> {
+    let target = ProviderId::parse(&target)
+        .map_err(|error| BlobError::Configuration(error.to_string()))?
+        .as_str()
+        .to_string();
+    let retried_jobs = state
+        .metadata_store
+        .retry_failed_jobs_for_target(&target, u128::from(current_unix_ms()))
+        .map_err(|error| BlobError::Configuration(error.to_string()))?;
+
+    for job in &retried_jobs {
+        state.replication.enqueue_existing_job(job.clone());
+    }
+
+    Ok(Json(ReplicationTargetRetryPayload {
+        target,
+        retried_jobs: retried_jobs.len(),
+        jobs: retried_jobs
+            .into_iter()
+            .map(|job| ReplicationTargetRetryJobPayload {
+                job_id: job.job_id,
+                status: job.status.as_str(),
+                bucket: job.object.bucket,
+                key: job.object.key,
+            })
+            .collect(),
     }))
 }
 
@@ -11765,6 +11847,8 @@ mod tests {
         assert!(html.contains("id=\"replication-feedback\""));
         assert!(html.contains("data-retry-replication-job"));
         assert!(html.contains("retryReplicationJob"));
+        assert!(html.contains("data-retry-replication-target"));
+        assert!(html.contains("retryFailedReplicationTarget"));
         assert!(html.contains("id=\"status-auto-refresh-enabled\""));
         assert!(html.contains("id=\"status-auto-refresh-interval-seconds\""));
         assert!(html.contains("id=\"status-refresh-summary\""));
@@ -11942,6 +12026,92 @@ mod tests {
             .expect_err("retry api should reject non-failed job");
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn retry_replication_target_api_requeues_only_latest_failed_jobs_for_target() {
+        let state = test_state();
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "retry/batch-latest.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "retry/batch-stale.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Completed,
+            "root",
+            "retry/batch-stale.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+        record_replication_state(
+            &state,
+            ProviderId::Telecom,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "retry/other-target.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+
+        let Json(payload) =
+            retry_replication_target_api(State(state.clone()), Path("onedrive".to_string()))
+                .await
+                .expect("target retry api should succeed");
+
+        assert_eq!(payload.target, "onedrive");
+        assert_eq!(payload.retried_jobs, 1);
+        assert_eq!(payload.jobs.len(), 1);
+        assert_eq!(payload.jobs[0].key, "retry/batch-latest.txt");
+        assert_eq!(payload.jobs[0].status, "pending");
+
+        let snapshot = state.replication.snapshot();
+        assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.pending_jobs.len(), 1);
+        assert_eq!(snapshot.pending_jobs[0].target, "onedrive");
+        assert_eq!(
+            snapshot.pending_jobs[0].object.key,
+            "retry/batch-latest.txt"
+        );
+
+        let latest_onedrive = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "root", "retry/batch-latest.txt")
+            .expect("latest onedrive job should load")
+            .expect("latest onedrive job should exist");
+        assert!(matches!(latest_onedrive.status, ReplicationStatus::Pending));
+
+        let stale = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "root", "retry/batch-stale.txt")
+            .expect("stale onedrive job should load")
+            .expect("stale onedrive job should exist");
+        assert!(matches!(stale.status, ReplicationStatus::Completed));
+
+        let telecom = state
+            .metadata_store
+            .latest_job_for_object("telecom", "root", "retry/other-target.txt")
+            .expect("telecom job should load")
+            .expect("telecom job should exist");
+        assert!(matches!(telecom.status, ReplicationStatus::Failed));
     }
 
     #[test]
