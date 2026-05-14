@@ -10,7 +10,7 @@
 - `reqwest + rustls` 的上游 HTTPS 访问
 - `rusqlite` 的本地持久化元数据
 - 多 provider、后台复制 worker、健康检查和 fallback 判定
-- 对象当前仍以整块 `Vec<u8>` 形式进出内存
+- 对象边界虽然已改成 `ObjectBody` 流，但很多 provider 内部仍会整块收集
 
 这套形态对 `PVE LXC`、`Docker`、`Podman`、`OpenWRT arm64` 是合理的，对 `ESP32-S3` 不是。
 
@@ -22,8 +22,8 @@
 
 当前仓库里最不适合 MCU 的点:
 
-- `gatewayd` 写入路径会把请求体整块复制到内存
-- `BlobBackend` 仍以 `Vec<u8>` 表达对象 body
+- `gatewayd` 已支持 `UNSIGNED-PAYLOAD` 流式写入，但不是所有签名路径都流式
+- `BlobBackend` 已以 `ObjectBody` 表达对象 body，但 provider 内部仍常常收集整块对象
 - OneDrive provider 依赖 `reqwest` 和 TLS 栈
 - metadata store 依赖 SQLite
 - fallback 读取依赖本地复制元数据
@@ -146,7 +146,7 @@
 如果真的要跑在 `ESP32-S3`，下面这些约束必须接受:
 
 1. 必须放弃当前完整宿主定位。
-2. 必须把对象读写改成流式或分块，不允许整对象 `Vec<u8>` 常驻。
+2. 必须把对象读写改成流式或分块，不允许整对象 `Bytes` 常驻。
 3. 必须移除 SQLite 依赖，改成 NVS / LittleFS / 超轻量自定义日志结构。
 4. 必须把 OneDrive 同步和 OAuth 挪到更强的宿主。
 5. 必须把 Web UI 和复杂控制面移除。
@@ -176,7 +176,7 @@
 
 ### 2. 把对象 API 改成流式
 
-当前 `BlobBackend` 以 `Vec<u8>` 传对象，不适合 MCU。
+当前 `BlobBackend` 以整块 `Bytes` 传对象，不适合 MCU。
 
 需要改成:
 

@@ -4,10 +4,14 @@ use std::{
     collections::BTreeMap,
     env, fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    pin::Pin,
     sync::Mutex,
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures_core::Stream;
+use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -100,23 +104,45 @@ pub struct ListObjectsRequest {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
 pub struct ObjectPayload {
     pub info: ObjectInfo,
-    pub body: Vec<u8>,
+    pub body: ObjectBody,
 }
 
-#[derive(Debug, Clone)]
 pub struct PutObjectRequest {
     pub container: String,
     pub key: String,
-    pub body: Vec<u8>,
+    pub body: ObjectBody,
+    pub size: Option<u64>,
     pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutObjectResult {
     pub etag: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameObjectRequest {
+    pub container: String,
+    pub key: String,
+    pub new_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CopyObjectRequest {
+    pub source_container: String,
+    pub source_key: String,
+    pub destination_container: String,
+    pub destination_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveObjectRequest {
+    pub source_container: String,
+    pub source_key: String,
+    pub destination_container: String,
+    pub destination_key: String,
 }
 
 #[derive(Debug, Error)]
@@ -129,6 +155,63 @@ pub enum BlobError {
     NotImplemented(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("body stream error: {0}")]
+    BodyStream(String),
+}
+
+pub type ObjectBodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, BlobError>> + Send + 'static>>;
+
+pub struct ObjectBody {
+    inner: ObjectBodyStream,
+}
+
+impl std::fmt::Debug for ObjectBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ObjectBody(<stream>)")
+    }
+}
+
+impl ObjectBody {
+    pub fn from_bytes(bytes: Bytes) -> Self {
+        Self {
+            inner: Box::pin(futures_util::stream::once(async move { Ok(bytes) })),
+        }
+    }
+
+    pub fn from_stream<S>(stream: S) -> Self
+    where
+        S: Stream<Item = Result<Bytes, BlobError>> + Send + 'static,
+    {
+        Self {
+            inner: Box::pin(stream),
+        }
+    }
+
+    pub async fn collect(self) -> Result<Bytes, BlobError> {
+        let chunks = self.inner.try_collect::<Vec<_>>().await?;
+        let total_len = chunks.iter().map(Bytes::len).sum();
+        let mut buffer = Vec::with_capacity(total_len);
+        for chunk in chunks {
+            buffer.extend_from_slice(&chunk);
+        }
+        Ok(Bytes::from(buffer))
+    }
+
+    pub fn into_stream(self) -> ObjectBodyStream {
+        self.inner
+    }
+}
+
+impl From<Bytes> for ObjectBody {
+    fn from(value: Bytes) -> Self {
+        Self::from_bytes(value)
+    }
+}
+
+impl From<Vec<u8>> for ObjectBody {
+    fn from(value: Vec<u8>) -> Self {
+        Self::from_bytes(Bytes::from(value))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,10 +339,37 @@ pub trait BlobBackend: Send + Sync {
             "delete_object not implemented for {container}/{key}"
         )))
     }
+
+    async fn rename_object(&self, request: RenameObjectRequest) -> Result<(), BlobError> {
+        Err(BlobError::NotImplemented(format!(
+            "rename_object not implemented for {}/{} -> {}",
+            request.container, request.key, request.new_key
+        )))
+    }
+
+    async fn copy_object(&self, request: CopyObjectRequest) -> Result<(), BlobError> {
+        Err(BlobError::NotImplemented(format!(
+            "copy_object not implemented for {}/{} -> {}/{}",
+            request.source_container,
+            request.source_key,
+            request.destination_container,
+            request.destination_key
+        )))
+    }
+
+    async fn move_object(&self, request: MoveObjectRequest) -> Result<(), BlobError> {
+        Err(BlobError::NotImplemented(format!(
+            "move_object not implemented for {}/{} -> {}/{}",
+            request.source_container,
+            request.source_key,
+            request.destination_container,
+            request.destination_key
+        )))
+    }
 }
 
 struct StubObject {
-    body: Vec<u8>,
+    body: Bytes,
     etag: String,
     content_type: Option<String>,
     last_modified: String,
@@ -273,7 +383,7 @@ impl StubBackend {
     pub fn new() -> Self {
         let mut buckets = BTreeMap::new();
         let mut objects = BTreeMap::new();
-        let body = b"stub object from carrier-cloud-blob-gateway\n".to_vec();
+        let body = Bytes::from_static(b"stub object from carrier-cloud-blob-gateway\n");
         objects.insert(
             "example.txt".to_string(),
             StubObject {
@@ -391,20 +501,21 @@ impl BlobBackend for StubBackend {
                 content_type: object.content_type.clone(),
                 last_modified: Some(object.last_modified.clone()),
             },
-            body: object.body.clone(),
+            body: ObjectBody::from_bytes(object.body.clone()),
         })
     }
 
     async fn put_object(&self, request: PutObjectRequest) -> Result<PutObjectResult, BlobError> {
+        let body = request.body.collect().await?;
         let mut objects = self.objects.lock().expect("stub backend state poisoned");
         let entries = objects.entry(request.container).or_default();
-        let etag = calculate_stub_etag(&request.body);
+        let etag = calculate_stub_etag(&body);
 
         entries.insert(
             request.key,
             StubObject {
                 etag: etag.clone(),
-                body: request.body,
+                body,
                 content_type: request.content_type,
                 last_modified: "2026-01-01T00:00:00.000Z".to_string(),
             },
@@ -428,6 +539,58 @@ impl BlobBackend for StubBackend {
                 "object not found: {container}/{key}"
             )))
         }
+    }
+
+    async fn rename_object(&self, request: RenameObjectRequest) -> Result<(), BlobError> {
+        let mut objects = self.objects.lock().expect("stub backend state poisoned");
+        let Some(entries) = objects.get_mut(&request.container) else {
+            return Err(BlobError::NotFound(format!(
+                "container not found: {}",
+                request.container
+            )));
+        };
+        let Some(object) = entries.remove(&request.key) else {
+            return Err(BlobError::NotFound(format!(
+                "object not found: {}/{}",
+                request.container, request.key
+            )));
+        };
+        entries.insert(request.new_key, object);
+        Ok(())
+    }
+
+    async fn copy_object(&self, request: CopyObjectRequest) -> Result<(), BlobError> {
+        let mut objects = self.objects.lock().expect("stub backend state poisoned");
+        let source_entries = objects.get(&request.source_container).ok_or_else(|| {
+            BlobError::NotFound(format!("container not found: {}", request.source_container))
+        })?;
+        let source = source_entries.get(&request.source_key).ok_or_else(|| {
+            BlobError::NotFound(format!(
+                "object not found: {}/{}",
+                request.source_container, request.source_key
+            ))
+        })?;
+        let cloned = StubObject {
+            body: source.body.clone(),
+            etag: source.etag.clone(),
+            content_type: source.content_type.clone(),
+            last_modified: source.last_modified.clone(),
+        };
+        let destination_entries = objects.entry(request.destination_container).or_default();
+        destination_entries.insert(request.destination_key, cloned);
+        Ok(())
+    }
+
+    async fn move_object(&self, request: MoveObjectRequest) -> Result<(), BlobError> {
+        self.copy_object(CopyObjectRequest {
+            source_container: request.source_container.clone(),
+            source_key: request.source_key.clone(),
+            destination_container: request.destination_container.clone(),
+            destination_key: request.destination_key.clone(),
+        })
+        .await?;
+        self.delete_object(&request.source_container, &request.source_key)
+            .await
     }
 }
 

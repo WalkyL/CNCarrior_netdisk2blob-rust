@@ -8,24 +8,29 @@ use aes::Aes128;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use blob_core::{
-    BackendCapabilities, BlobBackend, BlobError, ContainerInfo, HealthStatus, ListObjectsRequest,
-    ObjectInfo, ObjectPayload, OutboundIpFamily, ServiceHealth, StorageCapacity,
+    BackendCapabilities, BlobBackend, BlobError, ContainerInfo, CopyObjectRequest, HealthStatus,
+    ListObjectsRequest, MoveObjectRequest, ObjectInfo, ObjectPayload, OutboundIpFamily,
+    PutObjectRequest, PutObjectResult, RenameObjectRequest, ServiceHealth, StorageCapacity,
     StorageScopeHealth, StorageScopeKind, TokenSource,
 };
+use bytes::Bytes;
 use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
 use md5::{Digest, Md5};
 use reqwest::{
     Method, Response, StatusCode,
     header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderName, HeaderValue, ORIGIN, REFERER, USER_AGENT},
+    multipart::{Form, Part},
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Map, Value, json};
+use tokio::time::sleep;
 
 type Aes128CbcEncryptor = cbc::Encryptor<Aes128>;
 type Aes128CbcDecryptor = cbc::Decryptor<Aes128>;
 
 const UNICOM_AES_IV: &str = "wNSOYIB1k1DjY5lA";
 const UNICOM_ROOT_CONTAINER: &str = "root";
+const UNICOM_FAMILY_CONTAINER: &str = "family";
 const QUERY_ALL_FILES_OPERATION: &str = "QueryAllFiles";
 const APP_QUERY_USER_OPERATION: &str = "AppQueryUser";
 const QUERY_FAMILY_GROUPS_OPERATION: &str = "QueryFamilyGroups";
@@ -39,10 +44,19 @@ const DOWNLOAD_URL_OPERATIONS: [&str; 3] = [
 ];
 const QUERY_ALL_FILES_ROOT_DIRECTORY_ID: &str = "0";
 const DEFAULT_QUERY_ALL_FILES_PAGE_SIZE: usize = 200;
+const DEFAULT_UNICOM_UPLOAD_URL: &str = "https://bjupload.pan.wo.cn:32443/openapi/client/upload2C";
+const DEFAULT_UNICOM_UPLOAD_CHUNK_SIZE_BYTES: u64 = 8 * 1024 * 1024;
+const DEFAULT_UNICOM_UPLOAD_CHANNEL: &str = "wocloud";
+const DEFAULT_UNICOM_UPLOAD_FILE_FIELD_NAME: &str = "file";
+const DEFAULT_UNICOM_UPLOAD_CHUNK_MAX_ATTEMPTS: u32 = 3;
+const DEFAULT_UNICOM_UPLOAD_CHUNK_RETRY_DELAY_MS: u64 = 25;
 const UNICOM_NATIVE_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 #[allow(dead_code)]
 const NATIVE_CAPABILITY_CREATE_DIRECTORY: &str = "create_directory";
 const NATIVE_CAPABILITY_DELETE_FILE: &str = "delete_file";
+const NATIVE_CAPABILITY_RENAME_FILE_OR_DIRECTORY: &str = "rename_file_or_directory";
+const NATIVE_CAPABILITY_COPY_FILE: &str = "copy_file";
+const NATIVE_CAPABILITY_MOVE_FILE: &str = "move_file";
 const DEFAULT_UNICOM_NATIVE_CAPABILITY_CATALOG_JSON: &str =
     include_str!("../../../config/provider-capabilities/unicom-native.json");
 
@@ -67,6 +81,8 @@ pub struct UnicomConfig {
     pub family_id: Option<String>,
     pub family_space_type: String,
     pub family_root_directory_id: String,
+    pub upload_url: String,
+    pub upload_chunk_size_bytes: u64,
     pub native_capability_catalog_path: Option<String>,
 }
 
@@ -201,6 +217,27 @@ struct DownloadUrlEntry {
 struct DownloadIdentifierCandidate {
     label: &'static str,
     value: String,
+}
+
+#[derive(Debug, Default)]
+struct UploadChunkResponse {
+    fid: Option<String>,
+    wc_file_id: Option<String>,
+    file_version: Option<String>,
+    etag: Option<String>,
+}
+
+#[derive(Debug)]
+enum UploadChunkError {
+    Retryable(String),
+    Fatal(BlobError),
+}
+
+#[derive(Debug, Clone)]
+struct UnicomScopeRoute {
+    root_directory_id: String,
+    space_type: String,
+    family_id: Option<String>,
 }
 
 impl AuthProbeStyle {
@@ -421,6 +458,62 @@ impl UnicomBlobAdapter {
         } else {
             value
         }
+    }
+
+    fn personal_scope_route(&self) -> Result<UnicomScopeRoute, BlobError> {
+        Ok(UnicomScopeRoute {
+            root_directory_id: QUERY_ALL_FILES_ROOT_DIRECTORY_ID.to_string(),
+            space_type: self.configured_space_type()?,
+            family_id: None,
+        })
+    }
+
+    async fn family_scope_route(&self) -> Result<UnicomScopeRoute, BlobError> {
+        let Some(family_id) = self.resolved_family_id().await? else {
+            return Err(BlobError::NotFound(format!(
+                "container not found: {UNICOM_FAMILY_CONTAINER}"
+            )));
+        };
+
+        Ok(UnicomScopeRoute {
+            root_directory_id: self.configured_family_root_directory_id().to_string(),
+            space_type: self.configured_family_space_type().to_string(),
+            family_id: Some(family_id),
+        })
+    }
+
+    async fn scope_route_for_container(
+        &self,
+        container: &str,
+    ) -> Result<UnicomScopeRoute, BlobError> {
+        match normalize_object_key(container).as_str() {
+            UNICOM_ROOT_CONTAINER => self.personal_scope_route(),
+            UNICOM_FAMILY_CONTAINER => self.family_scope_route().await,
+            _ => Err(BlobError::NotFound(format!(
+                "container not found: {container}"
+            ))),
+        }
+    }
+
+    fn upload_url(&self) -> &str {
+        let value = self.config.upload_url.trim();
+        if value.is_empty() {
+            DEFAULT_UNICOM_UPLOAD_URL
+        } else {
+            value
+        }
+    }
+
+    fn upload_chunk_size_bytes(&self) -> Result<u64, BlobError> {
+        let value = self.config.upload_chunk_size_bytes;
+        if value == 0 {
+            return Ok(DEFAULT_UNICOM_UPLOAD_CHUNK_SIZE_BYTES);
+        }
+        Ok(value)
+    }
+
+    fn upload_channel(&self) -> &'static str {
+        DEFAULT_UNICOM_UPLOAD_CHANNEL
     }
 
     fn native_capability(
@@ -683,7 +776,7 @@ impl UnicomBlobAdapter {
             id: "personal".to_string(),
             label: "Personal Cloud".to_string(),
             kind: StorageScopeKind::Personal,
-            writable: false,
+            writable: true,
             root: Some(QUERY_ALL_FILES_ROOT_DIRECTORY_ID.to_string()),
             container: Some(UNICOM_ROOT_CONTAINER.to_string()),
             object_count: Some(root_page.files.len() as u64),
@@ -709,15 +802,15 @@ impl UnicomBlobAdapter {
             id: family_id.to_string(),
             label: "Family Cloud".to_string(),
             kind: StorageScopeKind::Family,
-            writable: false,
+            writable: true,
             root: Some(self.configured_family_root_directory_id().to_string()),
-            container: None,
+            container: Some(UNICOM_FAMILY_CONTAINER.to_string()),
             object_count: Some(root_page.files.len() as u64),
             capacity: None,
             notes: vec![
                 format!("family_id={family_id}"),
                 format!("space_type={}", self.configured_family_space_type()),
-                "scope discovered from web session; S3 object routing is still bound to the personal root in v1".to_string(),
+                "scope is mapped to container=family".to_string(),
             ],
         }
     }
@@ -751,6 +844,7 @@ impl UnicomBlobAdapter {
 
     async fn find_child_entry(
         &self,
+        scope: &UnicomScopeRoute,
         parent_directory_id: &str,
         child_name: &str,
         entry_kind: QueryAllFilesEntryKind,
@@ -759,10 +853,12 @@ impl UnicomBlobAdapter {
 
         loop {
             let page = self
-                .query_all_files_page(
+                .query_all_files_page_for_scope(
                     parent_directory_id,
                     page_num,
                     DEFAULT_QUERY_ALL_FILES_PAGE_SIZE,
+                    scope.space_type.as_str(),
+                    scope.family_id.as_deref(),
                 )
                 .await?;
             let fetched_count = page.files.len();
@@ -786,6 +882,7 @@ impl UnicomBlobAdapter {
 
     async fn resolve_object_entry(
         &self,
+        scope: &UnicomScopeRoute,
         key: &str,
     ) -> Result<(QueryAllFilesEntry, String), BlobError> {
         let normalized_key = normalize_object_key(key);
@@ -794,11 +891,12 @@ impl UnicomBlobAdapter {
         }
 
         let segments = normalized_key.split('/').collect::<Vec<_>>();
-        let mut parent_directory_id = QUERY_ALL_FILES_ROOT_DIRECTORY_ID.to_string();
+        let mut parent_directory_id = scope.root_directory_id.clone();
 
         for segment in &segments[..segments.len().saturating_sub(1)] {
             let directory = self
                 .find_child_entry(
+                    scope,
                     &parent_directory_id,
                     segment,
                     QueryAllFilesEntryKind::Directory,
@@ -812,6 +910,7 @@ impl UnicomBlobAdapter {
             .expect("normalized object key should contain at least one segment");
         let file = self
             .find_child_entry(
+                scope,
                 &parent_directory_id,
                 file_name,
                 QueryAllFilesEntryKind::File,
@@ -823,22 +922,27 @@ impl UnicomBlobAdapter {
 
     async fn download_url_for_entry(
         &self,
+        scope: &UnicomScopeRoute,
         entry: &QueryAllFilesEntry,
     ) -> Result<String, BlobError> {
         let client_id = self.config.dispatcher_client_id.trim();
-        let space_type = self.configured_space_type()?;
         let identifiers = entry.download_identifier_candidates();
         let mut errors = Vec::new();
 
-        for operation in DOWNLOAD_URL_OPERATIONS {
-            for identifier in &identifiers {
-                let body = json!({
-                    "fidList": [identifier.value.as_str()],
-                    "clientId": client_id,
-                    "spaceType": space_type.as_str(),
-                });
+        for identifier in &identifiers {
+            for operation in DOWNLOAD_URL_OPERATIONS {
+                let mut body = Map::new();
+                body.insert("fidList".to_string(), json!([identifier.value.as_str()]));
+                body.insert("clientId".to_string(), Value::String(client_id.to_string()));
+                body.insert(
+                    "spaceType".to_string(),
+                    Value::String(scope.space_type.clone()),
+                );
+                if let Some(family_id) = scope.family_id.as_deref() {
+                    body.insert("familyId".to_string(), Value::String(family_id.to_string()));
+                }
 
-                match self.dispatch_json(operation, body).await {
+                match self.dispatch_json(operation, Value::Object(body)).await {
                     Ok(result) => match extract_download_url(operation, result.data) {
                         Ok(url) => return Ok(url),
                         Err(error) => errors.push(format!(
@@ -864,13 +968,14 @@ impl UnicomBlobAdapter {
     #[allow(dead_code)]
     async fn create_directory_entry(
         &self,
+        scope: &UnicomScopeRoute,
         parent_directory_id: &str,
         directory_name: &str,
     ) -> Result<QueryAllFilesEntry, BlobError> {
         let mut body = Map::new();
         body.insert(
             "spaceType".to_string(),
-            Value::String(self.configured_space_type()?),
+            Value::String(scope.space_type.clone()),
         );
         body.insert(
             "parentDirectoryId".to_string(),
@@ -880,10 +985,14 @@ impl UnicomBlobAdapter {
             "directoryName".to_string(),
             Value::String(directory_name.to_string()),
         );
+        if let Some(family_id) = scope.family_id.as_deref() {
+            body.insert("familyId".to_string(), Value::String(family_id.to_string()));
+        }
 
         self.dispatch_native_capability(NATIVE_CAPABILITY_CREATE_DIRECTORY, body)
             .await?;
         self.find_child_entry(
+            scope,
             parent_directory_id,
             directory_name,
             QueryAllFilesEntryKind::Directory,
@@ -893,15 +1002,26 @@ impl UnicomBlobAdapter {
 
     #[allow(dead_code)]
     async fn ensure_directory_path(&self, path: &str) -> Result<String, BlobError> {
+        let scope = self.personal_scope_route()?;
+        self.ensure_directory_path_for_scope(&scope, path).await
+    }
+
+    #[allow(dead_code)]
+    async fn ensure_directory_path_for_scope(
+        &self,
+        scope: &UnicomScopeRoute,
+        path: &str,
+    ) -> Result<String, BlobError> {
         let normalized = normalize_object_key(path);
         if normalized.is_empty() {
-            return Ok(QUERY_ALL_FILES_ROOT_DIRECTORY_ID.to_string());
+            return Ok(scope.root_directory_id.clone());
         }
 
-        let mut parent_directory_id = QUERY_ALL_FILES_ROOT_DIRECTORY_ID.to_string();
+        let mut parent_directory_id = scope.root_directory_id.clone();
         for segment in normalized.split('/') {
             let directory = match self
                 .find_child_entry(
+                    scope,
                     &parent_directory_id,
                     segment,
                     QueryAllFilesEntryKind::Directory,
@@ -910,7 +1030,7 @@ impl UnicomBlobAdapter {
             {
                 Ok(entry) => entry,
                 Err(BlobError::NotFound(_)) => {
-                    self.create_directory_entry(&parent_directory_id, segment)
+                    self.create_directory_entry(scope, &parent_directory_id, segment)
                         .await?
                 }
                 Err(error) => return Err(error),
@@ -921,19 +1041,285 @@ impl UnicomBlobAdapter {
         Ok(parent_directory_id)
     }
 
-    async fn delete_file_entry(&self, entry: &QueryAllFilesEntry) -> Result<(), BlobError> {
+    async fn delete_file_entry(
+        &self,
+        scope: &UnicomScopeRoute,
+        entry: &QueryAllFilesEntry,
+    ) -> Result<(), BlobError> {
         let mut body = Map::new();
         body.insert(
             "spaceType".to_string(),
-            Value::String(self.configured_space_type()?),
+            Value::String(scope.space_type.clone()),
         );
         body.insert(
             "fileList".to_string(),
             Value::Array(vec![Value::String(entry.id.clone())]),
         );
+        if let Some(family_id) = scope.family_id.as_deref() {
+            body.insert("familyId".to_string(), Value::String(family_id.to_string()));
+        }
         self.dispatch_native_capability(NATIVE_CAPABILITY_DELETE_FILE, body)
             .await?;
         Ok(())
+    }
+
+    async fn rename_object_entry(
+        &self,
+        scope: &UnicomScopeRoute,
+        entry: &QueryAllFilesEntry,
+        new_name: &str,
+    ) -> Result<(), BlobError> {
+        let requested_name = new_name.trim();
+        if requested_name.is_empty() {
+            return Err(BlobError::Configuration(
+                "new object name must not be empty".to_string(),
+            ));
+        }
+
+        let mut body = Map::new();
+        body.insert(
+            "spaceType".to_string(),
+            Value::String(scope.space_type.clone()),
+        );
+        body.insert(
+            "type".to_string(),
+            Value::Number((if entry.is_directory() { 0 } else { 1 }).into()),
+        );
+        body.insert("id".to_string(), Value::String(entry.id.clone()));
+        body.insert(
+            "name".to_string(),
+            Value::String(requested_name.to_string()),
+        );
+        if let Some(file_type) = entry
+            .resolved_content_type()
+            .and_then(|content_type| classify_unicom_file_type(&content_type))
+        {
+            body.insert("fileType".to_string(), Value::String(file_type.to_string()));
+        }
+        if let Some(family_id) = scope.family_id.as_deref() {
+            body.insert("familyId".to_string(), Value::String(family_id.to_string()));
+        }
+
+        self.dispatch_native_capability(NATIVE_CAPABILITY_RENAME_FILE_OR_DIRECTORY, body)
+            .await?;
+        Ok(())
+    }
+
+    async fn copy_object_entry(
+        &self,
+        source_scope: &UnicomScopeRoute,
+        entry: &QueryAllFilesEntry,
+        destination_scope: &UnicomScopeRoute,
+        target_directory_id: &str,
+    ) -> Result<(), BlobError> {
+        let mut body = Map::new();
+        body.insert(
+            "targetDirId".to_string(),
+            Value::String(target_directory_id.to_string()),
+        );
+        body.insert(
+            "sourceType".to_string(),
+            Value::String(source_scope.space_type.clone()),
+        );
+        body.insert(
+            "targetType".to_string(),
+            Value::String(destination_scope.space_type.clone()),
+        );
+        if entry.is_directory() {
+            body.insert(
+                "dirList".to_string(),
+                Value::Array(vec![Value::String(entry.id.clone())]),
+            );
+        } else {
+            body.insert(
+                "fileList".to_string(),
+                Value::Array(vec![Value::String(entry.id.clone())]),
+            );
+        }
+        if let Some(family_id) = destination_scope.family_id.as_deref() {
+            body.insert("familyId".to_string(), Value::String(family_id.to_string()));
+        }
+
+        self.dispatch_native_capability(NATIVE_CAPABILITY_COPY_FILE, body)
+            .await?;
+        Ok(())
+    }
+
+    async fn move_object_entry(
+        &self,
+        source_scope: &UnicomScopeRoute,
+        entry: &QueryAllFilesEntry,
+        destination_scope: &UnicomScopeRoute,
+        target_directory_id: &str,
+    ) -> Result<(), BlobError> {
+        let mut body = Map::new();
+        body.insert(
+            "targetDirId".to_string(),
+            Value::String(target_directory_id.to_string()),
+        );
+        body.insert(
+            "sourceType".to_string(),
+            Value::String(source_scope.space_type.clone()),
+        );
+        body.insert(
+            "targetType".to_string(),
+            Value::String(destination_scope.space_type.clone()),
+        );
+        if entry.is_directory() {
+            body.insert(
+                "dirList".to_string(),
+                Value::Array(vec![Value::String(entry.id.clone())]),
+            );
+        } else {
+            body.insert(
+                "fileList".to_string(),
+                Value::Array(vec![Value::String(entry.id.clone())]),
+            );
+        }
+        if let Some(family_id) = destination_scope.family_id.as_deref() {
+            body.insert("familyId".to_string(), Value::String(family_id.to_string()));
+        }
+        if let Some(from_family_id) = source_scope.family_id.as_deref() {
+            body.insert(
+                "fromFamilyId".to_string(),
+                Value::String(from_family_id.to_string()),
+            );
+        }
+
+        self.dispatch_native_capability(NATIVE_CAPABILITY_MOVE_FILE, body)
+            .await?;
+        Ok(())
+    }
+
+    fn upload_file_name_and_parent(
+        key: &str,
+    ) -> Result<(Option<String>, String, String), BlobError> {
+        let normalized_key = normalize_object_key(key);
+        if normalized_key.is_empty() {
+            return Err(BlobError::NotFound("object key is empty".to_string()));
+        }
+
+        let mut segments = normalized_key.split('/').collect::<Vec<_>>();
+        let file_name = segments
+            .pop()
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| BlobError::NotFound("object key is empty".to_string()))?;
+        let parent_path = if segments.is_empty() {
+            None
+        } else {
+            Some(segments.join("/"))
+        };
+
+        Ok((parent_path, file_name, normalized_key))
+    }
+
+    fn upload_file_info_ciphertext(
+        &self,
+        token: &str,
+        file_name: &str,
+        file_size: u64,
+        parent_directory_id: &str,
+    ) -> Result<String, BlobError> {
+        let file_type = content_type_from_name(file_name)
+            .and_then(classify_unicom_file_type)
+            .unwrap_or("5");
+        aes_cbc_encrypt_base64(
+            &serde_json::to_string(&json!({
+                "fileName": file_name,
+                "fileSize": file_size,
+                "fileType": file_type,
+                "directoryId": parent_directory_id,
+            }))
+            .map_err(|error| {
+                BlobError::Upstream(format!("failed to encode Unicom upload fileInfo: {error}"))
+            })?,
+            token,
+        )
+    }
+
+    async fn upload_chunk(
+        &self,
+        token: &str,
+        scope: &UnicomScopeRoute,
+        file_name: &str,
+        file_size: u64,
+        content_type: &str,
+        parent_directory_id: &str,
+        unique_id: &str,
+        total_parts: u64,
+        part_index: u64,
+        chunk: Bytes,
+        file_info_ciphertext: &str,
+    ) -> Result<UploadChunkResponse, BlobError> {
+        let url = self.upload_url().to_string();
+        let action = format!("upload2C {file_name} part {part_index}/{total_parts}");
+        let part_size = chunk.len() as u64;
+        let chunk_bytes = chunk.to_vec();
+
+        for attempt in 1..=DEFAULT_UNICOM_UPLOAD_CHUNK_MAX_ATTEMPTS {
+            let file_part = Part::bytes(chunk_bytes.clone())
+                .file_name(file_name.to_string())
+                .mime_str(content_type)
+                .map_err(|error| {
+                    BlobError::Configuration(format!(
+                        "invalid content type for Unicom upload {file_name}: {error}"
+                    ))
+                })?;
+            let form = Form::new()
+                .text("uniqueId", unique_id.to_string())
+                .text("accessToken", token.to_string())
+                .text("fileName", file_name.to_string())
+                .text("fileSize", file_size.to_string())
+                .text("totalPart", total_parts.to_string())
+                .text("partSize", part_size.to_string())
+                .text("partIndex", part_index.to_string())
+                .text("channel", self.upload_channel().to_string())
+                .text("spaceType", scope.space_type.clone())
+                .text("directoryId", parent_directory_id.to_string())
+                .text("fileInfo", file_info_ciphertext.to_string());
+            let form = if let Some(family_id) = scope.family_id.as_deref() {
+                form.text("familyId", family_id.to_string())
+            } else {
+                form
+            }
+            .part(DEFAULT_UNICOM_UPLOAD_FILE_FIELD_NAME, file_part);
+
+            let response = match self
+                .request(Method::POST, &url)?
+                .multipart(form)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    if attempt == DEFAULT_UNICOM_UPLOAD_CHUNK_MAX_ATTEMPTS {
+                        return Err(BlobError::Upstream(format!(
+                            "{action} failed after {attempt} attempts: request error: {error}"
+                        )));
+                    }
+                    sleep(upload_chunk_retry_delay(attempt)).await;
+                    continue;
+                }
+            };
+
+            match parse_upload_chunk_response(response, &action).await {
+                Ok(result) => return Ok(result),
+                Err(UploadChunkError::Fatal(error)) => return Err(error),
+                Err(UploadChunkError::Retryable(message)) => {
+                    if attempt == DEFAULT_UNICOM_UPLOAD_CHUNK_MAX_ATTEMPTS {
+                        return Err(BlobError::Upstream(format!(
+                            "{action} failed after {attempt} attempts: {message}"
+                        )));
+                    }
+                    sleep(upload_chunk_retry_delay(attempt)).await;
+                }
+            }
+        }
+
+        Err(BlobError::Upstream(format!(
+            "{action} exhausted upload retries unexpectedly"
+        )))
     }
 
     fn download_request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
@@ -967,18 +1353,9 @@ impl UnicomBlobAdapter {
             })
     }
 
-    fn validate_container(&self, container: &str) -> Result<(), BlobError> {
-        if normalize_object_key(container) == UNICOM_ROOT_CONTAINER {
-            Ok(())
-        } else {
-            Err(BlobError::NotFound(format!(
-                "container not found: {container}"
-            )))
-        }
-    }
-
     async fn list_objects_in_root(
         &self,
+        scope: &UnicomScopeRoute,
         request: &ListObjectsRequest,
     ) -> Result<Vec<ObjectInfo>, BlobError> {
         if matches!(request.limit, Some(0)) {
@@ -987,14 +1364,20 @@ impl UnicomBlobAdapter {
 
         let normalized_prefix = request.prefix.as_deref().map(normalize_object_key);
         let mut objects = BTreeMap::new();
-        let mut stack = vec![(QUERY_ALL_FILES_ROOT_DIRECTORY_ID.to_string(), String::new())];
+        let mut stack = vec![(scope.root_directory_id.clone(), String::new())];
 
         while let Some((folder_id, folder_prefix)) = stack.pop() {
             let mut page_num = 0;
 
             loop {
                 let page = self
-                    .query_all_files_page(&folder_id, page_num, DEFAULT_QUERY_ALL_FILES_PAGE_SIZE)
+                    .query_all_files_page_for_scope(
+                        &folder_id,
+                        page_num,
+                        DEFAULT_QUERY_ALL_FILES_PAGE_SIZE,
+                        scope.space_type.as_str(),
+                        scope.family_id.as_deref(),
+                    )
                     .await?;
                 let fetched_count = page.files.len();
 
@@ -1051,7 +1434,7 @@ impl BlobBackend for UnicomBlobAdapter {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             read: true,
-            write: false,
+            write: true,
             delete: true,
             multipart_upload: false,
         }
@@ -1083,9 +1466,15 @@ impl BlobBackend for UnicomBlobAdapter {
             format!("root_container={UNICOM_ROOT_CONTAINER}"),
             format!("list_operation={QUERY_ALL_FILES_OPERATION}"),
             format!("download_operations={}", DOWNLOAD_URL_OPERATIONS.join(",")),
+            format!("upload_url={}", self.upload_url()),
+            format!(
+                "upload_chunk_size_bytes={}",
+                self.upload_chunk_size_bytes()?
+            ),
             "browser-session interception is intentionally out of scope".to_string(),
         ];
         let mut scopes = Vec::new();
+        let mut personal_scope_ready = false;
 
         if self
             .config
@@ -1139,6 +1528,7 @@ impl BlobBackend for UnicomBlobAdapter {
         {
             Ok(personal_root) => {
                 status = HealthStatus::Healthy;
+                personal_scope_ready = true;
                 notes.push(format!(
                     "personal_root_entry_count={}",
                     personal_root.files.len()
@@ -1188,6 +1578,9 @@ impl BlobBackend for UnicomBlobAdapter {
                 Err(error) => {
                     notes.push(format!("family_root_probe_failed={error}"));
                     self.push_remediation_notes(&mut notes, &error);
+                    if personal_scope_ready {
+                        status = HealthStatus::Degraded;
+                    }
                 }
             },
             Ok(None) => {
@@ -1196,6 +1589,9 @@ impl BlobBackend for UnicomBlobAdapter {
             Err(error) => {
                 notes.push(format!("family_scope_probe_failed={error}"));
                 self.push_remediation_notes(&mut notes, &error);
+                if personal_scope_ready {
+                    status = HealthStatus::Degraded;
+                }
             }
         };
 
@@ -1209,17 +1605,41 @@ impl BlobBackend for UnicomBlobAdapter {
     }
 
     async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
-        self.query_all_files_page(
-            QUERY_ALL_FILES_ROOT_DIRECTORY_ID,
+        let personal_scope = self.personal_scope_route()?;
+        self.query_all_files_page_for_scope(
+            personal_scope.root_directory_id.as_str(),
             0,
             DEFAULT_QUERY_ALL_FILES_PAGE_SIZE,
+            personal_scope.space_type.as_str(),
+            personal_scope.family_id.as_deref(),
         )
         .await?;
 
-        Ok(vec![ContainerInfo {
+        let mut containers = vec![ContainerInfo {
             name: UNICOM_ROOT_CONTAINER.to_string(),
             object_count: None,
-        }])
+        }];
+
+        if let Ok(family_scope) = self.family_scope_route().await {
+            if self
+                .query_all_files_page_for_scope(
+                    family_scope.root_directory_id.as_str(),
+                    0,
+                    DEFAULT_QUERY_ALL_FILES_PAGE_SIZE,
+                    family_scope.space_type.as_str(),
+                    family_scope.family_id.as_deref(),
+                )
+                .await
+                .is_ok()
+            {
+                containers.push(ContainerInfo {
+                    name: UNICOM_FAMILY_CONTAINER.to_string(),
+                    object_count: None,
+                });
+            }
+        }
+
+        Ok(containers)
     }
 
     async fn list_objects(
@@ -1230,43 +1650,183 @@ impl BlobBackend for UnicomBlobAdapter {
             return Ok(Vec::new());
         };
 
-        self.validate_container(container)?;
-        self.list_objects_in_root(&request).await
+        let scope = self.scope_route_for_container(container).await?;
+        self.list_objects_in_root(&scope, &request).await
     }
 
     async fn head_container(&self, name: &str) -> Result<ContainerInfo, BlobError> {
-        self.validate_container(name)?;
-        self.query_all_files_page(QUERY_ALL_FILES_ROOT_DIRECTORY_ID, 0, 1)
-            .await?;
+        let scope = self.scope_route_for_container(name).await?;
+        self.query_all_files_page_for_scope(
+            scope.root_directory_id.as_str(),
+            0,
+            1,
+            scope.space_type.as_str(),
+            scope.family_id.as_deref(),
+        )
+        .await?;
 
         Ok(ContainerInfo {
-            name: UNICOM_ROOT_CONTAINER.to_string(),
+            name: normalize_object_key(name),
             object_count: None,
         })
     }
 
     async fn head_object(&self, container: &str, key: &str) -> Result<ObjectInfo, BlobError> {
-        self.validate_container(container)?;
-        let (entry, normalized_key) = self.resolve_object_entry(key).await?;
+        let scope = self.scope_route_for_container(container).await?;
+        let (entry, normalized_key) = self.resolve_object_entry(&scope, key).await?;
         Ok(entry.into_object_info(normalized_key))
     }
 
     async fn get_object(&self, container: &str, key: &str) -> Result<ObjectPayload, BlobError> {
-        self.validate_container(container)?;
-        let (entry, normalized_key) = self.resolve_object_entry(key).await?;
-        let download_url = self.download_url_for_entry(&entry).await?;
+        let scope = self.scope_route_for_container(container).await?;
+        let (entry, normalized_key) = self.resolve_object_entry(&scope, key).await?;
+        let download_url = self.download_url_for_entry(&scope, &entry).await?;
         let info = entry.into_object_info(normalized_key);
         let body = self
             .get_bytes(&download_url, &format!("download object {container}/{key}"))
             .await?;
 
-        Ok(ObjectPayload { info, body })
+        Ok(ObjectPayload {
+            info,
+            body: body.into(),
+        })
+    }
+
+    async fn put_object(&self, request: PutObjectRequest) -> Result<PutObjectResult, BlobError> {
+        let scope = self.scope_route_for_container(&request.container).await?;
+        let token = self.config.token_source.load()?;
+        let chunk_size = self.upload_chunk_size_bytes()?;
+        let (parent_path, file_name, normalized_key) =
+            Self::upload_file_name_and_parent(&request.key)?;
+        let content_type = request
+            .content_type
+            .clone()
+            .or_else(|| content_type_from_name(&file_name).map(str::to_string))
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let body = request.body.collect().await?;
+        let size = request.size.unwrap_or(body.len() as u64);
+        if request.size.is_some() && body.len() as u64 != size {
+            return Err(BlobError::BodyStream(format!(
+                "object body size mismatch for {normalized_key}: declared {size} bytes, received {}",
+                body.len()
+            )));
+        }
+
+        let parent_directory_id = match parent_path.as_deref() {
+            Some(path) => self.ensure_directory_path_for_scope(&scope, path).await?,
+            None => scope.root_directory_id.clone(),
+        };
+        let total_parts = std::cmp::max(1, size.div_ceil(chunk_size));
+        let unique_id = resumable_unique_id(size, &file_name);
+        let file_info_ciphertext =
+            self.upload_file_info_ciphertext(&token, &file_name, size, &parent_directory_id)?;
+        let mut last_response = UploadChunkResponse::default();
+
+        for (index, chunk) in body.chunks(chunk_size as usize).enumerate() {
+            last_response = self
+                .upload_chunk(
+                    &token,
+                    &scope,
+                    &file_name,
+                    size,
+                    &content_type,
+                    &parent_directory_id,
+                    &unique_id,
+                    total_parts,
+                    index as u64 + 1,
+                    Bytes::copy_from_slice(chunk),
+                    &file_info_ciphertext,
+                )
+                .await?;
+        }
+
+        Ok(PutObjectResult {
+            etag: last_response
+                .etag
+                .or(last_response.fid)
+                .or(last_response.wc_file_id)
+                .or(last_response.file_version),
+        })
     }
 
     async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
-        self.validate_container(container)?;
-        let (entry, _) = self.resolve_object_entry(key).await?;
-        self.delete_file_entry(&entry).await
+        let scope = self.scope_route_for_container(container).await?;
+        let (entry, _) = self.resolve_object_entry(&scope, key).await?;
+        self.delete_file_entry(&scope, &entry).await
+    }
+
+    async fn rename_object(&self, request: RenameObjectRequest) -> Result<(), BlobError> {
+        let scope = self.scope_route_for_container(&request.container).await?;
+        let (entry, normalized_key) = self.resolve_object_entry(&scope, &request.key).await?;
+        let (_, new_name, normalized_new_key) =
+            Self::upload_file_name_and_parent(&request.new_key)?;
+        let source_parent = normalized_key.rsplit_once('/').map(|(parent, _)| parent);
+        let destination_parent = normalized_new_key
+            .rsplit_once('/')
+            .map(|(parent, _)| parent);
+        if source_parent != destination_parent {
+            return Err(BlobError::NotImplemented(
+                "Unicom rename_object currently requires staying within the same parent directory"
+                    .to_string(),
+            ));
+        }
+        self.rename_object_entry(&scope, &entry, &new_name).await
+    }
+
+    async fn copy_object(&self, request: CopyObjectRequest) -> Result<(), BlobError> {
+        let source_scope = self
+            .scope_route_for_container(&request.source_container)
+            .await?;
+        let destination_scope = self
+            .scope_route_for_container(&request.destination_container)
+            .await?;
+        let (entry, _) = self
+            .resolve_object_entry(&source_scope, &request.source_key)
+            .await?;
+        let (target_parent_path, _, _) =
+            Self::upload_file_name_and_parent(&request.destination_key)?;
+        let target_directory_id = match target_parent_path.as_deref() {
+            Some(path) => {
+                self.ensure_directory_path_for_scope(&destination_scope, path)
+                    .await?
+            }
+            None => destination_scope.root_directory_id.clone(),
+        };
+        self.copy_object_entry(
+            &source_scope,
+            &entry,
+            &destination_scope,
+            &target_directory_id,
+        )
+        .await
+    }
+
+    async fn move_object(&self, request: MoveObjectRequest) -> Result<(), BlobError> {
+        let source_scope = self
+            .scope_route_for_container(&request.source_container)
+            .await?;
+        let destination_scope = self
+            .scope_route_for_container(&request.destination_container)
+            .await?;
+        let (entry, _) = self
+            .resolve_object_entry(&source_scope, &request.source_key)
+            .await?;
+        let (target_parent_path, _, _) =
+            Self::upload_file_name_and_parent(&request.destination_key)?;
+        let target_directory_id = match target_parent_path.as_deref() {
+            Some(path) => {
+                self.ensure_directory_path_for_scope(&destination_scope, path)
+                    .await?
+            }
+            None => destination_scope.root_directory_id.clone(),
+        };
+        self.move_object_entry(
+            &source_scope,
+            &entry,
+            &destination_scope,
+            &target_directory_id,
+        )
+        .await
     }
 }
 
@@ -1383,6 +1943,77 @@ impl QueryAllFilesEntry {
 enum QueryAllFilesEntryKind {
     Directory,
     File,
+}
+
+async fn parse_upload_chunk_response(
+    response: Response,
+    action: &str,
+) -> Result<UploadChunkResponse, UploadChunkError> {
+    let status = response.status();
+    let body = response.text().await.map_err(|error| {
+        UploadChunkError::Fatal(BlobError::Upstream(format!(
+            "{action} returned unreadable text: {error}"
+        )))
+    })?;
+
+    if !status.is_success() {
+        let message = format!("{action} failed with HTTP {}: {}", status, body.trim());
+        return if is_retryable_upload_status(status) {
+            Err(UploadChunkError::Retryable(message))
+        } else {
+            Err(UploadChunkError::Fatal(BlobError::Upstream(message)))
+        };
+    }
+
+    let payload = serde_json::from_str::<Value>(&body).map_err(|error| {
+        UploadChunkError::Fatal(BlobError::Upstream(format!(
+            "{action} returned invalid JSON: {error}"
+        )))
+    })?;
+    let code = payload
+        .get("code")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            payload
+                .get("code")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<i64>().ok())
+        })
+        .unwrap_or(0);
+    if code != 0 {
+        let message = format!(
+            "{action} returned code={code}: {}",
+            payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown upload error")
+        );
+        return if is_retryable_upload_code(code) {
+            Err(UploadChunkError::Retryable(message))
+        } else {
+            Err(UploadChunkError::Fatal(BlobError::Upstream(message)))
+        };
+    }
+
+    let data = payload.get("data");
+    Ok(UploadChunkResponse {
+        fid: find_first_string_like_for_keys(data, &["fid"]),
+        wc_file_id: find_first_string_like_for_keys(data, &["wcFileId", "wc_file_id"]),
+        file_version: find_first_string_like_for_keys(data, &["fileVersion", "file_version"]),
+        etag: find_first_string_like_for_keys(data, &["etag", "eTag"]),
+    })
+}
+
+fn is_retryable_upload_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn is_retryable_upload_code(code: i64) -> bool {
+    code == 429 || (500..=599).contains(&code)
+}
+
+fn upload_chunk_retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis(DEFAULT_UNICOM_UPLOAD_CHUNK_RETRY_DELAY_MS * attempt as u64)
 }
 
 fn trim_objects_to_limit(objects: &mut BTreeMap<String, ObjectInfo>, limit: usize) {
@@ -1507,6 +2138,29 @@ fn value_as_u64(value: Option<&Value>) -> Option<u64> {
     }
 }
 
+fn find_first_string_like_for_keys(value: Option<&Value>, keys: &[&str]) -> Option<String> {
+    let value = value?;
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                if let Some(found) = value_as_string_like(map.get(*key)) {
+                    return Some(found);
+                }
+            }
+            for child in map.values() {
+                if let Some(found) = find_first_string_like_for_keys(Some(child), keys) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|child| find_first_string_like_for_keys(Some(child), keys)),
+        _ => None,
+    }
+}
+
 fn normalize_upstream_timestamp(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -1541,6 +2195,39 @@ fn content_type_from_suffix(suffix: &str) -> Option<&'static str> {
         "mp3" => Some("audio/mpeg"),
         _ => None,
     }
+}
+
+fn content_type_from_name(name: &str) -> Option<&'static str> {
+    name.rsplit_once('.')
+        .and_then(|(_, suffix)| content_type_from_suffix(suffix))
+}
+
+fn classify_unicom_file_type(content_type: &str) -> Option<&'static str> {
+    let content_type = content_type.trim().to_ascii_lowercase();
+    if content_type.starts_with("image/") {
+        Some("1")
+    } else if content_type.starts_with("video/") {
+        Some("2")
+    } else if content_type.starts_with("audio/") {
+        Some("3")
+    } else if content_type.starts_with("text/")
+        || matches!(
+            content_type.as_str(),
+            "application/json" | "application/pdf"
+        )
+    {
+        Some("4")
+    } else {
+        Some("5")
+    }
+}
+
+fn resumable_unique_id(file_size: u64, file_name: &str) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(file_size.to_string().as_bytes());
+    hasher.update(b":");
+    hasher.update(file_name.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn deserialize_string_like<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -2050,35 +2737,56 @@ mod tests {
         routing::{get, post},
     };
     use blob_core::{
-        BlobBackend, HealthStatus, ListObjectsRequest, OutboundIpFamily, StorageScopeKind,
-        TokenSource,
+        BlobBackend, CopyObjectRequest, HealthStatus, ListObjectsRequest, MoveObjectRequest,
+        OutboundIpFamily, PutObjectRequest, RenameObjectRequest, StorageScopeKind, TokenSource,
     };
+    use bytes::Bytes;
 
     use super::{
-        APP_QUERY_USER_OPERATION, GET_DOWNLOAD_URL_OPERATION, GET_DOWNLOAD_URL_V2_OPERATION,
-        GET_DOWNLOAD_URL_V3_OPERATION, QUERY_ALL_FILES_OPERATION, QUERY_FAMILY_GROUPS_OPERATION,
-        UNICOM_ROOT_CONTAINER, UnicomBlobAdapter, UnicomConfig, aes_cbc_decrypt_base64,
-        aes_cbc_encrypt_base64, build_api_user_dispatcher_payload, build_wohome_dispatcher_payload,
-        dispatcher_sign,
+        APP_QUERY_USER_OPERATION, DEFAULT_UNICOM_UPLOAD_CHUNK_SIZE_BYTES,
+        DEFAULT_UNICOM_UPLOAD_FILE_FIELD_NAME, GET_DOWNLOAD_URL_OPERATION,
+        GET_DOWNLOAD_URL_V2_OPERATION, GET_DOWNLOAD_URL_V3_OPERATION, QUERY_ALL_FILES_OPERATION,
+        QUERY_FAMILY_GROUPS_OPERATION, UNICOM_FAMILY_CONTAINER, UNICOM_ROOT_CONTAINER,
+        UnicomBlobAdapter, UnicomConfig, aes_cbc_decrypt_base64, aes_cbc_encrypt_base64,
+        build_api_user_dispatcher_payload, build_wohome_dispatcher_payload, dispatcher_sign,
     };
     use serde_json::{Value, json};
 
     const CREATE_DIRECTORY_OPERATION: &str = "CreateDirectory";
     const DELETE_FILE_OPERATION: &str = "DeleteFile";
+    const RENAME_FILE_OR_DIRECTORY_OPERATION: &str = "RenameFileOrDirectory";
+    const COPY_FILE_OPERATION: &str = "CopyFile";
+    const MOVE_FILE_OPERATION: &str = "MoveFile";
 
     type MockDownloadRoutes = BTreeMap<String, BTreeMap<String, String>>;
+    type MockUploadFailures = BTreeMap<u64, usize>;
+    type MockQueryFailures = BTreeSet<String>;
 
     #[derive(Clone)]
     struct MockDispatcherState {
         token: String,
         base_url: String,
         entries_by_parent: Arc<BTreeMap<String, Vec<Value>>>,
-        file_bodies_by_id: Arc<BTreeMap<String, Vec<u8>>>,
+        file_bodies_by_id: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         download_routes_by_operation: Arc<MockDownloadRoutes>,
         created_entries_by_parent: Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
         next_created_directory_id: Arc<Mutex<u64>>,
+        next_created_file_id: Arc<Mutex<u64>>,
+        uploads_by_unique_id: Arc<Mutex<BTreeMap<String, MockUploadAssembly>>>,
+        upload_failures_by_part_index: Arc<Mutex<MockUploadFailures>>,
+        query_failures: Arc<MockQueryFailures>,
         deleted_ids: Arc<Mutex<BTreeSet<String>>>,
         requests: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct MockUploadAssembly {
+        file_name: String,
+        parent_directory_id: String,
+        scope_parent_key: String,
+        total_parts: u64,
+        file_size: u64,
+        parts: BTreeMap<u64, Vec<u8>>,
     }
 
     struct MockServer {
@@ -2095,10 +2803,12 @@ mod tests {
         ) -> Self {
             let download_routes_by_operation =
                 default_download_routes_by_operation(&file_bodies_by_id);
-            Self::start_with_download_routes(
+            Self::start_with_options(
                 entries_by_parent,
                 file_bodies_by_id,
                 download_routes_by_operation,
+                MockUploadFailures::new(),
+                MockQueryFailures::new(),
                 token,
             )
             .await
@@ -2108,6 +2818,63 @@ mod tests {
             entries_by_parent: BTreeMap<String, Vec<Value>>,
             file_bodies_by_id: BTreeMap<String, Vec<u8>>,
             download_routes_by_operation: MockDownloadRoutes,
+            token: &str,
+        ) -> Self {
+            Self::start_with_options(
+                entries_by_parent,
+                file_bodies_by_id,
+                download_routes_by_operation,
+                MockUploadFailures::new(),
+                MockQueryFailures::new(),
+                token,
+            )
+            .await
+        }
+
+        async fn start_with_upload_failures(
+            entries_by_parent: BTreeMap<String, Vec<Value>>,
+            file_bodies_by_id: BTreeMap<String, Vec<u8>>,
+            upload_failures_by_part_index: MockUploadFailures,
+            token: &str,
+        ) -> Self {
+            let download_routes_by_operation =
+                default_download_routes_by_operation(&file_bodies_by_id);
+            Self::start_with_options(
+                entries_by_parent,
+                file_bodies_by_id,
+                download_routes_by_operation,
+                upload_failures_by_part_index,
+                MockQueryFailures::new(),
+                token,
+            )
+            .await
+        }
+
+        async fn start_with_query_failures(
+            entries_by_parent: BTreeMap<String, Vec<Value>>,
+            file_bodies_by_id: BTreeMap<String, Vec<u8>>,
+            query_failures: MockQueryFailures,
+            token: &str,
+        ) -> Self {
+            let download_routes_by_operation =
+                default_download_routes_by_operation(&file_bodies_by_id);
+            Self::start_with_options(
+                entries_by_parent,
+                file_bodies_by_id,
+                download_routes_by_operation,
+                MockUploadFailures::new(),
+                query_failures,
+                token,
+            )
+            .await
+        }
+
+        async fn start_with_options(
+            entries_by_parent: BTreeMap<String, Vec<Value>>,
+            file_bodies_by_id: BTreeMap<String, Vec<u8>>,
+            download_routes_by_operation: MockDownloadRoutes,
+            upload_failures_by_part_index: MockUploadFailures,
+            query_failures: MockQueryFailures,
             token: &str,
         ) -> Self {
             let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2120,16 +2887,21 @@ mod tests {
                 token: token.to_string(),
                 base_url: base_url.clone(),
                 entries_by_parent: Arc::new(entries_by_parent),
-                file_bodies_by_id: Arc::new(file_bodies_by_id),
+                file_bodies_by_id: Arc::new(Mutex::new(file_bodies_by_id)),
                 download_routes_by_operation: Arc::new(download_routes_by_operation),
                 created_entries_by_parent: Arc::new(Mutex::new(BTreeMap::new())),
                 next_created_directory_id: Arc::new(Mutex::new(0)),
+                next_created_file_id: Arc::new(Mutex::new(0)),
+                uploads_by_unique_id: Arc::new(Mutex::new(BTreeMap::new())),
+                upload_failures_by_part_index: Arc::new(Mutex::new(upload_failures_by_part_index)),
+                query_failures: Arc::new(query_failures),
                 deleted_ids: Arc::new(Mutex::new(BTreeSet::new())),
                 requests: requests.clone(),
             };
 
             let app = Router::new()
                 .route("/wohome/dispatcher", post(mock_dispatcher))
+                .route("/openapi/client/upload2C", post(mock_upload))
                 .route("/download/{id}", get(mock_download))
                 .with_state(state);
             let task = tokio::spawn(async move {
@@ -2226,41 +2998,44 @@ mod tests {
                 } else {
                     parent_directory_id.to_string()
                 };
-
-                let mut entries = state
-                    .entries_by_parent
-                    .get(&scoped_parent_key)
-                    .or_else(|| state.entries_by_parent.get(parent_directory_id))
-                    .cloned()
-                    .unwrap_or_default();
-                if let Some(created_entries) = state
-                    .created_entries_by_parent
-                    .lock()
-                    .expect("mock created entries")
-                    .get(&scoped_parent_key)
-                    .cloned()
-                {
-                    entries.extend(created_entries);
+                if state.query_failures.contains(&scoped_parent_key) {
+                    ("9999", "系统异常", None)
+                } else {
+                    let mut entries = state
+                        .entries_by_parent
+                        .get(&scoped_parent_key)
+                        .or_else(|| state.entries_by_parent.get(parent_directory_id))
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(created_entries) = state
+                        .created_entries_by_parent
+                        .lock()
+                        .expect("mock created entries")
+                        .get(&scoped_parent_key)
+                        .cloned()
+                    {
+                        entries.extend(created_entries);
+                    }
+                    let deleted_ids = state.deleted_ids.lock().expect("mock deleted id set");
+                    let files = entries
+                        .into_iter()
+                        .filter(|entry| {
+                            !entry["id"]
+                                .as_str()
+                                .is_some_and(|id| deleted_ids.contains(id))
+                        })
+                        .skip(page_num * page_size)
+                        .take(page_size)
+                        .collect::<Vec<_>>();
+                    (
+                        "0000",
+                        "成功",
+                        Some(json!({
+                            "files": files,
+                            "systemDirs": [],
+                        })),
+                    )
                 }
-                let deleted_ids = state.deleted_ids.lock().expect("mock deleted id set");
-                let files = entries
-                    .into_iter()
-                    .filter(|entry| {
-                        !entry["id"]
-                            .as_str()
-                            .is_some_and(|id| deleted_ids.contains(id))
-                    })
-                    .skip(page_num * page_size)
-                    .take(page_size)
-                    .collect::<Vec<_>>();
-                (
-                    "0000",
-                    "成功",
-                    Some(json!({
-                        "files": files,
-                        "systemDirs": [],
-                    })),
-                )
             }
             APP_QUERY_USER_OPERATION => (
                 "0000",
@@ -2299,7 +3074,15 @@ mod tests {
                     .download_routes_by_operation
                     .get(operation)
                     .and_then(|routes| routes.get(identifier))
-                {
+                    .cloned()
+                    .or_else(|| {
+                        state
+                            .file_bodies_by_id
+                            .lock()
+                            .expect("mock file bodies")
+                            .contains_key(identifier)
+                            .then(|| identifier.to_string())
+                    }) {
                     Some(target_id) => (
                         "0000",
                         "成功",
@@ -2407,6 +3190,9 @@ mod tests {
                 }
                 ("0000", "成功", Some(json!({ "deleted": true })))
             }
+            RENAME_FILE_OR_DIRECTORY_OPERATION | COPY_FILE_OPERATION | MOVE_FILE_OPERATION => {
+                ("0000", "成功", Some(json!({ "ok": true })))
+            }
             other => panic!("unexpected mock dispatcher operation: {other}"),
         };
         let encrypted_response = response_data
@@ -2435,10 +3221,216 @@ mod tests {
         State(state): State<MockDispatcherState>,
         Path(id): Path<String>,
     ) -> impl IntoResponse {
-        match state.file_bodies_by_id.get(&id) {
+        match state
+            .file_bodies_by_id
+            .lock()
+            .expect("mock file bodies")
+            .get(&id)
+        {
             Some(body) => ResponseTuple(StatusCode::OK, body.clone()),
             None => ResponseTuple(StatusCode::NOT_FOUND, Vec::new()),
         }
+    }
+
+    async fn mock_upload(
+        State(state): State<MockDispatcherState>,
+        mut multipart: axum::extract::Multipart,
+    ) -> Json<Value> {
+        let mut fields = BTreeMap::new();
+        let mut file_bytes = Vec::new();
+        let mut file_field_name = None;
+
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .expect("parse mock upload field")
+        {
+            let name = field.name().unwrap_or("").to_string();
+            if name == DEFAULT_UNICOM_UPLOAD_FILE_FIELD_NAME {
+                file_field_name = Some(name);
+                file_bytes = field
+                    .bytes()
+                    .await
+                    .expect("read mock upload file bytes")
+                    .to_vec();
+            } else {
+                fields.insert(
+                    name,
+                    field.text().await.expect("read mock upload field text"),
+                );
+            }
+        }
+
+        let unique_id = fields
+            .get("uniqueId")
+            .cloned()
+            .unwrap_or_else(|| "missing-unique-id".to_string());
+        let file_name = fields
+            .get("fileName")
+            .cloned()
+            .unwrap_or_else(|| "missing-name".to_string());
+        let parent_directory_id = fields
+            .get("directoryId")
+            .cloned()
+            .unwrap_or_else(|| "0".to_string());
+        let total_parts = fields
+            .get("totalPart")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1);
+        let part_index = fields
+            .get("partIndex")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(1);
+        let file_size = fields
+            .get("fileSize")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(file_bytes.len() as u64);
+        let file_info = fields.get("fileInfo").cloned().unwrap_or_default();
+        let space_type = fields
+            .get("spaceType")
+            .cloned()
+            .unwrap_or_else(|| "0".to_string());
+        let family_id = fields.get("familyId").cloned().unwrap_or_default();
+        let scope_parent_key = if space_type == "1" && !family_id.trim().is_empty() {
+            format!("family:{family_id}:{parent_directory_id}")
+        } else {
+            parent_directory_id.clone()
+        };
+
+        state
+            .requests
+            .lock()
+            .expect("record mock request")
+            .push(json!({
+                "kind": "upload",
+                "uniqueId": unique_id,
+                "fileName": file_name,
+                "directoryId": parent_directory_id,
+                "totalPart": total_parts,
+                "partIndex": part_index,
+                "partSize": fields.get("partSize").cloned().unwrap_or_default(),
+                "fileSize": file_size,
+                "channel": fields.get("channel").cloned().unwrap_or_default(),
+                "fileInfo": file_info,
+                "fileBytes": file_bytes.len(),
+                "fileFieldName": file_field_name,
+                "spaceType": space_type,
+                "familyId": family_id,
+            }));
+
+        let should_fail = {
+            let mut failures = state
+                .upload_failures_by_part_index
+                .lock()
+                .expect("mock upload failures");
+            match failures.get_mut(&part_index) {
+                Some(remaining) if *remaining > 0 => {
+                    *remaining -= 1;
+                    true
+                }
+                _ => false,
+            }
+        };
+        if should_fail {
+            return Json(json!({
+                "code": 503,
+                "message": "transient upload failure"
+            }));
+        }
+
+        let mut uploads = state.uploads_by_unique_id.lock().expect("mock uploads");
+        let completed_upload = {
+            let upload = uploads
+                .entry(unique_id.clone())
+                .or_insert_with(|| MockUploadAssembly {
+                    file_name: file_name.clone(),
+                    parent_directory_id: parent_directory_id.clone(),
+                    scope_parent_key: scope_parent_key.clone(),
+                    total_parts,
+                    file_size,
+                    parts: BTreeMap::new(),
+                });
+            upload.parts.insert(part_index, file_bytes);
+            if part_index >= upload.total_parts || upload.parts.len() as u64 >= upload.total_parts {
+                let mut body = Vec::new();
+                for chunk in upload.parts.values() {
+                    body.extend_from_slice(chunk);
+                }
+                Some((
+                    upload.file_name.clone(),
+                    upload.parent_directory_id.clone(),
+                    upload.scope_parent_key.clone(),
+                    upload.file_size,
+                    body,
+                ))
+            } else {
+                None
+            }
+        };
+
+        if let Some((
+            upload_file_name,
+            upload_parent_directory_id,
+            upload_scope_parent_key,
+            upload_file_size,
+            body,
+        )) = completed_upload
+        {
+            uploads.remove(&unique_id);
+            let mut next_file_id = state
+                .next_created_file_id
+                .lock()
+                .expect("mock next created file id");
+            *next_file_id += 1;
+            let created_id = format!("created-file-{}", *next_file_id);
+            drop(next_file_id);
+            let suffix = upload_file_name
+                .rsplit_once('.')
+                .map(|(_, suffix)| suffix.to_string())
+                .unwrap_or_default();
+
+            let created_entry = json!({
+                "id": created_id.clone(),
+                "name": upload_file_name,
+                "type": 1,
+                "parentDirectoryId": upload_parent_directory_id,
+                "fileSize": upload_file_size,
+                "updateTime": "20260426120000",
+                "suffix": suffix,
+            });
+            state
+                .created_entries_by_parent
+                .lock()
+                .expect("mock created entries")
+                .entry(upload_scope_parent_key)
+                .or_default()
+                .push(created_entry);
+
+            state
+                .file_bodies_by_id
+                .lock()
+                .expect("mock file bodies")
+                .insert(created_id.clone(), body);
+
+            return Json(json!({
+                "code": 0,
+                "message": "ok",
+                "data": {
+                    "fid": created_id,
+                    "wcFileId": format!("wc-{unique_id}"),
+                    "fileVersion": "1"
+                }
+            }));
+        }
+
+        Json(json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "partIndex": part_index,
+                "totalPart": total_parts
+            }
+        }))
     }
 
     struct ResponseTuple(StatusCode, Vec<u8>);
@@ -2474,7 +3466,21 @@ mod tests {
             family_id: None,
             family_space_type: "1".to_string(),
             family_root_directory_id: "0".to_string(),
+            upload_url: format!("{base_url}/openapi/client/upload2C"),
+            upload_chunk_size_bytes: DEFAULT_UNICOM_UPLOAD_CHUNK_SIZE_BYTES,
             native_capability_catalog_path: None,
+        })
+        .expect("unicom test adapter should build")
+    }
+
+    fn mock_unicom_adapter_with_chunk_size(
+        base_url: &str,
+        token: &str,
+        upload_chunk_size_bytes: u64,
+    ) -> UnicomBlobAdapter {
+        UnicomBlobAdapter::new(UnicomConfig {
+            upload_chunk_size_bytes,
+            ..mock_unicom_adapter(base_url, token).config
         })
         .expect("unicom test adapter should build")
     }
@@ -2590,6 +3596,7 @@ mod tests {
             ("file-beta".to_string(), b"123456".to_vec()),
             ("file-zeta".to_string(), b"123456789".to_vec()),
             ("file-photo".to_string(), b"hello-photo".to_vec()),
+            ("family-file".to_string(), b"family-notes".to_vec()),
         ])
     }
 
@@ -2689,16 +3696,25 @@ mod tests {
             .await
             .expect("list mock Unicom containers");
 
-        assert_eq!(containers.len(), 1);
+        assert_eq!(containers.len(), 2);
         assert_eq!(containers[0].name, UNICOM_ROOT_CONTAINER);
-        assert_eq!(containers[0].object_count, None);
+        assert_eq!(containers[1].name, UNICOM_FAMILY_CONTAINER);
 
         let requests = server.requests();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["__operation"], QUERY_ALL_FILES_OPERATION);
-        assert_eq!(requests[0]["parentDirectoryId"], "0");
-        assert_eq!(requests[0]["clientId"], "1001000021");
-        assert_eq!(requests[0]["spaceType"], "0");
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["__operation"] == QUERY_FAMILY_GROUPS_OPERATION)
+        );
+        assert!(requests.iter().any(
+            |request| request["__operation"] == QUERY_ALL_FILES_OPERATION
+                && request["spaceType"] == "0"
+        ));
+        assert!(requests.iter().any(
+            |request| request["__operation"] == QUERY_ALL_FILES_OPERATION
+                && request["spaceType"] == "1"
+                && request["familyId"] == "family-001"
+        ));
     }
 
     #[tokio::test]
@@ -2715,6 +3731,7 @@ mod tests {
         assert!(matches!(health.status, HealthStatus::Healthy));
         assert_eq!(health.scopes.len(), 2);
         assert_eq!(health.scopes[0].kind, StorageScopeKind::Personal);
+        assert!(health.scopes[0].writable);
         assert_eq!(
             health.scopes[0]
                 .capacity
@@ -2723,6 +3740,11 @@ mod tests {
             Some(2048)
         );
         assert_eq!(health.scopes[1].kind, StorageScopeKind::Family);
+        assert!(health.scopes[1].writable);
+        assert_eq!(
+            health.scopes[1].container.as_deref(),
+            Some(UNICOM_FAMILY_CONTAINER)
+        );
         assert!(
             health
                 .notes
@@ -2744,6 +3766,34 @@ mod tests {
             operations
                 .iter()
                 .any(|operation| operation == QUERY_FAMILY_GROUPS_OPERATION)
+        );
+    }
+
+    #[tokio::test]
+    async fn health_degrades_when_family_scope_probe_fails_after_personal_scope_succeeds() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start_with_query_failures(
+            sample_entries(),
+            sample_file_bodies(),
+            BTreeSet::from(["family:family-001:0".to_string()]),
+            token,
+        )
+        .await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        let health = adapter
+            .health()
+            .await
+            .expect("unicom health should still return payload");
+
+        assert!(matches!(health.status, HealthStatus::Degraded));
+        assert_eq!(health.scopes.len(), 1);
+        assert_eq!(health.scopes[0].kind, StorageScopeKind::Personal);
+        assert!(
+            health
+                .notes
+                .iter()
+                .any(|note| note.contains("family_root_probe_failed="))
         );
     }
 
@@ -2806,6 +3856,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn family_container_routes_list_and_read_through_family_scope() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        let objects = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(UNICOM_FAMILY_CONTAINER.to_string()),
+                prefix: None,
+                limit: None,
+            })
+            .await
+            .expect("family objects should list");
+        assert_eq!(
+            objects
+                .into_iter()
+                .map(|object| object.key)
+                .collect::<Vec<_>>(),
+            vec!["family-note.txt".to_string()]
+        );
+
+        let payload = adapter
+            .get_object(UNICOM_FAMILY_CONTAINER, "family-note.txt")
+            .await
+            .expect("family object should download");
+        assert_eq!(
+            payload
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"family-notes"
+        );
+
+        let requests = server.requests();
+        let family_queries = requests
+            .iter()
+            .filter(|request| request["__operation"] == QUERY_ALL_FILES_OPERATION)
+            .filter(|request| request["spaceType"] == "1")
+            .collect::<Vec<_>>();
+        assert!(
+            family_queries
+                .iter()
+                .any(|request| request["parentDirectoryId"] == "0"
+                    && request["familyId"] == "family-001")
+        );
+        let family_download = requests
+            .iter()
+            .find(|request| {
+                request["__operation"] == GET_DOWNLOAD_URL_OPERATION
+                    && request["fidList"][0] == "family-file"
+            })
+            .expect("family download request should be recorded");
+        assert_eq!(family_download["spaceType"], "1");
+        assert_eq!(family_download["familyId"], "family-001");
+    }
+
+    #[tokio::test]
+    async fn family_container_put_and_delete_roundtrip_through_family_scope() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        let body = Bytes::from_static(b"family write");
+        let put = adapter
+            .put_object(PutObjectRequest {
+                container: UNICOM_FAMILY_CONTAINER.to_string(),
+                key: "shared/new.txt".to_string(),
+                body: body.clone().into(),
+                size: Some(12),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("family put should succeed");
+        assert_eq!(put.etag.as_deref(), Some("created-file-1"));
+
+        let uploaded = adapter
+            .get_object(UNICOM_FAMILY_CONTAINER, "shared/new.txt")
+            .await
+            .expect("family uploaded object should download");
+        assert_eq!(
+            uploaded
+                .body
+                .collect()
+                .await
+                .expect("family uploaded body should collect")
+                .as_ref(),
+            body.as_ref()
+        );
+
+        adapter
+            .delete_object(UNICOM_FAMILY_CONTAINER, "shared/new.txt")
+            .await
+            .expect("family delete should succeed");
+
+        let error = adapter
+            .head_object(UNICOM_FAMILY_CONTAINER, "shared/new.txt")
+            .await
+            .expect_err("deleted family object should no longer resolve");
+        assert!(matches!(error, blob_core::BlobError::NotFound(_)));
+
+        let requests = server.requests();
+        let create_requests = requests
+            .iter()
+            .filter(|request| request["__operation"] == CREATE_DIRECTORY_OPERATION)
+            .collect::<Vec<_>>();
+        assert_eq!(create_requests.len(), 0);
+
+        let upload_requests = requests
+            .iter()
+            .filter(|request| request["kind"] == "upload")
+            .collect::<Vec<_>>();
+        assert_eq!(upload_requests.len(), 1);
+        assert_eq!(upload_requests[0]["spaceType"], "1");
+        assert_eq!(upload_requests[0]["familyId"], "family-001");
+        assert_eq!(upload_requests[0]["directoryId"], "family-dir");
+
+        let delete_request = requests
+            .iter()
+            .find(|request| request["__operation"] == DELETE_FILE_OPERATION)
+            .expect("family delete request should be recorded");
+        assert_eq!(delete_request["spaceType"], "1");
+        assert_eq!(delete_request["familyId"], "family-001");
+    }
+
+    #[tokio::test]
     async fn head_and_get_object_use_precise_lookup_and_download_url_flow() {
         let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
         let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
@@ -2824,7 +4001,15 @@ mod tests {
             .await
             .expect("download mock Unicom object");
         assert_eq!(payload.info.key, "docs/alpha.txt");
-        assert_eq!(payload.body, b"alpha");
+        assert_eq!(
+            payload
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"alpha"
+        );
 
         let requests = server.requests();
         let operations = requests
@@ -2872,7 +4057,15 @@ mod tests {
             .await
             .expect("download mock Unicom object through fid/v2 fallback");
         assert_eq!(payload.info.key, "docs/alpha.txt");
-        assert_eq!(payload.body, b"alpha");
+        assert_eq!(
+            payload
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"alpha"
+        );
 
         let requests = server.requests();
         let download_requests = requests
@@ -2953,6 +4146,225 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_object_uploads_chunks_and_exposes_uploaded_file() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter_with_chunk_size(&server.base_url, token, 4);
+
+        assert!(adapter.capabilities().write);
+
+        let body = Bytes::from_static(b"hello unicom upload");
+        let result = adapter
+            .put_object(PutObjectRequest {
+                container: UNICOM_ROOT_CONTAINER.to_string(),
+                key: "uploads/incoming/hello.txt".to_string(),
+                body: body.clone().into(),
+                size: Some(body.len() as u64),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("upload mock Unicom object");
+        assert_eq!(result.etag.as_deref(), Some("created-file-1"));
+
+        let uploaded = adapter
+            .get_object(UNICOM_ROOT_CONTAINER, "uploads/incoming/hello.txt")
+            .await
+            .expect("download uploaded mock Unicom object");
+        assert_eq!(uploaded.info.size, body.len() as u64);
+        assert_eq!(
+            uploaded
+                .body
+                .collect()
+                .await
+                .expect("uploaded body should collect")
+                .as_ref(),
+            body.as_ref()
+        );
+
+        let requests = server.requests();
+        let create_requests = requests
+            .iter()
+            .filter(|request| request["__operation"] == CREATE_DIRECTORY_OPERATION)
+            .collect::<Vec<_>>();
+        assert_eq!(create_requests.len(), 2);
+        assert_eq!(create_requests[0]["directoryName"], "uploads");
+        assert_eq!(create_requests[1]["directoryName"], "incoming");
+
+        let upload_requests = requests
+            .iter()
+            .filter(|request| request["kind"] == "upload")
+            .collect::<Vec<_>>();
+        assert_eq!(upload_requests.len(), 5);
+        assert_eq!(upload_requests[0]["totalPart"], 5);
+        assert_eq!(upload_requests[0]["partIndex"], 1);
+        assert_eq!(upload_requests[4]["partIndex"], 5);
+        assert_eq!(upload_requests[4]["fileBytes"], 3);
+        assert_eq!(upload_requests[0]["channel"], "wocloud");
+        let file_info = upload_requests[0]["fileInfo"]
+            .as_str()
+            .expect("upload fileInfo should be recorded");
+        let decrypted_file_info =
+            aes_cbc_decrypt_base64(file_info, token).expect("decrypt upload fileInfo");
+        let decrypted_file_info: Value =
+            serde_json::from_str(&decrypted_file_info).expect("parse upload fileInfo JSON");
+        assert_eq!(decrypted_file_info["fileName"], "hello.txt");
+        assert_eq!(decrypted_file_info["fileSize"], body.len() as u64);
+        assert_eq!(decrypted_file_info["fileType"], "4");
+        assert_eq!(decrypted_file_info["directoryId"], "created-dir-2");
+    }
+
+    #[tokio::test]
+    async fn put_object_accepts_body_without_explicit_size() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter_with_chunk_size(&server.base_url, token, 8);
+
+        let body = Bytes::from_static(b"size inferred");
+        let result = adapter
+            .put_object(PutObjectRequest {
+                container: UNICOM_ROOT_CONTAINER.to_string(),
+                key: "uploads/inferred.txt".to_string(),
+                body: body.clone().into(),
+                size: None,
+                content_type: None,
+            })
+            .await
+            .expect("upload without explicit size should succeed");
+        assert_eq!(result.etag.as_deref(), Some("created-file-1"));
+
+        let uploaded = adapter
+            .get_object(UNICOM_ROOT_CONTAINER, "uploads/inferred.txt")
+            .await
+            .expect("download uploaded inferred-size object");
+        assert_eq!(
+            uploaded
+                .body
+                .collect()
+                .await
+                .expect("uploaded inferred-size body should collect")
+                .as_ref(),
+            body.as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn put_object_retries_retryable_upload_chunk_failures() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start_with_upload_failures(
+            sample_entries(),
+            sample_file_bodies(),
+            BTreeMap::from([(3, 1)]),
+            token,
+        )
+        .await;
+        let adapter = mock_unicom_adapter_with_chunk_size(&server.base_url, token, 4);
+
+        let body = Bytes::from_static(b"hello unicom upload");
+        let result = adapter
+            .put_object(PutObjectRequest {
+                container: UNICOM_ROOT_CONTAINER.to_string(),
+                key: "uploads/retry/hello.txt".to_string(),
+                body: body.clone().into(),
+                size: Some(body.len() as u64),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("upload should retry transient chunk failure");
+        assert_eq!(result.etag.as_deref(), Some("created-file-1"));
+
+        let uploaded = adapter
+            .get_object(UNICOM_ROOT_CONTAINER, "uploads/retry/hello.txt")
+            .await
+            .expect("download uploaded retry object");
+        assert_eq!(
+            uploaded
+                .body
+                .collect()
+                .await
+                .expect("uploaded retry body should collect")
+                .as_ref(),
+            body.as_ref()
+        );
+
+        let requests = server.requests();
+        let upload_requests = requests
+            .iter()
+            .filter(|request| request["kind"] == "upload")
+            .collect::<Vec<_>>();
+        assert_eq!(upload_requests.len(), 6);
+        assert_eq!(
+            upload_requests
+                .iter()
+                .filter(|request| request["partIndex"] == 3)
+                .count(),
+            2
+        );
+        assert_eq!(
+            upload_requests
+                .iter()
+                .filter(|request| request["partIndex"] == 1)
+                .count(),
+            1
+        );
+        assert_eq!(
+            upload_requests
+                .iter()
+                .filter(|request| request["partIndex"] == 5)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn put_object_fails_after_exhausting_retryable_upload_chunk_failures() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start_with_upload_failures(
+            sample_entries(),
+            sample_file_bodies(),
+            BTreeMap::from([(2, 3)]),
+            token,
+        )
+        .await;
+        let adapter = mock_unicom_adapter_with_chunk_size(&server.base_url, token, 4);
+
+        let error = adapter
+            .put_object(PutObjectRequest {
+                container: UNICOM_ROOT_CONTAINER.to_string(),
+                key: "uploads/retry-fail/hello.txt".to_string(),
+                body: Bytes::from_static(b"hello unicom upload").into(),
+                size: Some(19),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect_err("upload should fail after retry budget is exhausted");
+        let blob_core::BlobError::Upstream(message) = error else {
+            panic!("expected upstream error from exhausted retries");
+        };
+        assert!(message.contains("upload2C hello.txt part 2/5 failed after 3 attempts"));
+        assert!(message.contains("code=503"));
+
+        let requests = server.requests();
+        let upload_requests = requests
+            .iter()
+            .filter(|request| request["kind"] == "upload")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            upload_requests
+                .iter()
+                .filter(|request| request["partIndex"] == 2)
+                .count(),
+            3
+        );
+        assert_eq!(
+            upload_requests
+                .iter()
+                .filter(|request| request["partIndex"] == 3)
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn delete_object_uses_native_delete_file_dispatcher() {
         let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
         let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
@@ -2982,6 +4394,96 @@ mod tests {
         assert_eq!(
             delete_request["fileList"],
             Value::Array(vec![json!("file-alpha")])
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_object_uses_native_rename_dispatcher() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        adapter
+            .rename_object(RenameObjectRequest {
+                container: UNICOM_ROOT_CONTAINER.to_string(),
+                key: "docs/alpha.txt".to_string(),
+                new_key: "docs/renamed.txt".to_string(),
+            })
+            .await
+            .expect("rename should succeed");
+
+        let requests = server.requests();
+        let rename_request = requests
+            .iter()
+            .find(|request| request["__operation"] == RENAME_FILE_OR_DIRECTORY_OPERATION)
+            .expect("RenameFileOrDirectory request should be recorded");
+        assert_eq!(rename_request["spaceType"], "0");
+        assert_eq!(rename_request["type"], 1);
+        assert_eq!(rename_request["id"], "file-alpha");
+        assert_eq!(rename_request["name"], "renamed.txt");
+        assert_eq!(rename_request["fileType"], "4");
+    }
+
+    #[tokio::test]
+    async fn copy_object_uses_native_copy_dispatcher() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        adapter
+            .copy_object(CopyObjectRequest {
+                source_container: UNICOM_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: UNICOM_ROOT_CONTAINER.to_string(),
+                destination_key: "media/copied-alpha.txt".to_string(),
+            })
+            .await
+            .expect("copy should succeed");
+
+        let requests = server.requests();
+        let copy_request = requests
+            .iter()
+            .find(|request| request["__operation"] == COPY_FILE_OPERATION)
+            .expect("CopyFile request should be recorded");
+        assert_eq!(copy_request["sourceType"], "0");
+        assert_eq!(copy_request["targetType"], "0");
+        assert_eq!(copy_request["targetDirId"], "dir-media");
+        assert_eq!(copy_request["dirList"], Value::Array(vec![]));
+        assert_eq!(
+            copy_request["fileList"],
+            Value::Array(vec![json!("file-alpha")])
+        );
+    }
+
+    #[tokio::test]
+    async fn move_object_uses_native_move_dispatcher_with_family_source_hint() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        adapter
+            .move_object(MoveObjectRequest {
+                source_container: UNICOM_FAMILY_CONTAINER.to_string(),
+                source_key: "family-note.txt".to_string(),
+                destination_container: UNICOM_ROOT_CONTAINER.to_string(),
+                destination_key: "docs/moved-family-note.txt".to_string(),
+            })
+            .await
+            .expect("move should succeed");
+
+        let requests = server.requests();
+        let move_request = requests
+            .iter()
+            .find(|request| request["__operation"] == MOVE_FILE_OPERATION)
+            .expect("MoveFile request should be recorded");
+        assert_eq!(move_request["sourceType"], "1");
+        assert_eq!(move_request["targetType"], "0");
+        assert_eq!(move_request["targetDirId"], "dir-docs");
+        assert_eq!(move_request["fromFamilyId"], "family-001");
+        assert_eq!(move_request["dirList"], Value::Array(vec![]));
+        assert_eq!(
+            move_request["fileList"],
+            Value::Array(vec![json!("family-file")])
         );
     }
 }

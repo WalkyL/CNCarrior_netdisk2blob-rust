@@ -1,26 +1,32 @@
 use std::{
     fs,
     path::Path,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use blob_core::{
-    BackendCapabilities, BlobBackend, BlobError, ContainerInfo, HealthStatus, ListObjectsRequest,
-    ObjectInfo, ObjectPayload, PutObjectRequest, PutObjectResult, ServiceHealth,
-    StorageScopeHealth, StorageScopeKind, TokenSource,
+    BackendCapabilities, BlobBackend, BlobError, ContainerInfo, CopyObjectRequest, HealthStatus,
+    ListObjectsRequest, MoveObjectRequest, ObjectInfo, ObjectPayload, PutObjectRequest,
+    PutObjectResult, RenameObjectRequest, ServiceHealth, StorageScopeHealth, StorageScopeKind,
+    TokenSource,
 };
+use bytes::Bytes;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{
     Method, StatusCode,
-    header::{ACCEPT, CONTENT_TYPE, USER_AGENT},
+    header::{ACCEPT, CONTENT_TYPE, LOCATION, USER_AGENT},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::json;
+use serde_json::{Map, Value, json};
+use tokio::time::sleep;
 
 pub const DEFAULT_ONEDRIVE_AUTH_BASE_URL: &str = "https://login.microsoftonline.com";
 pub const DEFAULT_ONEDRIVE_SCOPES: &str = "offline_access Files.ReadWrite User.Read openid profile";
 const SESSION_REFRESH_SKEW_SECS: u64 = 120;
+const COPY_STATUS_POLL_INTERVAL_MS: u64 = 50;
+const COPY_STATUS_POLL_MAX_ATTEMPTS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OneDriveConfig {
@@ -43,6 +49,69 @@ pub struct OneDriveConfig {
 pub struct OneDriveBlobAdapter {
     config: OneDriveConfig,
     client: reqwest::Client,
+    object_actions: Arc<dyn OneDriveObjectActionExecutor>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedOneDriveObject {
+    container: String,
+    key: String,
+    path: String,
+    item: DriveItemResponse,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedOneDriveDestination {
+    container: String,
+    key: String,
+    parent_path: String,
+    parent_id: String,
+    name: String,
+}
+
+#[async_trait]
+trait OneDriveObjectActionExecutor: Send + Sync {
+    async fn rename_object(
+        &self,
+        adapter: &OneDriveBlobAdapter,
+        source: &ResolvedOneDriveObject,
+        destination: &PreparedOneDriveDestination,
+    ) -> Result<(), BlobError>;
+
+    async fn copy_object(
+        &self,
+        adapter: &OneDriveBlobAdapter,
+        source: &ResolvedOneDriveObject,
+        destination: &PreparedOneDriveDestination,
+    ) -> Result<(), BlobError>;
+
+    async fn move_object(
+        &self,
+        adapter: &OneDriveBlobAdapter,
+        source: &ResolvedOneDriveObject,
+        destination: &PreparedOneDriveDestination,
+    ) -> Result<(), BlobError>;
+}
+
+struct GraphOneDriveObjectActionExecutor;
+
+#[derive(Debug, Deserialize)]
+struct CopyOperationStatus {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    percentage_complete: Option<f64>,
+    #[serde(default)]
+    resource_id: Option<String>,
+    #[serde(default)]
+    error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ParentReference {
+    #[serde(rename = "driveId")]
+    #[serde(default)]
+    drive_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,6 +125,9 @@ struct DriveItemResponse {
     last_modified: Option<String>,
     file: Option<FileFacet>,
     folder: Option<FolderFacet>,
+    #[serde(rename = "parentReference")]
+    #[serde(default)]
+    parent_reference: Option<ParentReference>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -99,11 +171,106 @@ struct OAuthTokenResponse {
     expires_in: Option<u64>,
 }
 
+#[async_trait]
+impl OneDriveObjectActionExecutor for GraphOneDriveObjectActionExecutor {
+    async fn rename_object(
+        &self,
+        adapter: &OneDriveBlobAdapter,
+        source: &ResolvedOneDriveObject,
+        destination: &PreparedOneDriveDestination,
+    ) -> Result<(), BlobError> {
+        let same_parent = parent_path(&source.path).unwrap_or_default() == destination.parent_path;
+        let action = format!(
+            "rename OneDrive object {}/{} -> {}",
+            source.container, source.key, destination.key
+        );
+        let mut payload = Map::new();
+        payload.insert("name".to_string(), Value::String(destination.name.clone()));
+        if !same_parent {
+            let drive_id = adapter.current_drive_id().await?;
+            payload.insert(
+                "parentReference".to_string(),
+                json!({
+                    "driveId": drive_id,
+                    "id": destination.parent_id,
+                }),
+            );
+        }
+
+        adapter
+            .patch_item_json(&source.item.id, Value::Object(payload), &action)
+            .await?;
+        Ok(())
+    }
+
+    async fn copy_object(
+        &self,
+        adapter: &OneDriveBlobAdapter,
+        source: &ResolvedOneDriveObject,
+        destination: &PreparedOneDriveDestination,
+    ) -> Result<(), BlobError> {
+        let action = format!(
+            "copy OneDrive object {}/{} -> {}/{}",
+            source.container, source.key, destination.container, destination.key
+        );
+        let drive_id = adapter.current_drive_id().await?;
+        let monitor_url = adapter
+            .post_copy_request(
+                &source.item.id,
+                json!({
+                    "name": destination.name,
+                    "parentReference": {
+                        "driveId": drive_id,
+                        "id": destination.parent_id,
+                    }
+                }),
+                &action,
+            )
+            .await?;
+        adapter.poll_copy_operation(&monitor_url, &action).await
+    }
+
+    async fn move_object(
+        &self,
+        adapter: &OneDriveBlobAdapter,
+        source: &ResolvedOneDriveObject,
+        destination: &PreparedOneDriveDestination,
+    ) -> Result<(), BlobError> {
+        let action = format!(
+            "move OneDrive object {}/{} -> {}/{}",
+            source.container, source.key, destination.container, destination.key
+        );
+        let drive_id = adapter.current_drive_id().await?;
+        adapter
+            .patch_item_json(
+                &source.item.id,
+                json!({
+                    "name": destination.name,
+                    "parentReference": {
+                        "driveId": drive_id,
+                        "id": destination.parent_id,
+                    }
+                }),
+                &action,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 impl OneDriveBlobAdapter {
     pub fn new(config: OneDriveConfig) -> Self {
+        Self::new_with_object_actions(config, Arc::new(GraphOneDriveObjectActionExecutor))
+    }
+
+    fn new_with_object_actions(
+        config: OneDriveConfig,
+        object_actions: Arc<dyn OneDriveObjectActionExecutor>,
+    ) -> Self {
         Self {
             config,
             client: reqwest::Client::new(),
+            object_actions,
         }
     }
 
@@ -182,6 +349,10 @@ impl OneDriveBlobAdapter {
 
     fn item_children_url(&self, item_id: &str) -> String {
         format!("{}/children", self.item_url(item_id))
+    }
+
+    fn item_copy_url(&self, item_id: &str) -> String {
+        format!("{}/copy", self.item_url(item_id))
     }
 
     fn item_content_url(&self, item_id: &str) -> String {
@@ -443,7 +614,7 @@ impl OneDriveBlobAdapter {
     async fn put_bytes(
         &self,
         url: &str,
-        body: Vec<u8>,
+        body: Bytes,
         content_type: Option<&str>,
         action: &str,
     ) -> Result<DriveItemResponse, BlobError> {
@@ -468,7 +639,7 @@ impl OneDriveBlobAdapter {
         })
     }
 
-    async fn get_bytes(&self, url: &str, action: &str) -> Result<Vec<u8>, BlobError> {
+    async fn get_bytes(&self, url: &str, action: &str) -> Result<Bytes, BlobError> {
         let response = self
             .request(Method::GET, url)
             .await?
@@ -484,13 +655,9 @@ impl OneDriveBlobAdapter {
             return Err(response_to_error(response, action).await);
         }
 
-        response
-            .bytes()
-            .await
-            .map(|body| body.to_vec())
-            .map_err(|error| {
-                BlobError::Upstream(format!("{action} returned invalid bytes: {error}"))
-            })
+        response.bytes().await.map_err(|error| {
+            BlobError::Upstream(format!("{action} returned invalid bytes: {error}"))
+        })
     }
 
     async fn delete_item_by_id(&self, item_id: &str, action: &str) -> Result<(), BlobError> {
@@ -506,6 +673,132 @@ impl OneDriveBlobAdapter {
             StatusCode::NOT_FOUND => Err(BlobError::NotFound(action.to_string())),
             _ => Err(response_to_error(response, action).await),
         }
+    }
+
+    async fn patch_item_json(
+        &self,
+        item_id: &str,
+        body: Value,
+        action: &str,
+    ) -> Result<DriveItemResponse, BlobError> {
+        let response = self
+            .request(Method::PATCH, &self.item_url(item_id))
+            .await?
+            .header(ACCEPT, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(BlobError::NotFound(action.to_string()));
+        }
+
+        if !response.status().is_success() {
+            return Err(response_to_error(response, action).await);
+        }
+
+        response.json::<DriveItemResponse>().await.map_err(|error| {
+            BlobError::Upstream(format!("{action} returned invalid JSON: {error}"))
+        })
+    }
+
+    async fn post_copy_request(
+        &self,
+        item_id: &str,
+        body: Value,
+        action: &str,
+    ) -> Result<String, BlobError> {
+        let response = self
+            .request(Method::POST, &self.item_copy_url(item_id))
+            .await?
+            .header(ACCEPT, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(BlobError::NotFound(action.to_string()));
+        }
+
+        if response.status() != StatusCode::ACCEPTED {
+            return Err(response_to_error(response, action).await);
+        }
+
+        response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(ToString::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                BlobError::Upstream(format!(
+                    "{action} did not return a usable Location header for copy monitoring"
+                ))
+            })
+    }
+
+    async fn poll_copy_operation(
+        &self,
+        monitor_url: &str,
+        action: &str,
+    ) -> Result<(), BlobError> {
+        for attempt in 1..=COPY_STATUS_POLL_MAX_ATTEMPTS {
+            let response = self
+                .request(Method::GET, monitor_url)
+                .await?
+                .header(ACCEPT, "application/json")
+                .send()
+                .await
+                .map_err(|error| {
+                    BlobError::Upstream(format!(
+                        "{action} monitor request failed on attempt {attempt}: {error}"
+                    ))
+                })?;
+
+            if !response.status().is_success() {
+                return Err(response_to_error(response, action).await);
+            }
+
+            let status = response.json::<CopyOperationStatus>().await.map_err(|error| {
+                BlobError::Upstream(format!(
+                    "{action} monitor returned invalid JSON on attempt {attempt}: {error}"
+                ))
+            })?;
+
+            match status
+                .status
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref()
+            {
+                Some("completed") => return Ok(()),
+                Some("failed") => {
+                    let detail = status
+                        .error
+                        .map(|value| trim_response_body(&value.to_string()))
+                        .unwrap_or_else(|| "copy operation failed".to_string());
+                    return Err(BlobError::Upstream(format!("{action} monitor failed: {detail}")));
+                }
+                Some("inprogress") | Some("in_progress") | Some("notstarted") | Some("not_started")
+                | None => {
+                    let _ = status.percentage_complete;
+                    let _ = status.resource_id;
+                    sleep(Duration::from_millis(COPY_STATUS_POLL_INTERVAL_MS)).await;
+                }
+                Some(other) => {
+                    return Err(BlobError::Upstream(format!(
+                        "{action} monitor returned unexpected status: {other}"
+                    )));
+                }
+            }
+        }
+
+        Err(BlobError::Upstream(format!(
+            "{action} monitor did not complete after {COPY_STATUS_POLL_MAX_ATTEMPTS} polling attempts"
+        )))
     }
 
     async fn get_root_item(&self) -> Result<DriveItemResponse, BlobError> {
@@ -568,6 +861,88 @@ impl OneDriveBlobAdapter {
             .ok_or_else(|| BlobError::NotFound(format!("object not found: {container}/{key}")))?;
         ensure_file(&item, &format!("object {container}/{key}"))?;
         Ok(item)
+    }
+
+    async fn resolve_object_with_path(
+        &self,
+        container: &str,
+        key: &str,
+    ) -> Result<ResolvedOneDriveObject, BlobError> {
+        let path = self.object_path(container, key)?;
+        let item = self
+            .get_item_by_path(&path)
+            .await?
+            .ok_or_else(|| BlobError::NotFound(format!("object not found: {container}/{key}")))?;
+        ensure_file(&item, &format!("object {container}/{key}"))?;
+        Ok(ResolvedOneDriveObject {
+            container: container.to_string(),
+            key: normalize_path(key),
+            path,
+            item,
+        })
+    }
+
+    async fn prepare_destination(
+        &self,
+        container: &str,
+        key: &str,
+    ) -> Result<PreparedOneDriveDestination, BlobError> {
+        let path = self.object_path(container, key)?;
+        let parent_path = parent_path(&path).ok_or_else(|| {
+            BlobError::Configuration(format!(
+                "destination path must include a container and object name: {container}/{key}"
+            ))
+        })?;
+        self.ensure_folder_tree(&parent_path).await?;
+        let parent = self
+            .get_item_by_path(&parent_path)
+            .await?
+            .ok_or_else(|| BlobError::Upstream(format!("destination folder missing: {parent_path}")))?;
+        ensure_folder(&parent, &format!("destination folder {parent_path}"))?;
+        let name = path
+            .split('/')
+            .next_back()
+            .map(str::to_string)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                BlobError::Configuration(format!(
+                    "destination key must include a file name: {container}/{key}"
+                ))
+            })?;
+
+        Ok(PreparedOneDriveDestination {
+            container: container.to_string(),
+            key: normalize_path(key),
+            parent_path,
+            parent_id: parent.id,
+            name,
+        })
+    }
+
+    async fn current_drive_id(&self) -> Result<String, BlobError> {
+        if let Some(drive_id) = self
+            .config
+            .drive_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(drive_id.to_string());
+        }
+
+        let root = self.get_root_item().await?;
+        root.parent_reference
+            .as_ref()
+            .and_then(|value| value.drive_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                BlobError::Upstream(
+                    "OneDrive root metadata did not include a usable driveId for copy requests"
+                        .to_string(),
+                )
+            })
     }
 
     async fn ensure_folder_tree(&self, folder_path: &str) -> Result<(), BlobError> {
@@ -887,7 +1262,7 @@ impl BlobBackend for OneDriveBlobAdapter {
 
         Ok(ObjectPayload {
             info: item.into_object_info(normalize_path(key)),
-            body,
+            body: body.into(),
         })
     }
 
@@ -898,11 +1273,12 @@ impl BlobBackend for OneDriveBlobAdapter {
         if let Some(parent_path) = parent_path(&object_path) {
             self.ensure_folder_tree(&parent_path).await?;
         }
+        let body = request.body.collect().await?;
 
         let uploaded = self
             .put_bytes(
                 &self.path_upload_url(&object_path),
-                request.body,
+                body,
                 request.content_type.as_deref(),
                 &format!("upload object {}/{}", request.container, request.key),
             )
@@ -918,6 +1294,48 @@ impl BlobBackend for OneDriveBlobAdapter {
 
         let item = self.resolve_object(container, key).await?;
         self.delete_item_by_id(&item.id, &format!("delete object {container}/{key}"))
+            .await
+    }
+
+    async fn rename_object(&self, request: RenameObjectRequest) -> Result<(), BlobError> {
+        self.ensure_enabled()?;
+
+        let source = self
+            .resolve_object_with_path(&request.container, &request.key)
+            .await?;
+        let destination = self
+            .prepare_destination(&request.container, &request.new_key)
+            .await?;
+        self.object_actions
+            .rename_object(self, &source, &destination)
+            .await
+    }
+
+    async fn copy_object(&self, request: CopyObjectRequest) -> Result<(), BlobError> {
+        self.ensure_enabled()?;
+
+        let source = self
+            .resolve_object_with_path(&request.source_container, &request.source_key)
+            .await?;
+        let destination = self
+            .prepare_destination(&request.destination_container, &request.destination_key)
+            .await?;
+        self.object_actions
+            .copy_object(self, &source, &destination)
+            .await
+    }
+
+    async fn move_object(&self, request: MoveObjectRequest) -> Result<(), BlobError> {
+        self.ensure_enabled()?;
+
+        let source = self
+            .resolve_object_with_path(&request.source_container, &request.source_key)
+            .await?;
+        let destination = self
+            .prepare_destination(&request.destination_container, &request.destination_key)
+            .await?;
+        self.object_actions
+            .move_object(self, &source, &destination)
             .await
     }
 }
@@ -1148,12 +1566,15 @@ mod tests {
     #[derive(Clone)]
     struct MockGraphState {
         drive: Arc<Mutex<MockDrive>>,
+        monitor_base_url: String,
     }
 
     struct MockDrive {
         items_by_id: BTreeMap<String, MockItem>,
         path_to_id: BTreeMap<String, String>,
+        copy_operations: BTreeMap<String, CopyOperationRecord>,
         next_id: usize,
+        next_copy_operation: usize,
     }
 
     #[derive(Clone)]
@@ -1166,6 +1587,12 @@ mod tests {
         content_type: Option<String>,
         etag: String,
         last_modified: String,
+    }
+
+    #[derive(Clone)]
+    struct CopyOperationRecord {
+        status: String,
+        error: Option<Value>,
     }
 
     struct MockServer {
@@ -1195,7 +1622,9 @@ mod tests {
             Self {
                 items_by_id,
                 path_to_id,
+                copy_operations: BTreeMap::new(),
                 next_id: 1,
+                next_copy_operation: 1,
             }
         }
 
@@ -1206,6 +1635,12 @@ mod tests {
                 "size": if item.is_folder { 0 } else { item.body.len() as u64 },
                 "eTag": item.etag,
                 "lastModifiedDateTime": item.last_modified,
+                "parentReference": {
+                    "driveId": "mock-drive",
+                    "id": parent_path(&item.path)
+                        .and_then(|path| self.path_to_id.get(&path).cloned())
+                        .unwrap_or_else(|| "root".to_string()),
+                }
             });
 
             if item.is_folder {
@@ -1366,12 +1801,186 @@ mod tests {
 
             Ok(())
         }
+
+        fn reindex_descendants(&mut self, item: &MockItem, previous_path: &str) {
+            let descendants = self
+                .items_by_id
+                .values()
+                .filter(|candidate| candidate.path.starts_with(&format!("{previous_path}/")))
+                .map(|candidate| candidate.id.clone())
+                .collect::<Vec<_>>();
+
+            for descendant_id in descendants {
+                let Some(descendant) = self.items_by_id.get_mut(&descendant_id) else {
+                    continue;
+                };
+                self.path_to_id.remove(&descendant.path);
+                let suffix = descendant
+                    .path
+                    .strip_prefix(&format!("{previous_path}/"))
+                    .expect("descendant prefix should match");
+                descendant.path = format!("{}/{}", item.path, suffix);
+                descendant.name = descendant
+                    .path
+                    .split('/')
+                    .next_back()
+                    .unwrap_or_default()
+                    .to_string();
+                self.path_to_id
+                    .insert(descendant.path.clone(), descendant.id.clone());
+            }
+        }
+
+        fn patch_item(
+            &mut self,
+            item_id: &str,
+            payload: &Value,
+        ) -> Result<MockItem, StatusCode> {
+            let Some(existing) = self.items_by_id.get(item_id).cloned() else {
+                return Err(StatusCode::NOT_FOUND);
+            };
+
+            let new_name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(existing.name.as_str())
+                .to_string();
+
+            let parent_id = payload
+                .get("parentReference")
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    existing
+                        .parent_reference_id(self)
+                        .unwrap_or_else(|| "root".to_string())
+                });
+
+            let parent = self
+                .items_by_id
+                .get(&parent_id)
+                .cloned()
+                .ok_or(StatusCode::NOT_FOUND)?;
+            if !parent.is_folder {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+
+            let new_path = join_relative_key(&parent.path, &new_name);
+            if let Some(conflict_id) = self.path_to_id.get(&new_path) {
+                if conflict_id != item_id {
+                    return Err(StatusCode::CONFLICT);
+                }
+            }
+
+            self.path_to_id.remove(&existing.path);
+            let updated = self
+                .items_by_id
+                .get_mut(item_id)
+                .expect("existing item should stay indexed");
+            let previous_path = updated.path.clone();
+            updated.name = new_name;
+            updated.path = new_path.clone();
+            updated.etag = format!("etag-file-{}", self.next_id);
+            updated.last_modified = "2026-04-25T00:00:00Z".to_string();
+            self.next_id += 1;
+            let updated_snapshot = updated.clone();
+            self.path_to_id.insert(new_path, item_id.to_string());
+            if updated_snapshot.is_folder {
+                self.reindex_descendants(&updated_snapshot, &previous_path);
+            }
+            Ok(updated_snapshot)
+        }
+
+        fn create_copy_operation(
+            &mut self,
+            item_id: &str,
+            payload: &Value,
+        ) -> Result<String, StatusCode> {
+            let Some(source) = self.items_by_id.get(item_id).cloned() else {
+                return Err(StatusCode::NOT_FOUND);
+            };
+
+            let target_name = payload
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(source.name.as_str())
+                .to_string();
+            let parent_id = payload
+                .get("parentReference")
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str)
+                .ok_or(StatusCode::BAD_REQUEST)?
+                .to_string();
+            let parent = self
+                .items_by_id
+                .get(&parent_id)
+                .cloned()
+                .ok_or(StatusCode::NOT_FOUND)?;
+            if !parent.is_folder {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+
+            let target_path = join_relative_key(&parent.path, &target_name);
+            if self.path_to_id.contains_key(&target_path) {
+                return Err(StatusCode::CONFLICT);
+            }
+
+            let copy = MockItem {
+                id: format!("item-{}", self.next_id),
+                path: target_path.clone(),
+                name: target_name,
+                is_folder: source.is_folder,
+                body: source.body.clone(),
+                content_type: source.content_type.clone(),
+                etag: format!("etag-file-{}", self.next_id),
+                last_modified: "2026-04-25T00:00:00Z".to_string(),
+            };
+            self.next_id += 1;
+            self.path_to_id.insert(copy.path.clone(), copy.id.clone());
+            self.items_by_id.insert(copy.id.clone(), copy);
+
+            let operation_id = format!("copy-op-{}", self.next_copy_operation);
+            self.next_copy_operation += 1;
+            self.copy_operations.insert(
+                operation_id.clone(),
+                CopyOperationRecord {
+                    status: "completed".to_string(),
+                    error: None,
+                },
+            );
+            Ok(operation_id)
+        }
+
+        fn copy_operation_status(&self, operation_id: &str) -> Option<CopyOperationRecord> {
+            self.copy_operations.get(operation_id).cloned()
+        }
+    }
+
+    impl MockItem {
+        fn parent_reference_id(&self, drive: &MockDrive) -> Option<String> {
+            parent_path(&self.path)
+                .and_then(|path| drive.path_to_id.get(&path).cloned())
+                .or_else(|| Some("root".to_string()))
+        }
     }
 
     impl MockServer {
         async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("mock listener should bind");
+            let addr = listener
+                .local_addr()
+                .expect("mock listener should have addr");
+            let base_url = format!("http://{addr}/v1.0");
             let state = MockGraphState {
                 drive: Arc::new(Mutex::new(MockDrive::new())),
+                monitor_base_url: format!("{base_url}/me/drive/monitor"),
             };
 
             let app = Router::new()
@@ -1381,16 +1990,10 @@ mod tests {
                     get(mock_graph_handler)
                         .post(mock_graph_handler)
                         .put(mock_graph_handler)
+                        .patch(mock_graph_handler)
                         .delete(mock_graph_handler),
                 )
                 .with_state(state);
-
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-                .await
-                .expect("mock listener should bind");
-            let addr = listener
-                .local_addr()
-                .expect("mock listener should have addr");
             let task = tokio::spawn(async move {
                 axum::serve(listener, app)
                     .await
@@ -1398,7 +2001,7 @@ mod tests {
             });
 
             Self {
-                base_url: format!("http://{addr}/v1.0"),
+                base_url,
                 _task: task,
             }
         }
@@ -1480,6 +2083,17 @@ mod tests {
 
                 Json(json!({ "value": children })).into_response()
             }
+            Method::GET if path.starts_with("/monitor/") => {
+                let operation_id = decode_segment(path.trim_start_matches("/monitor/"));
+                match drive.copy_operation_status(&operation_id) {
+                    Some(operation) => Json(json!({
+                        "status": operation.status,
+                        "error": operation.error,
+                    }))
+                    .into_response(),
+                    None => StatusCode::NOT_FOUND.into_response(),
+                }
+            }
             Method::GET if path.starts_with("/items/") && path.ends_with("/content") => {
                 let item_id = decode_segment(
                     path.trim_start_matches("/items/")
@@ -1515,6 +2129,34 @@ mod tests {
 
                 match drive.create_folder(&parent_id, name) {
                     Ok(item) => (StatusCode::CREATED, Json(drive.item_json(&item))).into_response(),
+                    Err(status) => status.into_response(),
+                }
+            }
+            Method::PATCH if path.starts_with("/items/") => {
+                let item_id = decode_segment(path.trim_start_matches("/items/"));
+                let payload = serde_json::from_slice::<Value>(&body)
+                    .expect("patch item payload should be JSON");
+                match drive.patch_item(&item_id, &payload) {
+                    Ok(item) => Json(drive.item_json(&item)).into_response(),
+                    Err(status) => status.into_response(),
+                }
+            }
+            Method::POST if path.starts_with("/items/") && path.ends_with("/copy") => {
+                let item_id = decode_segment(
+                    path.trim_start_matches("/items/")
+                        .trim_end_matches("/copy"),
+                );
+                let payload = serde_json::from_slice::<Value>(&body)
+                    .expect("copy payload should be JSON");
+                match drive.create_copy_operation(&item_id, &payload) {
+                    Ok(operation_id) => (
+                        StatusCode::ACCEPTED,
+                        [(
+                            "location",
+                            format!("{}/{}", state.monitor_base_url, operation_id),
+                        )],
+                    )
+                        .into_response(),
                     Err(status) => status.into_response(),
                 }
             }
@@ -1625,7 +2267,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "primary-bucket".to_string(),
                 key: "nested/report.txt".to_string(),
-                body: b"onedrive body".to_vec(),
+                body: Bytes::from_static(b"onedrive body").into(),
+                size: Some(13),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -1636,7 +2279,15 @@ mod tests {
             .get_object("primary-bucket", "nested/report.txt")
             .await
             .expect("get should succeed");
-        assert_eq!(object.body, b"onedrive body".to_vec());
+        assert_eq!(
+            object
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"onedrive body"
+        );
         assert_eq!(object.info.content_type.as_deref(), Some("text/plain"));
 
         adapter
@@ -1644,11 +2295,10 @@ mod tests {
             .await
             .expect("delete should succeed");
 
-        let error = adapter
+        let result = adapter
             .get_object("primary-bucket", "nested/report.txt")
-            .await
-            .expect_err("deleted object should not exist");
-        assert!(matches!(error, BlobError::NotFound(_)));
+            .await;
+        assert!(matches!(result, Err(BlobError::NotFound(_))));
     }
 
     #[tokio::test]
@@ -1660,7 +2310,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "alpha".to_string(),
                 key: "a.txt".to_string(),
-                body: b"A".to_vec(),
+                body: Bytes::from_static(b"A").into(),
+                size: Some(1),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -1669,7 +2320,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "alpha".to_string(),
                 key: "nested/b.txt".to_string(),
-                body: b"B".to_vec(),
+                body: Bytes::from_static(b"B").into(),
+                size: Some(1),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -1678,7 +2330,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "beta".to_string(),
                 key: "c.txt".to_string(),
-                body: b"C".to_vec(),
+                body: Bytes::from_static(b"C").into(),
+                size: Some(1),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -1710,6 +2363,152 @@ mod tests {
                 .map(|object| object.key)
                 .collect::<Vec<_>>(),
             vec!["a.txt".to_string(), "nested/b.txt".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_object_supports_rename_and_cross_directory_move() {
+        let server = MockServer::start().await;
+        let adapter = OneDriveBlobAdapter::new(test_config(&server.base_url));
+
+        adapter
+            .put_object(PutObjectRequest {
+                container: "alpha".to_string(),
+                key: "nested/b.txt".to_string(),
+                body: Bytes::from_static(b"B").into(),
+                size: Some(1),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("seed object should succeed");
+
+        adapter
+            .rename_object(RenameObjectRequest {
+                container: "alpha".to_string(),
+                key: "nested/b.txt".to_string(),
+                new_key: "renamed/final.txt".to_string(),
+            })
+            .await
+            .expect("rename should succeed");
+
+        let result = adapter
+            .get_object("alpha", "nested/b.txt")
+            .await;
+        assert!(matches!(result, Err(BlobError::NotFound(_))));
+
+        let renamed = adapter
+            .get_object("alpha", "renamed/final.txt")
+            .await
+            .expect("renamed object should resolve");
+        assert_eq!(
+            renamed
+                .body
+                .collect()
+                .await
+                .expect("renamed body should collect")
+                .as_ref(),
+            b"B"
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_object_supports_cross_container_destination() {
+        let server = MockServer::start().await;
+        let adapter = OneDriveBlobAdapter::new(test_config(&server.base_url));
+
+        adapter
+            .put_object(PutObjectRequest {
+                container: "alpha".to_string(),
+                key: "nested/b.txt".to_string(),
+                body: Bytes::from_static(b"B").into(),
+                size: Some(1),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("seed object should succeed");
+
+        adapter
+            .copy_object(CopyObjectRequest {
+                source_container: "alpha".to_string(),
+                source_key: "nested/b.txt".to_string(),
+                destination_container: "beta".to_string(),
+                destination_key: "copied/b.txt".to_string(),
+            })
+            .await
+            .expect("copy should succeed");
+
+        let source = adapter
+            .get_object("alpha", "nested/b.txt")
+            .await
+            .expect("source object should remain");
+        assert_eq!(
+            source
+                .body
+                .collect()
+                .await
+                .expect("source body should collect")
+                .as_ref(),
+            b"B"
+        );
+
+        let copied = adapter
+            .get_object("beta", "copied/b.txt")
+            .await
+            .expect("copied object should resolve");
+        assert_eq!(
+            copied
+                .body
+                .collect()
+                .await
+                .expect("copied body should collect")
+                .as_ref(),
+            b"B"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_object_supports_cross_container_destination() {
+        let server = MockServer::start().await;
+        let adapter = OneDriveBlobAdapter::new(test_config(&server.base_url));
+
+        adapter
+            .put_object(PutObjectRequest {
+                container: "alpha".to_string(),
+                key: "nested/b.txt".to_string(),
+                body: Bytes::from_static(b"B").into(),
+                size: Some(1),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("seed object should succeed");
+
+        adapter
+            .move_object(MoveObjectRequest {
+                source_container: "alpha".to_string(),
+                source_key: "nested/b.txt".to_string(),
+                destination_container: "beta".to_string(),
+                destination_key: "moved/b.txt".to_string(),
+            })
+            .await
+            .expect("move should succeed");
+
+        let result = adapter
+            .get_object("alpha", "nested/b.txt")
+            .await;
+        assert!(matches!(result, Err(BlobError::NotFound(_))));
+
+        let moved = adapter
+            .get_object("beta", "moved/b.txt")
+            .await
+            .expect("moved object should resolve");
+        assert_eq!(
+            moved
+                .body
+                .collect()
+                .await
+                .expect("moved body should collect")
+                .as_ref(),
+            b"B"
         );
     }
 

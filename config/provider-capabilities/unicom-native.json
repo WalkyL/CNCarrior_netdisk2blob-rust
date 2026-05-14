@@ -24,6 +24,36 @@
       "notes": [
         "spaceType and target ids are injected by provider-unicom at runtime."
       ]
+    },
+    {
+      "id": "rename_file_or_directory",
+      "dispatcher_operation": "RenameFileOrDirectory",
+      "body_defaults": {},
+      "notes": [
+        "spaceType, type, fileType, id, and name are injected by provider-unicom at runtime."
+      ]
+    },
+    {
+      "id": "copy_file",
+      "dispatcher_operation": "CopyFile",
+      "body_defaults": {
+        "dirList": [],
+        "fileList": []
+      },
+      "notes": [
+        "targetDirId, sourceType, targetType, and selected ids are injected by provider-unicom at runtime."
+      ]
+    },
+    {
+      "id": "move_file",
+      "dispatcher_operation": "MoveFile",
+      "body_defaults": {
+        "dirList": [],
+        "fileList": []
+      },
+      "notes": [
+        "targetDirId, sourceType, targetType, and selected ids are injected by provider-unicom at runtime; fromFamilyId is added when moving out of family scope."
+      ]
     }
   ]
 }

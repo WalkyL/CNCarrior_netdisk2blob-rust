@@ -7,10 +7,12 @@ version.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 blob-core = { path = "../blob-core" }
+bytes = { workspace = true }
 percent-encoding = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 axum = { workspace = true }

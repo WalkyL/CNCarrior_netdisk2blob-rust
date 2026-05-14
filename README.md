@@ -2,9 +2,9 @@
 
 面向 Hermes Agent、Open Claw Agent 等编程 Agent 的本地 S3 兼容对象网关。
 
-项目目标是把中国联通、中国电信、中国移动云盘接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商云盘作为唯一写入主云盘，其他被选中的运营商云盘可作为异步同步目标，OneDrive 作为默认备份同步对象，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。源码一期按公开 GitHub 仓库形式发布。
+项目目标是把中国联通、中国电信、中国移动云盘与 OneDrive 接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商或 `stub` provider 作为唯一写入主云盘，其他被选中的后端可作为异步同步目标，OneDrive 默认仍作为异步备份同步对象，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。源码一期按公开 GitHub 仓库形式发布。
 
-当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、session 持久化与异步复制；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载和对象删除，其余 native 写入路径待补；电信 provider 已打通真实目录列举和下载，写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置，以及给短信码/手机号/验证码之类交互式认证步骤预留的“验证输入队列”。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
+当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、对象级 rename/copy/move、session 持久化与异步复制，但在本项目中仍仅作为异步备份同步对象与可选 fallback 目标，不作为主写后端；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载、上传、对象删除，并把 personal/family scope 映射成 `root`/`family` 两个容器；电信 provider 已打通真实目录列举和下载，写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置，以及给短信码/手机号/验证码之类交互式认证步骤预留的“验证输入队列”。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
 针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。对已经证明稳定、但仍然可能有静态字段微调的 provider-native 能力，则额外放进 `config/provider-capabilities/*.json`，把 dispatcher 操作名和默认请求体固定项沉淀成可替换组件。对“每个云盘后续还要自动探测哪些账号、作用域、读写路径事实”，则额外放进 `config/provider-probes/*.json`。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程，并为 native `CreateDirectory` / `DeleteFile` 和后续自动探测项维护独立 catalog。
 
@@ -79,6 +79,16 @@ carrier-cloud-blob-gateway/
 - [.github/workflows/ci.yml](.github/workflows/ci.yml)
 - [Dockerfile](deploy/Dockerfile)
 - [Containerfile](deploy/Containerfile)
+
+推荐优先阅读的运维文档:
+
+- [docs/auth-step-by-step.md](/home/walky/carrier-cloud-blob-gateway/docs/auth-step-by-step.md:1)
+- [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)
+- [docs/object-actions-api-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-api-reference.md:1)
+- [docs/unicom-go-live-checklist.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-go-live-checklist.md:1)
+- [docs/unicom-change-record-template.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-change-record-template.md:1)
+- [docs/unicom-phase-closeout-report.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-phase-closeout-report.md:1)
+- [docs/provider-completion-standard.md](/home/walky/carrier-cloud-blob-gateway/docs/provider-completion-standard.md:1)
 
 ## 快速启动
 
@@ -187,6 +197,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `CCBG_REPLICATION_MAX_ATTEMPTS`
 - `CCBG_REPLICATION_BASE_RETRY_DELAY_MS`
 - `CCBG_REPLICATION_MAX_RETRY_DELAY_MS`
+- `CCBG_OBJECT_ACTION_HISTORY_LIMIT`
 - `CCBG_METADATA_SNAPSHOT_RECENT_LIMIT`
 - `CCBG_METADATA_COMPLETED_HISTORY_LIMIT`
 - `CCBG_METADATA_FAILED_HISTORY_LIMIT`

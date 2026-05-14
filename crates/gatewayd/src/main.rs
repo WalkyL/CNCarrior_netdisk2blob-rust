@@ -7,9 +7,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+#[cfg(test)]
+use axum::body::Bytes;
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{Body, to_bytes},
     extract::{DefaultBodyLimit, OriginalUri, Path, Query, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode, Uri,
@@ -27,10 +29,13 @@ use blob_core::{
     BlobBackend, BlobError, BrowserFlow, BrowserFlowBindingContext, BrowserFlowCatalog,
     BrowserFlowCatalogCollection, BrowserFlowExecutionReport, BrowserFlowExecutor,
     BrowserFlowInput, BrowserFlowInputKind, BrowserFlowOutputKind, BrowserFlowSessionExecutor,
-    DryRunBrowserFlowExecutor, ListObjectsRequest, OutboundIpFamily, PutObjectRequest, StubBackend,
-    TokenSource,
+    CopyObjectRequest, DryRunBrowserFlowExecutor, ListObjectsRequest, MoveObjectRequest,
+    ObjectBody, OutboundIpFamily, PutObjectRequest, RenameObjectRequest, StubBackend, TokenSource,
 };
 use browser_cdp::{CdpBrowserFlowSession, CdpConnectionConfig};
+use futures_util::TryStreamExt;
+#[cfg(test)]
+use futures_util::stream;
 use hmac::{Hmac, Mac};
 use metadata_store::{
     MetadataRetentionPolicy, MetadataSnapshot, MetadataStore, MetadataStoreOptions,
@@ -67,6 +72,7 @@ const REQUEST_ID: &str = "ccbg-local";
 const DEFAULT_TIMESTAMP: &str = "1970-01-01T00:00:00.000Z";
 const SOURCE_PROVIDER_HEADER: &str = "x-ccbg-source-provider";
 const FALLBACK_FROM_HEADER: &str = "x-ccbg-fallback-from";
+const DEFAULT_OBJECT_ACTION_HISTORY_LIMIT: usize = 12;
 const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 const BROWSER_FLOW_AUTH_SESSION_STATUS_PENDING: &str = "pending";
 const BROWSER_FLOW_AUTH_SESSION_STATUS_AWAITING_INPUT: &str = "awaiting_input";
@@ -313,6 +319,8 @@ struct ControlPlaneState {
     onedrive_policy: OnedrivePolicy,
     #[serde(default = "AuthCapturePolicy::from_env_defaults")]
     auth_capture_policy: AuthCapturePolicy,
+    #[serde(default)]
+    object_action_history: Vec<ObjectActionHistoryEntryPayload>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -354,6 +362,8 @@ struct AdminStatusPayload {
     desired_topology: DesiredTopologyPayload,
     replication: ReplicationQueueSummary,
     replication_state: ReplicationStatePayload,
+    object_action_history: Vec<ObjectActionHistoryEntryPayload>,
+    object_action_history_limit: usize,
     provider_health: Vec<BackendPayload>,
     alerts: Vec<AdminAlertPayload>,
     onedrive_auth: OneDriveAuthStatusPayload,
@@ -539,6 +549,7 @@ struct AppConfig {
     control_plane_file: String,
     credentials_dir: String,
     browser_flow_catalog_dir: String,
+    provider_capability_catalog_dir: String,
     topology: TopologyPolicy,
     s3_access_key_id: String,
     s3_secret_access_key: String,
@@ -551,6 +562,7 @@ struct AppConfig {
     replication_max_attempts: u32,
     replication_base_retry_delay_ms: u64,
     replication_max_retry_delay_ms: u64,
+    object_action_history_limit: usize,
     max_in_memory_object_bytes: usize,
     onedrive: OneDriveConfig,
 }
@@ -978,6 +990,10 @@ impl AppConfig {
                 "CCBG_BROWSER_FLOW_CATALOG_DIR",
                 "./config/browser-flows",
             ),
+            provider_capability_catalog_dir: env_or(
+                "CCBG_PROVIDER_CAPABILITY_CATALOG_DIR",
+                "./config/provider-capabilities",
+            ),
             topology,
             s3_access_key_id: env_or("CCBG_S3_ACCESS_KEY_ID", "ccbg"),
             s3_secret_access_key: env_or("CCBG_S3_SECRET_ACCESS_KEY", "change-me"),
@@ -993,6 +1009,10 @@ impl AppConfig {
             replication_max_attempts: env_u64("CCBG_REPLICATION_MAX_ATTEMPTS", 3) as u32,
             replication_base_retry_delay_ms: env_u64("CCBG_REPLICATION_BASE_RETRY_DELAY_MS", 1_000),
             replication_max_retry_delay_ms: env_u64("CCBG_REPLICATION_MAX_RETRY_DELAY_MS", 30_000),
+            object_action_history_limit: env_usize(
+                "CCBG_OBJECT_ACTION_HISTORY_LIMIT",
+                DEFAULT_OBJECT_ACTION_HISTORY_LIMIT,
+            ),
             max_in_memory_object_bytes: env_usize(
                 "CCBG_MAX_IN_MEMORY_OBJECT_BYTES",
                 8 * 1024 * 1024,
@@ -1102,6 +1122,26 @@ struct ObjectProviderStatusPayload {
     fallback_reason: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObjectActionHistoryReferencePayload {
+    label: String,
+    bucket: String,
+    key: String,
+    changes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObjectActionHistoryEntryPayload {
+    executed_at_unix_ms: u64,
+    primary_provider: String,
+    action: String,
+    description: String,
+    outcome: String,
+    message: String,
+    warnings: Vec<String>,
+    references: Vec<ObjectActionHistoryReferencePayload>,
+}
+
 #[derive(Debug, Serialize)]
 struct ObjectStatusPayload {
     bucket: String,
@@ -1124,6 +1164,29 @@ struct ObjectsQuery {
 struct ObjectStatusQuery {
     bucket: String,
     key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[derive(Clone)]
+enum ObjectActionInput {
+    Rename {
+        bucket: String,
+        key: String,
+        new_key: String,
+    },
+    Copy {
+        source_bucket: String,
+        source_key: String,
+        destination_bucket: String,
+        destination_key: String,
+    },
+    Move {
+        source_bucket: String,
+        source_key: String,
+        destination_bucket: String,
+        destination_key: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1155,6 +1218,7 @@ impl IntoResponse for ApiError {
             BlobError::Upstream(_) => StatusCode::BAD_GATEWAY,
             BlobError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             BlobError::NotFound(_) => StatusCode::NOT_FOUND,
+            BlobError::BodyStream(_) => StatusCode::BAD_REQUEST,
         };
 
         (status, Json(json!({ "error": error.to_string() }))).into_response()
@@ -1269,6 +1333,7 @@ async fn main() -> Result<()> {
             topology: config.topology.clone(),
             onedrive_policy: OnedrivePolicy::from_env_defaults(&config.topology),
             auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
+            object_action_history: Vec::new(),
         },
         config.onedrive.enabled,
     )?;
@@ -1376,6 +1441,7 @@ async fn main() -> Result<()> {
         auth_callback_bind_addr = %config.auth_callback_bind_addr,
         control_plane_file = %config.control_plane_file,
         browser_flow_catalog_dir = %config.browser_flow_catalog_dir,
+        provider_capability_catalog_dir = %config.provider_capability_catalog_dir,
         primary_provider = primary_provider_name,
         backend = backend_name,
         metadata_db_path = %config.metadata_db_path,
@@ -1387,6 +1453,7 @@ async fn main() -> Result<()> {
         replication_max_attempts = config.replication_max_attempts,
         replication_base_retry_delay_ms = config.replication_base_retry_delay_ms,
         replication_max_retry_delay_ms = config.replication_max_retry_delay_ms,
+        object_action_history_limit = config.object_action_history_limit,
         max_in_memory_object_bytes = config.max_in_memory_object_bytes,
         "gateway ready"
     );
@@ -1415,6 +1482,11 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         )
         .route("/api/providers/{provider}/test", post(test_provider))
         .route("/api/object-status", get(inspect_object_status))
+        .route("/api/object-actions", post(run_object_action))
+        .route(
+            "/api/object-actions/history/clear",
+            post(clear_object_action_history_api),
+        )
         .route(
             "/api/browser-flows/catalogs",
             get(list_browser_flow_catalogs),
@@ -2799,6 +2871,18 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     .object-card {{ border:1px solid var(--border); border-radius: 16px; padding: 14px; background:#fffef9; }}
     .object-card h3 {{ margin:0 0 8px; font-size:18px; }}
     .object-meta {{ font-size:13px; color: var(--muted); margin-top: 6px; white-space: pre-wrap; }}
+    .field-group.hidden {{ display:none; }}
+    .preview-card {{ border:1px solid var(--border); border-radius: 14px; padding: 12px; background:#fffef9; margin-top: 12px; }}
+    .preview-card strong {{ display:block; margin-bottom: 6px; }}
+    .delta-list {{ margin: 8px 0 0; padding-left: 18px; }}
+    .delta-list li {{ margin-top: 4px; }}
+    .comparison-grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-top: 12px; }}
+    .comparison-card {{ border:1px solid #eadfce; border-radius: 14px; background:#fff9f2; padding: 12px; }}
+    .comparison-card h4 {{ margin:0; font-size:15px; }}
+    .history-list {{ display:flex; flex-direction:column; gap: 10px; margin-top: 12px; }}
+    .history-card {{ border:1px solid var(--border); border-radius: 14px; background:#fffef9; padding: 12px; }}
+    .history-card h4 {{ margin:0; font-size:15px; }}
+    .history-toolbar {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-top: 12px; }}
   </style>
 </head>
 <body>
@@ -2893,6 +2977,102 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       <details>
         <summary>Raw object status payload</summary>
         <pre id="object-status-json">Run an object inspection to see the raw JSON payload here.</pre>
+      </details>
+    </section>
+    <section class="card" style="margin-top: 16px;">
+      <h2>Object Actions</h2>
+      <p>Run admin-level rename/copy/move actions against the current primary provider. Successful actions also update replication metadata so fallback state stays coherent.</p>
+      <div class="grid" style="margin-top: 0;">
+        <div>
+          <label>Action</label>
+          <select id="object-action-kind">
+            <option value="rename">rename</option>
+            <option value="copy">copy</option>
+            <option value="move">move</option>
+          </select>
+        </div>
+      </div>
+      <div id="object-action-rename-fields">
+        <div class="grid" style="margin-top: 0;">
+          <div>
+            <label>Bucket</label>
+            <input id="object-action-rename-bucket" type="text" placeholder="family" />
+          </div>
+          <div>
+            <label>Key</label>
+            <input id="object-action-rename-key" type="text" placeholder="shared/note.txt" />
+          </div>
+          <div>
+            <label>New Key</label>
+            <input id="object-action-rename-new-key" type="text" placeholder="shared/renamed.txt" />
+          </div>
+        </div>
+      </div>
+      <div id="object-action-transfer-fields" class="field-group hidden">
+        <div class="grid" style="margin-top: 0;">
+          <div>
+            <label>Source Bucket</label>
+            <input id="object-action-source-bucket" type="text" placeholder="family" />
+          </div>
+          <div>
+            <label>Source Key</label>
+            <input id="object-action-source-key" type="text" placeholder="shared/renamed.txt" />
+          </div>
+          <div>
+            <label>Destination Bucket</label>
+            <input id="object-action-destination-bucket" type="text" placeholder="root" />
+          </div>
+          <div>
+            <label>Destination Key</label>
+            <input id="object-action-destination-key" type="text" placeholder="docs/copied.txt" />
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="run-object-action">Run Object Action</button>
+      </div>
+      <div id="object-action-feedback" class="flash"></div>
+      <div id="object-action-preview" class="preview-card">
+        <strong>Execution Preview</strong>
+        <div id="object-action-preview-summary" class="hint">Select an action and fill the fields to see risks before execution.</div>
+      </div>
+      <div id="object-action-summary" class="hint">No object action has been run from the admin UI yet.</div>
+      <div id="object-action-inspection-summary" class="hint">No before/after object inspection captured yet.</div>
+      <div id="object-action-inspection-results" class="object-results"></div>
+      <div class="history-toolbar">
+        <div>
+          <label>History Action Filter</label>
+          <select id="object-action-history-action-filter">
+            <option value="all">all</option>
+            <option value="rename">rename</option>
+            <option value="copy">copy</option>
+            <option value="move">move</option>
+          </select>
+        </div>
+        <div>
+          <label>History Outcome Filter</label>
+          <select id="object-action-history-outcome-filter">
+            <option value="all">all</option>
+            <option value="success">success</option>
+            <option value="failed">failed</option>
+          </select>
+        </div>
+        <div>
+          <label>History Provider Filter</label>
+          <select id="object-action-history-provider-filter">
+            <option value="all">all</option>
+          </select>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="clear-object-action-history" class="secondary" type="button">Clear Shared History</button>
+        <button id="export-object-action-history" class="secondary" type="button">Export Shared History</button>
+      </div>
+      <div id="object-action-history-summary" class="hint">No shared object action history yet.</div>
+      <div id="object-action-history" class="history-list"></div>
+      <details>
+        <summary>Raw object action payload</summary>
+        <pre id="object-action-json">Submit an object action to see the request payload and result here.</pre>
       </details>
     </section>
     <section class="card" style="margin-top: 16px;">
@@ -2993,7 +3173,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         fields: [
           {{ key: 'token', label: 'Access Token', multiline: true, placeholder: 'Paste browser token / accessToken here' }},
           {{ key: 'cookie_header', label: 'Cookie Header', multiline: true, placeholder: 'cookie1=value; cookie2=value' }},
-          {{ key: 'family_id', label: 'Family ID (Optional)', placeholder: 'Used to probe family cloud when available' }},
+          {{ key: 'family_id', label: 'Family ID (Optional)', placeholder: 'Used to discover and expose the family bucket when available' }},
         ],
       }},
       {{
@@ -3033,7 +3213,14 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       sync_targets: [],
       fallback_read_order: [],
     }};
+    let runtimeTopologyState = {{
+      primary_provider: 'unicom',
+      sync_targets: [],
+      fallback_read_order: [],
+    }};
     let authPromptState = new Map();
+    let objectActionHistory = [];
+    let objectActionHistoryLimit = {DEFAULT_OBJECT_ACTION_HISTORY_LIMIT};
 
     function csvToArray(value) {{
       return value.split(',').map(part => part.trim()).filter(Boolean);
@@ -3074,6 +3261,11 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     }}
     function setObjectStatusFeedback(message, tone) {{
       const node = document.getElementById('object-status-feedback');
+      node.textContent = message || '';
+      node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
+    }}
+    function setObjectActionFeedback(message, tone) {{
+      const node = document.getElementById('object-action-feedback');
       node.textContent = message || '';
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }}
@@ -3468,6 +3660,487 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         `;
       }}).join('');
     }}
+    function renderObjectActionEditor() {{
+      const action = document.getElementById('object-action-kind').value;
+      document.getElementById('object-action-rename-fields').className =
+        action === 'rename' ? '' : 'field-group hidden';
+      document.getElementById('object-action-transfer-fields').className =
+        action === 'rename' ? 'field-group hidden' : '';
+      renderObjectActionPreview();
+    }}
+    function objectParentPath(key) {{
+      const trimmed = String(key || '').trim().replace(/^\/+|\/+$/g, '');
+      if (!trimmed.includes('/')) {{
+        return '';
+      }}
+      return trimmed.slice(0, trimmed.lastIndexOf('/'));
+    }}
+    function objectRefId(bucket, key) {{
+      return `${{bucket}}/${{key}}`;
+    }}
+    function actionDescription(payload) {{
+      return payload.action === 'rename'
+        ? `${{payload.bucket}}/${{payload.key}} -> ${{payload.new_key}}`
+        : `${{payload.source_bucket}}/${{payload.source_key}} -> ${{payload.destination_bucket}}/${{payload.destination_key}}`;
+    }}
+    function objectActionTouchedObjects(payload) {{
+      const refs = payload.action === 'rename'
+        ? [
+            {{ bucket: payload.bucket, key: payload.key, label: 'source before / old key after' }},
+            {{ bucket: payload.bucket, key: payload.new_key, label: 'renamed target' }},
+          ]
+        : [
+            {{ bucket: payload.source_bucket, key: payload.source_key, label: 'source' }},
+            {{ bucket: payload.destination_bucket, key: payload.destination_key, label: 'destination' }},
+          ];
+      const seen = new Set();
+      return refs.filter(ref => {{
+        const id = objectRefId(ref.bucket, ref.key);
+        if (seen.has(id)) {{
+          return false;
+        }}
+        seen.add(id);
+        return true;
+      }});
+    }}
+    async function fetchObjectStatusSnapshot(bucket, key) {{
+      const query = new URLSearchParams({{ bucket, key }});
+      return fetchJson(`/api/object-status?${{query.toString()}}`);
+    }}
+    async function captureObjectActionSnapshots(refs) {{
+      const entries = await Promise.all(refs.map(async ref => {{
+        try {{
+          const payload = await fetchObjectStatusSnapshot(ref.bucket, ref.key);
+          return [objectRefId(ref.bucket, ref.key), payload];
+        }} catch (error) {{
+          return [objectRefId(ref.bucket, ref.key), {{ bucket: ref.bucket, key: ref.key, gateway_error: error.message, provider_states: [] }}];
+        }}
+      }}));
+      return Object.fromEntries(entries);
+    }}
+    function summarizeObjectStatusPayload(payload) {{
+      if (!payload) {{
+        return 'No snapshot.';
+      }}
+      const states = payload.provider_states || [];
+      const existing = states.filter(state => state.exists).length;
+      const readable = states.filter(state => state.readable_via_gateway).length;
+      if (payload.gateway_read_source) {{
+        return `gateway=${{providerLabel(payload.gateway_read_source)}}${{payload.gateway_fallback_from ? ` fallback_from=${{providerLabel(payload.gateway_fallback_from)}}` : ''}} | exists_on=${{existing}} providers | gateway_readable=${{readable}} providers`;
+      }}
+      return `gateway_error=${{payload.gateway_error || 'unknown'}} | exists_on=${{existing}} providers | gateway_readable=${{readable}} providers`;
+    }}
+    function objectStateIndex(payload) {{
+      const index = new Map();
+      (payload?.provider_states || []).forEach(state => {{
+        index.set(state.provider, state);
+      }});
+      return index;
+    }}
+    function objectStatusDelta(before, after) {{
+      const changes = [];
+      const beforeSource = before?.gateway_read_source || 'none';
+      const afterSource = after?.gateway_read_source || 'none';
+      if (beforeSource !== afterSource) {{
+        changes.push(`gateway source: ${{providerLabel(beforeSource)}} -> ${{providerLabel(afterSource)}}`);
+      }}
+      const beforeError = before?.gateway_error || 'none';
+      const afterError = after?.gateway_error || 'none';
+      if (beforeError !== afterError) {{
+        changes.push(`gateway error: ${{beforeError}} -> ${{afterError}}`);
+      }}
+      const beforeStates = before?.provider_states || [];
+      const afterStates = after?.provider_states || [];
+      const beforeExisting = beforeStates.filter(state => state.exists).length;
+      const afterExisting = afterStates.filter(state => state.exists).length;
+      if (beforeExisting !== afterExisting) {{
+        changes.push(`exists on providers: ${{beforeExisting}} -> ${{afterExisting}}`);
+      }}
+      const beforeReadable = beforeStates.filter(state => state.readable_via_gateway).length;
+      const afterReadable = afterStates.filter(state => state.readable_via_gateway).length;
+      if (beforeReadable !== afterReadable) {{
+        changes.push(`gateway-readable providers: ${{beforeReadable}} -> ${{afterReadable}}`);
+      }}
+      const beforeIndex = objectStateIndex(before);
+      const afterIndex = objectStateIndex(after);
+      const providers = dedupe([
+        ...Array.from(beforeIndex.keys()),
+        ...Array.from(afterIndex.keys()),
+      ]);
+      providers.forEach(provider => {{
+        const prev = beforeIndex.get(provider);
+        const next = afterIndex.get(provider);
+        const prevExists = prev?.exists ? 'yes' : 'no';
+        const nextExists = next?.exists ? 'yes' : 'no';
+        if (prevExists !== nextExists) {{
+          changes.push(`${{providerLabel(provider)}} exists: ${{prevExists}} -> ${{nextExists}}`);
+        }}
+        const prevReadable = prev?.readable_via_gateway ? 'yes' : 'no';
+        const nextReadable = next?.readable_via_gateway ? 'yes' : 'no';
+        if (prevReadable !== nextReadable) {{
+          changes.push(`${{providerLabel(provider)}} gateway-readable: ${{prevReadable}} -> ${{nextReadable}}`);
+        }}
+      }});
+      return changes;
+    }}
+    function latestReplicationJobSummary(job) {{
+      if (!job) {{
+        return 'none';
+      }}
+      return `status=${{job.status}} | op=${{job.operation}} | attempts=${{job.attempts}} | source=${{job.source_provider || 'n/a'}}`;
+    }}
+    function providerStateSnapshotSummary(state) {{
+      if (!state) {{
+        return 'missing';
+      }}
+      const parts = [
+        `exists=${{state.exists ? 'yes' : 'no'}}`,
+        `gateway_readable=${{state.readable_via_gateway ? 'yes' : 'no'}}`,
+      ];
+      if (state.fallback_gate) {{
+        parts.push(`fallback=${{state.fallback_gate}}`);
+      }}
+      if (state.accepts_replication_put !== null && state.accepts_replication_put !== undefined) {{
+        parts.push(`accepts_replication_put=${{state.accepts_replication_put ? 'yes' : 'no'}}`);
+      }}
+      if (state.access_error) {{
+        parts.push(`access_error=${{state.access_error}}`);
+      }}
+      parts.push(`latest_job=${{latestReplicationJobSummary(state.latest_replication_job)}}`);
+      return parts.join(' | ');
+    }}
+    function providerStateDelta(beforeState, afterState) {{
+      const changes = [];
+      const beforeExists = beforeState?.exists ? 'yes' : 'no';
+      const afterExists = afterState?.exists ? 'yes' : 'no';
+      if (beforeExists !== afterExists) {{
+        changes.push(`exists: ${{beforeExists}} -> ${{afterExists}}`);
+      }}
+      const beforeReadable = beforeState?.readable_via_gateway ? 'yes' : 'no';
+      const afterReadable = afterState?.readable_via_gateway ? 'yes' : 'no';
+      if (beforeReadable !== afterReadable) {{
+        changes.push(`gateway_readable: ${{beforeReadable}} -> ${{afterReadable}}`);
+      }}
+      const beforeFallback = beforeState?.fallback_gate || 'none';
+      const afterFallback = afterState?.fallback_gate || 'none';
+      if (beforeFallback !== afterFallback) {{
+        changes.push(`fallback_gate: ${{beforeFallback}} -> ${{afterFallback}}`);
+      }}
+      const beforeAccess = beforeState?.access_error || 'none';
+      const afterAccess = afterState?.access_error || 'none';
+      if (beforeAccess !== afterAccess) {{
+        changes.push(`access_error: ${{beforeAccess}} -> ${{afterAccess}}`);
+      }}
+      const beforeJob = latestReplicationJobSummary(beforeState?.latest_replication_job);
+      const afterJob = latestReplicationJobSummary(afterState?.latest_replication_job);
+      if (beforeJob !== afterJob) {{
+        changes.push(`latest_job: ${{beforeJob}} -> ${{afterJob}}`);
+      }}
+      return changes;
+    }}
+    function renderProviderStateComparisons(before, after) {{
+      const beforeIndex = objectStateIndex(before);
+      const afterIndex = objectStateIndex(after);
+      const providers = dedupe([
+        ...Array.from(beforeIndex.keys()),
+        ...Array.from(afterIndex.keys()),
+      ]);
+      if (!providers.length) {{
+        return '<div class="object-meta">No provider-level state available.</div>';
+      }}
+      return `
+        <div class="comparison-grid">
+          ${{
+            providers.map(provider => {{
+              const beforeState = beforeIndex.get(provider);
+              const afterState = afterIndex.get(provider);
+              const deltas = providerStateDelta(beforeState, afterState);
+              const deltaHtml = deltas.length
+                ? `<ul class="delta-list">${{deltas.map(item => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul>`
+                : '<div class="object-meta">No provider-level change detected.</div>';
+              return `
+                <div class="comparison-card">
+                  <h4>${{escapeHtml(providerLabel(provider))}}</h4>
+                  <div class="object-meta"><strong>Delta</strong>${{deltaHtml}}</div>
+                  <div class="object-meta"><strong>Before</strong><br>${{escapeHtml(providerStateSnapshotSummary(beforeState))}}</div>
+                  <div class="object-meta"><strong>After</strong><br>${{escapeHtml(providerStateSnapshotSummary(afterState))}}</div>
+                </div>
+              `;
+            }}).join('')
+          }}
+        </div>
+      `;
+    }}
+    function renderObjectActionInspection(details) {{
+      const summaryNode = document.getElementById('object-action-inspection-summary');
+      const resultsNode = document.getElementById('object-action-inspection-results');
+      if (!details || !details.references || !details.references.length) {{
+        summaryNode.textContent = 'No before/after object inspection captured yet.';
+        resultsNode.innerHTML = '';
+        return;
+      }}
+      summaryNode.textContent = `Captured before/after state for ${{details.references.length}} object reference(s).`;
+      resultsNode.innerHTML = details.references.map(ref => {{
+        const before = summarizeObjectStatusPayload(ref.before);
+        const after = summarizeObjectStatusPayload(ref.after);
+        const changes = objectStatusDelta(ref.before, ref.after);
+        const providerComparisons = renderProviderStateComparisons(ref.before, ref.after);
+        const deltaHtml = changes.length
+          ? `<ul class="delta-list">${{changes.map(item => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul>`
+          : '<div class="object-meta">No material state change detected yet.</div>';
+        return `
+          <div class="object-card">
+            <h3>${{escapeHtml(ref.label)}}</h3>
+            <div class="object-meta mono">${{escapeHtml(ref.bucket)}}/${{escapeHtml(ref.key)}}</div>
+            <div class="object-meta"><strong>Changes</strong>${{deltaHtml}}</div>
+            <div class="object-meta"><strong>Before</strong><br>${{escapeHtml(before)}}</div>
+            <div class="object-meta"><strong>After</strong><br>${{escapeHtml(after)}}</div>
+            <div class="object-meta"><strong>Provider Changes</strong></div>
+            ${{providerComparisons}}
+          </div>
+        `;
+      }}).join('');
+    }}
+    function clearObjectActionHistory() {{
+      setObjectActionFeedback('Clearing shared object action history…', 'warn');
+      fetchJson('/api/object-actions/history/clear', {{
+        method: 'POST',
+      }})
+        .then(async () => {{
+          await refreshStatus();
+          setObjectActionFeedback('Shared object action history cleared.', 'ok');
+        }})
+        .catch(error => {{
+          setObjectActionFeedback(error.message, 'warn');
+        }});
+    }}
+    function objectActionHistoryFilters() {{
+      return {{
+        action: document.getElementById('object-action-history-action-filter').value,
+        outcome: document.getElementById('object-action-history-outcome-filter').value,
+        provider: document.getElementById('object-action-history-provider-filter').value,
+      }};
+    }}
+    function updateObjectActionHistoryProviderFilter(history) {{
+      const node = document.getElementById('object-action-history-provider-filter');
+      const previous = node.value || 'all';
+      const providers = dedupe((history || []).map(entry => entry.primary_provider).filter(Boolean));
+      node.innerHTML = ['all', ...providers]
+        .map(provider => `<option value="${{escapeHtml(provider)}}">${{escapeHtml(provider === 'all' ? 'all' : providerLabel(provider))}}</option>`)
+        .join('');
+      node.value = providers.includes(previous) || previous === 'all' ? previous : 'all';
+    }}
+    function filteredObjectActionHistory(history) {{
+      const filters = objectActionHistoryFilters();
+      return (history || []).filter(entry => {{
+        if (filters.action !== 'all' && entry.action !== filters.action) {{
+          return false;
+        }}
+        if (filters.outcome !== 'all' && entry.outcome !== filters.outcome) {{
+          return false;
+        }}
+        if (filters.provider !== 'all' && entry.primary_provider !== filters.provider) {{
+          return false;
+        }}
+        return true;
+      }});
+    }}
+    function downloadObjectActionHistory() {{
+      const filtered = filteredObjectActionHistory(objectActionHistory);
+      const payload = {{
+        exported_at: new Date().toISOString(),
+        history_limit: objectActionHistoryLimit,
+        filters: objectActionHistoryFilters(),
+        entries: filtered,
+      }};
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {{ type: 'application/json' }});
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `object-action-history-${{Date.now()}}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setObjectActionFeedback(`Exported ${{filtered.length}} shared history entr${{filtered.length === 1 ? 'y' : 'ies'}}.`, 'ok');
+    }}
+    function renderObjectActionHistory(history) {{
+      objectActionHistory.splice(0, objectActionHistory.length, ...(history || []));
+      updateObjectActionHistoryProviderFilter(objectActionHistory);
+      const summaryNode = document.getElementById('object-action-history-summary');
+      const container = document.getElementById('object-action-history');
+      if (!objectActionHistory.length) {{
+        summaryNode.textContent = 'No shared object action history yet.';
+        container.innerHTML = '';
+        return;
+      }}
+      const filteredHistory = filteredObjectActionHistory(objectActionHistory);
+      summaryNode.textContent = `Showing ${{filteredHistory.length}} of ${{objectActionHistory.length}} recent object action(s) stored on this gateway. Limit=${{objectActionHistoryLimit}}.`;
+      if (!filteredHistory.length) {{
+        container.innerHTML = '<div class="object-meta">No shared history entries match the current filters.</div>';
+        return;
+      }}
+      container.innerHTML = filteredHistory.map(entry => {{
+        const warningHtml = entry.warnings && entry.warnings.length
+          ? `<ul class="delta-list">${{entry.warnings.map(item => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul>`
+          : '<div class="object-meta">No warnings were recorded for this action.</div>';
+        const refs = (entry.references || []).map(ref => {{
+          const changeHtml = ref.changes && ref.changes.length
+            ? `<ul class="delta-list">${{ref.changes.map(item => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul>`
+            : '<div class="object-meta">No material change recorded.</div>';
+          return `
+            <div class="comparison-card">
+              <h4>${{escapeHtml(ref.label)}}</h4>
+              <div class="object-meta mono">${{escapeHtml(ref.bucket)}}/${{escapeHtml(ref.key)}}</div>
+              <div class="object-meta">${{changeHtml}}</div>
+            </div>
+          `;
+        }}).join('');
+        return `
+          <div class="history-card">
+            <h4>${{escapeHtml(entry.action)}} · <span class="${{entry.outcome === 'success' ? 'status-ok' : 'status-warn'}}">${{escapeHtml(entry.outcome)}}</span></h4>
+            <div class="object-meta">${{escapeHtml(formatTimestamp(entry.executed_at_unix_ms))}} | primary=${{escapeHtml(providerLabel(entry.primary_provider))}}</div>
+            <div class="object-meta mono">${{escapeHtml(entry.description)}}</div>
+            <div class="object-meta">${{escapeHtml(entry.message || '')}}</div>
+            <div class="object-meta"><strong>Warnings</strong>${{warningHtml}}</div>
+            <div class="comparison-grid">${{refs || '<div class="object-meta">No captured object references.</div>'}}</div>
+          </div>
+        `;
+      }}).join('');
+    }}
+    function buildObjectActionPreview(payload) {{
+      const primary = runtimeTopologyState.primary_provider || 'unknown';
+      const lines = [`Primary provider: ${{providerLabel(primary)}}`];
+      const warnings = [];
+      if (payload.action === 'rename') {{
+        lines.push(`Planned rename: ${{payload.bucket}}/${{payload.key}} -> ${{payload.bucket}}/${{payload.new_key}}`);
+        lines.push('Replication plan: put(new) + delete(old)');
+        if (payload.key === payload.new_key) {{
+          warnings.push('This is a no-op rename. The gateway will return success without changing the object.');
+        }}
+        if (primary === 'unicom' && objectParentPath(payload.key) !== objectParentPath(payload.new_key)) {{
+          warnings.push('Current Unicom rename only supports staying in the same parent directory. Use move for cross-directory changes.');
+        }}
+      }} else if (payload.action === 'copy') {{
+        lines.push(`Planned copy: ${{payload.source_bucket}}/${{payload.source_key}} -> ${{payload.destination_bucket}}/${{payload.destination_key}}`);
+        lines.push('Replication plan: put(destination)');
+        if (payload.source_bucket === payload.destination_bucket && payload.source_key === payload.destination_key) {{
+          warnings.push('This copies an object onto the same bucket/key. The destination may be overwritten or treated as a provider-specific no-op.');
+        }}
+      }} else if (payload.action === 'move') {{
+        lines.push(`Planned move: ${{payload.source_bucket}}/${{payload.source_key}} -> ${{payload.destination_bucket}}/${{payload.destination_key}}`);
+        lines.push('Replication plan: put(destination) + delete(source)');
+        if (payload.source_bucket === payload.destination_bucket && payload.source_key === payload.destination_key) {{
+          warnings.push('This is a no-op move. The gateway will return success without changing the object.');
+        }}
+      }}
+      if (payload.action === 'copy' || payload.action === 'move') {{
+        if (payload.source_bucket !== payload.destination_bucket) {{
+          warnings.push('This action crosses buckets/containers. Confirm the destination scope is intentional.');
+        }}
+        warnings.push('Destination writes may overwrite an existing object at the destination key.');
+      }}
+      return {{
+        summary: lines.join('\\n'),
+        warnings,
+      }};
+    }}
+    function renderObjectActionPreview() {{
+      const summaryNode = document.getElementById('object-action-preview-summary');
+      try {{
+        const payload = collectObjectActionInput();
+        const preview = buildObjectActionPreview(payload);
+        const warningLines = preview.warnings.length
+          ? `\\nWarnings:\\n- ${{preview.warnings.join('\\n- ')}}`
+          : '\\nWarnings:\\n- none';
+        summaryNode.textContent = `${{preview.summary}}${{warningLines}}`;
+      }} catch (error) {{
+        summaryNode.textContent = error.message || 'Select an action and fill the fields to see risks before execution.';
+      }}
+    }}
+    function collectObjectActionInput() {{
+      const action = document.getElementById('object-action-kind').value;
+      if (action === 'rename') {{
+        const bucket = document.getElementById('object-action-rename-bucket').value.trim();
+        const key = document.getElementById('object-action-rename-key').value.trim();
+        const new_key = document.getElementById('object-action-rename-new-key').value.trim();
+        if (!bucket || !key || !new_key) {{
+          throw new Error('Rename requires bucket, key, and new key.');
+        }}
+        return {{ action, bucket, key, new_key }};
+      }}
+      const source_bucket = document.getElementById('object-action-source-bucket').value.trim();
+      const source_key = document.getElementById('object-action-source-key').value.trim();
+      const destination_bucket = document.getElementById('object-action-destination-bucket').value.trim();
+      const destination_key = document.getElementById('object-action-destination-key').value.trim();
+      if (!source_bucket || !source_key || !destination_bucket || !destination_key) {{
+        throw new Error(`${{action}} requires source and destination bucket/key values.`);
+      }}
+      return {{ action, source_bucket, source_key, destination_bucket, destination_key }};
+    }}
+    async function runObjectAction() {{
+      let payload;
+      try {{
+        payload = collectObjectActionInput();
+      }} catch (error) {{
+        setObjectActionFeedback(error.message, 'warn');
+        return;
+      }}
+      const description = actionDescription(payload);
+      const refs = objectActionTouchedObjects(payload);
+      setObjectActionFeedback(`Running ${{payload.action}} for ${{description}}…`, 'warn');
+      document.getElementById('object-action-json').textContent = JSON.stringify(payload, null, 2);
+      const beforeSnapshots = await captureObjectActionSnapshots(refs);
+      try {{
+        await fetchJson('/api/object-actions', {{
+          method: 'POST',
+          headers: {{ 'content-type': 'application/json' }},
+          body: JSON.stringify(payload),
+        }});
+        const afterSnapshots = await captureObjectActionSnapshots(refs);
+        const inspection = {{
+          references: refs.map(ref => {{
+            const id = objectRefId(ref.bucket, ref.key);
+            return {{
+              ...ref,
+              before: beforeSnapshots[id] || null,
+              after: afterSnapshots[id] || null,
+            }};
+          }}),
+        }};
+        renderObjectActionInspection(inspection);
+        document.getElementById('object-action-summary').textContent =
+          `Completed ${{payload.action}}: ${{description}}`;
+        document.getElementById('object-action-json').textContent = JSON.stringify({{
+          request: payload,
+          result: 'no_content',
+          inspection,
+        }}, null, 2);
+        setObjectActionFeedback(`Object action completed: ${{description}}`, 'ok');
+        await refreshStatus();
+      }} catch (error) {{
+        const afterSnapshots = await captureObjectActionSnapshots(refs);
+        const inspection = {{
+          references: refs.map(ref => {{
+            const id = objectRefId(ref.bucket, ref.key);
+            return {{
+              ...ref,
+              before: beforeSnapshots[id] || null,
+              after: afterSnapshots[id] || null,
+            }};
+          }}),
+        }};
+        renderObjectActionInspection(inspection);
+        document.getElementById('object-action-summary').textContent = error.message;
+        document.getElementById('object-action-json').textContent = JSON.stringify({{
+          request: payload,
+          error: error.message,
+          inspection,
+        }}, null, 2);
+        setObjectActionFeedback(error.message, 'warn');
+        await refreshStatus();
+      }}
+    }}
     function credentialFieldId(provider, key) {{
       return `provider-credential-${{provider}}-${{key}}`;
     }}
@@ -3688,6 +4361,8 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     async function refreshStatus() {{
       try {{
         const status = await fetchJson('/api/status');
+        runtimeTopologyState = status.runtime_topology || runtimeTopologyState;
+        objectActionHistoryLimit = Number(status.object_action_history_limit || objectActionHistoryLimit || {DEFAULT_OBJECT_ACTION_HISTORY_LIMIT});
         document.getElementById('gateway-status').textContent = JSON.stringify(status, null, 2);
         document.getElementById('auth-status').textContent = JSON.stringify(status.onedrive_auth, null, 2);
         document.getElementById('runtime-topology').textContent = JSON.stringify(status.runtime_topology, null, 2);
@@ -3696,11 +4371,13 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         renderAlerts(status.alerts || []);
         renderProviderHealth(status.provider_health || []);
         renderReplication(status.replication_state);
+        renderObjectActionHistory(status.object_action_history || []);
         loadDesiredTopology(status.desired_topology);
         loadOnedrivePolicy(status.onedrive_policy);
         renderAuthCapturePolicy(status.auth_capture_policy || {{}});
         await refreshProviderCredentials();
         await refreshAuthCapturePrompts();
+        renderObjectActionPreview();
       }} catch (error) {{
         document.getElementById('gateway-status').textContent = error.message;
       }}
@@ -3915,6 +4592,30 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     document.getElementById('save-onedrive-policy').addEventListener('click', saveOnedrivePolicy);
     document.getElementById('save-auth-capture-policy').addEventListener('click', saveAuthCapturePolicy);
     document.getElementById('inspect-object-status').addEventListener('click', inspectObjectStatus);
+    document.getElementById('object-action-kind').addEventListener('change', renderObjectActionEditor);
+    document.getElementById('run-object-action').addEventListener('click', runObjectAction);
+    document.getElementById('clear-object-action-history').addEventListener('click', clearObjectActionHistory);
+    document.getElementById('export-object-action-history').addEventListener('click', downloadObjectActionHistory);
+    [
+      'object-action-history-action-filter',
+      'object-action-history-outcome-filter',
+      'object-action-history-provider-filter',
+    ].forEach(id => {{
+      document.getElementById(id).addEventListener('change', () => renderObjectActionHistory(objectActionHistory));
+    }});
+    [
+      'object-action-rename-bucket',
+      'object-action-rename-key',
+      'object-action-rename-new-key',
+      'object-action-source-bucket',
+      'object-action-source-key',
+      'object-action-destination-bucket',
+      'object-action-destination-key',
+    ].forEach(id => {{
+      document.getElementById(id).addEventListener('input', renderObjectActionPreview);
+    }});
+    renderObjectActionEditor();
+    renderObjectActionHistory();
     renderTopologyEditor();
     refreshStatus();
   </script>
@@ -3938,6 +4639,7 @@ async fn admin_status(State(state): State<AppState>) -> Result<Json<AdminStatusP
     let provider_health = provider_health_payloads(&state).await?;
     let onedrive_auth = read_onedrive_auth_status(&state);
     let alerts = build_admin_alerts(&state, &provider_health, &replication_state, &onedrive_auth);
+    let object_action_history = control_plane_snapshot(&state).object_action_history;
     Ok(Json(AdminStatusPayload {
         runtime_topology: runtime_topology_payload(&runtime_topology(&state)),
         desired_topology: desired_topology_payload(&state),
@@ -3946,6 +4648,8 @@ async fn admin_status(State(state): State<AppState>) -> Result<Json<AdminStatusP
             recent_jobs: replication_state.in_memory.recent_count,
         },
         replication_state,
+        object_action_history,
+        object_action_history_limit: state.config.object_action_history_limit,
         provider_health,
         alerts,
         onedrive_auth,
@@ -3988,104 +4692,160 @@ async fn inspect_object_status(
             BlobError::Configuration("bucket and key are both required".to_string()).into(),
         );
     }
+    Ok(Json(
+        object_status_payload_for(&state, &bucket, &key).await?,
+    ))
+}
 
-    let topology = runtime_topology(&state);
-    let mut providers = Vec::with_capacity(1 + topology.sync_targets.len());
-    providers.push(topology.primary_provider);
-    for provider in &topology.sync_targets {
-        if !providers.contains(provider) {
-            providers.push(*provider);
+async fn clear_object_action_history_api(
+    State(state): State<AppState>,
+) -> Result<StatusCode, ApiError> {
+    clear_object_action_history(&state)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn run_object_action(
+    State(state): State<AppState>,
+    Json(input): Json<ObjectActionInput>,
+) -> Result<StatusCode, ApiError> {
+    let (primary_provider, backend) = current_primary_backend(&state)?;
+    let input_for_history = input.clone();
+    let description = object_action_description(&input_for_history);
+    let warnings = object_action_warnings(&input_for_history, primary_provider);
+    let refs = object_action_targets(&input_for_history);
+    let before_snapshots = capture_object_action_snapshots(&state, &refs).await;
+    let mut replication_jobs = Vec::new();
+    let action_result: Result<(), BlobError> = match input {
+        ObjectActionInput::Rename {
+            bucket,
+            key,
+            new_key,
+        } => {
+            let bucket = bucket.trim().to_string();
+            let key = key.trim().to_string();
+            let new_key = new_key.trim().to_string();
+            if key == new_key {
+                Ok(())
+            } else {
+                let source_object = backend.head_object(&bucket, &key).await?;
+                backend
+                    .rename_object(RenameObjectRequest {
+                        container: bucket.clone(),
+                        key: key.clone(),
+                        new_key: new_key.clone(),
+                    })
+                    .await?;
+                replication_jobs.extend(enqueue_replication_put_for_object(
+                    &state,
+                    primary_provider,
+                    &bucket,
+                    &new_key,
+                    &source_object,
+                )?);
+                replication_jobs.extend(enqueue_replication_delete_for_object(
+                    &state,
+                    primary_provider,
+                    &bucket,
+                    &key,
+                )?);
+                Ok(())
+            }
         }
-    }
-
-    let gateway_resolution = resolve_object_read(&state, &bucket, &key).await;
-    let (gateway_read_source, gateway_fallback_from, gateway_error) = match gateway_resolution {
-        Ok(resolved) => (
-            Some(resolved.source.provider.as_str()),
-            resolved
-                .source
-                .fallback_from
-                .map(|provider| provider.as_str()),
-            None,
-        ),
-        Err(error) => (None, None, Some(error.to_string())),
+        ObjectActionInput::Copy {
+            source_bucket,
+            source_key,
+            destination_bucket,
+            destination_key,
+        } => {
+            let source_bucket = source_bucket.trim().to_string();
+            let source_key = source_key.trim().to_string();
+            let destination_bucket = destination_bucket.trim().to_string();
+            let destination_key = destination_key.trim().to_string();
+            let source_object = backend.head_object(&source_bucket, &source_key).await?;
+            backend
+                .copy_object(CopyObjectRequest {
+                    source_container: source_bucket,
+                    source_key,
+                    destination_container: destination_bucket.clone(),
+                    destination_key: destination_key.clone(),
+                })
+                .await?;
+            replication_jobs.extend(enqueue_replication_put_for_object(
+                &state,
+                primary_provider,
+                &destination_bucket,
+                &destination_key,
+                &source_object,
+            )?);
+            Ok(())
+        }
+        ObjectActionInput::Move {
+            source_bucket,
+            source_key,
+            destination_bucket,
+            destination_key,
+        } => {
+            let source_bucket = source_bucket.trim().to_string();
+            let source_key = source_key.trim().to_string();
+            let destination_bucket = destination_bucket.trim().to_string();
+            let destination_key = destination_key.trim().to_string();
+            if source_bucket == destination_bucket && source_key == destination_key {
+                Ok(())
+            } else {
+                let source_object = backend.head_object(&source_bucket, &source_key).await?;
+                backend
+                    .move_object(MoveObjectRequest {
+                        source_container: source_bucket.clone(),
+                        source_key: source_key.clone(),
+                        destination_container: destination_bucket.clone(),
+                        destination_key: destination_key.clone(),
+                    })
+                    .await?;
+                replication_jobs.extend(enqueue_replication_put_for_object(
+                    &state,
+                    primary_provider,
+                    &destination_bucket,
+                    &destination_key,
+                    &source_object,
+                )?);
+                replication_jobs.extend(enqueue_replication_delete_for_object(
+                    &state,
+                    primary_provider,
+                    &source_bucket,
+                    &source_key,
+                )?);
+                Ok(())
+            }
+        }
     };
 
-    let mut provider_states = Vec::with_capacity(providers.len());
-    for provider in providers {
-        let backend = backend_for_provider(&state, provider)?;
-        let roles = provider_roles(&topology, provider);
-        let fallback_order_index = topology
-            .fallback_read_order
-            .iter()
-            .position(|item| *item == provider)
-            .map(|index| index + 1);
-        let latest_replication_job = if provider == topology.primary_provider {
-            None
-        } else {
-            state
-                .metadata_store
-                .latest_job_for_object(provider.as_str(), &bucket, &key)
-                .map_err(|error| BlobError::Upstream(error.to_string()))?
-        };
-        let accepts_replication_put = if provider == topology.primary_provider {
-            None
-        } else {
-            Some(provider_allowed_for_replication(
-                &state,
-                provider,
-                ReplicationOperation::Put,
-                &bucket,
-                &key,
-            )?)
-        };
-        let fallback_gate = if provider == topology.primary_provider {
-            None
-        } else {
-            Some(load_fallback_gate_for_object(
-                &state, provider, &bucket, &key,
-            )?)
-        };
+    let after_snapshots = capture_object_action_snapshots(&state, &refs).await;
+    let outcome = if action_result.is_ok() {
+        "success"
+    } else {
+        "failed"
+    };
+    let message = action_result
+        .as_ref()
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| format!("Completed {description}"));
+    record_object_action_history(
+        &state,
+        object_action_history_entry(
+            primary_provider,
+            &input_for_history,
+            outcome,
+            message,
+            warnings,
+            &before_snapshots,
+            &after_snapshots,
+        ),
+    );
 
-        let (exists, object_info, access_error) = match backend.head_object(&bucket, &key).await {
-            Ok(info) => (true, Some(info), None),
-            Err(BlobError::NotFound(_)) => (false, None, None),
-            Err(error) => (false, None, Some(error.to_string())),
-        };
-
-        let readable_via_gateway = if provider == topology.primary_provider {
-            exists
-        } else {
-            exists
-                && matches!(fallback_gate, Some(FallbackObjectGate::Allowed))
-                && fallback_order_index.is_some()
-        };
-
-        provider_states.push(ObjectProviderStatusPayload {
-            provider: provider.as_str(),
-            label: provider_label(provider),
-            roles,
-            fallback_order_index,
-            exists,
-            readable_via_gateway,
-            accepts_replication_put,
-            object_info,
-            access_error,
-            latest_replication_job,
-            fallback_gate: fallback_gate.map(fallback_gate_name),
-            fallback_reason: fallback_gate.map(fallback_gate_reason),
-        });
-    }
-
-    Ok(Json(ObjectStatusPayload {
-        bucket,
-        key,
-        primary_provider: topology.primary_provider.as_str(),
-        gateway_read_source,
-        gateway_fallback_from,
-        gateway_error,
-        provider_states,
-    }))
+    action_result?;
+    persist_replication_jobs(&state, &replication_jobs, "object action");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_browser_flow_catalogs(
@@ -4747,8 +5507,20 @@ fn build_backend(config: &AppConfig, provider: ProviderId) -> Result<DynBackend,
                     .or_else(|| env_opt("CCBG_UNICOM_FAMILY_ID")),
                 family_space_type: env_or("CCBG_UNICOM_FAMILY_SPACE_TYPE", "1"),
                 family_root_directory_id: env_or("CCBG_UNICOM_FAMILY_ROOT_DIRECTORY_ID", "0"),
-                native_capability_catalog_path: env_opt(
-                    "CCBG_UNICOM_NATIVE_CAPABILITY_CATALOG_FILE",
+                upload_url: env_or(
+                    "CCBG_UNICOM_UPLOAD_URL",
+                    "https://bjupload.pan.wo.cn:32443/openapi/client/upload2C",
+                ),
+                upload_chunk_size_bytes: env_u64(
+                    "CCBG_UNICOM_UPLOAD_CHUNK_SIZE_BYTES",
+                    8 * 1024 * 1024,
+                ),
+                native_capability_catalog_path: Some(
+                    env_opt("CCBG_UNICOM_NATIVE_CAPABILITY_CATALOG_FILE").unwrap_or_else(|| {
+                        provider_capability_catalog_path(config, provider, "native")
+                            .display()
+                            .to_string()
+                    }),
                 ),
             })?))
         }
@@ -5066,6 +5838,560 @@ fn effective_topology_for_replication(
         .filter(|provider| topology.sync_targets.contains(provider))
         .collect();
     Ok(topology)
+}
+
+fn enqueue_replication_put_for_object(
+    state: &AppState,
+    source_provider: ProviderId,
+    bucket: &str,
+    key: &str,
+    object: &blob_core::ObjectInfo,
+) -> Result<Vec<ReplicationJob>, BlobError> {
+    let effective_topology =
+        effective_topology_for_replication(state, ReplicationOperation::Put, bucket, key)?;
+    Ok(state.replication.enqueue_put(
+        &effective_topology,
+        Some(source_provider.as_str().to_string()),
+        bucket.to_string(),
+        key.to_string(),
+        object.etag.clone(),
+        object.size,
+        object.content_type.clone(),
+    ))
+}
+
+fn enqueue_replication_delete_for_object(
+    state: &AppState,
+    source_provider: ProviderId,
+    bucket: &str,
+    key: &str,
+) -> Result<Vec<ReplicationJob>, BlobError> {
+    let effective_topology =
+        effective_topology_for_replication(state, ReplicationOperation::Delete, bucket, key)?;
+    Ok(state.replication.enqueue_delete(
+        &effective_topology,
+        Some(source_provider.as_str().to_string()),
+        bucket.to_string(),
+        key.to_string(),
+    ))
+}
+
+fn persist_replication_jobs(state: &AppState, jobs: &[ReplicationJob], reason: &'static str) {
+    if let Err(error) = state.metadata_store.enqueue_jobs(jobs) {
+        warn!(
+            reason,
+            queued_jobs = jobs.len(),
+            error = %error,
+            "failed to persist replication jobs"
+        );
+    } else if !jobs.is_empty() {
+        info!(
+            reason,
+            queued_jobs = jobs.len(),
+            "replication jobs enqueued"
+        );
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ObjectActionTargetRef {
+    label: String,
+    bucket: String,
+    key: String,
+}
+
+fn object_action_name(input: &ObjectActionInput) -> &'static str {
+    match input {
+        ObjectActionInput::Rename { .. } => "rename",
+        ObjectActionInput::Copy { .. } => "copy",
+        ObjectActionInput::Move { .. } => "move",
+    }
+}
+
+fn object_action_description(input: &ObjectActionInput) -> String {
+    match input {
+        ObjectActionInput::Rename {
+            bucket,
+            key,
+            new_key,
+        } => format!("{bucket}/{key} -> {bucket}/{new_key}"),
+        ObjectActionInput::Copy {
+            source_bucket,
+            source_key,
+            destination_bucket,
+            destination_key,
+        } => format!("{source_bucket}/{source_key} -> {destination_bucket}/{destination_key}"),
+        ObjectActionInput::Move {
+            source_bucket,
+            source_key,
+            destination_bucket,
+            destination_key,
+        } => format!("{source_bucket}/{source_key} -> {destination_bucket}/{destination_key}"),
+    }
+}
+
+fn object_parent_path(key: &str) -> &str {
+    let trimmed = key.trim().trim_matches('/');
+    trimmed
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
+}
+
+fn object_action_warnings(input: &ObjectActionInput, primary_provider: ProviderId) -> Vec<String> {
+    match input {
+        ObjectActionInput::Rename {
+            bucket: _,
+            key,
+            new_key,
+        } => {
+            let mut warnings = Vec::new();
+            if key.trim() == new_key.trim() {
+                warnings.push(
+                    "This is a no-op rename. The gateway will return success without changing the object."
+                        .to_string(),
+                );
+            }
+            if matches!(primary_provider, ProviderId::Unicom)
+                && object_parent_path(key) != object_parent_path(new_key)
+            {
+                warnings.push(
+                    "Current Unicom rename only supports staying in the same parent directory. Use move for cross-directory changes."
+                        .to_string(),
+                );
+            }
+            warnings
+        }
+        ObjectActionInput::Copy {
+            source_bucket,
+            source_key,
+            destination_bucket,
+            destination_key,
+        } => {
+            let mut warnings = Vec::new();
+            if source_bucket.trim() == destination_bucket.trim()
+                && source_key.trim() == destination_key.trim()
+            {
+                warnings.push(
+                    "This copies an object onto the same bucket/key. The destination may be overwritten or treated as a provider-specific no-op."
+                        .to_string(),
+                );
+            }
+            if source_bucket.trim() != destination_bucket.trim() {
+                warnings.push(
+                    "This action crosses buckets/containers. Confirm the destination scope is intentional."
+                        .to_string(),
+                );
+            }
+            warnings.push(
+                "Destination writes may overwrite an existing object at the destination key."
+                    .to_string(),
+            );
+            warnings
+        }
+        ObjectActionInput::Move {
+            source_bucket,
+            source_key,
+            destination_bucket,
+            destination_key,
+        } => {
+            let mut warnings = Vec::new();
+            if source_bucket.trim() == destination_bucket.trim()
+                && source_key.trim() == destination_key.trim()
+            {
+                warnings.push(
+                    "This is a no-op move. The gateway will return success without changing the object."
+                        .to_string(),
+                );
+            }
+            if source_bucket.trim() != destination_bucket.trim() {
+                warnings.push(
+                    "This action crosses buckets/containers. Confirm the destination scope is intentional."
+                        .to_string(),
+                );
+            }
+            warnings.push(
+                "Destination writes may overwrite an existing object at the destination key."
+                    .to_string(),
+            );
+            warnings
+        }
+    }
+}
+
+fn object_action_targets(input: &ObjectActionInput) -> Vec<ObjectActionTargetRef> {
+    let targets = match input {
+        ObjectActionInput::Rename {
+            bucket,
+            key,
+            new_key,
+        } => vec![
+            ObjectActionTargetRef {
+                label: "source before / old key after".to_string(),
+                bucket: bucket.trim().to_string(),
+                key: key.trim().to_string(),
+            },
+            ObjectActionTargetRef {
+                label: "renamed target".to_string(),
+                bucket: bucket.trim().to_string(),
+                key: new_key.trim().to_string(),
+            },
+        ],
+        ObjectActionInput::Copy {
+            source_bucket,
+            source_key,
+            destination_bucket,
+            destination_key,
+        }
+        | ObjectActionInput::Move {
+            source_bucket,
+            source_key,
+            destination_bucket,
+            destination_key,
+        } => vec![
+            ObjectActionTargetRef {
+                label: "source".to_string(),
+                bucket: source_bucket.trim().to_string(),
+                key: source_key.trim().to_string(),
+            },
+            ObjectActionTargetRef {
+                label: "destination".to_string(),
+                bucket: destination_bucket.trim().to_string(),
+                key: destination_key.trim().to_string(),
+            },
+        ],
+    };
+
+    let mut deduped = Vec::with_capacity(targets.len());
+    for target in targets {
+        if deduped.iter().any(|existing: &ObjectActionTargetRef| {
+            existing.bucket == target.bucket && existing.key == target.key
+        }) {
+            continue;
+        }
+        deduped.push(target);
+    }
+    deduped
+}
+
+fn object_status_delta(before: &ObjectStatusPayload, after: &ObjectStatusPayload) -> Vec<String> {
+    let mut changes = Vec::new();
+    let before_source = before.gateway_read_source.unwrap_or("none");
+    let after_source = after.gateway_read_source.unwrap_or("none");
+    if before_source != after_source {
+        changes.push(format!(
+            "gateway source: {} -> {}",
+            before_source, after_source
+        ));
+    }
+    let before_error = before.gateway_error.as_deref().unwrap_or("none");
+    let after_error = after.gateway_error.as_deref().unwrap_or("none");
+    if before_error != after_error {
+        changes.push(format!("gateway error: {before_error} -> {after_error}"));
+    }
+    let before_existing = before
+        .provider_states
+        .iter()
+        .filter(|state| state.exists)
+        .count();
+    let after_existing = after
+        .provider_states
+        .iter()
+        .filter(|state| state.exists)
+        .count();
+    if before_existing != after_existing {
+        changes.push(format!(
+            "exists on providers: {} -> {}",
+            before_existing, after_existing
+        ));
+    }
+    let before_readable = before
+        .provider_states
+        .iter()
+        .filter(|state| state.readable_via_gateway)
+        .count();
+    let after_readable = after
+        .provider_states
+        .iter()
+        .filter(|state| state.readable_via_gateway)
+        .count();
+    if before_readable != after_readable {
+        changes.push(format!(
+            "gateway-readable providers: {} -> {}",
+            before_readable, after_readable
+        ));
+    }
+
+    let before_index = object_status_index(before);
+    let after_index = object_status_index(after);
+    let mut providers: Vec<String> = before_index.keys().cloned().collect();
+    for provider in after_index.keys() {
+        if !providers.iter().any(|existing| existing == provider) {
+            providers.push(provider.clone());
+        }
+    }
+
+    for provider in providers {
+        let prev = before_index.get(&provider);
+        let next = after_index.get(&provider);
+        let prev_exists = prev.map(|state| state.exists).unwrap_or(false);
+        let next_exists = next.map(|state| state.exists).unwrap_or(false);
+        if prev_exists != next_exists {
+            changes.push(format!(
+                "{} exists: {} -> {}",
+                provider,
+                yes_no(prev_exists),
+                yes_no(next_exists)
+            ));
+        }
+        let prev_readable = prev
+            .map(|state| state.readable_via_gateway)
+            .unwrap_or(false);
+        let next_readable = next
+            .map(|state| state.readable_via_gateway)
+            .unwrap_or(false);
+        if prev_readable != next_readable {
+            changes.push(format!(
+                "{} gateway-readable: {} -> {}",
+                provider,
+                yes_no(prev_readable),
+                yes_no(next_readable)
+            ));
+        }
+    }
+
+    changes
+}
+
+fn object_status_index(
+    payload: &ObjectStatusPayload,
+) -> HashMap<String, &ObjectProviderStatusPayload> {
+    payload
+        .provider_states
+        .iter()
+        .map(|state| (state.provider.to_string(), state))
+        .collect()
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn object_action_history_summary(
+    before: &ObjectStatusPayload,
+    after: &ObjectStatusPayload,
+    label: &str,
+    bucket: &str,
+    key: &str,
+) -> ObjectActionHistoryReferencePayload {
+    ObjectActionHistoryReferencePayload {
+        label: label.to_string(),
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        changes: object_status_delta(before, after),
+    }
+}
+
+fn object_action_history_entry(
+    primary_provider: ProviderId,
+    input: &ObjectActionInput,
+    outcome: &str,
+    message: impl Into<String>,
+    warnings: Vec<String>,
+    before_snapshots: &HashMap<String, ObjectStatusPayload>,
+    after_snapshots: &HashMap<String, ObjectStatusPayload>,
+) -> ObjectActionHistoryEntryPayload {
+    let references = object_action_targets(input)
+        .into_iter()
+        .map(|target| {
+            let id = format!("{}/{}", target.bucket, target.key);
+            let before = before_snapshots.get(&id);
+            let after = after_snapshots.get(&id);
+            let changes = match (before, after) {
+                (Some(before), Some(after)) => object_action_history_summary(
+                    before,
+                    after,
+                    &target.label,
+                    &target.bucket,
+                    &target.key,
+                ),
+                _ => ObjectActionHistoryReferencePayload {
+                    label: target.label,
+                    bucket: target.bucket,
+                    key: target.key,
+                    changes: vec!["missing before/after snapshot".to_string()],
+                },
+            };
+            changes
+        })
+        .collect();
+
+    ObjectActionHistoryEntryPayload {
+        executed_at_unix_ms: current_unix_ms(),
+        primary_provider: primary_provider.as_str().to_string(),
+        action: object_action_name(input).to_string(),
+        description: object_action_description(input),
+        outcome: outcome.to_string(),
+        message: message.into(),
+        warnings,
+        references,
+    }
+}
+
+fn record_object_action_history(state: &AppState, entry: ObjectActionHistoryEntryPayload) {
+    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    control_plane.object_action_history.insert(0, entry);
+    control_plane
+        .object_action_history
+        .truncate(state.config.object_action_history_limit);
+    if let Err(error) =
+        persist_control_plane_state(&state.config.control_plane_file, &control_plane)
+    {
+        warn!(
+            error = %error,
+            "failed to persist object action history to control plane"
+        );
+    }
+}
+
+fn clear_object_action_history(state: &AppState) -> Result<(), BlobError> {
+    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    control_plane.object_action_history.clear();
+    persist_control_plane_state(&state.config.control_plane_file, &control_plane)
+        .map_err(|error| BlobError::Upstream(error.to_string()))
+}
+
+async fn capture_object_status_snapshot(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> ObjectStatusPayload {
+    match object_status_payload_for(state, bucket, key).await {
+        Ok(payload) => payload,
+        Err(error) => ObjectStatusPayload {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            primary_provider: runtime_topology(state).primary_provider.as_str(),
+            gateway_read_source: None,
+            gateway_fallback_from: None,
+            gateway_error: Some(error.to_string()),
+            provider_states: Vec::new(),
+        },
+    }
+}
+
+async fn capture_object_action_snapshots(
+    state: &AppState,
+    refs: &[ObjectActionTargetRef],
+) -> HashMap<String, ObjectStatusPayload> {
+    let mut snapshots = HashMap::with_capacity(refs.len());
+    for target in refs {
+        let snapshot = capture_object_status_snapshot(state, &target.bucket, &target.key).await;
+        snapshots.insert(format!("{}/{}", target.bucket, target.key), snapshot);
+    }
+    snapshots
+}
+
+async fn object_status_payload_for(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<ObjectStatusPayload, BlobError> {
+    let topology = runtime_topology(state);
+    let mut providers = Vec::with_capacity(1 + topology.sync_targets.len());
+    providers.push(topology.primary_provider);
+    for provider in &topology.sync_targets {
+        if !providers.contains(provider) {
+            providers.push(*provider);
+        }
+    }
+
+    let gateway_resolution = resolve_object_read(state, bucket, key).await;
+    let (gateway_read_source, gateway_fallback_from, gateway_error) = match gateway_resolution {
+        Ok(resolved) => (
+            Some(resolved.source.provider.as_str()),
+            resolved
+                .source
+                .fallback_from
+                .map(|provider| provider.as_str()),
+            None,
+        ),
+        Err(error) => (None, None, Some(error.to_string())),
+    };
+
+    let mut provider_states = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let backend = backend_for_provider(state, provider)?;
+        let roles = provider_roles(&topology, provider);
+        let fallback_order_index = topology
+            .fallback_read_order
+            .iter()
+            .position(|item| *item == provider)
+            .map(|index| index + 1);
+        let latest_replication_job = if provider == topology.primary_provider {
+            None
+        } else {
+            state
+                .metadata_store
+                .latest_job_for_object(provider.as_str(), bucket, key)
+                .map_err(|error| BlobError::Upstream(error.to_string()))?
+        };
+        let accepts_replication_put = if provider == topology.primary_provider {
+            None
+        } else {
+            Some(provider_allowed_for_replication(
+                state,
+                provider,
+                ReplicationOperation::Put,
+                bucket,
+                key,
+            )?)
+        };
+        let fallback_gate = if provider == topology.primary_provider {
+            None
+        } else {
+            Some(load_fallback_gate_for_object(state, provider, bucket, key)?)
+        };
+
+        let (exists, object_info, access_error) = match backend.head_object(bucket, key).await {
+            Ok(info) => (true, Some(info), None),
+            Err(BlobError::NotFound(_)) => (false, None, None),
+            Err(error) => (false, None, Some(error.to_string())),
+        };
+
+        let readable_via_gateway = if provider == topology.primary_provider {
+            exists
+        } else {
+            exists
+                && matches!(fallback_gate, Some(FallbackObjectGate::Allowed))
+                && fallback_order_index.is_some()
+        };
+
+        provider_states.push(ObjectProviderStatusPayload {
+            provider: provider.as_str(),
+            label: provider_label(provider),
+            roles,
+            fallback_order_index,
+            exists,
+            readable_via_gateway,
+            accepts_replication_put,
+            object_info,
+            access_error,
+            latest_replication_job,
+            fallback_gate: fallback_gate.map(fallback_gate_name),
+            fallback_reason: fallback_gate.map(fallback_gate_reason),
+        });
+    }
+
+    Ok(ObjectStatusPayload {
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        primary_provider: topology.primary_provider.as_str(),
+        gateway_read_source,
+        gateway_fallback_from,
+        gateway_error,
+        provider_states,
+    })
 }
 
 fn bucket_has_readable_fallback_objects(
@@ -5607,6 +6933,7 @@ async fn process_replication_job(
                     container: job.object.bucket.clone(),
                     key: job.object.key.clone(),
                     body: source_object.body,
+                    size: Some(source_object.info.size),
                     content_type: source_object.info.content_type,
                 })
                 .await
@@ -5663,6 +6990,9 @@ fn replication_source_read_failure(error: BlobError) -> ReplicationFailure {
         BlobError::Upstream(message) => {
             ReplicationFailure::retryable(format!("failed to read source object: {message}"))
         }
+        BlobError::BodyStream(message) => {
+            ReplicationFailure::retryable(format!("failed to read source object stream: {message}"))
+        }
         BlobError::NotFound(message) => {
             ReplicationFailure::permanent(format!("failed to read source object: {message}"))
         }
@@ -5677,7 +7007,9 @@ fn replication_source_read_failure(error: BlobError) -> ReplicationFailure {
 
 fn replication_target_write_failure(error: BlobError) -> ReplicationFailure {
     match error {
-        BlobError::Upstream(message) | BlobError::NotFound(message) => {
+        BlobError::Upstream(message)
+        | BlobError::NotFound(message)
+        | BlobError::BodyStream(message) => {
             ReplicationFailure::retryable(format!("failed to write target object: {message}"))
         }
         BlobError::Configuration(message) => {
@@ -5691,7 +7023,7 @@ fn replication_target_write_failure(error: BlobError) -> ReplicationFailure {
 
 fn replication_target_delete_failure(error: BlobError) -> ReplicationFailure {
     match error {
-        BlobError::Upstream(message) => {
+        BlobError::Upstream(message) | BlobError::BodyStream(message) => {
             ReplicationFailure::retryable(format!("failed to delete target object: {message}"))
         }
         BlobError::Configuration(message) => {
@@ -5794,6 +7126,18 @@ fn normalize_secret_field(value: Option<String>) -> Option<String> {
 
 fn provider_credentials_path(config: &AppConfig, provider: ProviderId) -> PathBuf {
     FsPath::new(&config.credentials_dir).join(format!("{}.json", provider.as_str()))
+}
+
+fn provider_capability_catalog_path(
+    config: &AppConfig,
+    provider: ProviderId,
+    variant: &str,
+) -> PathBuf {
+    FsPath::new(&config.provider_capability_catalog_dir).join(format!(
+        "{}-{}.json",
+        provider.as_str(),
+        variant
+    ))
 }
 
 fn load_provider_credential_record(
@@ -6465,7 +7809,13 @@ async fn get_object(
     }
     apply_read_source_headers(&mut response_headers, resolved.source);
 
-    Ok((StatusCode::OK, response_headers, object.body).into_response())
+    let body_stream = object.body.into_stream().map_err(std::io::Error::other);
+    Ok((
+        StatusCode::OK,
+        response_headers,
+        Body::from_stream(body_stream),
+    )
+        .into_response())
 }
 
 async fn put_object(
@@ -6474,9 +7824,17 @@ async fn put_object(
     method: Method,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Result<Response, S3Error> {
-    authorize_s3(&state.config, &method, &uri, &headers, Some(&body))?;
+    let content_length = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let payload_hash = headers
+        .get("x-amz-content-sha256")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| S3Error::access_denied("Missing x-amz-content-sha256 header."))?
+        .to_string();
     let (primary_provider, primary_backend) =
         current_primary_backend(&state).map_err(map_backend_error_to_s3)?;
 
@@ -6485,13 +7843,83 @@ async fn put_object(
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
 
+    if payload_hash == "UNSIGNED-PAYLOAD" {
+        authorize_s3(&state.config, &method, &uri, &headers, None)?;
+        let body_len = content_length.ok_or_else(|| {
+            S3Error::access_denied(
+                "UNSIGNED-PAYLOAD uploads must include a valid Content-Length header.",
+            )
+        })?;
+        ensure_object_within_in_memory_limit(&state.config, body_len)?;
+
+        let result = primary_backend
+            .put_object(PutObjectRequest {
+                container: bucket.clone(),
+                key: key.clone(),
+                body: ObjectBody::from_stream(
+                    body.into_data_stream()
+                        .map_err(|error| BlobError::BodyStream(error.to_string())),
+                ),
+                size: Some(body_len),
+                content_type: content_type.clone(),
+            })
+            .await
+            .map_err(map_backend_error_to_s3)?;
+
+        let effective_topology =
+            effective_topology_for_replication(&state, ReplicationOperation::Put, &bucket, &key)
+                .map_err(map_backend_error_to_s3)?;
+        let jobs = state.replication.enqueue_put(
+            &effective_topology,
+            Some(primary_provider.as_str().to_string()),
+            bucket.clone(),
+            key.clone(),
+            result.etag.clone(),
+            body_len,
+            content_type,
+        );
+        if let Err(error) = state.metadata_store.enqueue_jobs(&jobs) {
+            warn!(
+                bucket = %bucket,
+                key = %key,
+                error = %error,
+                "failed to persist replication jobs after put"
+            );
+        }
+        if !jobs.is_empty() {
+            info!(
+                bucket = %bucket,
+                key = %key,
+                queued_jobs = jobs.len(),
+                "replication jobs enqueued after put"
+            );
+        }
+
+        let mut response = StatusCode::OK.into_response();
+        if let Some(etag) = result.etag {
+            response.headers_mut().insert(
+                ETAG,
+                HeaderValue::from_str(&quoted_etag(Some(&etag))).expect("etag should be valid"),
+            );
+        }
+        return Ok(response);
+    }
+
+    let body = to_bytes(body, state.config.max_in_memory_object_bytes)
+        .await
+        .map_err(|error| {
+            S3Error::entity_too_large(format!("request body exceeds in-memory limit: {error}"))
+        })?;
+    authorize_s3(&state.config, &method, &uri, &headers, Some(&body))?;
     ensure_object_within_in_memory_limit(&state.config, body.len() as u64)?;
+    let body_len = body.len() as u64;
 
     let result = primary_backend
         .put_object(PutObjectRequest {
             container: bucket.clone(),
             key: key.clone(),
-            body: body.to_vec(),
+            body: body.into(),
+            size: Some(body_len),
             content_type: content_type.clone(),
         })
         .await
@@ -6506,7 +7934,7 @@ async fn put_object(
         bucket.clone(),
         key.clone(),
         result.etag.clone(),
-        body.len() as u64,
+        body_len,
         content_type,
     );
     if let Err(error) = state.metadata_store.enqueue_jobs(&jobs) {
@@ -6802,6 +8230,7 @@ fn map_backend_error_to_s3(error: BlobError) -> S3Error {
     match error {
         BlobError::Configuration(message) => S3Error::internal_error(message),
         BlobError::Upstream(message) => S3Error::internal_error(message),
+        BlobError::BodyStream(message) => S3Error::internal_error(message),
         BlobError::NotImplemented(message) => S3Error::not_implemented(message),
         BlobError::NotFound(message) => S3Error::internal_error(message),
     }
@@ -6856,6 +8285,7 @@ mod tests {
     use blob_core::{
         BackendCapabilities, BrowserFlowElement, BrowserFlowOperation, BrowserFlowPage,
         BrowserFlowRequest, ContainerInfo, HealthStatus, ObjectInfo, ServiceHealth,
+        StorageScopeHealth, StorageScopeKind,
     };
 
     fn temp_db_path() -> String {
@@ -6966,6 +8396,80 @@ mod tests {
             }
             *remaining -= 1;
             Err(BlobError::Upstream(self.message.clone()))
+        }
+    }
+
+    struct ScopedStubBackend {
+        name: &'static str,
+        inner: StubBackend,
+        scopes: Vec<StorageScopeHealth>,
+        notes: Vec<String>,
+    }
+
+    impl ScopedStubBackend {
+        fn new(name: &'static str, scopes: Vec<StorageScopeHealth>, notes: Vec<String>) -> Self {
+            Self {
+                name,
+                inner: StubBackend::new(),
+                scopes,
+                notes,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobBackend for ScopedStubBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                read: true,
+                write: true,
+                delete: true,
+                multipart_upload: false,
+            }
+        }
+
+        async fn health(&self) -> Result<ServiceHealth, BlobError> {
+            Ok(ServiceHealth {
+                backend: self.name().to_string(),
+                status: HealthStatus::Healthy,
+                capabilities: self.capabilities(),
+                scopes: self.scopes.clone(),
+                notes: self.notes.clone(),
+            })
+        }
+
+        async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
+            self.inner.list_containers().await
+        }
+
+        async fn list_objects(
+            &self,
+            request: ListObjectsRequest,
+        ) -> Result<Vec<ObjectInfo>, BlobError> {
+            self.inner.list_objects(request).await
+        }
+
+        async fn get_object(
+            &self,
+            container: &str,
+            key: &str,
+        ) -> Result<blob_core::ObjectPayload, BlobError> {
+            self.inner.get_object(container, key).await
+        }
+
+        async fn put_object(
+            &self,
+            request: PutObjectRequest,
+        ) -> Result<blob_core::PutObjectResult, BlobError> {
+            self.inner.put_object(request).await
+        }
+
+        async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+            self.inner.delete_object(container, key).await
         }
     }
 
@@ -7182,6 +8686,10 @@ mod tests {
             .join("../../config/browser-flows")
             .display()
             .to_string();
+        let provider_capability_catalog_dir = FsPath::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/provider-capabilities")
+            .display()
+            .to_string();
 
         Arc::new(AppConfig {
             bind_addr: "127.0.0.1:61080".parse().expect("test addr should parse"),
@@ -7193,6 +8701,7 @@ mod tests {
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
             credentials_dir: temp_db_path().replace(".db", "-provider-credentials"),
             browser_flow_catalog_dir,
+            provider_capability_catalog_dir,
             topology,
             s3_access_key_id: "ccbg-test".to_string(),
             s3_secret_access_key: "ccbg-secret".to_string(),
@@ -7208,6 +8717,7 @@ mod tests {
             replication_max_attempts: 3,
             replication_base_retry_delay_ms: 0,
             replication_max_retry_delay_ms: 0,
+            object_action_history_limit: DEFAULT_OBJECT_ACTION_HISTORY_LIMIT,
             max_in_memory_object_bytes: 8 * 1024 * 1024,
             onedrive: OneDriveConfig {
                 enabled: true,
@@ -7263,6 +8773,7 @@ mod tests {
                     updated_at_unix_ms: current_unix_ms(),
                 },
                 auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
+                object_action_history: Vec::new(),
             })),
             browser_flow_catalogs: Arc::new(
                 BrowserFlowCatalogCollection::from_json_dir(&config.browser_flow_catalog_dir)
@@ -7412,6 +8923,93 @@ mod tests {
         headers
     }
 
+    fn unsigned_payload_headers(
+        config: &AppConfig,
+        method: &Method,
+        uri: &Uri,
+        content_length: u64,
+        extra_headers: &[(&str, &str)],
+    ) -> HeaderMap {
+        let amz_date = "20260424T120000Z";
+        let short_date = "20260424";
+        let payload_hash = "UNSIGNED-PAYLOAD";
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("127.0.0.1:61080"));
+        headers.insert("x-amz-date", HeaderValue::from_static("20260424T120000Z"));
+        headers.insert(
+            "x-amz-content-sha256",
+            HeaderValue::from_static(payload_hash),
+        );
+        headers.insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&content_length.to_string())
+                .expect("content length should be valid"),
+        );
+
+        let mut signed_headers = vec![
+            "content-length".to_string(),
+            "host".to_string(),
+            "x-amz-content-sha256".to_string(),
+            "x-amz-date".to_string(),
+        ];
+
+        for (name, value) in extra_headers {
+            let header_name =
+                axum::http::HeaderName::from_bytes(name.as_bytes()).expect("header name is valid");
+            headers.insert(
+                header_name,
+                HeaderValue::from_str(value).expect("extra header should be valid"),
+            );
+            signed_headers.push(name.to_ascii_lowercase());
+        }
+
+        signed_headers.sort();
+        signed_headers.dedup();
+
+        let canonical_request = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}",
+            method.as_str(),
+            canonical_uri(uri.path()),
+            canonical_query_string(uri.query()),
+            canonical_headers(&headers, &signed_headers)
+                .expect("canonical headers should build in tests"),
+            signed_headers.join(";"),
+            payload_hash
+        );
+
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{}\n{}/{}/s3/aws4_request\n{}",
+            amz_date,
+            short_date,
+            config.s3_region,
+            sha256_hex(canonical_request.as_bytes())
+        );
+
+        let signature = sign_v4(
+            &config.s3_secret_access_key,
+            short_date,
+            &config.s3_region,
+            "s3",
+            &string_to_sign,
+        );
+        let authorization = format!(
+            "AWS4-HMAC-SHA256 Credential={}/{}/{}/s3/aws4_request, SignedHeaders={}, Signature={}",
+            config.s3_access_key_id,
+            short_date,
+            config.s3_region,
+            signed_headers.join(";"),
+            signature
+        );
+
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&authorization).expect("authorization header should be valid"),
+        );
+
+        headers
+    }
+
     #[tokio::test]
     async fn list_buckets_returns_s3_xml() {
         let state = test_state();
@@ -7472,6 +9070,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_health_surfaces_family_scope_for_unicom_primary() {
+        let mut state = test_state();
+        let unicom_backend: DynBackend = Arc::new(ScopedStubBackend::new(
+            "unicom-cloud-drive",
+            vec![
+                StorageScopeHealth {
+                    id: "root".to_string(),
+                    label: "Personal".to_string(),
+                    kind: StorageScopeKind::Personal,
+                    writable: true,
+                    root: Some("0".to_string()),
+                    container: Some("root".to_string()),
+                    object_count: Some(3),
+                    capacity: None,
+                    notes: vec!["personal scope ready".to_string()],
+                },
+                StorageScopeHealth {
+                    id: "family-123".to_string(),
+                    label: "Family".to_string(),
+                    kind: StorageScopeKind::Family,
+                    writable: true,
+                    root: Some("0".to_string()),
+                    container: Some("family".to_string()),
+                    object_count: Some(2),
+                    capacity: None,
+                    notes: vec!["family scope ready".to_string()],
+                },
+            ],
+            vec!["stubbed unicom health".to_string()],
+        ));
+        replace_backend(&mut state, ProviderId::Unicom, unicom_backend);
+
+        let Json(_) = update_topology(
+            State(state.clone()),
+            Json(TopologyUpdateInput {
+                primary_provider: ProviderId::Unicom,
+                sync_targets: vec![ProviderId::Onedrive],
+                fallback_read_order: vec![ProviderId::Onedrive],
+            }),
+        )
+        .await
+        .expect("topology update should succeed");
+
+        let Json(providers) = list_provider_health(State(state))
+            .await
+            .expect("provider health should succeed");
+
+        let unicom = providers
+            .into_iter()
+            .find(|payload| payload.provider == "unicom" && payload.role == "primary")
+            .expect("unicom primary health payload should exist");
+        assert!(matches!(
+            unicom.health.status,
+            HealthStatus::Healthy | HealthStatus::Degraded
+        ));
+        assert!(
+            unicom
+                .health
+                .scopes
+                .iter()
+                .any(|scope| { scope.container.as_deref() == Some("root") && scope.writable })
+        );
+        assert!(
+            unicom
+                .health
+                .scopes
+                .iter()
+                .any(|scope| { scope.container.as_deref() == Some("family") && scope.writable })
+        );
+    }
+
+    #[tokio::test]
     async fn object_status_reports_fallback_readability() {
         let mut state = test_state();
         let target_backend: DynBackend = Arc::new(StubBackend::new());
@@ -7481,7 +9151,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "placeholder".to_string(),
                 key: "fallback/inspect.txt".to_string(),
-                body: b"inspect fallback".to_vec(),
+                body: Bytes::from_static(b"inspect fallback").into(),
+                size: Some(16),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -7534,6 +9205,7 @@ mod tests {
             .expect("admin status should succeed");
 
         assert_eq!(status.runtime_topology.primary_provider, "stub");
+        assert_eq!(status.object_action_history_limit, 12);
         assert_eq!(status.provider_health.len(), 2);
         assert_eq!(status.replication_state.persisted.pending_count, 0);
         assert!(
@@ -8333,6 +10005,423 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_credentials_round_trip_and_hot_reload_unicom_family_id() {
+        let state = test_state();
+
+        let Json(saved) = update_provider_credentials(
+            State(state.clone()),
+            Path("unicom".to_string()),
+            Json(ProviderCredentialInput {
+                token: Some("manual-unicom-token".to_string()),
+                browser_id: None,
+                cookie_header: Some("foo=bar; session=1".to_string()),
+                family_id: Some(" family-123 ".to_string()),
+                root_folder_id: None,
+                client_id: None,
+                tenant: None,
+                drive_id: None,
+                redirect_url: None,
+            }),
+        )
+        .await
+        .expect("unicom provider credentials update should succeed");
+
+        assert_eq!(saved.provider, "unicom");
+        assert_eq!(saved.token.as_deref(), Some("manual-unicom-token"));
+        assert_eq!(saved.cookie_header.as_deref(), Some("foo=bar; session=1"));
+        assert_eq!(saved.family_id.as_deref(), Some("family-123"));
+        assert_eq!(
+            backend_for_test(&state, ProviderId::Unicom).name(),
+            "unicom-cloud-drive"
+        );
+
+        let Json(current) =
+            get_provider_credentials(State(state.clone()), Path("unicom".to_string()))
+                .await
+                .expect("unicom provider credentials get should succeed");
+        assert_eq!(current.family_id.as_deref(), Some("family-123"));
+        assert_eq!(current.token.as_deref(), Some("manual-unicom-token"));
+
+        let credential_path = provider_credentials_path(&state.config, ProviderId::Unicom);
+        let stored = fs::read_to_string(&credential_path).expect("credential file should exist");
+        assert!(stored.contains("manual-unicom-token"));
+        assert!(stored.contains("family-123"));
+    }
+
+    #[tokio::test]
+    async fn object_actions_api_rename_copy_and_move_against_primary_backend() {
+        let mut state = test_state();
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend.clone());
+
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                body: Bytes::from_static(b"family note").into(),
+                size: Some(11),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("seed family object should be created");
+
+        let rename_status = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Rename {
+                bucket: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                new_key: "shared/renamed.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("rename should succeed");
+        assert_eq!(rename_status, StatusCode::NO_CONTENT);
+
+        let copy_status = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Copy {
+                source_bucket: "family".to_string(),
+                source_key: "shared/renamed.txt".to_string(),
+                destination_bucket: "root".to_string(),
+                destination_key: "docs/copied.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("copy should succeed");
+        assert_eq!(copy_status, StatusCode::NO_CONTENT);
+
+        let move_status = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Move {
+                source_bucket: "root".to_string(),
+                source_key: "docs/copied.txt".to_string(),
+                destination_bucket: "family".to_string(),
+                destination_key: "shared/moved.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("move should succeed");
+        assert_eq!(move_status, StatusCode::NO_CONTENT);
+
+        assert!(
+            primary_backend
+                .get_object("family", "shared/renamed.txt")
+                .await
+                .is_ok()
+        );
+        assert!(
+            primary_backend
+                .get_object("family", "shared/moved.txt")
+                .await
+                .is_ok()
+        );
+        assert!(
+            primary_backend
+                .get_object("root", "docs/copied.txt")
+                .await
+                .is_err()
+        );
+
+        let rename_job = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "family", "shared/renamed.txt")
+            .expect("rename metadata should load")
+            .expect("rename metadata should exist");
+        assert!(matches!(rename_job.operation, ReplicationOperation::Put));
+        assert_eq!(rename_job.source_provider.as_deref(), Some("stub"));
+        assert_eq!(rename_job.object.size, Some(11));
+
+        let renamed_delete_job = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "family", "shared/note.txt")
+            .expect("rename delete metadata should load")
+            .expect("rename delete metadata should exist");
+        assert!(matches!(
+            renamed_delete_job.operation,
+            ReplicationOperation::Delete
+        ));
+
+        let copied_job = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "root", "docs/copied.txt")
+            .expect("copy metadata should load")
+            .expect("copy metadata should exist");
+        assert!(matches!(copied_job.operation, ReplicationOperation::Delete));
+
+        let moved_job = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "family", "shared/moved.txt")
+            .expect("move metadata should load")
+            .expect("move metadata should exist");
+        assert!(matches!(moved_job.operation, ReplicationOperation::Put));
+        assert_eq!(moved_job.object.content_type.as_deref(), Some("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn object_action_history_persists_and_can_be_cleared() {
+        let mut state = test_state();
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend.clone());
+
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                body: Bytes::from_static(b"family note").into(),
+                size: Some(11),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("seed family object should be created");
+
+        let rename_status = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Rename {
+                bucket: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                new_key: "shared/renamed.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("rename should succeed");
+        assert_eq!(rename_status, StatusCode::NO_CONTENT);
+
+        let history = control_plane_snapshot(&state).object_action_history;
+        assert_eq!(history.len(), 1);
+        let entry = &history[0];
+        assert_eq!(entry.action, "rename");
+        assert_eq!(entry.outcome, "success");
+        assert_eq!(entry.primary_provider, "stub");
+        assert_eq!(
+            entry.description,
+            "family/shared/note.txt -> family/shared/renamed.txt"
+        );
+        assert!(entry.references.iter().any(|reference| {
+            reference.bucket == "family"
+                && reference.key == "shared/note.txt"
+                && !reference.changes.is_empty()
+        }));
+        assert!(entry.references.iter().any(|reference| {
+            reference.bucket == "family"
+                && reference.key == "shared/renamed.txt"
+                && !reference.changes.is_empty()
+        }));
+
+        let persisted = load_control_plane_state(
+            &state.config.control_plane_file,
+            ControlPlaneState {
+                topology: state.config.topology.clone(),
+                onedrive_policy: OnedrivePolicy::from_env_defaults(&state.config.topology),
+                auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
+                object_action_history: Vec::new(),
+            },
+            state.config.onedrive.enabled,
+        )
+        .expect("persisted control plane should load");
+        assert_eq!(persisted.object_action_history.len(), 1);
+        assert_eq!(persisted.object_action_history[0].action, "rename");
+
+        let clear_status = clear_object_action_history_api(State(state.clone()))
+            .await
+            .expect("history clear should succeed");
+        assert_eq!(clear_status, StatusCode::NO_CONTENT);
+        assert!(
+            control_plane_snapshot(&state)
+                .object_action_history
+                .is_empty()
+        );
+
+        let cleared = load_control_plane_state(
+            &state.config.control_plane_file,
+            ControlPlaneState {
+                topology: state.config.topology.clone(),
+                onedrive_policy: OnedrivePolicy::from_env_defaults(&state.config.topology),
+                auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
+                object_action_history: Vec::new(),
+            },
+            state.config.onedrive.enabled,
+        )
+        .expect("cleared control plane should load");
+        assert!(cleared.object_action_history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn object_action_history_respects_configured_limit() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).object_action_history_limit = 2;
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend.clone());
+
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                body: Bytes::from_static(b"family note").into(),
+                size: Some(11),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("seed family object should be created");
+
+        run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Rename {
+                bucket: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                new_key: "shared/renamed.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("rename should succeed");
+
+        run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Copy {
+                source_bucket: "family".to_string(),
+                source_key: "shared/renamed.txt".to_string(),
+                destination_bucket: "root".to_string(),
+                destination_key: "docs/copied.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("copy should succeed");
+
+        run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Move {
+                source_bucket: "root".to_string(),
+                source_key: "docs/copied.txt".to_string(),
+                destination_bucket: "family".to_string(),
+                destination_key: "shared/moved.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("move should succeed");
+
+        let history = control_plane_snapshot(&state).object_action_history;
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            history
+                .iter()
+                .map(|entry| entry.action.as_str())
+                .collect::<Vec<_>>(),
+            vec!["move", "copy"]
+        );
+
+        let persisted = load_control_plane_state(
+            &state.config.control_plane_file,
+            ControlPlaneState {
+                topology: state.config.topology.clone(),
+                onedrive_policy: OnedrivePolicy::from_env_defaults(&state.config.topology),
+                auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
+                object_action_history: Vec::new(),
+            },
+            state.config.onedrive.enabled,
+        )
+        .expect("persisted control plane should load");
+        assert_eq!(persisted.object_action_history.len(), 2);
+        assert_eq!(persisted.object_action_history[0].action, "move");
+        assert_eq!(persisted.object_action_history[1].action, "copy");
+    }
+
+    #[tokio::test]
+    async fn object_action_noop_does_not_enqueue_replication_jobs() {
+        let mut state = test_state();
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend.clone());
+
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                body: Bytes::from_static(b"family note").into(),
+                size: Some(11),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("seed family object should be created");
+
+        let rename_status = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Rename {
+                bucket: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                new_key: "shared/note.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("noop rename should succeed");
+        assert_eq!(rename_status, StatusCode::NO_CONTENT);
+
+        let move_status = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Move {
+                source_bucket: "family".to_string(),
+                source_key: "shared/note.txt".to_string(),
+                destination_bucket: "family".to_string(),
+                destination_key: "shared/note.txt".to_string(),
+            }),
+        )
+        .await
+        .expect("noop move should succeed");
+        assert_eq!(move_status, StatusCode::NO_CONTENT);
+
+        assert_eq!(state.replication.snapshot().pending_count, 0);
+        assert!(
+            state
+                .metadata_store
+                .snapshot(16)
+                .expect("metadata snapshot should load")
+                .recent_jobs
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_page_exposes_object_actions_panel() {
+        let state = test_state();
+
+        let response = admin_index(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("admin page body should read");
+        let html = String::from_utf8(body.to_vec()).expect("admin page should be utf-8");
+
+        assert!(html.contains("<h2>Object Actions</h2>"));
+        assert!(html.contains("id=\"object-action-kind\""));
+        assert!(html.contains("id=\"run-object-action\""));
+        assert!(html.contains("runObjectAction"));
+        assert!(html.contains("id=\"object-action-preview-summary\""));
+        assert!(html.contains("id=\"object-action-inspection-summary\""));
+        assert!(html.contains("renderObjectActionInspection"));
+        assert!(html.contains("renderProviderStateComparisons"));
+        assert!(html.contains("No before/after object inspection captured yet."));
+        assert!(html.contains("id=\"object-action-history-summary\""));
+        assert!(html.contains("id=\"object-action-history-action-filter\""));
+        assert!(html.contains("id=\"object-action-history-outcome-filter\""));
+        assert!(html.contains("id=\"object-action-history-provider-filter\""));
+        assert!(html.contains("renderObjectActionHistory"));
+        assert!(html.contains("id=\"clear-object-action-history\""));
+        assert!(html.contains("id=\"export-object-action-history\""));
+        assert!(html.contains("Clear Shared History"));
+        assert!(html.contains("downloadObjectActionHistory"));
+        assert!(html.contains("renderObjectActionHistory(status.object_action_history || [])"));
+        assert!(!html.contains("function loadObjectActionHistory("));
+        assert!(html.contains("Changes"));
+        assert!(html.contains("Provider Changes"));
+        assert!(html.contains("objectStatusDelta"));
+        assert!(html.contains("Execution Preview"));
+        assert!(
+            html.contains(
+                "Current Unicom rename only supports staying in the same parent directory"
+            )
+        );
+        assert!(html.contains("/api/object-actions"));
+    }
+
+    #[tokio::test]
     async fn stub_provider_credentials_are_rejected() {
         let state = test_state();
         let error = get_provider_credentials(State(state), Path("stub".to_string()))
@@ -8369,7 +10458,7 @@ mod tests {
             Method::PUT,
             OriginalUri(uri),
             put_headers,
-            body,
+            body.into(),
         )
         .await
         .expect("put should succeed");
@@ -8410,7 +10499,7 @@ mod tests {
             Method::PUT,
             OriginalUri(uri.clone()),
             put_headers,
-            body.clone(),
+            body.clone().into(),
         )
         .await
         .expect("put object should succeed");
@@ -8504,6 +10593,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn family_bucket_object_lifecycle_round_trip_works_for_signed_requests() {
+        let mut state = test_state();
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend);
+
+        let bucket = "family".to_string();
+        let key = "shared/gatewayd.txt".to_string();
+        let body = Bytes::from_static(b"hello family bucket");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+
+        let put_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        let put_response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            put_headers,
+            body.clone().into(),
+        )
+        .await
+        .expect("family put object should succeed");
+        assert_eq!(put_response.status(), StatusCode::OK);
+
+        let get_headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let get_response = get_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::GET,
+            OriginalUri(uri.clone()),
+            get_headers,
+        )
+        .await
+        .expect("family get object should succeed");
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = to_bytes(get_response.into_body(), usize::MAX)
+            .await
+            .expect("family get body should read");
+        assert_eq!(get_body.as_ref(), b"hello family bucket");
+
+        let delete_headers = signed_headers(&state.config, &Method::DELETE, &uri, &[], &[]);
+        let delete_response = delete_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::DELETE,
+            OriginalUri(uri.clone()),
+            delete_headers,
+        )
+        .await
+        .expect("family delete object should succeed");
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        let head_headers = signed_headers(&state.config, &Method::HEAD, &uri, &[], &[]);
+        let error_response = head_object(
+            State(state),
+            Path((bucket, key)),
+            Method::HEAD,
+            OriginalUri(uri),
+            head_headers,
+        )
+        .await
+        .expect_err("deleted family object should no longer exist")
+        .into_response();
+        assert_eq!(error_response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn object_put_accepts_unsigned_payload_streaming_body() {
+        let state = test_state();
+        let bucket = "placeholder".to_string();
+        let key = "notes/streamed.txt".to_string();
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = unsigned_payload_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            14,
+            &[("content-type", "text/plain")],
+        );
+        let body = Body::from_stream(stream::iter([
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"streamed ")),
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"body!")),
+        ]));
+
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            headers,
+            body,
+        )
+        .await
+        .expect("streaming unsigned payload put should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let get_headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let get_response = get_object(
+            State(state),
+            Path((bucket, key)),
+            Method::GET,
+            OriginalUri(uri),
+            get_headers,
+        )
+        .await
+        .expect("get streamed object should succeed");
+        let get_body = to_bytes(get_response.into_body(), usize::MAX)
+            .await
+            .expect("get body should read");
+        assert_eq!(get_body.as_ref(), b"streamed body!");
+    }
+
+    #[tokio::test]
     async fn oversized_object_reads_are_rejected_by_in_memory_limit() {
         let mut state = test_state();
         let mut config = (*state.config).clone();
@@ -8514,7 +10725,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "placeholder".to_string(),
                 key: "notes/large.txt".to_string(),
-                body: b"this object is larger than eight bytes".to_vec(),
+                body: Bytes::from_static(b"this object is larger than eight bytes").into(),
+                size: Some(37),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -8556,7 +10768,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "placeholder".to_string(),
                 key: "fallback/cached.txt".to_string(),
-                body: b"read from fallback".to_vec(),
+                body: Bytes::from_static(b"read from fallback").into(),
+                size: Some(18),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -8646,7 +10859,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "archive".to_string(),
                 key: "snapshots/day-1.txt".to_string(),
-                body: b"snapshot".to_vec(),
+                body: Bytes::from_static(b"snapshot").into(),
+                size: Some(8),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -8742,7 +10956,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "archive".to_string(),
                 key: "snapshots/day-2.txt".to_string(),
-                body: b"snapshot".to_vec(),
+                body: Bytes::from_static(b"snapshot").into(),
+                size: Some(8),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -8787,6 +11002,164 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gateway_handles_primary_backend_with_multiple_containers() {
+        let mut state = test_state();
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend.clone());
+
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "root".to_string(),
+                key: "docs/alpha.txt".to_string(),
+                body: Bytes::from_static(b"alpha").into(),
+                size: Some(5),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("root object should be created");
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                body: Bytes::from_static(b"family note").into(),
+                size: Some(11),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("family object should be created");
+
+        let buckets_uri: Uri = "/".parse().expect("uri should parse");
+        let buckets_headers = signed_headers(&state.config, &Method::GET, &buckets_uri, &[], &[]);
+        let buckets_response = list_buckets(
+            State(state.clone()),
+            Method::GET,
+            OriginalUri(buckets_uri),
+            buckets_headers,
+        )
+        .await
+        .expect("list buckets should succeed");
+        assert_eq!(buckets_response.status(), StatusCode::OK);
+        let buckets_body = to_bytes(buckets_response.into_body(), usize::MAX)
+            .await
+            .expect("bucket body should read");
+        let buckets_body =
+            String::from_utf8(buckets_body.to_vec()).expect("bucket body should be utf-8");
+        assert!(buckets_body.contains("<Name>root</Name>"));
+        assert!(buckets_body.contains("<Name>family</Name>"));
+
+        let family_head_uri: Uri = "/family".parse().expect("family head uri should parse");
+        let family_head_headers =
+            signed_headers(&state.config, &Method::HEAD, &family_head_uri, &[], &[]);
+        let family_head = head_bucket(
+            State(state.clone()),
+            Path("family".to_string()),
+            Method::HEAD,
+            OriginalUri(family_head_uri),
+            family_head_headers,
+        )
+        .await
+        .expect("family bucket head should succeed");
+        assert_eq!(family_head.status(), StatusCode::OK);
+
+        let family_list_uri: Uri = "/family?list-type=2"
+            .parse()
+            .expect("family list uri should parse");
+        let family_list_headers =
+            signed_headers(&state.config, &Method::GET, &family_list_uri, &[], &[]);
+        let family_list = list_objects_v2(
+            State(state),
+            Path("family".to_string()),
+            Query(ListObjectsV2Query {
+                list_type: Some("2".to_string()),
+                ..Default::default()
+            }),
+            Method::GET,
+            OriginalUri(family_list_uri),
+            family_list_headers,
+        )
+        .await
+        .expect("family bucket list should succeed");
+        assert_eq!(family_list.status(), StatusCode::OK);
+        let family_body = to_bytes(family_list.into_body(), usize::MAX)
+            .await
+            .expect("family list body should read");
+        let family_body =
+            String::from_utf8(family_body.to_vec()).expect("family list body should be utf-8");
+        assert!(family_body.contains("<Name>family</Name>"));
+        assert!(family_body.contains("<Key>shared/note.txt</Key>"));
+    }
+
+    #[tokio::test]
+    async fn containers_api_returns_multiple_primary_backend_containers() {
+        let mut state = test_state();
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend.clone());
+
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "root".to_string(),
+                key: "docs/alpha.txt".to_string(),
+                body: Bytes::from_static(b"alpha").into(),
+                size: Some(5),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("root object should be created");
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                body: Bytes::from_static(b"family note").into(),
+                size: Some(11),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("family object should be created");
+
+        let Json(containers) = list_containers(State(state))
+            .await
+            .expect("containers api should succeed");
+        assert!(containers.len() >= 2);
+        assert!(containers.iter().any(|container| container.name == "root"));
+        assert!(
+            containers
+                .iter()
+                .any(|container| container.name == "family")
+        );
+    }
+
+    #[tokio::test]
+    async fn objects_api_lists_family_container_objects_from_primary_backend() {
+        let mut state = test_state();
+        let primary_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, primary_backend.clone());
+
+        primary_backend
+            .put_object(PutObjectRequest {
+                container: "family".to_string(),
+                key: "shared/note.txt".to_string(),
+                body: Bytes::from_static(b"family note").into(),
+                size: Some(11),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("family object should be created");
+
+        let Json(objects) = list_objects(
+            State(state),
+            Query(ObjectsQuery {
+                container: Some("family".to_string()),
+                prefix: None,
+                limit: None,
+            }),
+        )
+        .await
+        .expect("objects api should succeed");
+
+        assert!(objects.iter().any(|object| object.key == "shared/note.txt"));
+    }
+
+    #[tokio::test]
     async fn stale_fallback_object_is_blocked_when_delete_is_pending() {
         let mut state = test_state();
         let target_backend: DynBackend = Arc::new(StubBackend::new());
@@ -8796,7 +11169,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "placeholder".to_string(),
                 key: "deleted/stale.txt".to_string(),
-                body: b"stale backup".to_vec(),
+                body: Bytes::from_static(b"stale backup").into(),
+                size: Some(12),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -8870,7 +11244,7 @@ mod tests {
             Method::PUT,
             OriginalUri(uri),
             headers,
-            body,
+            body.into(),
         )
         .await
         .expect("put should succeed");
@@ -8910,7 +11284,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "placeholder".to_string(),
                 key: "fallback/cached.txt".to_string(),
-                body: b"read from fallback".to_vec(),
+                body: Bytes::from_static(b"read from fallback").into(),
+                size: Some(18),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -9013,7 +11388,7 @@ mod tests {
             Method::PUT,
             OriginalUri(uri),
             headers,
-            body,
+            body.into(),
         )
         .await
         .expect("put after hot switch should succeed");
@@ -9022,7 +11397,15 @@ mod tests {
             .get_object(&bucket, &key)
             .await
             .expect("new primary should receive writes immediately");
-        assert_eq!(written.body, b"write after switch".to_vec());
+        assert_eq!(
+            written
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"write after switch"
+        );
         assert!(
             backend_for_test(&state, ProviderId::Stub)
                 .get_object(&bucket, &key)
@@ -9041,7 +11424,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "placeholder".to_string(),
                 key: "worker/copied.txt".to_string(),
-                body: b"copy through worker".to_vec(),
+                body: Bytes::from_static(b"copy through worker").into(),
+                size: Some(19),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -9068,7 +11452,15 @@ mod tests {
             .get_object("placeholder", "worker/copied.txt")
             .await
             .expect("target object should exist");
-        assert_eq!(copied.body, b"copy through worker".to_vec());
+        assert_eq!(
+            copied
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"copy through worker"
+        );
     }
 
     #[tokio::test]
@@ -9085,7 +11477,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "placeholder".to_string(),
                 key: "worker/retry-once.txt".to_string(),
-                body: b"copy after retry".to_vec(),
+                body: Bytes::from_static(b"copy after retry").into(),
+                size: Some(16),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -9153,7 +11546,15 @@ mod tests {
             .get_object("placeholder", "worker/retry-once.txt")
             .await
             .expect("target object should exist after retry");
-        assert_eq!(copied.body, b"copy after retry".to_vec());
+        assert_eq!(
+            copied
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"copy after retry"
+        );
     }
 
     #[tokio::test]
@@ -9174,7 +11575,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: "placeholder".to_string(),
                 key: "worker/final-failure.txt".to_string(),
-                body: b"will not copy".to_vec(),
+                body: Bytes::from_static(b"will not copy").into(),
+                size: Some(13),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -9241,7 +11643,8 @@ mod tests {
             .put_object(PutObjectRequest {
                 container: bucket.clone(),
                 key: key.clone(),
-                body: b"copy old primary".to_vec(),
+                body: Bytes::from_static(b"copy old primary").into(),
+                size: Some(16),
                 content_type: Some("text/plain".to_string()),
             })
             .await
@@ -9291,7 +11694,15 @@ mod tests {
             .get_object(&bucket, &key)
             .await
             .expect("target object should exist");
-        assert_eq!(copied.body, b"copy old primary".to_vec());
+        assert_eq!(
+            copied
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"copy old primary"
+        );
         assert!(telecom_backend.get_object(&bucket, &key).await.is_err());
     }
 }

@@ -3,8 +3,8 @@
 ## 设计原则
 
 1. 三家运营商的网页接口都可能变化，因此每个 provider 都必须独立成 crate。
-2. 任意时刻只允许一个运营商云盘作为唯一写入主云盘。
-3. OneDrive 是默认备份同步目标，其他运营商账号可按配置加入异步同步目标集合。
+2. 任意时刻只允许一个运营商或 `stub` provider 作为唯一写入主云盘。
+3. OneDrive 是默认异步备份同步目标与可选 fallback 目标，不作为主写 provider。
 4. 写入语义采用“主写成功即返回，后台异步复制到同步目标集合”，系统接受最终一致性。
 5. fallback 只能在对象已复制到对应同步目标时触发，不能假定备份侧永远有数据。
 6. 认证信息只允许通过受控输入进入服务；如后续启用自动抓取，也必须经由独立 `auth-broker` / sidecar，而不是直接塞进 data plane。
@@ -74,7 +74,7 @@
 
 - 分别封装联通、电信、移动云盘网页接口访问逻辑
 - 管理 token 来源、请求头拼装、错误归类
-- 联通当前已支持目录遍历、文件下载与对象删除；电信当前已支持目录遍历与文件下载
+- 联通当前已支持目录遍历、文件下载、上传、对象删除，以及对象级 rename/copy/move，并把 personal/family scope 映射成 `root` / `family` 容器；电信当前已支持目录遍历与文件下载
 - 后续继续扩展写入、分片上传、断点续传
 - 对于来自真实浏览器/CDP 的页面元素、流程和请求形状，优先沉淀到浏览器流程配置层，而不是把页面细节直接硬编码到 provider crate
 - 对于已经稳定下来的 native dispatcher 动作，优先把操作名、默认字段和值约束沉淀到 `config/provider-capabilities/*.json`，让 provider crate 只保留执行器、鉴权、加密和错误归类
@@ -87,6 +87,11 @@
 - 通过 `policy-engine` 校验唯一主写与 sync target 拓扑
 - 在对象写入和删除成功后向 `replication-engine` 写入复制任务
 - 已内嵌最小控制面，提供 Admin HTML 首页、`GET /api/status`、`GET /api/auth/onedrive/status`、`GET /api/auth/onedrive/web/start`、`POST /api/auth/onedrive/device/start`、`GET /api/auth/onedrive/device/{flow_id}` 和 `GET /auth/onedrive/callback`
+- 已支持 `POST /api/object-actions`，并已在 Admin Web 暴露对象动作面板，可把对象级 `rename/copy/move` 动作直接下发给当前主 provider，并在成功后补齐对应的异步复制元数据：`rename=put(new)+delete(old)`、`copy=put(dest)`、`move=put(dest)+delete(src)`
+- Admin Web 对象动作面板现在会展示 before/after 对象检查结果，并把最近共享执行历史持久化到 control-plane 文件；`POST /api/object-actions/history/clear` 用于清空这份服务端共享历史
+- 这部分控制面的详细运维说明单独放在 [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)，避免把操作细节挤进架构文档
+- 这部分 API 契约单独放在 [docs/object-actions-api-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-api-reference.md:1)，避免把字段细节塞进架构说明
+- 如果要把联通作为正式 primary provider 上线，最后再走 [docs/unicom-go-live-checklist.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-go-live-checklist.md:1)
 - 已支持把运行中的主写 provider / sync targets / fallback 顺序保存到本地 control-plane 文件，并热更新到数据面
 - 已支持在网页中直接修改 OneDrive 的 async backup / fallback 开关，以及 `memory_only` 作用域
 - 已支持在网页中直接修改 `auth-capture` sidecar 地址、LLM endpoint / model，以及 provider 独立凭证
@@ -102,8 +107,9 @@
 
 - 封装 OneDrive 授权后访问能力的 provider
 - 作为默认异步备份目标和最终 fallback 目标的入口
-- 当前已落最小 Graph 映射，支持 `root_prefix/<bucket>/<key>` 路径映射、健康检查、列容器、列对象、对象读写删
+- 当前已落 Graph 映射，支持 `root_prefix/<bucket>/<key>` 路径映射、健康检查、列容器、列对象、对象读写删，以及对象级 rename/copy/move
 - 当前已支持显式 access token、token file、OAuth session file，以及 access token 过期后使用 refresh token 自动续期并回写 session
+- 对象动作执行层已做成可替换结构；当前默认执行器走 Graph `PATCH` 更新 `name` / `parentReference` 完成 rename/move，并走 Graph async copy + monitor URL 轮询完成 copy
 - 可直接复用 `gatewayd` 内建的 Web PKCE / Device Code 授权链路
 - 后续再补分片上传、更稳健的 delta/sync 与更完整的运维面
 

@@ -12,6 +12,7 @@ blob-core = { path = "../blob-core" }
 browser-cdp = { path = "../browser-cdp" }
 hex = { workspace = true }
 hmac = { workspace = true }
+futures-util = { workspace = true }
 metadata-store = { path = "../metadata-store" }
 percent-encoding = { workspace = true }
 policy-engine = { path = "../policy-engine" }

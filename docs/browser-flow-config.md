@@ -123,6 +123,14 @@
 - `action-dialog.onSubmit()` 在 `move` 分支会组装 `targetDirId`、`sourceType`、`targetType`、`dirList`、`fileList`，家庭空间时还会带 `fromFamilyId`
 - 两者最终都走 `/wohome/dispatcher`
 
+这些事实现在已经同步沉淀进联通 native capability catalog 和 provider 代码:
+
+- `CreateDirectory`
+- `DeleteFile`
+- `RenameFileOrDirectory`
+- `CopyFile`
+- `MoveFile`
+
 这里还有两个值得固化到配置层的页面约束:
 
 - `copy/move` 不能只伪造 `dirIds/fileIds`，父组件需要先经过 `handleSelectionChange()`，再让 `handleCopy()` / `handleMove()` 从 `multipleSelection` 派生 `dialogData`
@@ -174,7 +182,7 @@
 
 1. 给真正的 CDP / `auth-capture` 执行层接入这套 catalog loader 和 `bind_flow(...)` 解析结果，而不是再手写 provider-specific 文件路径和模板替换。
 2. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。
-3. 继续补联通 family/private space 变体，以及后续电信/移动 provider 的网页 flow catalog。
+3. 继续补联通 family space 的网页 flow catalog 变体，以及后续电信/移动 provider 的网页 flow catalog。当前 native provider 已支持 `family` bucket，但浏览器流程样例仍以 personal space 为主。
 
 目前仓库已经有最小可用的真实 CDP transport 和 session 执行链，但还没有完整的 auth-capture 编排层。
 

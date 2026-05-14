@@ -86,7 +86,31 @@
         "CCBG_UNICOM_FAMILY_ID"
       ],
       "notes": [
-        "Current health path already auto-discovers familyId when possible."
+        "Current health path already auto-discovers familyId when possible.",
+        "Provider health now degrades correctly when personal scope is reachable but family scope probing fails."
+      ]
+    },
+    {
+      "id": "family_root_listing",
+      "status": "confirmed",
+      "category": "scope_discovery",
+      "transport": "native_http",
+      "goal": "Verify the discovered family scope can be listed as a stable S3-visible family container.",
+      "prerequisites": [
+        "access_token",
+        "family_scope_discovery"
+      ],
+      "artifacts": [
+        "family_root_directory_id",
+        "family_space_type",
+        "family_container_name"
+      ],
+      "config_targets": [
+        "CCBG_UNICOM_FAMILY_ROOT_DIRECTORY_ID",
+        "CCBG_UNICOM_FAMILY_SPACE_TYPE"
+      ],
+      "notes": [
+        "Current provider maps the family scope to the family bucket and surfaces it through provider health plus gateway container listing."
       ]
     },
     {
@@ -152,6 +176,73 @@
       ]
     },
     {
+      "id": "native_rename_file_or_directory",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Record the stable RenameFileOrDirectory dispatcher operation and its runtime field contract.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "dispatcher_operation",
+        "body_defaults",
+        "dynamic_fields",
+        "supported_boundary"
+      ],
+      "config_targets": [
+        "config/provider-capabilities/unicom-native.json#rename_file_or_directory"
+      ],
+      "notes": [
+        "Current provider supports rename within the same parent directory and intentionally rejects cross-parent rename semantics."
+      ]
+    },
+    {
+      "id": "native_copy_file",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Record the stable CopyFile dispatcher operation and its runtime field contract.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "dispatcher_operation",
+        "body_defaults",
+        "dynamic_fields",
+        "cross_container_support"
+      ],
+      "config_targets": [
+        "config/provider-capabilities/unicom-native.json#copy_file"
+      ],
+      "notes": [
+        "Current provider supports copy across personal and family containers after resolving the destination directory path."
+      ]
+    },
+    {
+      "id": "native_move_file",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Record the stable MoveFile dispatcher operation and its runtime field contract.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "dispatcher_operation",
+        "body_defaults",
+        "dynamic_fields",
+        "cross_container_support",
+        "family_source_hint"
+      ],
+      "config_targets": [
+        "config/provider-capabilities/unicom-native.json#move_file"
+      ],
+      "notes": [
+        "Current provider supports move across personal and family containers and injects fromFamilyId when moving out of family scope."
+      ]
+    },
+    {
       "id": "personal_root_upload_context",
       "status": "confirmed",
       "category": "upload",
@@ -190,7 +281,31 @@
       ],
       "config_targets": [],
       "notes": [
-        "Current upload still depends on browser state and remains on the CDP/browser path."
+        "Observed browser upload facts are now reused by the native upload2C write path in provider-unicom.",
+        "Keep this probe to refresh upload2C request/response facts when the page uploader contract changes."
+      ]
+    },
+    {
+      "id": "gateway_object_actions_replication_semantics",
+      "status": "confirmed",
+      "category": "metadata",
+      "transport": "native_http",
+      "goal": "Verify that successful gateway object actions update replication metadata with the same semantics used by fallback gating.",
+      "prerequisites": [
+        "native_rename_file_or_directory",
+        "native_copy_file",
+        "native_move_file"
+      ],
+      "artifacts": [
+        "rename_replication_plan",
+        "copy_replication_plan",
+        "move_replication_plan"
+      ],
+      "config_targets": [
+        "docs/architecture.md#gatewayd"
+      ],
+      "notes": [
+        "Current gateway semantics are rename=put(new)+delete(old), copy=put(dest), move=put(dest)+delete(src)."
       ]
     }
   ]

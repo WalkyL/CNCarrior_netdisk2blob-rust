@@ -2,6 +2,10 @@
 
 `config/provider-probes/*.json` 用来描述“每个云盘后续要自动探测什么”。
 
+如果要判断某个 provider 是否已经“做到满”，请同时对照:
+
+- [docs/provider-completion-standard.md](/home/walky/carrier-cloud-blob-gateway/docs/provider-completion-standard.md:1)
+
 这层和 `browser-flows`、`provider-capabilities` 的分工不同:
 
 - `browser-flows`: 页面元素、页面动作、浏览器里的真实流程

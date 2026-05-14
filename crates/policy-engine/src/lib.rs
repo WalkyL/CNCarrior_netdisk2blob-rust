@@ -34,10 +34,7 @@ impl ProviderId {
     }
 
     pub fn can_be_primary(self) -> bool {
-        matches!(
-            self,
-            Self::Stub | Self::Unicom | Self::Telecom | Self::Mobile
-        )
+        matches!(self, Self::Stub | Self::Unicom | Self::Telecom | Self::Mobile)
     }
 
     pub fn can_be_sync_target(self) -> bool {

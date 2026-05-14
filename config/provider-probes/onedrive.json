@@ -76,6 +76,51 @@
       "notes": [
         "This provider already supports object lifecycle roundtrip."
       ]
+    },
+    {
+      "id": "object_actions_rename_copy_move",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Verify Graph-backed rename/copy/move object actions under the mapped bucket-folder namespace.",
+      "prerequisites": [
+        "drive_root_mapping",
+        "object_read_write_delete"
+      ],
+      "artifacts": [
+        "rename_request_shape",
+        "copy_monitor_url",
+        "move_parent_reference",
+        "cross_container_destination_support"
+      ],
+      "config_targets": [
+        "docs/object-actions-api-reference.md",
+        "docs/object-actions-and-history.md"
+      ],
+      "notes": [
+        "Current provider executes rename and move via driveItem PATCH with name/parentReference updates, and executes copy via Graph async copy monitoring."
+      ]
+    },
+    {
+      "id": "gateway_object_actions_replication_semantics",
+      "status": "confirmed",
+      "category": "metadata",
+      "transport": "native_http",
+      "goal": "Verify successful OneDrive object actions update replication metadata with the same semantics used by fallback gating.",
+      "prerequisites": [
+        "object_actions_rename_copy_move"
+      ],
+      "artifacts": [
+        "rename_replication_plan",
+        "copy_replication_plan",
+        "move_replication_plan"
+      ],
+      "config_targets": [
+        "docs/architecture.md#gatewayd"
+      ],
+      "notes": [
+        "Current gateway semantics are rename=put(new)+delete(old), copy=put(dest), move=put(dest)+delete(src); OneDrive consumes these updates as an async backup or fallback target, not as a primary provider."
+      ]
     }
   ]
 }

@@ -231,10 +231,9 @@ chmod 600 $HOME/.config/ccbg/credentials/example.token
 - 已有 token / token file / cookie header 入口
 - health 检查会真实请求 `pan.wo.cn` 桌面站实际使用的 `/wohome/dispatcher`
 - 当前默认 probe 会调用真实文件 API `QueryAllFiles`
-- 现在已经支持把联通云盘根目录映射成单个 S3 bucket: `root`
+- 现在已经支持把联通 personal / family scope 分别映射成 S3 bucket: `root` / `family`
 - 现在已经支持 `ListBuckets` / `ListObjectsV2` / `/v1/containers` / `/v1/objects`
-- 现在已经支持真实下载与对象删除
-- 上传和其余写入接口映射还没有完成
+- 现在已经支持真实下载、`upload2C` 上传、对象删除，以及对象级 rename/copy/move
 
 另外，联通桌面站当前已经有一份独立的浏览器流程样例配置:
 
@@ -251,8 +250,11 @@ chmod 600 $HOME/.config/ccbg/credentials/example.token
 
 这意味着:
 
-- 你已经可以用联通 token 在本地列出 bucket、读取对象并删除对象
-- 但今天还不能承诺联通云盘上传、重命名、复制、移动等 native 写路径已经完全打通
+- 你已经可以用联通 token 在本地列出 `root` / `family` bucket、读取对象、上传对象、删除对象，并通过控制面对象动作 API 触发 rename/copy/move
+- 当前浏览器流程配置仍然保留重命名、复制、移动等网页动作事实，用来校验和刷新 native dispatcher 请求形状，而不是唯一执行路径
+- 如果你接下来要正式通过 Admin Web 执行对象动作、导出共享历史或排查 rename/copy/move 的复制语义，请继续看 [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)
+- 如果你接下来要直接对接接口，请继续看 [docs/object-actions-api-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-api-reference.md:1)
+- 如果你接下来要把联通作为正式 primary provider 上线，请最后按 [docs/unicom-go-live-checklist.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-go-live-checklist.md:1) 逐项确认
 
 ### 联通云盘 Step by Step
 
@@ -319,7 +321,7 @@ CCBG_UNICOM_AUTH_PROBE_BODY_JSON={"spaceType":"0","parentDirectoryId":"0","pageN
 
 如果你更想走网页方式，也可以不写 `CCBG_UNICOM_TOKEN_FILE`，而是在 `Provider Credentials -> China Unicom` 卡片里把 token 和 cookie 直接粘进去。保存后会写入 `CCBG_CREDENTIALS_DIR/unicom.json`，并立即热生效。
 
-如果你同时有联通家庭云，并且希望控制面也把家庭空间探测出来，可以额外填写:
+如果你同时有联通家庭云，并且希望控制面把家庭空间发现并暴露成 `family` bucket，可以额外填写:
 
 - `Family ID (Optional)`
 
@@ -586,6 +588,7 @@ curl -s http://127.0.0.1:61080/__ccbg/providers
 当前 `provider-onedrive` 比三家运营商更完整:
 
 - 支持真实 Graph API 读写删
+- 支持对象级 rename/copy/move
 - 支持 `root_prefix/<bucket>/<key>` 映射
 - 已内置官方 OAuth 引导
 - 已支持把 OAuth session 持久化到本地文件
@@ -594,6 +597,7 @@ curl -s http://127.0.0.1:61080/__ccbg/providers
 这意味着:
 
 - OneDrive 目前已经是可工作的后端
+- 已支持 provider 侧对象级 rename/copy/move，并可作为异步备份/可选 fallback 目标承接这些动作对应的复制语义
 - 已经可以直接用浏览器或终端完成授权
 - 旧的“手工贴 access token”方式仍可作为兜底
 

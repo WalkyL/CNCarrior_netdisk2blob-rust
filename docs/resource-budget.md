@@ -41,46 +41,55 @@
 
 ## 当前资源占用由哪些算法决定
 
-### 1. 对象读写仍是非流式
+### 1. 对象 body 边界已改成流式，但还不是全链路流式
 
-当前代码的对象模型仍基于整块 `Vec<u8>`:
+当前代码的对象模型已经改成 `ObjectBody` 流:
 
-- `blob-core::ObjectPayload.body: Vec<u8>`
-- `blob-core::PutObjectRequest.body: Vec<u8>`
+- `blob-core::ObjectPayload.body: ObjectBody`
+- `blob-core::PutObjectRequest.body: ObjectBody`
 
 这意味着:
 
-- `PUT` 会把请求体完整放入内存
-- `GET` 会把对象完整读入内存
-- replication worker 复制对象时也会把源对象完整读入内存
+- `gatewayd` 对 `UNSIGNED-PAYLOAD` 上传可以直接把请求体按流传给 backend
+- `GET` 响应也可以直接把 backend 的对象流转回 HTTP 响应体
+- 但很多 provider 内部仍会在本地把对象收集成整块，再交给上游 SDK/HTTP 客户端
 
-### 2. `PUT` 路径存在双份 body
+这次流式改动带来的收益是:
 
-当前 `PUT` 路径先接收 `axum::body::Bytes`，之后又执行 `body.to_vec()` 写入 `PutObjectRequest`。
+- `gatewayd` 不再要求所有 `PUT` 先经 `axum::body::Bytes` 整块缓冲
+- replication 路径也不再要求中间层必须拿到整块 `Bytes`
 
-因此对单个上传对象，峰值内存近似为:
+但当前系统仍不是“全链路零缓冲流式”，对象大小上限和并发预算依然重要。
 
-`peak_put ~= base_rss + bytes_body + bytes_body_copy + protocol_overhead`
+### 2. `PUT` 路径已经分成两类
 
-可粗略写成:
+当前 `PUT` 路径分为:
 
-`peak_put ~= base_rss + 2 * object_size + 0.25~1.0 MiB`
+- `UNSIGNED-PAYLOAD`: 网关层流式透传
+- 其他显式 payload hash: 仍会先收集整个 body 再校验签名
 
-### 3. `GET` 路径通常是一份 body
+因此单个上传对象的峰值内存不再是单一模型:
 
-读取时会先拿到 `ObjectPayload.body`，之后直接作为响应体返回。
+- 流式 `UNSIGNED-PAYLOAD PUT`:
+  `peak_put_streaming ~= base_rss + protocol_overhead + provider_buffering`
+- 非流式签名 `PUT`:
+  `peak_put_buffered ~= base_rss + 1 * object_size + protocol_overhead`
 
-因此对单个下载对象，峰值内存近似为:
+如果 backend/provider 内部仍整块收集，则仍要按接近一份对象大小估算。
+
+### 3. `GET` 路径对网关已经是流式回传
+
+读取时会先拿到 `ObjectPayload.body` 流，之后直接作为响应体返回。
+
+但如果 provider 下载阶段已经把对象整块读入内存，则 provider 侧峰值仍接近一份对象大小。
 
 `peak_get ~= base_rss + object_size + 0.25~0.75 MiB`
 
 ### 4. replication worker 通常是一份 body，加上 HTTPS/TLS 开销
 
-后台复制会:
+后台复制现在在网关/复制层可以直接传递对象流，但目标 provider 仍可能整块收集。
 
-1. 从 primary 读取完整对象
-2. 将该对象 body 传给目标 backend
-3. 如果目标是 OneDrive，还会叠加 `reqwest + rustls` 的请求/TLS 缓冲
+因此复制峰值依然保守按“一份对象 + 上游缓冲”估算更稳妥。
 
 因此对单个复制 worker，峰值内存近似为:
 
@@ -139,7 +148,7 @@
 
 当前代码下，可用一个保守模型估算:
 
-`peak_rss ~= base_rss + (2 * W + 1 * G + 1 * R) * L + queue_overhead + tls_overhead`
+`peak_rss ~= base_rss + (1 * W + 1 * G + 1 * R) * L + queue_overhead + tls_overhead`
 
 其中:
 
@@ -187,11 +196,11 @@
 2. 单个 `GET 4 MiB`:
    约 `11~14 MiB`
 3. 单个 `PUT 4 MiB`:
-   约 `15~18 MiB`
+   约 `11~14 MiB`
 4. 单个 replication worker 复制 `4 MiB` 对象:
    约 `11~16 MiB`
 5. 最坏重叠场景: `1 PUT + 1 GET + 1 replication`
-   约 `23~30 MiB`
+   约 `19~27 MiB`
 
 这也是为什么当前判断是:
 
@@ -206,9 +215,11 @@
 - 单对象内存上限
 - recent history 和 SQLite 历史窗口
 
-当前代码还没有显式限制:
+当前代码还没有显式限制或完全流式化:
 
 - 入站 S3 请求并发数
+- 非 `UNSIGNED-PAYLOAD` PUT 的整包签名校验
+- 多数 provider 内部的整块收集
 
 所以对小内存宿主，必须把下面这些当成部署前提，而不是代码默认保证:
 

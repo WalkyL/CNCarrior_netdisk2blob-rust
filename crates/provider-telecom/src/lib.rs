@@ -9,6 +9,7 @@ use blob_core::{
     ObjectInfo, ObjectPayload, OutboundIpFamily, ServiceHealth, StorageCapacity,
     StorageScopeHealth, StorageScopeKind, TokenSource,
 };
+use bytes::Bytes;
 use md5::{Digest, Md5};
 use reqwest::{
     Method, Response, StatusCode,
@@ -747,7 +748,7 @@ impl TelecomBlobAdapter {
         Ok((file, normalized_key))
     }
 
-    async fn get_bytes(&self, url: &str, action: &str) -> Result<Vec<u8>, BlobError> {
+    async fn get_bytes(&self, url: &str, action: &str) -> Result<Bytes, BlobError> {
         let response = self
             .client
             .request(Method::GET, url)
@@ -765,13 +766,9 @@ impl TelecomBlobAdapter {
             return Err(response_to_error(response, action).await);
         }
 
-        response
-            .bytes()
-            .await
-            .map(|body| body.to_vec())
-            .map_err(|error| {
-                BlobError::Upstream(format!("{action} returned invalid bytes: {error}"))
-            })
+        response.bytes().await.map_err(|error| {
+            BlobError::Upstream(format!("{action} returned invalid bytes: {error}"))
+        })
     }
 
     fn validate_container(&self, container: &str) -> Result<(), BlobError> {
@@ -966,7 +963,10 @@ impl BlobBackend for TelecomBlobAdapter {
         let body = self
             .get_bytes(&download_url, "telecom object download")
             .await?;
-        Ok(ObjectPayload { info, body })
+        Ok(ObjectPayload {
+            info,
+            body: body.into(),
+        })
     }
 }
 
@@ -1762,7 +1762,15 @@ mod tests {
             .await
             .expect("telecom get_object should succeed");
         assert_eq!(payload.info.key, "docs/alpha.txt");
-        assert_eq!(payload.body, b"alpha");
+        assert_eq!(
+            payload
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"alpha"
+        );
 
         let requests = server.requests();
         let download_requests = requests
