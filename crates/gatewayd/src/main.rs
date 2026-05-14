@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env, fs,
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
@@ -361,6 +361,7 @@ struct TopologyProviderOptionPayload {
 #[derive(Debug, Serialize)]
 struct AdminStatusPayload {
     runtime: RuntimeStatusPayload,
+    monitoring: MonitoringSummaryPayload,
     runtime_topology: RuntimeTopologyPayload,
     desired_topology: DesiredTopologyPayload,
     replication: ReplicationQueueSummary,
@@ -390,6 +391,51 @@ struct RuntimeStatusPayload {
     provider_capability_catalog_dir: String,
     replication_workers: usize,
     object_action_history_limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MonitoringSummaryPayload {
+    open_alert_count: usize,
+    provider_summary: MonitoringProviderSummaryPayload,
+    replication: MonitoringReplicationSummaryPayload,
+    object_actions: MonitoringObjectActionSummaryPayload,
+    recent_failures: Vec<MonitoringFailurePayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MonitoringProviderSummaryPayload {
+    total: usize,
+    healthy: usize,
+    degraded: usize,
+    unavailable: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MonitoringReplicationSummaryPayload {
+    pending_jobs: usize,
+    retry_scheduled_jobs: usize,
+    failed_jobs: usize,
+    completed_jobs: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MonitoringObjectActionSummaryPayload {
+    total_entries: usize,
+    successful_entries: usize,
+    failed_entries: usize,
+    unique_operators: usize,
+    last_action_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MonitoringFailurePayload {
+    kind: &'static str,
+    provider: Option<String>,
+    action: Option<String>,
+    target: Option<String>,
+    object: Option<String>,
+    occurred_at_unix_ms: Option<u64>,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -427,6 +473,108 @@ fn runtime_status_payload(state: &AppState) -> RuntimeStatusPayload {
         provider_capability_catalog_dir: state.config.provider_capability_catalog_dir.clone(),
         replication_workers: state.config.replication_workers,
         object_action_history_limit: state.config.object_action_history_limit,
+    }
+}
+
+fn monitoring_summary_payload(
+    provider_health: &[BackendPayload],
+    replication_state: &ReplicationStatePayload,
+    object_action_history: &[ObjectActionHistoryEntryPayload],
+    alerts: &[AdminAlertPayload],
+) -> MonitoringSummaryPayload {
+    let mut healthy = 0;
+    let mut degraded = 0;
+    let mut unavailable = 0;
+    for provider in provider_health {
+        match provider.health.status {
+            blob_core::HealthStatus::Healthy => healthy += 1,
+            blob_core::HealthStatus::Degraded => degraded += 1,
+            blob_core::HealthStatus::Unavailable => unavailable += 1,
+        }
+    }
+
+    let mut successful_entries = 0;
+    let mut failed_entries = 0;
+    let mut operators = BTreeSet::new();
+    let mut last_action_at_unix_ms: Option<u64> = None;
+    let mut recent_failures = Vec::new();
+
+    for entry in object_action_history {
+        if entry.outcome == "success" {
+            successful_entries += 1;
+        } else {
+            failed_entries += 1;
+            recent_failures.push(MonitoringFailurePayload {
+                kind: "object_action",
+                provider: Some(entry.primary_provider.clone()),
+                action: Some(entry.action.clone()),
+                target: None,
+                object: Some(entry.description.clone()),
+                occurred_at_unix_ms: Some(entry.executed_at_unix_ms),
+                message: entry.message.clone(),
+            });
+        }
+        if let Some(operator) = entry.operator.as_deref() {
+            let trimmed = operator.trim();
+            if !trimmed.is_empty() {
+                operators.insert(trimmed.to_string());
+            }
+        }
+        last_action_at_unix_ms = Some(
+            last_action_at_unix_ms
+                .map(|current| current.max(entry.executed_at_unix_ms))
+                .unwrap_or(entry.executed_at_unix_ms),
+        );
+    }
+
+    for job in &replication_state.persisted.recent_jobs {
+        if !matches!(job.status, ReplicationStatus::Failed) {
+            continue;
+        }
+        recent_failures.push(MonitoringFailurePayload {
+            kind: "replication_job",
+            provider: job.source_provider.clone(),
+            action: Some(job.operation.as_str().to_string()),
+            target: Some(job.target.clone()),
+            object: Some(format!("{}/{}", job.object.bucket, job.object.key)),
+            occurred_at_unix_ms: Some(job.enqueued_at_unix_ms as u64),
+            message: job
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "replication job failed without error detail".to_string()),
+        });
+    }
+
+    recent_failures.sort_by(|left, right| {
+        right
+            .occurred_at_unix_ms
+            .unwrap_or(0)
+            .cmp(&left.occurred_at_unix_ms.unwrap_or(0))
+    });
+    recent_failures.truncate(8);
+
+    MonitoringSummaryPayload {
+        open_alert_count: alerts.len(),
+        provider_summary: MonitoringProviderSummaryPayload {
+            total: provider_health.len(),
+            healthy,
+            degraded,
+            unavailable,
+        },
+        replication: MonitoringReplicationSummaryPayload {
+            pending_jobs: replication_state.persisted.pending_count,
+            retry_scheduled_jobs: replication_state.persisted.retry_scheduled_count,
+            failed_jobs: replication_state.persisted.failed_count,
+            completed_jobs: replication_state.persisted.completed_count,
+        },
+        object_actions: MonitoringObjectActionSummaryPayload {
+            total_entries: object_action_history.len(),
+            successful_entries,
+            failed_entries,
+            unique_operators: operators.len(),
+            last_action_at_unix_ms,
+        },
+        recent_failures,
     }
 }
 
@@ -3021,6 +3169,11 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         </details>
       </section>
       <section class="card">
+        <h2>Monitoring Summary</h2>
+        <div id="monitoring-summary" class="metric-grid"></div>
+        <div id="monitoring-failures" class="health-notes">Loading monitoring summary…</div>
+      </section>
+      <section class="card">
         <h2>OneDrive Auth</h2>
         <div id="auth-summary" class="metric-grid"></div>
         <details>
@@ -3543,6 +3696,56 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
           <strong>${{escapeHtml(formatTimestamp(runtime?.started_at_unix_ms))}}</strong>
         </div>
       `;
+    }}
+    function renderMonitoringSummary(monitoring) {{
+      const summaryNode = document.getElementById('monitoring-summary');
+      const failuresNode = document.getElementById('monitoring-failures');
+      const providerSummary = monitoring?.provider_summary || {{}};
+      const replication = monitoring?.replication || {{}};
+      const objectActions = monitoring?.object_actions || {{}};
+      summaryNode.innerHTML = `
+        <div class="metric-card">
+          <div>Open Alerts</div>
+          <strong>${{escapeHtml(String(monitoring?.open_alert_count ?? 0))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Healthy Providers</div>
+          <strong>${{escapeHtml(`${{providerSummary.healthy ?? 0}} / ${{providerSummary.total ?? 0}}`)}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Replication Pending</div>
+          <strong>${{escapeHtml(String(replication.pending_jobs ?? 0))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Replication Failed</div>
+          <strong>${{escapeHtml(String(replication.failed_jobs ?? 0))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Action Failures</div>
+          <strong>${{escapeHtml(String(objectActions.failed_entries ?? 0))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Last Object Action</div>
+          <strong>${{escapeHtml(formatTimestamp(objectActions.last_action_at_unix_ms))}}</strong>
+        </div>
+      `;
+      const recentFailures = monitoring?.recent_failures || [];
+      if (!recentFailures.length) {{
+        failuresNode.textContent = 'No recent failed replication jobs or object actions.';
+        return;
+      }}
+      failuresNode.textContent = recentFailures.map(item => {{
+        const parts = [
+          `kind=${{item.kind || 'unknown'}}`,
+          item.provider ? `provider=${{providerLabel(item.provider) || item.provider}}` : null,
+          item.target ? `target=${{item.target}}` : null,
+          item.action ? `action=${{item.action}}` : null,
+          item.object ? `object=${{item.object}}` : null,
+          item.occurred_at_unix_ms ? `at=${{formatTimestamp(item.occurred_at_unix_ms)}}` : null,
+          `message=${{item.message || 'none'}}`,
+        ].filter(Boolean);
+        return parts.join(' | ');
+      }}).join('\n');
     }}
     function renderAuthSummary(auth) {{
       const container = document.getElementById('auth-summary');
@@ -4680,6 +4883,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         objectActionHistoryLimit = Number(status.object_action_history_limit || objectActionHistoryLimit || {DEFAULT_OBJECT_ACTION_HISTORY_LIMIT});
         document.getElementById('gateway-status').textContent = JSON.stringify(status, null, 2);
         renderRuntimeSummary(status.runtime || {{}});
+        renderMonitoringSummary(status.monitoring || {{}});
         document.getElementById('auth-status').textContent = JSON.stringify(status.onedrive_auth, null, 2);
         document.getElementById('runtime-topology').textContent = JSON.stringify(status.runtime_topology, null, 2);
         renderAuthSummary(status.onedrive_auth || {{}});
@@ -4978,8 +5182,15 @@ async fn admin_status(State(state): State<AppState>) -> Result<Json<AdminStatusP
     let onedrive_auth = read_onedrive_auth_status(&state);
     let alerts = build_admin_alerts(&state, &provider_health, &replication_state, &onedrive_auth);
     let object_action_history = control_plane_snapshot(&state).object_action_history;
+    let monitoring = monitoring_summary_payload(
+        &provider_health,
+        &replication_state,
+        &object_action_history,
+        &alerts,
+    );
     Ok(Json(AdminStatusPayload {
         runtime: runtime_status_payload(&state),
+        monitoring,
         runtime_topology: runtime_topology_payload(&runtime_topology(&state)),
         desired_topology: desired_topology_payload(&state),
         replication: ReplicationQueueSummary {
@@ -9557,6 +9768,16 @@ mod tests {
             ProviderId::Onedrive,
             Arc::new(StubBackend::new()),
         );
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "alerts/failure.txt",
+            Some(7),
+            Some("text/plain"),
+        );
 
         let Json(status) = admin_status(State(state))
             .await
@@ -9570,10 +9791,24 @@ mod tests {
         assert_eq!(status.runtime.object_action_history_limit, 12);
         assert!(status.runtime.started_at_unix_ms > 0);
         assert!(status.runtime.uptime_ms >= 5_000);
+        assert_eq!(status.monitoring.provider_summary.total, 2);
+        assert_eq!(status.monitoring.provider_summary.healthy, 0);
+        assert_eq!(status.monitoring.provider_summary.degraded, 2);
+        assert_eq!(status.monitoring.provider_summary.unavailable, 0);
+        assert_eq!(status.monitoring.replication.pending_jobs, 0);
+        assert_eq!(status.monitoring.replication.retry_scheduled_jobs, 0);
+        assert_eq!(status.monitoring.replication.failed_jobs, 1);
+        assert_eq!(status.monitoring.replication.completed_jobs, 0);
+        assert_eq!(status.monitoring.object_actions.total_entries, 0);
+        assert_eq!(status.monitoring.object_actions.failed_entries, 0);
+        assert!(status.monitoring.recent_failures.len() >= 1);
+        assert_eq!(status.monitoring.recent_failures[0].kind, "replication_job");
+        assert!(status.monitoring.open_alert_count >= 1);
         assert_eq!(status.runtime_topology.primary_provider, "stub");
         assert_eq!(status.object_action_history_limit, 12);
         assert_eq!(status.provider_health.len(), 2);
         assert_eq!(status.replication_state.persisted.pending_count, 0);
+        assert_eq!(status.replication_state.persisted.failed_count, 1);
         assert!(
             status
                 .browser_flow_catalogs
@@ -10788,6 +11023,10 @@ mod tests {
         assert!(html.contains("<h2>Runtime</h2>"));
         assert!(html.contains("id=\"runtime-summary\""));
         assert!(html.contains("id=\"runtime-json\""));
+        assert!(html.contains("<h2>Monitoring Summary</h2>"));
+        assert!(html.contains("id=\"monitoring-summary\""));
+        assert!(html.contains("id=\"monitoring-failures\""));
+        assert!(html.contains("renderMonitoringSummary"));
         assert!(html.contains("id=\"status-auto-refresh-enabled\""));
         assert!(html.contains("id=\"status-auto-refresh-interval-seconds\""));
         assert!(html.contains("id=\"status-refresh-summary\""));

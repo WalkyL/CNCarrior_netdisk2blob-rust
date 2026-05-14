@@ -138,6 +138,7 @@
 
 与对象动作直接相关的字段包括:
 
+- `monitoring`
 - `runtime_topology`
 - `object_action_history`
 - `object_action_history_limit`
@@ -237,7 +238,60 @@
 - `warnings`: 预警信息
 - `references`: 被影响对象及变化摘要
 
-### 4.3 object_action_history_limit
+### 4.3 monitoring
+
+类型:
+
+```json
+{
+  "open_alert_count": 1,
+  "provider_summary": {
+    "total": 2,
+    "healthy": 1,
+    "degraded": 1,
+    "unavailable": 0
+  },
+  "replication": {
+    "pending_jobs": 0,
+    "retry_scheduled_jobs": 0,
+    "failed_jobs": 1,
+    "completed_jobs": 12
+  },
+  "object_actions": {
+    "total_entries": 4,
+    "successful_entries": 3,
+    "failed_entries": 1,
+    "unique_operators": 2,
+    "last_action_at_unix_ms": 1710000000000
+  },
+  "recent_failures": [
+    {
+      "kind": "replication_job",
+      "provider": "stub",
+      "action": "put",
+      "target": "onedrive",
+      "object": "root/alerts/failure.txt",
+      "occurred_at_unix_ms": 1710000000000,
+      "message": "upstream failed"
+    }
+  ]
+}
+```
+
+用途:
+
+- 给 Admin Web 的 `Monitoring Summary` 卡片提供聚合摘要
+- 让运维先看到告警、provider 健康、复制失败和最近失败事件，再决定是否下钻 `provider_health`、`replication_state` 或 `object_action_history`
+
+字段说明:
+
+- `open_alert_count`: 当前告警数量
+- `provider_summary`: provider 健康计数汇总
+- `replication`: 复制任务状态汇总
+- `object_actions`: 对象动作历史汇总
+- `recent_failures`: 最近失败事件列表，来源包括失败的对象动作和失败的复制任务
+
+### 4.4 object_action_history_limit
 
 类型:
 

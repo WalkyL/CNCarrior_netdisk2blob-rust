@@ -31,7 +31,9 @@
 - `POST /api/object-actions/history/clear`
 - `GET /api/status` 返回 `object_action_history`
 - `GET /api/status` 返回运行态 `runtime` 摘要
+- `GET /api/status` 返回聚合监控 `monitoring` 摘要
 - Admin Web 里的对象动作面板
+- Admin Web 里的 `Monitoring Summary` 监控摘要卡片
 - before/after 对象状态检查
 - 服务端持久化共享历史
 - 历史筛选、JSON/CSV 导出、清空
@@ -251,8 +253,21 @@ Admin Web 顶部现在提供:
 
 - provider health
 - replication queue
+- monitoring summary
 - runtime 摘要
 - 共享历史
+
+### 5.7 Monitoring Summary
+
+Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
+
+- open alerts 数量
+- provider 健康计数: healthy / degraded / unavailable
+- replication pending / failed 概览
+- 对象动作失败数与最近一次对象动作时间
+- 最近失败事件列表，来源包括失败的对象动作和失败的复制任务
+
+这块摘要的目标不是替代详细表格，而是让运维先快速判断当前实例是否处在需要人工介入的状态。
 
 为了避免干扰操作中的表单，自动刷新不会在后台每一轮都强制重载 provider credentials 和 pending verification prompts；这些区域仍以手工触发或显式动作后的刷新为主。
 
