@@ -155,6 +155,8 @@
 - 重试后该 job 会被重新置成 `pending` 并重新入内存队列
 - 会清空 `last_error` 和 `next_attempt_at_unix_ms`
 
+`replication_state` 与 `monitoring.replication` 中的失败/完成/重试计数，当前都按“每个对象在每个 target 上的最新状态”统计。
+
 失败场景包括:
 
 - `job_id` 不存在

@@ -199,7 +199,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - 当响应来自备份侧时，会附带 `x-ccbg-source-provider` 和 `x-ccbg-fallback-from`
 - 当前自动化测试已覆盖 `stub` backend 与 OneDrive mock Graph；运营商 provider 仍未完成真实读写
 
-当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要、基础重试退避和 latest failed job 人工重试已经落地；后续仍需补更完整的死信 / 批量重试入口和 OneDrive OAuth broker。
+当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要、基础重试退避和 latest failed job 人工重试已经落地；复制失败相关监控现在也按“每个对象在每个 target 上的最新状态”统计，避免旧失败在后续成功后继续误报；后续仍需补更完整的死信 / 批量重试入口和 OneDrive OAuth broker。
 
 一期平台兼容边界:
 

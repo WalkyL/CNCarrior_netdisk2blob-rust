@@ -4257,7 +4257,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
           <strong>${{replicationState.in_memory.pending_count || 0}}</strong>
         </div>
         <div class="metric-card">
-          <div>Persisted Pending</div>
+          <div>Persisted Queue</div>
           <strong>${{replicationState.persisted.pending_count || 0}}</strong>
         </div>
         <div class="metric-card">
@@ -12071,7 +12071,7 @@ mod tests {
                 .snapshot(16)
                 .expect("snapshot should load")
                 .pending_count,
-            2
+            1
         );
 
         let missing_headers = signed_headers(&state.config, &Method::HEAD, &uri, &[], &[]);
@@ -13021,7 +13021,7 @@ mod tests {
             .metadata_store
             .snapshot(10)
             .expect("snapshot should persist retry state");
-        assert_eq!(persisted.pending_count, 1);
+        assert_eq!(persisted.pending_count, 0);
         assert_eq!(persisted.retry_scheduled_count, 1);
         assert_eq!(persisted.failed_count, 0);
 

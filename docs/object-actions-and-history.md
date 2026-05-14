@@ -291,6 +291,8 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 - 修正凭证、网络、target 配置后，点 `Retry`
 - 观察 `pending / retry / failed` 计数是否回落
 
+当前这些计数按“每个对象在每个 target 上的最新状态”统计，不会把已经被后续成功 job 覆盖的旧失败继续算进当前失败数。
+
 ### 5.8 Notify
 
 Admin Web 现在额外提供 `Notify` 卡片，显示:

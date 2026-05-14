@@ -291,11 +291,7 @@ impl MetadataStore {
 
     pub fn snapshot(&self, recent_limit: usize) -> Result<MetadataSnapshot, MetadataError> {
         let connection = self.connection.lock().expect("metadata store poisoned");
-        let pending_count = count_pending_like(&connection)?;
-        let retry_scheduled_count =
-            count_by_status(&connection, ReplicationStatus::RetryScheduled)?;
-        let completed_count = count_by_status(&connection, ReplicationStatus::Completed)?;
-        let failed_count = count_by_status(&connection, ReplicationStatus::Failed)?;
+        let aggregated = latest_status_aggregate(&connection)?;
         let target_statuses = target_statuses(&connection)?;
 
         let mut statement = connection
@@ -313,10 +309,10 @@ impl MetadataStore {
             .map_err(MetadataError::Sqlite)?;
 
         Ok(MetadataSnapshot {
-            pending_count,
-            retry_scheduled_count,
-            completed_count,
-            failed_count,
+            pending_count: aggregated.pending_count,
+            retry_scheduled_count: aggregated.retry_scheduled_count,
+            completed_count: aggregated.completed_count,
+            failed_count: aggregated.failed_count,
             target_statuses,
             recent_jobs,
         })
@@ -623,35 +619,46 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplicationJob> {
     })
 }
 
-fn count_pending_like(connection: &Connection) -> Result<usize, MetadataError> {
-    let count = connection
-        .query_row(
-            "SELECT COUNT(*) FROM replication_jobs WHERE status IN ('pending', 'retry_scheduled')",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(MetadataError::Sqlite)?
-        .unwrap_or(0);
-
-    Ok(count as usize)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LatestStatusAggregate {
+    pending_count: usize,
+    retry_scheduled_count: usize,
+    completed_count: usize,
+    failed_count: usize,
 }
 
-fn count_by_status(
+fn latest_status_aggregate(
     connection: &Connection,
-    status: ReplicationStatus,
-) -> Result<usize, MetadataError> {
-    let count = connection
-        .query_row(
-            "SELECT COUNT(*) FROM replication_jobs WHERE status = ?1",
-            [status.as_str()],
-            |row| row.get::<_, i64>(0),
+) -> Result<LatestStatusAggregate, MetadataError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+             FROM replication_jobs jobs
+             INNER JOIN (
+                 SELECT target, bucket, key, MAX(job_id) AS max_job_id
+                 FROM replication_jobs
+                 GROUP BY target, bucket, key
+             ) latest
+             ON latest.max_job_id = jobs.job_id",
         )
-        .optional()
+        .map_err(MetadataError::Sqlite)?;
+    let jobs = statement
+        .query_map([], row_to_job)
         .map_err(MetadataError::Sqlite)?
-        .unwrap_or(0);
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(MetadataError::Sqlite)?;
 
-    Ok(count as usize)
+    let mut aggregate = LatestStatusAggregate::default();
+    for job in jobs {
+        match job.status {
+            ReplicationStatus::Pending => aggregate.pending_count += 1,
+            ReplicationStatus::RetryScheduled => aggregate.retry_scheduled_count += 1,
+            ReplicationStatus::Completed => aggregate.completed_count += 1,
+            ReplicationStatus::Failed => aggregate.failed_count += 1,
+        }
+    }
+
+    Ok(aggregate)
 }
 
 fn target_statuses(connection: &Connection) -> Result<Vec<MetadataTargetStatus>, MetadataError> {
@@ -1052,7 +1059,7 @@ mod tests {
             .expect("jobs should persist");
 
         let snapshot = store.snapshot(10).expect("snapshot should load");
-        assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.pending_count, 0);
         assert_eq!(snapshot.retry_scheduled_count, 1);
         assert_eq!(snapshot.completed_count, 1);
         assert_eq!(snapshot.failed_count, 1);
@@ -1084,6 +1091,42 @@ mod tests {
                 .and_then(|job| job.last_error.clone()),
             Some("permanent auth error".to_string())
         );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn snapshot_counts_only_latest_job_per_object() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut failed_old = sample_job(40);
+        failed_old.object.key = "same-object.txt".to_string();
+        failed_old.status = ReplicationStatus::Failed;
+        failed_old.last_error = Some("old failure".to_string());
+
+        let mut completed_latest = sample_job(41);
+        completed_latest.object.key = "same-object.txt".to_string();
+        completed_latest.status = ReplicationStatus::Completed;
+
+        store
+            .enqueue_jobs(&[failed_old, completed_latest.clone()])
+            .expect("jobs should persist");
+
+        let snapshot = store.snapshot(10).expect("snapshot should load");
+        assert_eq!(snapshot.pending_count, 0);
+        assert_eq!(snapshot.retry_scheduled_count, 0);
+        assert_eq!(snapshot.completed_count, 1);
+        assert_eq!(snapshot.failed_count, 0);
+
+        let onedrive = snapshot
+            .target_statuses
+            .iter()
+            .find(|status| status.target == "onedrive")
+            .expect("onedrive target status should exist");
+        assert_eq!(onedrive.completed_count, 1);
+        assert_eq!(onedrive.failed_count, 0);
+        assert_eq!(onedrive.latest_job.as_ref().map(|job| job.job_id), Some(41));
 
         fs::remove_file(db_path).ok();
     }

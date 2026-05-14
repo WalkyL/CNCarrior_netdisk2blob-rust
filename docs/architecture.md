@@ -130,7 +130,7 @@
 - 当前实现内存队列、最近任务记录、对象级 `put/delete` 入队、启动时 pending job 恢复，以及 `retry_scheduled` 延迟重试出队
 - 复制 job 需要绑定创建当时的 `source provider`，避免主写热切换后旧 job 串读到新的主写后端
 - `gatewayd` 已启动后台 worker 消费任务，并把结果回写 SQLite
-- 当前已支持基础重试 / 退避、target 级状态汇总，以及 latest failed job 的控制面人工重试；后续再补更完整的死信和批量人工重试入口
+- 当前已支持基础重试 / 退避、按 latest object state 统计的 target 级状态汇总，以及 latest failed job 的控制面人工重试；后续再补更完整的死信和批量人工重试入口
 
 ### `metadata-store`
 
