@@ -7,4 +7,6 @@ data/
 /.idea
 /.vscode
 *.log
+__pycache__/
+*.pyc
 secrets/

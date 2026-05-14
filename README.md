@@ -61,6 +61,7 @@ carrier-cloud-blob-gateway/
 ├── tools/
 │   └── component-ast-map/ # cargo metadata + syn AST 依赖图生成器
 └── scripts/
+    ├── notify-webhook-receiver-example.py
     └── run-dev.sh
 ```
 
@@ -85,6 +86,7 @@ carrier-cloud-blob-gateway/
 - [docs/auth-step-by-step.md](/home/walky/carrier-cloud-blob-gateway/docs/auth-step-by-step.md:1)
 - [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)
 - [docs/object-actions-api-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-api-reference.md:1)
+- [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1)
 - [docs/unicom-go-live-checklist.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-go-live-checklist.md:1)
 - [docs/unicom-change-record-template.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-change-record-template.md:1)
 - [docs/unicom-phase-closeout-report.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-phase-closeout-report.md:1)
@@ -176,8 +178,9 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `CCBG_NOTIFY_WEBHOOK_URL` 配置后，后台会按 `CCBG_NOTIFY_POLL_INTERVAL_SECONDS` 周期检查 alerts
 - 仅当 alerts 集合发生变化时才发送 webhook，避免轮询风暴
 - webhook 请求体包含 `runtime`、`monitoring` 和 `alerts`
-- 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，还会附带 `x-ccbg-notify-timestamp` 与 `x-ccbg-notify-signature`
-- webhook 现在还会附带 `x-ccbg-notify-event-id`，建议接收端按 `event_id + timestamp` 做幂等与时间窗校验
+- webhook 总会附带 `x-ccbg-notify-event-id` 与 `x-ccbg-notify-timestamp`
+- 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，还会附带 `x-ccbg-notify-signature-version=v1` 与 `x-ccbg-notify-signature`
+- 建议接收端按 `event_id + timestamp` 做幂等与时间窗校验；可直接参考 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 和 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)
 
 当前 S3 兼容实现边界:
 

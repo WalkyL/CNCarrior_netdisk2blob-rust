@@ -327,11 +327,14 @@
 - `last_success_at_unix_ms`: 最近一次发送成功时间
 - `last_error`: 最近一次发送错误
 
-当前若启用了签名，请求头会额外包含:
+当前 webhook 总会包含:
 
 - `x-ccbg-notify-event-id`
-- `x-ccbg-notify-signature-version`
 - `x-ccbg-notify-timestamp`
+
+当前若启用了签名，请求头还会额外包含:
+
+- `x-ccbg-notify-signature-version`
 - `x-ccbg-notify-signature`
 
 签名算法:
@@ -343,6 +346,7 @@
 - 校验 `x-ccbg-notify-signature-version` 当前应为 `v1`
 - 校验 `x-ccbg-notify-timestamp` 是否落在可接受时间窗内
 - 按 `x-ccbg-notify-event-id` 做幂等去重
+- 可直接参考 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 与 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)
 
 ### 4.5 object_action_history_limit
 

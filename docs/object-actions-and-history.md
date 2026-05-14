@@ -287,13 +287,14 @@ Admin Web 现在额外提供 `Notify` 卡片，显示:
 - 如果 alerts 集合和上一次完全一致，不重复发送
 - 如果 provider 健康、复制失败数或其他告警条件变化，会重新发送一条 webhook
 - webhook 请求体会携带 `runtime`、`monitoring` 和 `alerts`，适合直接接企业微信/飞书/自建中转器
-- 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，请求还会带 `x-ccbg-notify-timestamp`
 - webhook 请求还会带 `x-ccbg-notify-event-id`
+- webhook 请求还会带 `x-ccbg-notify-timestamp`
 - 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，请求还会带 `x-ccbg-notify-signature-version=v1`
 - 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，请求还会带 `x-ccbg-notify-signature`
 - 当前签名算法是 `hex(HMAC_SHA256(secret, "<timestamp>.<sha256(body)>"))`
 - 接收端应校验 `timestamp` 是否落在可接受时间窗内
 - 接收端应按 `event_id` 做幂等去重，避免重放或重复投递造成重复告警
+- 接收端可直接参考 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 和 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)
 
 为了避免干扰操作中的表单，自动刷新不会在后台每一轮都强制重载 provider credentials 和 pending verification prompts；这些区域仍以手工触发或显式动作后的刷新为主。
 

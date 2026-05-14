@@ -65,9 +65,9 @@ use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::time::{Duration, sleep};
 #[cfg(test)]
 use tokio::sync::oneshot;
+use tokio::time::{Duration, sleep};
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -1285,8 +1285,7 @@ impl AppConfig {
                 "CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET",
                 "CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET_FILE",
             ),
-            notify_poll_interval_seconds: env_u64("CCBG_NOTIFY_POLL_INTERVAL_SECONDS", 15)
-                .max(5),
+            notify_poll_interval_seconds: env_u64("CCBG_NOTIFY_POLL_INTERVAL_SECONDS", 15).max(5),
             control_plane_file: env_or("CCBG_CONTROL_PLANE_FILE", "./data/control-plane.json"),
             credentials_dir: env_or("CCBG_CREDENTIALS_DIR", "./data/provider-credentials"),
             browser_flow_catalog_dir: env_or(
@@ -3104,7 +3103,10 @@ async fn notify_loop(state: AppState) {
             notify_state.last_attempt_at_unix_ms = Some(current_unix_ms());
             notify_state.last_error = Some(error.to_string());
         }
-        sleep(Duration::from_secs(state.config.notify_poll_interval_seconds)).await;
+        sleep(Duration::from_secs(
+            state.config.notify_poll_interval_seconds,
+        ))
+        .await;
     }
 }
 
@@ -3142,7 +3144,8 @@ async fn process_notify_tick(state: &AppState) -> Result<()> {
         monitoring,
         alerts,
     };
-    let payload_body = serde_json::to_vec(&payload).context("failed to serialize notify webhook payload")?;
+    let payload_body =
+        serde_json::to_vec(&payload).context("failed to serialize notify webhook payload")?;
     let timestamp = current_unix_ms();
 
     {
@@ -8474,13 +8477,18 @@ async fn metrics_prometheus(State(state): State<AppState>) -> Result<Response, A
         "ccbg_object_action_entries{{outcome=\"failed\"}} {}",
         monitoring.object_actions.failed_entries
     ));
-    lines.push("# HELP ccbg_object_action_unique_operators Unique operators in retained action history.".to_string());
+    lines.push(
+        "# HELP ccbg_object_action_unique_operators Unique operators in retained action history."
+            .to_string(),
+    );
     lines.push("# TYPE ccbg_object_action_unique_operators gauge".to_string());
     lines.push(format!(
         "ccbg_object_action_unique_operators {}",
         monitoring.object_actions.unique_operators
     ));
-    lines.push("# HELP ccbg_replication_target_jobs Replication job counters per target.".to_string());
+    lines.push(
+        "# HELP ccbg_replication_target_jobs Replication job counters per target.".to_string(),
+    );
     lines.push("# TYPE ccbg_replication_target_jobs gauge".to_string());
     for target in &replication_state.target_statuses {
         lines.push(format!(
@@ -9756,8 +9764,7 @@ mod tests {
         timestamp: Option<String>,
     }
 
-    async fn spawn_test_webhook_server(
-    ) -> (
+    async fn spawn_test_webhook_server() -> (
         String,
         Arc<Mutex<Vec<RecordedWebhookRequest>>>,
         oneshot::Sender<()>,
@@ -10168,7 +10175,12 @@ mod tests {
             .expect("metrics health should succeed");
         assert_eq!(health.status, "degraded");
         assert!(!health.ready);
-        assert!(health.alerts.iter().any(|alert| alert.title.contains("unavailable")));
+        assert!(
+            health
+                .alerts
+                .iter()
+                .any(|alert| alert.title.contains("unavailable"))
+        );
     }
 
     #[tokio::test]
@@ -10181,13 +10193,25 @@ mod tests {
             .await
             .expect("first notify tick should succeed");
         sleep(Duration::from_millis(50)).await;
-        assert_eq!(received.lock().expect("received webhook list poisoned").len(), 1);
+        assert_eq!(
+            received
+                .lock()
+                .expect("received webhook list poisoned")
+                .len(),
+            1
+        );
 
         process_notify_tick(&state)
             .await
             .expect("second notify tick should succeed");
         sleep(Duration::from_millis(50)).await;
-        assert_eq!(received.lock().expect("received webhook list poisoned").len(), 1);
+        assert_eq!(
+            received
+                .lock()
+                .expect("received webhook list poisoned")
+                .len(),
+            1
+        );
 
         record_replication_state(
             &state,
@@ -10208,6 +10232,9 @@ mod tests {
         assert_eq!(received_guard.len(), 2);
         assert!(received_guard[1].body.contains("replication jobs failed"));
         assert!(received_guard[1].event_id.is_some());
+        assert!(received_guard[1].timestamp.is_some());
+        assert!(received_guard[1].signature.is_none());
+        assert!(received_guard[1].signature_version.is_none());
         drop(received_guard);
 
         let notify_status = current_notify_status_payload(&state);
@@ -10239,7 +10266,11 @@ mod tests {
             .event_id
             .as_deref()
             .expect("signed webhook should include event id");
-        assert!(request.body.contains(&format!("\"event_id\":\"{event_id}\"")));
+        assert!(
+            request
+                .body
+                .contains(&format!("\"event_id\":\"{event_id}\""))
+        );
         assert_eq!(request.signature_version.as_deref(), Some("v1"));
         let timestamp = request
             .timestamp
@@ -10262,6 +10293,16 @@ mod tests {
         assert!(notify_status.signature_enabled);
 
         let _ = shutdown.send(());
+    }
+
+    #[test]
+    fn notify_signature_example_matches_reference_receiver() {
+        let body = br#"{"event_id":"evt-123","alerts":[{"title":"provider unavailable"}]}"#;
+        let timestamp = 1_710_000_000_123_u64;
+        assert_eq!(
+            sign_notify_payload("notify-secret", timestamp, body),
+            "373958a9b493acf9954727491b8b6d6335c49d34d77eafe0faf5c23fb4c59dc4"
+        );
     }
 
     #[tokio::test]
