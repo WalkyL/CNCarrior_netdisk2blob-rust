@@ -329,12 +329,20 @@
 
 当前若启用了签名，请求头会额外包含:
 
+- `x-ccbg-notify-event-id`
+- `x-ccbg-notify-signature-version`
 - `x-ccbg-notify-timestamp`
 - `x-ccbg-notify-signature`
 
 签名算法:
 
 - `hex(HMAC_SHA256(secret, "<timestamp>.<sha256(body)>"))`
+
+接收端建议:
+
+- 校验 `x-ccbg-notify-signature-version` 当前应为 `v1`
+- 校验 `x-ccbg-notify-timestamp` 是否落在可接受时间窗内
+- 按 `x-ccbg-notify-event-id` 做幂等去重
 
 ### 4.5 object_action_history_limit
 

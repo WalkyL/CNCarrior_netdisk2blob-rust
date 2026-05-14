@@ -87,8 +87,10 @@ const BROWSER_FLOW_AUTH_SESSION_STATUS_ANSWERED: &str = "answered";
 const BROWSER_FLOW_AUTH_SESSION_STATUS_RESUMED: &str = "resumed";
 const BROWSER_FLOW_AUTH_SESSION_STATUS_COMPLETED: &str = "completed";
 const BROWSER_FLOW_AUTH_SESSION_STATUS_FAILED: &str = "failed";
+const NOTIFY_SIGNATURE_VERSION_HEADER: &str = "x-ccbg-notify-signature-version";
 const NOTIFY_SIGNATURE_HEADER: &str = "x-ccbg-notify-signature";
 const NOTIFY_TIMESTAMP_HEADER: &str = "x-ccbg-notify-timestamp";
+const NOTIFY_EVENT_ID_HEADER: &str = "x-ccbg-notify-event-id";
 
 #[derive(Clone)]
 struct AppState {
@@ -426,6 +428,7 @@ struct NotifyStatusPayload {
 
 #[derive(Debug, Clone, Serialize)]
 struct NotifyWebhookPayload {
+    event_id: String,
     service: &'static str,
     emitted_at_unix_ms: u64,
     runtime: RuntimeStatusPayload,
@@ -3130,7 +3133,9 @@ async fn process_notify_tick(state: &AppState) -> Result<()> {
         }
     }
 
+    let event_id = random_urlsafe_token(18);
     let payload = NotifyWebhookPayload {
+        event_id: event_id.clone(),
         service: "carrier-cloud-blob-gateway",
         emitted_at_unix_ms: current_unix_ms(),
         runtime: runtime_status_payload(state),
@@ -3151,11 +3156,14 @@ async fn process_notify_tick(state: &AppState) -> Result<()> {
         .http_client
         .post(webhook_url)
         .header(CONTENT_TYPE, "application/json")
+        .header(NOTIFY_EVENT_ID_HEADER, event_id)
         .header(NOTIFY_TIMESTAMP_HEADER, timestamp.to_string())
         .body(payload_body.clone());
     if let Some(secret) = state.config.notify_webhook_signing_secret.as_deref() {
         let signature = sign_notify_payload(secret, timestamp, &payload_body);
-        request = request.header(NOTIFY_SIGNATURE_HEADER, signature);
+        request = request
+            .header(NOTIFY_SIGNATURE_VERSION_HEADER, "v1")
+            .header(NOTIFY_SIGNATURE_HEADER, signature);
     }
     request
         .send()
@@ -9742,6 +9750,8 @@ mod tests {
     #[derive(Debug, Clone)]
     struct RecordedWebhookRequest {
         body: String,
+        event_id: Option<String>,
+        signature_version: Option<String>,
         signature: Option<String>,
         timestamp: Option<String>,
     }
@@ -9763,6 +9773,16 @@ mod tests {
             any(move |request: Request<Body>| {
                 let received = received_clone.clone();
                 async move {
+                    let event_id = request
+                        .headers()
+                        .get(NOTIFY_EVENT_ID_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToString::to_string);
+                    let signature_version = request
+                        .headers()
+                        .get(NOTIFY_SIGNATURE_VERSION_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToString::to_string);
                     let signature = request
                         .headers()
                         .get(NOTIFY_SIGNATURE_HEADER)
@@ -9783,6 +9803,8 @@ mod tests {
                         .expect("received webhook list poisoned")
                         .push(RecordedWebhookRequest {
                             body,
+                            event_id,
+                            signature_version,
                             signature,
                             timestamp,
                         });
@@ -10185,6 +10207,7 @@ mod tests {
         let received_guard = received.lock().expect("received webhook list poisoned");
         assert_eq!(received_guard.len(), 2);
         assert!(received_guard[1].body.contains("replication jobs failed"));
+        assert!(received_guard[1].event_id.is_some());
         drop(received_guard);
 
         let notify_status = current_notify_status_payload(&state);
@@ -10212,6 +10235,12 @@ mod tests {
         let received_guard = received.lock().expect("received webhook list poisoned");
         assert_eq!(received_guard.len(), 1);
         let request = &received_guard[0];
+        let event_id = request
+            .event_id
+            .as_deref()
+            .expect("signed webhook should include event id");
+        assert!(request.body.contains(&format!("\"event_id\":\"{event_id}\"")));
+        assert_eq!(request.signature_version.as_deref(), Some("v1"));
         let timestamp = request
             .timestamp
             .as_deref()
