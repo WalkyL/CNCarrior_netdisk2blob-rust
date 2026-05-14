@@ -1409,6 +1409,15 @@ struct ProviderTestPayload {
 }
 
 #[derive(Debug, Serialize)]
+struct ReplicationRetryPayload {
+    job_id: u64,
+    status: &'static str,
+    target: String,
+    bucket: String,
+    key: String,
+}
+
+#[derive(Debug, Serialize)]
 struct ObjectProviderStatusPayload {
     provider: &'static str,
     label: &'static str,
@@ -1718,6 +1727,12 @@ async fn main() -> Result<()> {
         );
         replication.restore_pending(restored_jobs);
     }
+    let next_job_id = metadata_store
+        .max_job_id()
+        .context("failed to read max replication job id")?
+        .unwrap_or(0)
+        .saturating_add(1);
+    replication.ensure_next_job_id_at_least(next_job_id);
 
     let state = AppState {
         config: config.clone(),
@@ -1810,6 +1825,10 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
     let admin_app = Router::new()
         .route("/", get(admin_index))
         .route("/api/status", get(admin_status))
+        .route(
+            "/api/replication/jobs/{job_id}/retry",
+            post(retry_replication_job_api),
+        )
         .route("/api/control-plane/topology", post(update_topology))
         .route(
             "/api/providers/{provider}/credentials",
@@ -3428,6 +3447,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     <section class="card" style="margin-top: 16px;">
       <h2>Replication Queue</h2>
       <p>Watch pending copy/delete work here. Failed jobs stay visible in the recent history table with the last error message.</p>
+      <div id="replication-feedback" class="flash"></div>
       <div id="replication-metrics" class="metric-grid"></div>
       <div style="margin-top: 16px;">
         <h3>Target Status</h3>
@@ -3792,6 +3812,11 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     }}
     function setProviderCredentialsFeedback(message, tone) {{
       const node = document.getElementById('provider-credentials-feedback');
+      node.textContent = message || '';
+      node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
+    }}
+    function setReplicationFeedback(message, tone) {{
+      const node = document.getElementById('replication-feedback');
       node.textContent = message || '';
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }}
@@ -4184,6 +4209,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
               <th>Next Retry</th>
               <th>Error</th>
               <th>Queued</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -4198,12 +4224,28 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
                   <td>${{escapeHtml(formatTimestamp(job.next_attempt_at_unix_ms))}}</td>
                   <td>${{escapeHtml(job.last_error || '') || 'None'}}</td>
                   <td>${{escapeHtml(formatTimestamp(job.enqueued_at_unix_ms))}}</td>
+                  <td>${{job.status === 'failed' ? `<button class="secondary" type="button" data-retry-replication-job="${{job.job_id}}">Retry</button>` : ''}}</td>
                 </tr>
               `).join('')
             }}
           </tbody>
         </table>
       `;
+    }}
+    async function retryReplicationJob(jobId) {{
+      setReplicationFeedback(`Retrying replication job ${{jobId}}…`, 'warn');
+      try {{
+        const result = await fetchJson(`/api/replication/jobs/${{encodeURIComponent(jobId)}}/retry`, {{
+          method: 'POST',
+        }});
+        await refreshStatus();
+        setReplicationFeedback(
+          `Replication job ${{result.job_id}} requeued for ${{providerLabel(result.target)}} -> ${{result.bucket}}/${{result.key}}.`,
+          'ok'
+        );
+      }} catch (error) {{
+        setReplicationFeedback(error.message, 'warn');
+      }}
     }}
     function renderReplication(replicationState) {{
       if (!replicationState) {{
@@ -5318,6 +5360,13 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       }}
       runProviderTest(button.dataset.providerTest);
     }});
+    document.getElementById('replication-recent').addEventListener('click', event => {{
+      const button = event.target.closest('button[data-retry-replication-job]');
+      if (!button) {{
+        return;
+      }}
+      retryReplicationJob(button.dataset.retryReplicationJob);
+    }});
     document.getElementById('provider-credentials-grid').addEventListener('click', event => {{
       const saveButton = event.target.closest('button[data-provider-credential-save]');
       if (saveButton) {{
@@ -5452,6 +5501,25 @@ async fn test_provider(
         roles: provider_roles(&topology, provider),
         checked_at_unix_ms: current_unix_ms(),
         health,
+    }))
+}
+
+async fn retry_replication_job_api(
+    State(state): State<AppState>,
+    Path(job_id): Path<u64>,
+) -> Result<Json<ReplicationRetryPayload>, ApiError> {
+    let retried_job = state
+        .metadata_store
+        .retry_failed_job(job_id, u128::from(current_unix_ms()))
+        .map_err(|error| BlobError::Configuration(error.to_string()))?;
+    state.replication.enqueue_existing_job(retried_job.clone());
+
+    Ok(Json(ReplicationRetryPayload {
+        job_id: retried_job.job_id,
+        status: retried_job.status.as_str(),
+        target: retried_job.target,
+        bucket: retried_job.object.bucket,
+        key: retried_job.object.key,
     }))
 }
 
@@ -11694,6 +11762,9 @@ mod tests {
         assert!(html.contains("id=\"monitoring-summary\""));
         assert!(html.contains("id=\"monitoring-failures\""));
         assert!(html.contains("renderMonitoringSummary"));
+        assert!(html.contains("id=\"replication-feedback\""));
+        assert!(html.contains("data-retry-replication-job"));
+        assert!(html.contains("retryReplicationJob"));
         assert!(html.contains("id=\"status-auto-refresh-enabled\""));
         assert!(html.contains("id=\"status-auto-refresh-interval-seconds\""));
         assert!(html.contains("id=\"status-refresh-summary\""));
@@ -11794,6 +11865,118 @@ mod tests {
         assert_eq!(snapshot.target_statuses.len(), 1);
         assert_eq!(snapshot.target_statuses[0].provider, "onedrive");
         assert_eq!(snapshot.target_statuses[0].queued_count, 1);
+    }
+
+    #[tokio::test]
+    async fn retry_replication_job_api_requeues_latest_failed_job() {
+        let state = test_state();
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "retry/manual.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+
+        let failed_job = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "root", "retry/manual.txt")
+            .expect("latest failed job should load")
+            .expect("failed job should exist");
+        assert!(matches!(failed_job.status, ReplicationStatus::Failed));
+
+        let Json(payload) =
+            retry_replication_job_api(State(state.clone()), Path(failed_job.job_id))
+                .await
+                .expect("retry api should succeed");
+        assert_eq!(payload.job_id, failed_job.job_id);
+        assert_eq!(payload.status, "pending");
+        assert_eq!(payload.target, "onedrive");
+
+        let snapshot = state.replication.snapshot();
+        assert_eq!(snapshot.pending_count, 1);
+        assert!(matches!(
+            snapshot.pending_jobs[0].status,
+            ReplicationStatus::Pending
+        ));
+        assert_eq!(snapshot.pending_jobs[0].job_id, failed_job.job_id);
+        assert_eq!(snapshot.pending_jobs[0].attempts, 0);
+        assert!(snapshot.pending_jobs[0].last_error.is_none());
+
+        let persisted = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "root", "retry/manual.txt")
+            .expect("retried job should load")
+            .expect("retried job should still exist");
+        assert!(matches!(persisted.status, ReplicationStatus::Pending));
+        assert_eq!(persisted.job_id, failed_job.job_id);
+        assert_eq!(persisted.attempts, 0);
+        assert!(persisted.last_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn retry_replication_job_api_rejects_non_failed_job() {
+        let state = test_state();
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Completed,
+            "root",
+            "retry/completed.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+
+        let completed_job = state
+            .metadata_store
+            .latest_job_for_object("onedrive", "root", "retry/completed.txt")
+            .expect("latest completed job should load")
+            .expect("completed job should exist");
+
+        let error = retry_replication_job_api(State(state), Path(completed_job.job_id))
+            .await
+            .expect_err("retry api should reject non-failed job");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn replication_engine_next_job_id_advances_past_metadata_history() {
+        let state = test_state();
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Completed,
+            "root",
+            "history/existing.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+
+        let next_job_id = state
+            .metadata_store
+            .max_job_id()
+            .expect("max job id should load")
+            .unwrap_or(0)
+            .saturating_add(1);
+        state.replication.ensure_next_job_id_at_least(next_job_id);
+
+        let jobs = state.replication.enqueue_put(
+            &runtime_topology(&state),
+            Some("stub".to_string()),
+            "root",
+            "history/new.txt",
+            None,
+            7,
+            Some("text/plain".to_string()),
+        );
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, next_job_id);
     }
 
     #[tokio::test]

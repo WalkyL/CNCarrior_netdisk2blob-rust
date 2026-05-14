@@ -271,6 +271,26 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 
 这块摘要的目标不是替代详细表格，而是让运维先快速判断当前实例是否处在需要人工介入的状态。
 
+### 5.75 Replication Retry
+
+`Replication Queue -> Recent Jobs` 表格现在会在符合条件的失败任务旁边显示 `Retry`。
+
+当前规则:
+
+- 只允许重试 `failed` 状态的 job
+- 只允许重试该 `target + bucket + key` 上当前最新的一条 failed job
+- 重试后该 job 会重新变成 `pending`
+- 重试会清空 `last_error`、`next_retry`，并重新进入内存队列
+
+这条入口的定位是“修完根因后的人工补偿”，不是批量回放系统。
+
+典型使用方式:
+
+- 先在 `Monitoring Summary` 或 `Notify` 中看到复制失败
+- 再到 `Recent Jobs` 查看最新错误
+- 修正凭证、网络、target 配置后，点 `Retry`
+- 观察 `pending / retry / failed` 计数是否回落
+
 ### 5.8 Notify
 
 Admin Web 现在额外提供 `Notify` 卡片，显示:

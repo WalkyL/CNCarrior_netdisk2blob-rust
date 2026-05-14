@@ -173,6 +173,12 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `GET http://127.0.0.1:61083/readyz` -> 返回 `200` / `503`，用于宿主探针判断 primary provider 是否可服务
 - `GET http://127.0.0.1:61083/metrics` -> 返回 Prometheus 文本格式指标，覆盖 uptime、open alerts、provider health、replication job 计数和对象动作汇总
 
+当前已落地的复制人工干预能力:
+
+- Admin Web 的 `Recent Jobs` 表格现在可对最新 failed replication job 直接执行 `Retry`
+- `POST /api/replication/jobs/{job_id}/retry` 只允许重试该对象在对应 target 上“当前最新的一条 failed job”
+- 重试会把该 job 重新置回 `pending` 并重新入内存队列
+
 当前已落地的外部告警 webhook:
 
 - `CCBG_NOTIFY_WEBHOOK_URL` 配置后，后台会按 `CCBG_NOTIFY_POLL_INTERVAL_SECONDS` 周期检查 alerts
@@ -193,7 +199,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - 当响应来自备份侧时，会附带 `x-ccbg-source-provider` 和 `x-ccbg-fallback-from`
 - 当前自动化测试已覆盖 `stub` backend 与 OneDrive mock Graph；运营商 provider 仍未完成真实读写
 
-当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要与基础重试退避已经落地；后续仍需补更完整的死信 / 人工重试入口和 OneDrive OAuth broker。
+当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要、基础重试退避和 latest failed job 人工重试已经落地；后续仍需补更完整的死信 / 批量重试入口和 OneDrive OAuth broker。
 
 一期平台兼容边界:
 

@@ -119,6 +119,15 @@ impl ReplicationEngine {
         }
     }
 
+    pub fn ensure_next_job_id_at_least(&self, next_job_id: u64) {
+        self.next_job_id
+            .fetch_max(next_job_id.max(1), Ordering::Relaxed);
+    }
+
+    pub fn allocate_job_id(&self) -> u64 {
+        self.next_job_id.fetch_add(1, Ordering::Relaxed)
+    }
+
     pub fn enqueue_put(
         &self,
         topology: &TopologyPolicy,
@@ -205,6 +214,14 @@ impl ReplicationEngine {
         pending.push_back(job);
     }
 
+    pub fn enqueue_existing_job(&self, job: ReplicationJob) {
+        let mut pending = self
+            .pending_jobs
+            .lock()
+            .expect("replication queue poisoned");
+        pending.push_back(job);
+    }
+
     pub fn record_completed(&self, mut job: ReplicationJob) {
         job.status = ReplicationStatus::Completed;
         job.next_attempt_at_unix_ms = None;
@@ -249,7 +266,7 @@ impl ReplicationEngine {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        self.next_job_id.fetch_max(next_job_id, Ordering::Relaxed);
+        self.ensure_next_job_id_at_least(next_job_id);
 
         let mut pending = self
             .pending_jobs
@@ -273,7 +290,7 @@ impl ReplicationEngine {
 
         for target in &topology.sync_targets {
             let job = ReplicationJob {
-                job_id: self.next_job_id.fetch_add(1, Ordering::Relaxed),
+                job_id: self.allocate_job_id(),
                 target: target.as_str().to_string(),
                 source_provider: source_provider.clone(),
                 operation: operation.clone(),
@@ -436,5 +453,21 @@ mod tests {
             .pop_next_ready_at(2_000)
             .expect("retry job should become ready when due");
         assert_eq!(retry.job_id, 1);
+    }
+
+    #[test]
+    fn seeded_next_job_id_is_used_for_new_jobs() {
+        let engine = ReplicationEngine::new();
+        engine.ensure_next_job_id_at_least(9);
+
+        let jobs = engine.enqueue_delete(
+            &topology(),
+            Some("unicom".to_string()),
+            "bucket-a",
+            "seeded.txt",
+        );
+
+        assert_eq!(jobs[0].job_id, 9);
+        assert_eq!(jobs[1].job_id, 10);
     }
 }

@@ -12,6 +12,7 @@
 
 - `POST /api/object-actions`
 - `POST /api/object-actions/history/clear`
+- `POST /api/replication/jobs/{job_id}/retry`
 - `GET /api/status`
 
 当前支持的动作:
@@ -129,7 +130,40 @@
 - 这是共享状态，不是单浏览器状态
 - 清空会影响所有访问同一网关控制面的操作者
 
-## 4. GET /api/status
+## 4. POST /api/replication/jobs/{job_id}/retry
+
+用途:
+
+- 对复制队列中的最新 failed job 执行人工重试
+
+成功返回:
+
+```json
+{
+  "job_id": 42,
+  "status": "pending",
+  "target": "onedrive",
+  "bucket": "root",
+  "key": "docs/report.txt"
+}
+```
+
+行为说明:
+
+- 只允许重试 `failed` 状态的 job
+- 只允许重试该 `target + bucket + key` 上当前最新的一条 failed job
+- 重试后该 job 会被重新置成 `pending` 并重新入内存队列
+- 会清空 `last_error` 和 `next_attempt_at_unix_ms`
+
+失败场景包括:
+
+- `job_id` 不存在
+- 该 job 当前不是 `failed`
+- 该 job 已经不是这个对象在该 target 上的最新状态
+
+这条接口的目标是“值守时人工恢复”，不是批量补偿系统。
+
+## 5. GET /api/status
 
 用途:
 
@@ -146,7 +180,7 @@
 - `provider_health`
 - `replication_state`
 
-### 4.1 runtime
+### 5.1 runtime
 
 类型:
 
@@ -186,7 +220,7 @@
 - `replication_workers`: 复制 worker 数量
 - `object_action_history_limit`: 当前共享历史窗口大小
 
-### 4.2 object_action_history
+### 5.2 object_action_history
 
 类型:
 
@@ -241,7 +275,7 @@
 - `warnings`: 预警信息
 - `references`: 被影响对象及变化摘要
 
-### 4.3 monitoring
+### 5.3 monitoring
 
 类型:
 
@@ -294,7 +328,7 @@
 - `object_actions`: 对象动作历史汇总
 - `recent_failures`: 最近失败事件列表，来源包括失败的对象动作和失败的复制任务
 
-### 4.4 notify
+### 5.4 notify
 
 类型:
 
@@ -348,7 +382,7 @@
 - 按 `x-ccbg-notify-event-id` 做幂等去重
 - 可直接参考 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 与 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)
 
-### 4.5 object_action_history_limit
+### 5.5 object_action_history_limit
 
 类型:
 
@@ -367,9 +401,9 @@ Admin Web 会基于 `object_action_history` 做本地筛选和 JSON/CSV 导出�
 CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 ```
 
-## 5. 配置项
+## 6. 配置项
 
-### 5.1 CCBG_OBJECT_ACTION_HISTORY_LIMIT
+### 6.1 CCBG_OBJECT_ACTION_HISTORY_LIMIT
 
 用途:
 
@@ -381,34 +415,40 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 ```
 
-### 5.2 CCBG_CONTROL_PLANE_FILE
+### 6.2 CCBG_CONTROL_PLANE_FILE
 
 用途:
 
 - 指定 control-plane 状态文件路径
 - 对象动作共享历史会持久化在这里
 
-## 6. 行为约束
+## 7. 行为约束
 
-### 6.1 历史来源
+### 7.1 历史来源
 
 - 历史以服务端状态为准
 - 不以浏览器 `localStorage` 为准
 
-### 6.2 截断规则
+### 7.2 截断规则
 
 - 新记录插入头部
 - 超过 `object_action_history_limit` 后，裁剪最旧记录
 
-### 6.3 一致性边界
+### 7.3 一致性边界
 
 - primary provider 动作成功，不代表 backup 已同步完成
 - before/after 检查展示的是当前观察状态
 - fallback 仍受最新复制状态约束
 
-## 7. Provider 特殊说明
+### 7.4 复制人工重试边界
 
-### 7.1 联通
+- `Retry` 不是强制执行通道，只是把 job 重新交给后台 worker
+- 如果根因没修复，job 仍然会再次失败
+- 当前只支持单 job 人工重试，不支持批量重试或按 target 批量清队
+
+## 8. Provider 特殊说明
+
+### 8.1 联通
 
 当前联通 `rename` 仍有边界:
 

@@ -209,6 +209,78 @@ impl MetadataStore {
         Ok(prune_result)
     }
 
+    pub fn retry_failed_job(
+        &self,
+        job_id: u64,
+        enqueued_at_unix_ms: u128,
+    ) -> Result<ReplicationJob, MetadataError> {
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+
+        let job = transaction
+            .query_row(
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+                 FROM replication_jobs
+                 WHERE job_id = ?1",
+                [job_id as i64],
+                row_to_job,
+            )
+            .optional()
+            .map_err(MetadataError::Sqlite)?
+            .ok_or(MetadataError::MissingJob(job_id))?;
+
+        if !matches!(job.status, ReplicationStatus::Failed) {
+            return Err(MetadataError::JobNotFailed(job_id));
+        }
+
+        let latest_job_id = transaction
+            .query_row(
+                "SELECT job_id
+                 FROM replication_jobs
+                 WHERE target = ?1 AND bucket = ?2 AND key = ?3
+                 ORDER BY job_id DESC
+                 LIMIT 1",
+                params![job.target, job.object.bucket, job.object.key],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(MetadataError::Sqlite)? as u64;
+
+        if latest_job_id != job_id {
+            return Err(MetadataError::JobNotLatest {
+                requested_job_id: job_id,
+                latest_job_id,
+            });
+        }
+
+        transaction
+            .execute(
+                "UPDATE replication_jobs
+                 SET status = ?1,
+                     attempts = 0,
+                     enqueued_at_unix_ms = ?2,
+                     next_attempt_at_unix_ms = NULL,
+                     last_error = NULL
+                 WHERE job_id = ?3",
+                params![
+                    ReplicationStatus::Pending.as_str(),
+                    enqueued_at_unix_ms as i64,
+                    job_id as i64,
+                ],
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        transaction.commit().map_err(MetadataError::Sqlite)?;
+
+        Ok(ReplicationJob {
+            status: ReplicationStatus::Pending,
+            attempts: 0,
+            enqueued_at_unix_ms,
+            next_attempt_at_unix_ms: None,
+            last_error: None,
+            ..job
+        })
+    }
+
     pub fn apply_retention(&self) -> Result<MetadataPruneResult, MetadataError> {
         let mut connection = self.connection.lock().expect("metadata store poisoned");
         let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
@@ -649,6 +721,15 @@ pub enum MetadataError {
     },
     #[error("replication job {0} was not found")]
     MissingJob(u64),
+    #[error("replication job {0} is not currently failed")]
+    JobNotFailed(u64),
+    #[error(
+        "replication job {requested_job_id} is no longer the latest state for its object; latest job is {latest_job_id}"
+    )]
+    JobNotLatest {
+        requested_job_id: u64,
+        latest_job_id: u64,
+    },
 }
 
 #[cfg(test)]
@@ -662,7 +743,7 @@ mod tests {
         ReplicationJob, ReplicationObjectRef, ReplicationOperation, ReplicationStatus,
     };
 
-    use super::{MetadataRetentionPolicy, MetadataStore, MetadataStoreOptions};
+    use super::{MetadataError, MetadataRetentionPolicy, MetadataStore, MetadataStoreOptions};
 
     fn temp_db_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -732,6 +813,69 @@ mod tests {
             snapshot.recent_jobs[0].last_error.as_deref(),
             Some("write not supported")
         );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn failed_job_can_be_requeued_as_pending() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+        store
+            .enqueue_jobs(&[sample_job(8)])
+            .expect("job should persist");
+        store
+            .mark_job_status(8, ReplicationStatus::Failed, 2, Some("temporary outage"))
+            .expect("job should fail");
+
+        let retried = store
+            .retry_failed_job(8, 9_999)
+            .expect("failed job should retry");
+
+        assert_eq!(retried.job_id, 8);
+        assert!(matches!(retried.status, ReplicationStatus::Pending));
+        assert_eq!(retried.attempts, 0);
+        assert_eq!(retried.enqueued_at_unix_ms, 9_999);
+        assert!(retried.last_error.is_none());
+
+        let snapshot = store.snapshot(10).expect("snapshot should load");
+        assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.retry_scheduled_count, 0);
+        assert_eq!(snapshot.failed_count, 0);
+        assert_eq!(snapshot.recent_jobs[0].job_id, 8);
+        assert!(matches!(
+            snapshot.recent_jobs[0].status,
+            ReplicationStatus::Pending
+        ));
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn retry_rejects_non_latest_failed_job() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut failed_job = sample_job(20);
+        failed_job.status = ReplicationStatus::Failed;
+
+        let mut newer_completed = sample_job(21);
+        newer_completed.status = ReplicationStatus::Completed;
+
+        store
+            .enqueue_jobs(&[failed_job, newer_completed])
+            .expect("jobs should persist");
+
+        let error = store
+            .retry_failed_job(20, 9_999)
+            .expect_err("retry should reject stale failed job");
+        assert!(matches!(
+            error,
+            MetadataError::JobNotLatest {
+                requested_job_id: 20,
+                latest_job_id: 21,
+            }
+        ));
 
         fs::remove_file(db_path).ok();
     }
