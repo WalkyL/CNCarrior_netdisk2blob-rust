@@ -10,6 +10,10 @@ use std::{
 use anyhow::{Context, Result};
 #[cfg(test)]
 use axum::body::Bytes;
+#[cfg(test)]
+use axum::http::Request;
+#[cfg(test)]
+use axum::routing::any;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -62,6 +66,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::time::{Duration, sleep};
+#[cfg(test)]
+use tokio::sync::oneshot;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -90,6 +96,7 @@ struct AppState {
     metadata_store: Arc<MetadataStore>,
     auth: Arc<AuthBrokerState>,
     control_plane: Arc<Mutex<ControlPlaneState>>,
+    notify_state: Arc<Mutex<NotifyState>>,
     browser_flow_catalogs: Arc<BrowserFlowCatalogCollection>,
     started_at_unix_ms: u64,
 }
@@ -362,6 +369,7 @@ struct TopologyProviderOptionPayload {
 struct AdminStatusPayload {
     runtime: RuntimeStatusPayload,
     monitoring: MonitoringSummaryPayload,
+    notify: NotifyStatusPayload,
     runtime_topology: RuntimeTopologyPayload,
     desired_topology: DesiredTopologyPayload,
     replication: ReplicationQueueSummary,
@@ -392,6 +400,34 @@ struct RuntimeStatusPayload {
     provider_capability_catalog_dir: String,
     replication_workers: usize,
     object_action_history_limit: usize,
+}
+
+#[derive(Debug, Clone)]
+struct NotifyState {
+    last_alert_hash: Option<String>,
+    last_attempt_at_unix_ms: Option<u64>,
+    last_success_at_unix_ms: Option<u64>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NotifyStatusPayload {
+    webhook_enabled: bool,
+    webhook_url_present: bool,
+    poll_interval_seconds: u64,
+    last_alert_hash: Option<String>,
+    last_attempt_at_unix_ms: Option<u64>,
+    last_success_at_unix_ms: Option<u64>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NotifyWebhookPayload {
+    service: &'static str,
+    emitted_at_unix_ms: u64,
+    runtime: RuntimeStatusPayload,
+    monitoring: MonitoringSummaryPayload,
+    alerts: Vec<AdminAlertPayload>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -475,6 +511,23 @@ fn runtime_status_payload(state: &AppState) -> RuntimeStatusPayload {
         provider_capability_catalog_dir: state.config.provider_capability_catalog_dir.clone(),
         replication_workers: state.config.replication_workers,
         object_action_history_limit: state.config.object_action_history_limit,
+    }
+}
+
+fn current_notify_status_payload(state: &AppState) -> NotifyStatusPayload {
+    let snapshot = state
+        .notify_state
+        .lock()
+        .expect("notify state poisoned")
+        .clone();
+    NotifyStatusPayload {
+        webhook_enabled: state.config.notify_webhook_url.is_some(),
+        webhook_url_present: state.config.notify_webhook_url.is_some(),
+        poll_interval_seconds: state.config.notify_poll_interval_seconds,
+        last_alert_hash: snapshot.last_alert_hash,
+        last_attempt_at_unix_ms: snapshot.last_attempt_at_unix_ms,
+        last_success_at_unix_ms: snapshot.last_success_at_unix_ms,
+        last_error: snapshot.last_error,
     }
 }
 
@@ -719,7 +772,7 @@ struct BrowserFlowCatalogQuery {
     surface: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct AdminAlertPayload {
     severity: &'static str,
     title: String,
@@ -773,6 +826,8 @@ struct AppConfig {
     admin_bind_addr: SocketAddr,
     auth_callback_bind_addr: SocketAddr,
     metrics_bind_addr: SocketAddr,
+    notify_webhook_url: Option<String>,
+    notify_poll_interval_seconds: u64,
     control_plane_file: String,
     credentials_dir: String,
     browser_flow_catalog_dir: String,
@@ -1217,6 +1272,9 @@ impl AppConfig {
             admin_bind_addr,
             auth_callback_bind_addr,
             metrics_bind_addr,
+            notify_webhook_url: env_opt("CCBG_NOTIFY_WEBHOOK_URL"),
+            notify_poll_interval_seconds: env_u64("CCBG_NOTIFY_POLL_INTERVAL_SECONDS", 15)
+                .max(5),
             control_plane_file: env_or("CCBG_CONTROL_PLANE_FILE", "./data/control-plane.json"),
             credentials_dir: env_or("CCBG_CREDENTIALS_DIR", "./data/provider-credentials"),
             browser_flow_catalog_dir: env_or(
@@ -1657,10 +1715,17 @@ async fn main() -> Result<()> {
         metadata_store,
         auth: Arc::new(AuthBrokerState::new()),
         control_plane: Arc::new(Mutex::new(control_plane)),
+        notify_state: Arc::new(Mutex::new(NotifyState {
+            last_alert_hash: None,
+            last_attempt_at_unix_ms: None,
+            last_success_at_unix_ms: None,
+            last_error: None,
+        })),
         browser_flow_catalogs,
         started_at_unix_ms: current_unix_ms(),
     };
     spawn_replication_workers(state.clone(), config.replication_workers);
+    tokio::spawn(notify_loop(state.clone()));
     spawn_admin_services(state.clone())
         .await
         .context("failed to start admin/auth services")?;
@@ -1695,6 +1760,8 @@ async fn main() -> Result<()> {
         admin_bind_addr = %config.admin_bind_addr,
         auth_callback_bind_addr = %config.auth_callback_bind_addr,
         metrics_bind_addr = %config.metrics_bind_addr,
+        notify_webhook_enabled = config.notify_webhook_url.is_some(),
+        notify_poll_interval_seconds = config.notify_poll_interval_seconds,
         control_plane_file = %config.control_plane_file,
         browser_flow_catalog_dir = %config.browser_flow_catalog_dir,
         provider_capability_catalog_dir = %config.provider_capability_catalog_dir,
@@ -3005,6 +3072,80 @@ fn build_admin_alerts(
     alerts
 }
 
+fn alerts_fingerprint(alerts: &[AdminAlertPayload]) -> String {
+    let payload = serde_json::to_vec(alerts).unwrap_or_default();
+    sha256_hex(&payload)
+}
+
+async fn notify_loop(state: AppState) {
+    loop {
+        if let Err(error) = process_notify_tick(&state).await {
+            warn!(error = %error, "notify webhook tick failed");
+            let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
+            notify_state.last_attempt_at_unix_ms = Some(current_unix_ms());
+            notify_state.last_error = Some(error.to_string());
+        }
+        sleep(Duration::from_secs(state.config.notify_poll_interval_seconds)).await;
+    }
+}
+
+async fn process_notify_tick(state: &AppState) -> Result<()> {
+    let Some(webhook_url) = state.config.notify_webhook_url.as_deref() else {
+        return Ok(());
+    };
+
+    let replication_state = replication_state_payload(state)?;
+    let provider_health = provider_health_payloads(state).await?;
+    let onedrive_auth = read_onedrive_auth_status(state);
+    let alerts = build_admin_alerts(state, &provider_health, &replication_state, &onedrive_auth);
+    let object_action_history = control_plane_snapshot(state).object_action_history;
+    let monitoring = monitoring_summary_payload(
+        &provider_health,
+        &replication_state,
+        &object_action_history,
+        &alerts,
+    );
+    let alert_hash = alerts_fingerprint(&alerts);
+
+    {
+        let notify_state = state.notify_state.lock().expect("notify state poisoned");
+        if notify_state.last_alert_hash.as_deref() == Some(alert_hash.as_str()) {
+            return Ok(());
+        }
+    }
+
+    let payload = NotifyWebhookPayload {
+        service: "carrier-cloud-blob-gateway",
+        emitted_at_unix_ms: current_unix_ms(),
+        runtime: runtime_status_payload(state),
+        monitoring,
+        alerts,
+    };
+
+    {
+        let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
+        notify_state.last_attempt_at_unix_ms = Some(current_unix_ms());
+        notify_state.last_error = None;
+    }
+
+    state
+        .auth
+        .http_client
+        .post(webhook_url)
+        .json(&payload)
+        .send()
+        .await
+        .context("notify webhook request failed")?
+        .error_for_status()
+        .context("notify webhook returned error status")?;
+
+    let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
+    notify_state.last_alert_hash = Some(alert_hash);
+    notify_state.last_success_at_unix_ms = Some(current_unix_ms());
+    notify_state.last_error = None;
+    Ok(())
+}
+
 fn provider_label(provider: ProviderId) -> &'static str {
     match provider {
         ProviderId::Stub => "Local Stub",
@@ -3202,6 +3343,10 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         <h2>Monitoring Summary</h2>
         <div id="monitoring-summary" class="metric-grid"></div>
         <div id="monitoring-failures" class="health-notes">Loading monitoring summary…</div>
+      </section>
+      <section class="card">
+        <h2>Notify</h2>
+        <div id="notify-summary" class="health-notes">Loading notify status…</div>
       </section>
       <section class="card">
         <h2>OneDrive Auth</h2>
@@ -3776,6 +3921,17 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         ].filter(Boolean);
         return parts.join(' | ');
       }}).join('\n');
+    }}
+    function renderNotifySummary(notify) {{
+      const container = document.getElementById('notify-summary');
+      const summary = [
+        `Webhook enabled: ${{notify?.webhook_enabled ? 'yes' : 'no'}}`,
+        `Poll interval: ${{notify?.poll_interval_seconds ?? 'n/a'}}s`,
+        `Last attempt: ${{formatTimestamp(notify?.last_attempt_at_unix_ms)}}`,
+        `Last success: ${{formatTimestamp(notify?.last_success_at_unix_ms)}}`,
+        `Last error: ${{notify?.last_error || 'none'}}`,
+      ].join('\n');
+      container.textContent = summary;
     }}
     function renderAuthSummary(auth) {{
       const container = document.getElementById('auth-summary');
@@ -4914,6 +5070,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         document.getElementById('gateway-status').textContent = JSON.stringify(status, null, 2);
         renderRuntimeSummary(status.runtime || {{}});
         renderMonitoringSummary(status.monitoring || {{}});
+        renderNotifySummary(status.notify || {{}});
         document.getElementById('auth-status').textContent = JSON.stringify(status.onedrive_auth, null, 2);
         document.getElementById('runtime-topology').textContent = JSON.stringify(status.runtime_topology, null, 2);
         renderAuthSummary(status.onedrive_auth || {{}});
@@ -5221,6 +5378,7 @@ async fn admin_status(State(state): State<AppState>) -> Result<Json<AdminStatusP
     Ok(Json(AdminStatusPayload {
         runtime: runtime_status_payload(&state),
         monitoring,
+        notify: current_notify_status_payload(&state),
         runtime_topology: runtime_topology_payload(&runtime_topology(&state)),
         desired_topology: desired_topology_payload(&state),
         replication: ReplicationQueueSummary {
@@ -9462,6 +9620,8 @@ mod tests {
             metrics_bind_addr: "127.0.0.1:61083"
                 .parse()
                 .expect("metrics addr should parse"),
+            notify_webhook_url: None,
+            notify_poll_interval_seconds: 15,
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
             credentials_dir: temp_db_path().replace(".db", "-provider-credentials"),
             browser_flow_catalog_dir,
@@ -9539,12 +9699,53 @@ mod tests {
                 auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
                 object_action_history: Vec::new(),
             })),
+            notify_state: Arc::new(Mutex::new(NotifyState {
+                last_alert_hash: None,
+                last_attempt_at_unix_ms: None,
+                last_success_at_unix_ms: None,
+                last_error: None,
+            })),
             browser_flow_catalogs: Arc::new(
                 BrowserFlowCatalogCollection::from_json_dir(&config.browser_flow_catalog_dir)
                     .expect("test browser flow catalogs should load"),
             ),
             started_at_unix_ms: current_unix_ms().saturating_sub(5_000),
         }
+    }
+
+    async fn spawn_test_webhook_server(
+    ) -> (String, Arc<Mutex<Vec<String>>>, oneshot::Sender<()>) {
+        let received = Arc::new(Mutex::new(Vec::<String>::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test webhook listener should bind");
+        let addr = listener.local_addr().expect("local addr should load");
+        let received_clone = received.clone();
+        let app = Router::new().route(
+            "/",
+            any(move |request: Request<Body>| {
+                let received = received_clone.clone();
+                async move {
+                    let bytes = to_bytes(request.into_body(), usize::MAX)
+                        .await
+                        .expect("webhook request body should read");
+                    let body = String::from_utf8(bytes.to_vec())
+                        .expect("webhook request body should be utf-8");
+                    received.lock().expect("received webhook list poisoned").push(body);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+
+        (format!("http://{addr}"), received, shutdown_tx)
     }
 
     fn backend_for_test(state: &AppState, provider: ProviderId) -> DynBackend {
@@ -9892,6 +10093,52 @@ mod tests {
         assert_eq!(health.status, "degraded");
         assert!(!health.ready);
         assert!(health.alerts.iter().any(|alert| alert.title.contains("unavailable")));
+    }
+
+    #[tokio::test]
+    async fn notify_webhook_posts_only_when_alert_state_changes() {
+        let (webhook_url, received, shutdown) = spawn_test_webhook_server().await;
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).notify_webhook_url = Some(webhook_url);
+
+        process_notify_tick(&state)
+            .await
+            .expect("first notify tick should succeed");
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(received.lock().expect("received webhook list poisoned").len(), 1);
+
+        process_notify_tick(&state)
+            .await
+            .expect("second notify tick should succeed");
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(received.lock().expect("received webhook list poisoned").len(), 1);
+
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "notify/changed.txt",
+            Some(7),
+            Some("text/plain"),
+        );
+
+        process_notify_tick(&state)
+            .await
+            .expect("changed notify tick should succeed");
+        sleep(Duration::from_millis(50)).await;
+        let received_guard = received.lock().expect("received webhook list poisoned");
+        assert_eq!(received_guard.len(), 2);
+        assert!(received_guard[1].contains("replication jobs failed"));
+        drop(received_guard);
+
+        let notify_status = current_notify_status_payload(&state);
+        assert!(notify_status.webhook_enabled);
+        assert!(notify_status.last_success_at_unix_ms.is_some());
+        assert!(notify_status.last_error.is_none());
+
+        let _ = shutdown.send(());
     }
 
     #[tokio::test]

@@ -139,6 +139,7 @@
 与对象动作直接相关的字段包括:
 
 - `monitoring`
+- `notify`
 - `runtime_topology`
 - `object_action_history`
 - `object_action_history_limit`
@@ -293,7 +294,38 @@
 - `object_actions`: 对象动作历史汇总
 - `recent_failures`: 最近失败事件列表，来源包括失败的对象动作和失败的复制任务
 
-### 4.4 object_action_history_limit
+### 4.4 notify
+
+类型:
+
+```json
+{
+  "webhook_enabled": true,
+  "webhook_url_present": true,
+  "poll_interval_seconds": 15,
+  "last_alert_hash": "6f9d4d2d...",
+  "last_attempt_at_unix_ms": 1710000000000,
+  "last_success_at_unix_ms": 1710000000500,
+  "last_error": null
+}
+```
+
+用途:
+
+- 给 Admin Web 的 `Notify` 卡片提供 webhook 投递状态
+- 让运维确认告警是否已经对外发送，而不是只停留在本地控制面
+
+字段说明:
+
+- `webhook_enabled`: 当前是否启用了 webhook 外发
+- `webhook_url_present`: 当前是否配置了 webhook URL
+- `poll_interval_seconds`: 告警轮询间隔
+- `last_alert_hash`: 最近一次成功发送的 alerts 指纹
+- `last_attempt_at_unix_ms`: 最近一次尝试发送时间
+- `last_success_at_unix_ms`: 最近一次发送成功时间
+- `last_error`: 最近一次发送错误
+
+### 4.5 object_action_history_limit
 
 类型:
 

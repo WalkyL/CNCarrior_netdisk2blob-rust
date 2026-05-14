@@ -32,8 +32,10 @@
 - `GET /api/status` 返回 `object_action_history`
 - `GET /api/status` 返回运行态 `runtime` 摘要
 - `GET /api/status` 返回聚合监控 `monitoring` 摘要
+- `GET /api/status` 返回 notify webhook 状态 `notify`
 - Admin Web 里的对象动作面板
 - Admin Web 里的 `Monitoring Summary` 监控摘要卡片
+- Admin Web 里的 `Notify` 状态卡片
 - before/after 对象状态检查
 - 服务端持久化共享历史
 - 历史筛选、JSON/CSV 导出、清空
@@ -268,6 +270,22 @@ Admin Web 现在额外提供 `Monitoring Summary` 卡片，聚合展示:
 - 最近失败事件列表，来源包括失败的对象动作和失败的复制任务
 
 这块摘要的目标不是替代详细表格，而是让运维先快速判断当前实例是否处在需要人工介入的状态。
+
+### 5.8 Notify
+
+Admin Web 现在额外提供 `Notify` 卡片，显示:
+
+- 是否启用了 `CCBG_NOTIFY_WEBHOOK_URL`
+- 当前 webhook 轮询间隔
+- 最近一次尝试投递时间
+- 最近一次成功投递时间
+- 最近一次投递错误
+
+当前 webhook 采用“告警状态变化才发送”的保守策略。
+
+- 如果 alerts 集合和上一次完全一致，不重复发送
+- 如果 provider 健康、复制失败数或其他告警条件变化，会重新发送一条 webhook
+- webhook 请求体会携带 `runtime`、`monitoring` 和 `alerts`，适合直接接企业微信/飞书/自建中转器
 
 为了避免干扰操作中的表单，自动刷新不会在后台每一轮都强制重载 provider credentials 和 pending verification prompts；这些区域仍以手工触发或显式动作后的刷新为主。
 

@@ -171,6 +171,12 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `GET http://127.0.0.1:61083/readyz` -> 返回 `200` / `503`，用于宿主探针判断 primary provider 是否可服务
 - `GET http://127.0.0.1:61083/metrics` -> 返回 Prometheus 文本格式指标，覆盖 uptime、open alerts、provider health、replication job 计数和对象动作汇总
 
+当前已落地的外部告警 webhook:
+
+- `CCBG_NOTIFY_WEBHOOK_URL` 配置后，后台会按 `CCBG_NOTIFY_POLL_INTERVAL_SECONDS` 周期检查 alerts
+- 仅当 alerts 集合发生变化时才发送 webhook，避免轮询风暴
+- webhook 请求体包含 `runtime`、`monitoring` 和 `alerts`
+
 当前 S3 兼容实现边界:
 
 - 仅验证 header-based SigV4
