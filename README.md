@@ -84,6 +84,7 @@ carrier-cloud-blob-gateway/
 推荐优先阅读的运维文档:
 
 - [docs/auth-step-by-step.md](/home/walky/carrier-cloud-blob-gateway/docs/auth-step-by-step.md:1)
+- [docs/router-deployment-guide.md](/home/walky/carrier-cloud-blob-gateway/docs/router-deployment-guide.md:1)
 - [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)
 - [docs/object-actions-api-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-api-reference.md:1)
 - [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1)
@@ -103,6 +104,8 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 ```
 
 当前默认监听地址为 `127.0.0.1:61080`，该端口规划为本地 S3 兼容数据面入口。
+
+如果宿主是软路由或 OpenWRT 类设备，先看 [docs/router-deployment-guide.md](/home/walky/carrier-cloud-blob-gateway/docs/router-deployment-guide.md:1)。推荐默认保持 `Admin Web`、`OAuth Callback`、`Metrics` 都只监听 `127.0.0.1`，仅按需要显式开放 `S3 API`。
 
 规划中的同步拓扑:
 

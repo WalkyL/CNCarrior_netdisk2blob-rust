@@ -408,7 +408,12 @@
   "notify_last_success_age_ms": 15000,
   "notify_last_error": null,
   "replication_failed_alert_threshold": 2,
-  "replication_failed_alert_min_age_ms": 60000
+  "replication_failed_alert_min_age_ms": 60000,
+  "data_plane_loopback_only": false,
+  "admin_loopback_only": true,
+  "auth_callback_loopback_only": true,
+  "metrics_loopback_only": true,
+  "s3_secret_uses_default": false
 }
 ```
 
@@ -439,6 +444,11 @@
 - `notify_last_error`: 最近一次 webhook 错误
 - `replication_failed_alert_threshold`: latest failed object 正式触发告警的数量阈值
 - `replication_failed_alert_min_age_ms`: latest failed object 参与正式告警的最小失败年龄
+- `data_plane_loopback_only`: 数据面是否仍绑定在回环地址
+- `admin_loopback_only`: Admin Web 是否仍绑定在回环地址
+- `auth_callback_loopback_only`: OAuth callback 是否仍绑定在回环地址
+- `metrics_loopback_only`: Metrics / Health 是否仍绑定在回环地址
+- `s3_secret_uses_default`: 当前 S3 secret 是否还在使用示例默认值 `change-me`
 
 ### 6.5 notify
 

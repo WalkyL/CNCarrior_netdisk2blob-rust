@@ -48,3 +48,9 @@
 - 需要对外暴露时，通过反向代理或端口映射转发
 - 不建议直接把管理界面暴露到公网
 - 若启用 MCP Streamable HTTP，建议只开放到受控内网并校验来源
+
+## 软路由建议
+
+- `S3 API` 是否对外开放按你的 Agent/客户端接入方式决定
+- `Admin Web UI`、`OAuth Callback`、`Metrics / Health` 默认都应保持 `127.0.0.1`
+- 软路由长期值守建议结合 [router-deployment-guide.md](/home/walky/carrier-cloud-blob-gateway/docs/router-deployment-guide.md:1)

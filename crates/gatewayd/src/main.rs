@@ -468,6 +468,11 @@ struct OperationsOverviewPayload {
     notify_last_error: Option<String>,
     replication_failed_alert_threshold: usize,
     replication_failed_alert_min_age_ms: u64,
+    data_plane_loopback_only: bool,
+    admin_loopback_only: bool,
+    auth_callback_loopback_only: bool,
+    metrics_loopback_only: bool,
+    s3_secret_uses_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -569,6 +574,10 @@ fn replication_mode_name(mode: ReplicationMode) -> &'static str {
     }
 }
 
+fn socket_addr_is_loopback(addr: &SocketAddr) -> bool {
+    addr.ip().is_loopback()
+}
+
 fn oldest_job_age_ms<'a>(
     now_unix_ms: u64,
     jobs: impl Iterator<Item = &'a ReplicationJob>,
@@ -626,6 +635,11 @@ fn operations_overview_payload(
         notify_last_error: notify.last_error.clone(),
         replication_failed_alert_threshold: state.config.replication_failed_alert_threshold,
         replication_failed_alert_min_age_ms: state.config.replication_failed_alert_min_age_ms,
+        data_plane_loopback_only: socket_addr_is_loopback(&state.config.bind_addr),
+        admin_loopback_only: socket_addr_is_loopback(&state.config.admin_bind_addr),
+        auth_callback_loopback_only: socket_addr_is_loopback(&state.config.auth_callback_bind_addr),
+        metrics_loopback_only: socket_addr_is_loopback(&state.config.metrics_bind_addr),
+        s3_secret_uses_default: state.config.s3_secret_access_key == "change-me",
     }
 }
 
@@ -3223,6 +3237,49 @@ fn build_admin_alerts(
         });
     }
 
+    if !socket_addr_is_loopback(&state.config.admin_bind_addr) {
+        alerts.push(AdminAlertPayload {
+            severity: "warn",
+            title: "Admin Web is exposed beyond loopback".to_string(),
+            detail: format!(
+                "admin_bind_addr={} | Soft-router deployments should normally keep the admin UI bound to 127.0.0.1 and publish it only through an explicit trusted tunnel or reverse proxy.",
+                state.config.admin_bind_addr
+            ),
+        });
+    }
+
+    if matches!(state.config.admin_mode, AdminMode::Web)
+        && !socket_addr_is_loopback(&state.config.auth_callback_bind_addr)
+    {
+        alerts.push(AdminAlertPayload {
+            severity: "warn",
+            title: "OAuth callback listener is exposed beyond loopback".to_string(),
+            detail: format!(
+                "auth_callback_bind_addr={} | Keep the callback listener loopback-only unless you intentionally terminate and filter it elsewhere.",
+                state.config.auth_callback_bind_addr
+            ),
+        });
+    }
+
+    if !socket_addr_is_loopback(&state.config.metrics_bind_addr) {
+        alerts.push(AdminAlertPayload {
+            severity: "warn",
+            title: "Metrics endpoint is exposed beyond loopback".to_string(),
+            detail: format!(
+                "metrics_bind_addr={} | On routers, prefer loopback-only health/metrics and let an upstream collector or tunnel fetch it if needed.",
+                state.config.metrics_bind_addr
+            ),
+        });
+    }
+
+    if state.config.s3_secret_access_key == "change-me" {
+        alerts.push(AdminAlertPayload {
+            severity: "warn",
+            title: "S3 secret is still using the example default".to_string(),
+            detail: "CCBG_S3_SECRET_ACCESS_KEY still equals the example value `change-me`; rotate it before exposing the S3 endpoint to any non-local client.".to_string(),
+        });
+    }
+
     if replication_state.in_memory.pending_count != replication_state.persisted.pending_count {
         alerts.push(AdminAlertPayload {
             severity: "warn",
@@ -4242,6 +4299,8 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         `Fallback read order: ${{fallbackReadOrder.length ? fallbackReadOrder.map(providerLabel).join(' -> ') : 'disabled'}}`,
         `OneDrive async backup: ${{overview?.onedrive_async_backup_enabled ? 'enabled' : 'disabled'}}`,
         `OneDrive fallback: ${{overview?.onedrive_fallback_enabled ? 'enabled' : 'disabled'}}`,
+        `Loopback-only listeners: data=${{overview?.data_plane_loopback_only ? 'yes' : 'no'}} | admin=${{overview?.admin_loopback_only ? 'yes' : 'no'}} | callback=${{overview?.auth_callback_loopback_only ? 'yes' : 'no'}} | metrics=${{overview?.metrics_loopback_only ? 'yes' : 'no'}}`,
+        `S3 secret rotated: ${{overview?.s3_secret_uses_default ? 'no' : 'yes'}}`,
         `Replication workers: ${{overview?.replication_workers ?? 'n/a'}}`,
         `Pending jobs: ${{overview?.pending_jobs ?? 0}} | retry scheduled: ${{overview?.retry_scheduled_jobs ?? 0}} | latest failed objects: ${{overview?.latest_failed_objects ?? 0}}`,
         `Failed alert gate: threshold=${{overview?.replication_failed_alert_threshold ?? 'n/a'}} | min_age_ms=${{overview?.replication_failed_alert_min_age_ms ?? 'n/a'}}`,
@@ -11056,6 +11115,11 @@ mod tests {
         assert_eq!(status.operations_overview.latest_failed_objects, 1);
         assert_eq!(status.operations_overview.replication_failed_alert_threshold, 1);
         assert_eq!(status.operations_overview.replication_failed_alert_min_age_ms, 0);
+        assert!(status.operations_overview.data_plane_loopback_only);
+        assert!(status.operations_overview.admin_loopback_only);
+        assert!(status.operations_overview.auth_callback_loopback_only);
+        assert!(status.operations_overview.metrics_loopback_only);
+        assert!(!status.operations_overview.s3_secret_uses_default);
         assert_eq!(status.runtime_topology.primary_provider, "stub");
         assert_eq!(status.object_action_history_limit, 12);
         assert_eq!(status.provider_health.len(), 2);
@@ -11233,6 +11297,51 @@ mod tests {
                 .operations_overview
                 .notify_last_success_age_ms
                 .is_some_and(|age| age >= 10_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_alerts_warn_when_router_listeners_are_exposed_or_secret_is_default() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_bind_addr =
+            "0.0.0.0:61081".parse().expect("admin addr should parse");
+        Arc::make_mut(&mut state.config).auth_callback_bind_addr =
+            "0.0.0.0:61082".parse().expect("callback addr should parse");
+        Arc::make_mut(&mut state.config).metrics_bind_addr =
+            "0.0.0.0:61083".parse().expect("metrics addr should parse");
+        Arc::make_mut(&mut state.config).s3_secret_access_key = "change-me".to_string();
+
+        let Json(status) = admin_status(State(state))
+            .await
+            .expect("admin status should succeed");
+
+        assert!(!status.operations_overview.admin_loopback_only);
+        assert!(!status.operations_overview.auth_callback_loopback_only);
+        assert!(!status.operations_overview.metrics_loopback_only);
+        assert!(status.operations_overview.s3_secret_uses_default);
+        assert!(
+            status
+                .alerts
+                .iter()
+                .any(|alert| alert.title.contains("Admin Web is exposed beyond loopback"))
+        );
+        assert!(
+            status
+                .alerts
+                .iter()
+                .any(|alert| alert.title.contains("OAuth callback listener is exposed beyond loopback"))
+        );
+        assert!(
+            status
+                .alerts
+                .iter()
+                .any(|alert| alert.title.contains("Metrics endpoint is exposed beyond loopback"))
+        );
+        assert!(
+            status
+                .alerts
+                .iter()
+                .any(|alert| alert.title.contains("S3 secret is still using the example default"))
         );
     }
 
