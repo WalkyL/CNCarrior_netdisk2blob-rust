@@ -30,10 +30,12 @@
 - `POST /api/object-actions`
 - `POST /api/object-actions/history/clear`
 - `GET /api/status` 返回 `object_action_history`
+- `GET /api/status` 返回运行态 `runtime` 摘要
 - Admin Web 里的对象动作面板
 - before/after 对象状态检查
 - 服务端持久化共享历史
-- 历史筛选、导出、清空
+- 历史筛选、JSON/CSV 导出、清空
+- operator / ticket / notes 审计字段
 
 当前共享历史的几个关键事实:
 
@@ -41,6 +43,7 @@
 - 清空历史会影响所有访问同一网关控制面的操作者
 - 历史长度有上限，超出会从最旧记录开始裁剪
 - 历史导出的是“当前筛选结果”，不是无条件全量导出
+- 单条历史现在可附带 `operator`、`ticket`、`notes`
 
 当前已完成对象动作接入的 provider 包括:
 
@@ -175,6 +178,7 @@ OneDrive 当前已经支持:
 - 执行预览
 - before/after 检查结果
 - 共享历史
+- 审计输入: `operator` / `ticket` / `notes`
 
 ### 5.2 执行前预览
 
@@ -221,7 +225,10 @@ OneDrive 当前已经支持:
 - action 筛选
 - outcome 筛选
 - primary provider 筛选
+- operator 筛选
+- bucket/key 检索
 - 导出当前筛选结果
+- 导出 CSV
 - 清空整份共享历史
 
 注意:
@@ -246,6 +253,14 @@ OneDrive 当前已经支持:
 - 事后审计
 - 给另一个工程师复盘
 - 附到问题单或变更记录里
+
+点击 `Export Shared History CSV` 会导出一份面向审计表格的 CSV。
+
+它更适合:
+
+- 交给运维或变更流程做留档
+- 在表格工具里筛选 operator / ticket / object
+- 做阶段性复盘
 
 ### 5.6 清空
 
@@ -288,6 +303,9 @@ POST /api/object-actions/history/clear
 - `executed_at_unix_ms`
 - `primary_provider`
 - `action`
+- `operator`
+- `ticket`
+- `notes`
 - `description`
 - `outcome`
 - `message`
@@ -406,15 +424,13 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=12
 
 这部分不是“缺功能”，而是后续可以继续增强:
 
-- 给历史记录补操作者标识
-- 给历史记录补备注 / 工单号
 - 支持按时间范围筛选
-- 支持按 bucket / key 搜索
-- 支持导出 CSV
+- 审计字段与外部变更/告警系统联动
+- 更细粒度的聚合统计视图
 - 接入真实账号 E2E 回归
 
 如果后续要继续提升“联通做到满”的运维质量，优先级最高的是:
 
 1. 真实账号 E2E
-2. 历史操作者标识
-3. 更细粒度的对象搜索与筛选
+2. 时间范围筛选
+3. 审计字段对接外部系统

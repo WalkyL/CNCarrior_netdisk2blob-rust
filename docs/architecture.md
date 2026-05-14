@@ -89,6 +89,8 @@
 - 已内嵌最小控制面，提供 Admin HTML 首页、`GET /api/status`、`GET /api/auth/onedrive/status`、`GET /api/auth/onedrive/web/start`、`POST /api/auth/onedrive/device/start`、`GET /api/auth/onedrive/device/{flow_id}` 和 `GET /auth/onedrive/callback`
 - 已支持 `POST /api/object-actions`，并已在 Admin Web 暴露对象动作面板，可把对象级 `rename/copy/move` 动作直接下发给当前主 provider，并在成功后补齐对应的异步复制元数据：`rename=put(new)+delete(old)`、`copy=put(dest)`、`move=put(dest)+delete(src)`
 - Admin Web 对象动作面板现在会展示 before/after 对象检查结果，并把最近共享执行历史持久化到 control-plane 文件；`POST /api/object-actions/history/clear` 用于清空这份服务端共享历史
+- Admin Web 现在也直接展示运行态 `runtime` 摘要，包括 uptime、监听地址、复制 worker 数量、control-plane / metadata 路径等，已具备基础运行监控面板能力
+- 对象动作共享历史现在支持 `operator` / `ticket` / `notes` 审计字段，以及 operator / object 过滤与 CSV 导出
 - 这部分控制面的详细运维说明单独放在 [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)，避免把操作细节挤进架构文档
 - 这部分 API 契约单独放在 [docs/object-actions-api-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-api-reference.md:1)，避免把字段细节塞进架构说明
 - 如果要把联通作为正式 primary provider 上线，最后再走 [docs/unicom-go-live-checklist.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-go-live-checklist.md:1)

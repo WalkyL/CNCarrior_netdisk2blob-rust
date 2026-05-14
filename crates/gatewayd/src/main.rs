@@ -4,6 +4,7 @@ use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -90,6 +91,7 @@ struct AppState {
     auth: Arc<AuthBrokerState>,
     control_plane: Arc<Mutex<ControlPlaneState>>,
     browser_flow_catalogs: Arc<BrowserFlowCatalogCollection>,
+    started_at_unix_ms: u64,
 }
 
 #[derive(Clone)]
@@ -358,6 +360,7 @@ struct TopologyProviderOptionPayload {
 
 #[derive(Debug, Serialize)]
 struct AdminStatusPayload {
+    runtime: RuntimeStatusPayload,
     runtime_topology: RuntimeTopologyPayload,
     desired_topology: DesiredTopologyPayload,
     replication: ReplicationQueueSummary,
@@ -370,6 +373,23 @@ struct AdminStatusPayload {
     onedrive_policy: OnedrivePolicy,
     auth_capture_policy: AuthCapturePolicyPayload,
     browser_flow_catalogs: Vec<BrowserFlowCatalogSummaryPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RuntimeStatusPayload {
+    started_at_unix_ms: u64,
+    uptime_ms: u64,
+    bind_addr: String,
+    admin_mode: &'static str,
+    admin_bind_addr: String,
+    auth_callback_bind_addr: String,
+    control_plane_file: String,
+    metadata_db_path: String,
+    credentials_dir: String,
+    browser_flow_catalog_dir: String,
+    provider_capability_catalog_dir: String,
+    replication_workers: usize,
+    object_action_history_limit: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -386,6 +406,62 @@ struct BrowserFlowCatalogPayload {
     surface: String,
     source_path: String,
     catalog: BrowserFlowCatalog,
+}
+
+fn runtime_status_payload(state: &AppState) -> RuntimeStatusPayload {
+    RuntimeStatusPayload {
+        started_at_unix_ms: state.started_at_unix_ms,
+        uptime_ms: current_unix_ms().saturating_sub(state.started_at_unix_ms),
+        bind_addr: state.config.bind_addr.to_string(),
+        admin_mode: match state.config.admin_mode {
+            AdminMode::Off => "off",
+            AdminMode::Web => "web",
+            AdminMode::Terminal => "terminal",
+        },
+        admin_bind_addr: state.config.admin_bind_addr.to_string(),
+        auth_callback_bind_addr: state.config.auth_callback_bind_addr.to_string(),
+        control_plane_file: state.config.control_plane_file.clone(),
+        metadata_db_path: state.config.metadata_db_path.clone(),
+        credentials_dir: state.config.credentials_dir.clone(),
+        browser_flow_catalog_dir: state.config.browser_flow_catalog_dir.clone(),
+        provider_capability_catalog_dir: state.config.provider_capability_catalog_dir.clone(),
+        replication_workers: state.config.replication_workers,
+        object_action_history_limit: state.config.object_action_history_limit,
+    }
+}
+
+fn object_action_audit_fields(input: &ObjectActionInput) -> ObjectActionAuditFields {
+    match input {
+        ObjectActionInput::Rename {
+            operator,
+            ticket,
+            notes,
+            ..
+        }
+        | ObjectActionInput::Copy {
+            operator,
+            ticket,
+            notes,
+            ..
+        }
+        | ObjectActionInput::Move {
+            operator,
+            ticket,
+            notes,
+            ..
+        } => ObjectActionAuditFields {
+            operator: sanitize_optional_text(operator.clone()),
+            ticket: sanitize_optional_text(ticket.clone()),
+            notes: sanitize_optional_text(notes.clone()),
+        },
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ObjectActionAuditFields {
+    operator: Option<String>,
+    ticket: Option<String>,
+    notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1138,6 +1214,9 @@ struct ObjectActionHistoryEntryPayload {
     description: String,
     outcome: String,
     message: String,
+    operator: Option<String>,
+    ticket: Option<String>,
+    notes: Option<String>,
     warnings: Vec<String>,
     references: Vec<ObjectActionHistoryReferencePayload>,
 }
@@ -1174,18 +1253,36 @@ enum ObjectActionInput {
         bucket: String,
         key: String,
         new_key: String,
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        ticket: Option<String>,
+        #[serde(default)]
+        notes: Option<String>,
     },
     Copy {
         source_bucket: String,
         source_key: String,
         destination_bucket: String,
         destination_key: String,
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        ticket: Option<String>,
+        #[serde(default)]
+        notes: Option<String>,
     },
     Move {
         source_bucket: String,
         source_key: String,
         destination_bucket: String,
         destination_key: String,
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        ticket: Option<String>,
+        #[serde(default)]
+        notes: Option<String>,
     },
 }
 
@@ -1404,6 +1501,7 @@ async fn main() -> Result<()> {
         auth: Arc::new(AuthBrokerState::new()),
         control_plane: Arc::new(Mutex::new(control_plane)),
         browser_flow_catalogs,
+        started_at_unix_ms: current_unix_ms(),
     };
     spawn_replication_workers(state.clone(), config.replication_workers);
     spawn_admin_services(state.clone())
@@ -1642,6 +1740,24 @@ fn onedrive_session_file(config: &OneDriveConfig) -> Result<&str, ApiError> {
         })
 }
 
+fn current_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn sanitize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn ensure_onedrive_client_id(config: &OneDriveConfig) -> Result<&str, ApiError> {
     config
         .client_id
@@ -1668,13 +1784,6 @@ fn ensure_onedrive_redirect_url(config: &OneDriveConfig) -> Result<&str, ApiErro
             )
             .into()
         })
-}
-
-fn current_unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 fn random_urlsafe_token(bytes_len: usize) -> String {
@@ -2896,6 +3005,14 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     </div>
     <div class="grid">
       <section class="card">
+        <h2>Runtime</h2>
+        <div id="runtime-summary" class="metric-grid"></div>
+        <details>
+          <summary>Raw runtime payload</summary>
+          <pre id="runtime-json">Loading…</pre>
+        </details>
+      </section>
+      <section class="card">
         <h2>OneDrive Auth</h2>
         <div id="auth-summary" class="metric-grid"></div>
         <details>
@@ -3031,6 +3148,18 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       <div class="actions">
         <button id="run-object-action">Run Object Action</button>
       </div>
+      <div class="grid" style="margin-top: 0;">
+        <div>
+          <label>Operator</label>
+          <input id="object-action-operator" type="text" placeholder="alice" />
+        </div>
+        <div>
+          <label>Ticket / Change ID</label>
+          <input id="object-action-ticket" type="text" placeholder="CHG-2026-0514" />
+        </div>
+      </div>
+      <label>Notes</label>
+      <textarea id="object-action-notes" placeholder="Reason for this action, risk notes, rollback context..."></textarea>
       <div id="object-action-feedback" class="flash"></div>
       <div id="object-action-preview" class="preview-card">
         <strong>Execution Preview</strong>
@@ -3063,10 +3192,19 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
             <option value="all">all</option>
           </select>
         </div>
+        <div>
+          <label>History Operator Filter</label>
+          <input id="object-action-history-operator-filter" type="text" placeholder="alice" />
+        </div>
+        <div>
+          <label>History Object Filter</label>
+          <input id="object-action-history-object-filter" type="text" placeholder="family/shared/note.txt" />
+        </div>
       </div>
       <div class="actions">
         <button id="clear-object-action-history" class="secondary" type="button">Clear Shared History</button>
         <button id="export-object-action-history" class="secondary" type="button">Export Shared History</button>
+        <button id="export-object-action-history-csv" class="secondary" type="button">Export Shared History CSV</button>
       </div>
       <div id="object-action-history-summary" class="hint">No shared object action history yet.</div>
       <div id="object-action-history" class="history-list"></div>
@@ -3303,6 +3441,49 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         return String(unixMs);
       }}
       return date.toLocaleString();
+    }}
+    function formatDurationMs(ms) {{
+      const totalSeconds = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      const seconds = totalSeconds % 60;
+      if (hours > 0) {{
+        return `${{hours}}h ${{minutes}}m ${{seconds}}s`;
+      }}
+      if (minutes > 0) {{
+        return `${{minutes}}m ${{seconds}}s`;
+      }}
+      return `${{seconds}}s`;
+    }}
+    function renderRuntimeSummary(runtime) {{
+      const container = document.getElementById('runtime-summary');
+      document.getElementById('runtime-json').textContent = JSON.stringify(runtime || {{}}, null, 2);
+      container.innerHTML = `
+        <div class="metric-card">
+          <div>Uptime</div>
+          <strong>${{escapeHtml(formatDurationMs(runtime?.uptime_ms))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Admin Mode</div>
+          <strong>${{escapeHtml(runtime?.admin_mode || 'n/a')}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Data Plane</div>
+          <strong>${{escapeHtml(runtime?.bind_addr || 'n/a')}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Replication Workers</div>
+          <strong>${{escapeHtml(String(runtime?.replication_workers ?? 'n/a'))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>History Limit</div>
+          <strong>${{escapeHtml(String(runtime?.object_action_history_limit ?? 'n/a'))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Started</div>
+          <strong>${{escapeHtml(formatTimestamp(runtime?.started_at_unix_ms))}}</strong>
+        </div>
+      `;
     }}
     function renderAuthSummary(auth) {{
       const container = document.getElementById('auth-summary');
@@ -3919,6 +4100,8 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         action: document.getElementById('object-action-history-action-filter').value,
         outcome: document.getElementById('object-action-history-outcome-filter').value,
         provider: document.getElementById('object-action-history-provider-filter').value,
+        operator: document.getElementById('object-action-history-operator-filter').value.trim().toLowerCase(),
+        object: document.getElementById('object-action-history-object-filter').value.trim().toLowerCase(),
       }};
     }}
     function updateObjectActionHistoryProviderFilter(history) {{
@@ -3942,8 +4125,25 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         if (filters.provider !== 'all' && entry.primary_provider !== filters.provider) {{
           return false;
         }}
+        if (filters.operator) {{
+          const operator = String(entry.operator || '').toLowerCase();
+          if (!operator.includes(filters.operator)) {{
+            return false;
+          }}
+        }}
+        if (filters.object) {{
+          const description = String(entry.description || '').toLowerCase();
+          const matchesReference = (entry.references || []).some(ref => `${{ref.bucket || ''}}/${{ref.key || ''}}`.toLowerCase().includes(filters.object));
+          if (!description.includes(filters.object) && !matchesReference) {{
+            return false;
+          }}
+        }}
         return true;
       }});
+    }}
+    function csvEscape(value) {{
+      const raw = value === null || value === undefined ? '' : String(value);
+      return `"${{raw.replaceAll('"', '""')}}"`;
     }}
     function downloadObjectActionHistory() {{
       const filtered = filteredObjectActionHistory(objectActionHistory);
@@ -3963,6 +4163,36 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       anchor.remove();
       URL.revokeObjectURL(url);
       setObjectActionFeedback(`Exported ${{filtered.length}} shared history entr${{filtered.length === 1 ? 'y' : 'ies'}}.`, 'ok');
+    }}
+    function downloadObjectActionHistoryCsv() {{
+      const filtered = filteredObjectActionHistory(objectActionHistory);
+      const rows = [
+        ['executed_at', 'primary_provider', 'action', 'outcome', 'operator', 'ticket', 'description', 'message', 'notes', 'warnings', 'references'],
+        ...filtered.map(entry => [
+          formatTimestamp(entry.executed_at_unix_ms),
+          entry.primary_provider || '',
+          entry.action || '',
+          entry.outcome || '',
+          entry.operator || '',
+          entry.ticket || '',
+          entry.description || '',
+          entry.message || '',
+          entry.notes || '',
+          (entry.warnings || []).join(' | '),
+          (entry.references || []).map(ref => `${{ref.label}}:${{ref.bucket}}/${{ref.key}}`).join(' | '),
+        ]),
+      ];
+      const csv = rows.map(row => row.map(csvEscape).join(',')).join('\\n');
+      const blob = new Blob([csv], {{ type: 'text/csv;charset=utf-8' }});
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `object-action-history-${{Date.now()}}.csv`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      setObjectActionFeedback(`Exported ${{filtered.length}} shared history entr${{filtered.length === 1 ? 'y' : 'ies'}} as CSV.`, 'ok');
     }}
     function renderObjectActionHistory(history) {{
       objectActionHistory.splice(0, objectActionHistory.length, ...(history || []));
@@ -4000,8 +4230,10 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
           <div class="history-card">
             <h4>${{escapeHtml(entry.action)}} · <span class="${{entry.outcome === 'success' ? 'status-ok' : 'status-warn'}}">${{escapeHtml(entry.outcome)}}</span></h4>
             <div class="object-meta">${{escapeHtml(formatTimestamp(entry.executed_at_unix_ms))}} | primary=${{escapeHtml(providerLabel(entry.primary_provider))}}</div>
+            <div class="object-meta">${{escapeHtml(`operator=${{entry.operator || 'n/a'}} | ticket=${{entry.ticket || 'n/a'}}`)}}</div>
             <div class="object-meta mono">${{escapeHtml(entry.description)}}</div>
             <div class="object-meta">${{escapeHtml(entry.message || '')}}</div>
+            <div class="object-meta"><strong>Notes</strong><br>${{escapeHtml(entry.notes || 'No notes recorded.')}}</div>
             <div class="object-meta"><strong>Warnings</strong>${{warningHtml}}</div>
             <div class="comparison-grid">${{refs || '<div class="object-meta">No captured object references.</div>'}}</div>
           </div>
@@ -4059,6 +4291,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       }}
     }}
     function collectObjectActionInput() {{
+      const operator = document.getElementById('object-action-operator').value.trim();
+      const ticket = document.getElementById('object-action-ticket').value.trim();
+      const notes = document.getElementById('object-action-notes').value.trim();
       const action = document.getElementById('object-action-kind').value;
       if (action === 'rename') {{
         const bucket = document.getElementById('object-action-rename-bucket').value.trim();
@@ -4067,7 +4302,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         if (!bucket || !key || !new_key) {{
           throw new Error('Rename requires bucket, key, and new key.');
         }}
-        return {{ action, bucket, key, new_key }};
+        return {{ action, bucket, key, new_key, operator, ticket, notes }};
       }}
       const source_bucket = document.getElementById('object-action-source-bucket').value.trim();
       const source_key = document.getElementById('object-action-source-key').value.trim();
@@ -4076,7 +4311,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       if (!source_bucket || !source_key || !destination_bucket || !destination_key) {{
         throw new Error(`${{action}} requires source and destination bucket/key values.`);
       }}
-      return {{ action, source_bucket, source_key, destination_bucket, destination_key }};
+      return {{ action, source_bucket, source_key, destination_bucket, destination_key, operator, ticket, notes }};
     }}
     async function runObjectAction() {{
       let payload;
@@ -4364,6 +4599,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         runtimeTopologyState = status.runtime_topology || runtimeTopologyState;
         objectActionHistoryLimit = Number(status.object_action_history_limit || objectActionHistoryLimit || {DEFAULT_OBJECT_ACTION_HISTORY_LIMIT});
         document.getElementById('gateway-status').textContent = JSON.stringify(status, null, 2);
+        renderRuntimeSummary(status.runtime || {{}});
         document.getElementById('auth-status').textContent = JSON.stringify(status.onedrive_auth, null, 2);
         document.getElementById('runtime-topology').textContent = JSON.stringify(status.runtime_topology, null, 2);
         renderAuthSummary(status.onedrive_auth || {{}});
@@ -4596,12 +4832,18 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     document.getElementById('run-object-action').addEventListener('click', runObjectAction);
     document.getElementById('clear-object-action-history').addEventListener('click', clearObjectActionHistory);
     document.getElementById('export-object-action-history').addEventListener('click', downloadObjectActionHistory);
+    document.getElementById('export-object-action-history-csv').addEventListener('click', downloadObjectActionHistoryCsv);
     [
       'object-action-history-action-filter',
       'object-action-history-outcome-filter',
       'object-action-history-provider-filter',
+      'object-action-history-operator-filter',
+      'object-action-history-object-filter',
     ].forEach(id => {{
-      document.getElementById(id).addEventListener('change', () => renderObjectActionHistory(objectActionHistory));
+      const eventName = id.endsWith('-filter') && !id.includes('action-filter') && !id.includes('outcome-filter') && !id.includes('provider-filter')
+        ? 'input'
+        : 'change';
+      document.getElementById(id).addEventListener(eventName, () => renderObjectActionHistory(objectActionHistory));
     }});
     [
       'object-action-rename-bucket',
@@ -4611,6 +4853,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       'object-action-source-key',
       'object-action-destination-bucket',
       'object-action-destination-key',
+      'object-action-operator',
+      'object-action-ticket',
+      'object-action-notes',
     ].forEach(id => {{
       document.getElementById(id).addEventListener('input', renderObjectActionPreview);
     }});
@@ -4641,6 +4886,7 @@ async fn admin_status(State(state): State<AppState>) -> Result<Json<AdminStatusP
     let alerts = build_admin_alerts(&state, &provider_health, &replication_state, &onedrive_auth);
     let object_action_history = control_plane_snapshot(&state).object_action_history;
     Ok(Json(AdminStatusPayload {
+        runtime: runtime_status_payload(&state),
         runtime_topology: runtime_topology_payload(&runtime_topology(&state)),
         desired_topology: desired_topology_payload(&state),
         replication: ReplicationQueueSummary {
@@ -4715,11 +4961,13 @@ async fn run_object_action(
     let refs = object_action_targets(&input_for_history);
     let before_snapshots = capture_object_action_snapshots(&state, &refs).await;
     let mut replication_jobs = Vec::new();
+    let audit = object_action_audit_fields(&input_for_history);
     let action_result: Result<(), BlobError> = match input {
         ObjectActionInput::Rename {
             bucket,
             key,
             new_key,
+            ..
         } => {
             let bucket = bucket.trim().to_string();
             let key = key.trim().to_string();
@@ -4756,6 +5004,7 @@ async fn run_object_action(
             source_key,
             destination_bucket,
             destination_key,
+            ..
         } => {
             let source_bucket = source_bucket.trim().to_string();
             let source_key = source_key.trim().to_string();
@@ -4784,6 +5033,7 @@ async fn run_object_action(
             source_key,
             destination_bucket,
             destination_key,
+            ..
         } => {
             let source_bucket = source_bucket.trim().to_string();
             let source_key = source_key.trim().to_string();
@@ -4837,6 +5087,7 @@ async fn run_object_action(
             &input_for_history,
             outcome,
             message,
+            audit,
             warnings,
             &before_snapshots,
             &after_snapshots,
@@ -5914,18 +6165,21 @@ fn object_action_description(input: &ObjectActionInput) -> String {
             bucket,
             key,
             new_key,
+            ..
         } => format!("{bucket}/{key} -> {bucket}/{new_key}"),
         ObjectActionInput::Copy {
             source_bucket,
             source_key,
             destination_bucket,
             destination_key,
+            ..
         } => format!("{source_bucket}/{source_key} -> {destination_bucket}/{destination_key}"),
         ObjectActionInput::Move {
             source_bucket,
             source_key,
             destination_bucket,
             destination_key,
+            ..
         } => format!("{source_bucket}/{source_key} -> {destination_bucket}/{destination_key}"),
     }
 }
@@ -5944,6 +6198,7 @@ fn object_action_warnings(input: &ObjectActionInput, primary_provider: ProviderI
             bucket: _,
             key,
             new_key,
+            ..
         } => {
             let mut warnings = Vec::new();
             if key.trim() == new_key.trim() {
@@ -5967,6 +6222,7 @@ fn object_action_warnings(input: &ObjectActionInput, primary_provider: ProviderI
             source_key,
             destination_bucket,
             destination_key,
+            ..
         } => {
             let mut warnings = Vec::new();
             if source_bucket.trim() == destination_bucket.trim()
@@ -5994,6 +6250,7 @@ fn object_action_warnings(input: &ObjectActionInput, primary_provider: ProviderI
             source_key,
             destination_bucket,
             destination_key,
+            ..
         } => {
             let mut warnings = Vec::new();
             if source_bucket.trim() == destination_bucket.trim()
@@ -6025,6 +6282,7 @@ fn object_action_targets(input: &ObjectActionInput) -> Vec<ObjectActionTargetRef
             bucket,
             key,
             new_key,
+            ..
         } => vec![
             ObjectActionTargetRef {
                 label: "source before / old key after".to_string(),
@@ -6042,12 +6300,14 @@ fn object_action_targets(input: &ObjectActionInput) -> Vec<ObjectActionTargetRef
             source_key,
             destination_bucket,
             destination_key,
+            ..
         }
         | ObjectActionInput::Move {
             source_bucket,
             source_key,
             destination_bucket,
             destination_key,
+            ..
         } => vec![
             ObjectActionTargetRef {
                 label: "source".to_string(),
@@ -6197,6 +6457,7 @@ fn object_action_history_entry(
     input: &ObjectActionInput,
     outcome: &str,
     message: impl Into<String>,
+    audit: ObjectActionAuditFields,
     warnings: Vec<String>,
     before_snapshots: &HashMap<String, ObjectStatusPayload>,
     after_snapshots: &HashMap<String, ObjectStatusPayload>,
@@ -6233,6 +6494,9 @@ fn object_action_history_entry(
         description: object_action_description(input),
         outcome: outcome.to_string(),
         message: message.into(),
+        operator: audit.operator,
+        ticket: audit.ticket,
+        notes: audit.notes,
         warnings,
         references,
     }
@@ -8779,6 +9043,7 @@ mod tests {
                 BrowserFlowCatalogCollection::from_json_dir(&config.browser_flow_catalog_dir)
                     .expect("test browser flow catalogs should load"),
             ),
+            started_at_unix_ms: current_unix_ms().saturating_sub(5_000),
         }
     }
 
@@ -9204,6 +9469,14 @@ mod tests {
             .await
             .expect("admin status should succeed");
 
+        assert_eq!(status.runtime.admin_mode, "web");
+        assert_eq!(status.runtime.bind_addr, "127.0.0.1:61080");
+        assert_eq!(status.runtime.admin_bind_addr, "127.0.0.1:61081");
+        assert_eq!(status.runtime.auth_callback_bind_addr, "127.0.0.1:61082");
+        assert_eq!(status.runtime.replication_workers, 0);
+        assert_eq!(status.runtime.object_action_history_limit, 12);
+        assert!(status.runtime.started_at_unix_ms > 0);
+        assert!(status.runtime.uptime_ms >= 5_000);
         assert_eq!(status.runtime_topology.primary_provider, "stub");
         assert_eq!(status.object_action_history_limit, 12);
         assert_eq!(status.provider_health.len(), 2);
@@ -10071,6 +10344,9 @@ mod tests {
                 bucket: "family".to_string(),
                 key: "shared/note.txt".to_string(),
                 new_key: "shared/renamed.txt".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
             }),
         )
         .await
@@ -10084,6 +10360,9 @@ mod tests {
                 source_key: "shared/renamed.txt".to_string(),
                 destination_bucket: "root".to_string(),
                 destination_key: "docs/copied.txt".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
             }),
         )
         .await
@@ -10097,6 +10376,9 @@ mod tests {
                 source_key: "docs/copied.txt".to_string(),
                 destination_bucket: "family".to_string(),
                 destination_key: "shared/moved.txt".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
             }),
         )
         .await
@@ -10180,6 +10462,9 @@ mod tests {
                 bucket: "family".to_string(),
                 key: "shared/note.txt".to_string(),
                 new_key: "shared/renamed.txt".to_string(),
+                operator: Some("alice".to_string()),
+                ticket: Some("CHG-1".to_string()),
+                notes: Some("rename for test".to_string()),
             }),
         )
         .await
@@ -10196,6 +10481,9 @@ mod tests {
             entry.description,
             "family/shared/note.txt -> family/shared/renamed.txt"
         );
+        assert_eq!(entry.operator.as_deref(), Some("alice"));
+        assert_eq!(entry.ticket.as_deref(), Some("CHG-1"));
+        assert_eq!(entry.notes.as_deref(), Some("rename for test"));
         assert!(entry.references.iter().any(|reference| {
             reference.bucket == "family"
                 && reference.key == "shared/note.txt"
@@ -10269,6 +10557,9 @@ mod tests {
                 bucket: "family".to_string(),
                 key: "shared/note.txt".to_string(),
                 new_key: "shared/renamed.txt".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
             }),
         )
         .await
@@ -10281,6 +10572,9 @@ mod tests {
                 source_key: "shared/renamed.txt".to_string(),
                 destination_bucket: "root".to_string(),
                 destination_key: "docs/copied.txt".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
             }),
         )
         .await
@@ -10293,6 +10587,9 @@ mod tests {
                 source_key: "docs/copied.txt".to_string(),
                 destination_bucket: "family".to_string(),
                 destination_key: "shared/moved.txt".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
             }),
         )
         .await
@@ -10347,6 +10644,9 @@ mod tests {
                 bucket: "family".to_string(),
                 key: "shared/note.txt".to_string(),
                 new_key: "shared/note.txt".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
             }),
         )
         .await
@@ -10360,6 +10660,9 @@ mod tests {
                 source_key: "shared/note.txt".to_string(),
                 destination_bucket: "family".to_string(),
                 destination_key: "shared/note.txt".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
             }),
         )
         .await
@@ -10389,10 +10692,16 @@ mod tests {
             .expect("admin page body should read");
         let html = String::from_utf8(body.to_vec()).expect("admin page should be utf-8");
 
+        assert!(html.contains("<h2>Runtime</h2>"));
+        assert!(html.contains("id=\"runtime-summary\""));
+        assert!(html.contains("id=\"runtime-json\""));
         assert!(html.contains("<h2>Object Actions</h2>"));
         assert!(html.contains("id=\"object-action-kind\""));
         assert!(html.contains("id=\"run-object-action\""));
         assert!(html.contains("runObjectAction"));
+        assert!(html.contains("id=\"object-action-operator\""));
+        assert!(html.contains("id=\"object-action-ticket\""));
+        assert!(html.contains("id=\"object-action-notes\""));
         assert!(html.contains("id=\"object-action-preview-summary\""));
         assert!(html.contains("id=\"object-action-inspection-summary\""));
         assert!(html.contains("renderObjectActionInspection"));
@@ -10402,11 +10711,15 @@ mod tests {
         assert!(html.contains("id=\"object-action-history-action-filter\""));
         assert!(html.contains("id=\"object-action-history-outcome-filter\""));
         assert!(html.contains("id=\"object-action-history-provider-filter\""));
+        assert!(html.contains("id=\"object-action-history-operator-filter\""));
+        assert!(html.contains("id=\"object-action-history-object-filter\""));
         assert!(html.contains("renderObjectActionHistory"));
         assert!(html.contains("id=\"clear-object-action-history\""));
         assert!(html.contains("id=\"export-object-action-history\""));
+        assert!(html.contains("id=\"export-object-action-history-csv\""));
         assert!(html.contains("Clear Shared History"));
         assert!(html.contains("downloadObjectActionHistory"));
+        assert!(html.contains("downloadObjectActionHistoryCsv"));
         assert!(html.contains("renderObjectActionHistory(status.object_action_history || [])"));
         assert!(!html.contains("function loadObjectActionHistory("));
         assert!(html.contains("Changes"));

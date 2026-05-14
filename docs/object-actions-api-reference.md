@@ -50,6 +50,14 @@
 - 本项目当前只允许运营商 provider 或 `stub` 作为 primary
 - 因此 OneDrive 虽然已经实现对象动作，但运行时仍定位为异步备份 / 可选 fallback 目标，而不是 primary provider
 
+所有 `rename/copy/move` 请求都支持可选审计字段:
+
+- `operator`
+- `ticket`
+- `notes`
+
+这三个字段会在服务端做 trim 后写入共享历史，方便后续筛选和 CSV 导出。
+
 ### 2.1 rename
 
 请求体:
@@ -136,7 +144,45 @@
 - `provider_health`
 - `replication_state`
 
-### 4.1 object_action_history
+### 4.1 runtime
+
+类型:
+
+```json
+{
+  "started_at_unix_ms": 1710000000000,
+  "uptime_ms": 60000,
+  "bind_addr": "127.0.0.1:61080",
+  "admin_mode": "web",
+  "admin_bind_addr": "127.0.0.1:61081",
+  "auth_callback_bind_addr": "127.0.0.1:61082",
+  "control_plane_file": "./data/control-plane.json",
+  "metadata_db_path": "./data/metadata.db",
+  "credentials_dir": "./data/provider-credentials",
+  "browser_flow_catalog_dir": "./config/browser-flows",
+  "provider_capability_catalog_dir": "./config/provider-capabilities",
+  "replication_workers": 2,
+  "object_action_history_limit": 12
+}
+```
+
+字段说明:
+
+- `started_at_unix_ms`: 服务启动时间
+- `uptime_ms`: 已运行时长
+- `bind_addr`: 数据面监听地址
+- `admin_mode`: Admin Web 运行模式
+- `admin_bind_addr`: Admin Web 监听地址
+- `auth_callback_bind_addr`: OAuth / auth callback 监听地址
+- `control_plane_file`: control-plane 状态文件
+- `metadata_db_path`: 元数据数据库路径
+- `credentials_dir`: 凭证存储目录
+- `browser_flow_catalog_dir`: browser flow catalog 目录
+- `provider_capability_catalog_dir`: provider capability catalog 目录
+- `replication_workers`: 复制 worker 数量
+- `object_action_history_limit`: 当前共享历史窗口大小
+
+### 4.2 object_action_history
 
 类型:
 
@@ -146,6 +192,9 @@
     "executed_at_unix_ms": 1710000000000,
     "primary_provider": "unicom",
     "action": "rename",
+    "operator": "alice",
+    "ticket": "CHG-2026-0514",
+    "notes": "rename for maintenance",
     "description": "family/shared/note.txt -> family/shared/renamed.txt",
     "outcome": "success",
     "message": "Completed family/shared/note.txt -> family/shared/renamed.txt",
@@ -179,13 +228,16 @@
 - `executed_at_unix_ms`: 执行时间
 - `primary_provider`: 当时的 primary provider
 - `action`: `rename | copy | move`
+- `operator`: 操作者标识，可为空
+- `ticket`: 工单号 / 变更号，可为空
+- `notes`: 备注，可为空
 - `description`: 人类可读动作摘要
 - `outcome`: `success | failed`
 - `message`: 成功/失败消息
 - `warnings`: 预警信息
 - `references`: 被影响对象及变化摘要
 
-### 4.2 object_action_history_limit
+### 4.3 object_action_history_limit
 
 类型:
 
@@ -195,6 +247,8 @@
 
 - 表示当前服务端保留多少条共享历史
 - Admin Web 用它来展示当前历史窗口大小
+
+Admin Web 会基于 `object_action_history` 做本地筛选和 JSON/CSV 导出，所以这里不单独提供导出接口。
 
 对应环境变量:
 
