@@ -157,6 +157,7 @@
   "admin_mode": "web",
   "admin_bind_addr": "127.0.0.1:61081",
   "auth_callback_bind_addr": "127.0.0.1:61082",
+  "metrics_bind_addr": "127.0.0.1:61083",
   "control_plane_file": "./data/control-plane.json",
   "metadata_db_path": "./data/metadata.db",
   "credentials_dir": "./data/provider-credentials",
@@ -175,6 +176,7 @@
 - `admin_mode`: Admin Web 运行模式
 - `admin_bind_addr`: Admin Web 监听地址
 - `auth_callback_bind_addr`: OAuth / auth callback 监听地址
+- `metrics_bind_addr`: Metrics / extended health 监听地址
 - `control_plane_file`: control-plane 状态文件
 - `metadata_db_path`: 元数据数据库路径
 - `credentials_dir`: 凭证存储目录

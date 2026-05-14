@@ -16,6 +16,12 @@
 | Metrics / Extended Health | `127.0.0.1:61083` | 指标和增强健康检查 |
 | MCP Streamable HTTP | `127.0.0.1:61084` | 可选的 MCP HTTP 接入端口 |
 
+`61083` 当前实际暴露:
+
+- `GET /healthz`: 扩展健康摘要，返回运行态、监控聚合和 alerts
+- `GET /readyz`: 只给探针用；当前 primary provider 为 `unavailable` 时返回 `503`
+- `GET /metrics`: Prometheus 文本格式指标
+
 ## 端口选择原则
 
 1. `61080-61084` 作为默认核心端口段。

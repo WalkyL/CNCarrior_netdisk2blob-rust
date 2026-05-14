@@ -165,6 +165,12 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `GET /v1/containers`
 - `GET /v1/objects?container=<name>&prefix=<prefix>&limit=<n>`
 
+当前已落地的 Metrics / Extended Health 接口:
+
+- `GET http://127.0.0.1:61083/healthz` -> 返回扩展健康摘要，包含 `runtime`、`monitoring` 和当前 alerts
+- `GET http://127.0.0.1:61083/readyz` -> 返回 `200` / `503`，用于宿主探针判断 primary provider 是否可服务
+- `GET http://127.0.0.1:61083/metrics` -> 返回 Prometheus 文本格式指标，覆盖 uptime、open alerts、provider health、replication job 计数和对象动作汇总
+
 当前 S3 兼容实现边界:
 
 - 仅验证 header-based SigV4

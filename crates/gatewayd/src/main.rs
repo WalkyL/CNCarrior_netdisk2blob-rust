@@ -384,6 +384,7 @@ struct RuntimeStatusPayload {
     admin_mode: &'static str,
     admin_bind_addr: String,
     auth_callback_bind_addr: String,
+    metrics_bind_addr: String,
     control_plane_file: String,
     metadata_db_path: String,
     credentials_dir: String,
@@ -466,6 +467,7 @@ fn runtime_status_payload(state: &AppState) -> RuntimeStatusPayload {
         },
         admin_bind_addr: state.config.admin_bind_addr.to_string(),
         auth_callback_bind_addr: state.config.auth_callback_bind_addr.to_string(),
+        metrics_bind_addr: state.config.metrics_bind_addr.to_string(),
         control_plane_file: state.config.control_plane_file.clone(),
         metadata_db_path: state.config.metadata_db_path.clone(),
         credentials_dir: state.config.credentials_dir.clone(),
@@ -770,6 +772,7 @@ struct AppConfig {
     admin_mode: AdminMode,
     admin_bind_addr: SocketAddr,
     auth_callback_bind_addr: SocketAddr,
+    metrics_bind_addr: SocketAddr,
     control_plane_file: String,
     credentials_dir: String,
     browser_flow_catalog_dir: String,
@@ -1182,6 +1185,11 @@ impl AppConfig {
             .parse()
             .context("invalid CCBG_AUTH_CALLBACK_BIND_ADDR")?;
         validate_port_range(auth_callback_bind_addr.port())?;
+        let metrics_bind_addr: SocketAddr = env::var("CCBG_METRICS_BIND_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1:61083".to_string())
+            .parse()
+            .context("invalid CCBG_METRICS_BIND_ADDR")?;
+        validate_port_range(metrics_bind_addr.port())?;
         let admin_mode = AdminMode::parse(&env_or("CCBG_ADMIN_MODE", "web"))?;
 
         let onedrive_enabled = env_bool("CCBG_ONEDRIVE_ENABLED", true);
@@ -1208,6 +1216,7 @@ impl AppConfig {
             admin_mode,
             admin_bind_addr,
             auth_callback_bind_addr,
+            metrics_bind_addr,
             control_plane_file: env_or("CCBG_CONTROL_PLANE_FILE", "./data/control-plane.json"),
             credentials_dir: env_or("CCBG_CREDENTIALS_DIR", "./data/provider-credentials"),
             browser_flow_catalog_dir: env_or(
@@ -1685,6 +1694,7 @@ async fn main() -> Result<()> {
         admin_mode = ?config.admin_mode,
         admin_bind_addr = %config.admin_bind_addr,
         auth_callback_bind_addr = %config.auth_callback_bind_addr,
+        metrics_bind_addr = %config.metrics_bind_addr,
         control_plane_file = %config.control_plane_file,
         browser_flow_catalog_dir = %config.browser_flow_catalog_dir,
         provider_capability_catalog_dir = %config.provider_capability_catalog_dir,
@@ -1796,6 +1806,26 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         bind_addr = %state.config.admin_bind_addr,
         mode = ?state.config.admin_mode,
         "admin service ready"
+    );
+
+    let metrics_listener = tokio::net::TcpListener::bind(state.config.metrics_bind_addr)
+        .await
+        .context("failed to bind metrics listener")?;
+    let metrics_app = Router::new()
+        .route("/healthz", get(metrics_healthz))
+        .route("/readyz", get(metrics_readyz))
+        .route("/metrics", get(metrics_prometheus))
+        .with_state(state.clone())
+        .layer(TraceLayer::new_for_http());
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(metrics_listener, metrics_app).await {
+            warn!(error = %error, "metrics service exited");
+        }
+    });
+
+    info!(
+        bind_addr = %state.config.metrics_bind_addr,
+        "metrics service ready"
     );
 
     if matches!(state.config.admin_mode, AdminMode::Web) {
@@ -8128,6 +8158,169 @@ async fn healthz(
     Ok(Json(backend.health().await?))
 }
 
+#[derive(Debug, Serialize)]
+struct ExtendedHealthPayload {
+    status: &'static str,
+    ready: bool,
+    checked_at_unix_ms: u64,
+    runtime: RuntimeStatusPayload,
+    monitoring: MonitoringSummaryPayload,
+    alerts: Vec<AdminAlertPayload>,
+}
+
+async fn metrics_healthz(
+    State(state): State<AppState>,
+) -> Result<Json<ExtendedHealthPayload>, ApiError> {
+    let replication_state = replication_state_payload(&state)?;
+    let provider_health = provider_health_payloads(&state).await?;
+    let onedrive_auth = read_onedrive_auth_status(&state);
+    let alerts = build_admin_alerts(&state, &provider_health, &replication_state, &onedrive_auth);
+    let object_action_history = control_plane_snapshot(&state).object_action_history;
+    let monitoring = monitoring_summary_payload(
+        &provider_health,
+        &replication_state,
+        &object_action_history,
+        &alerts,
+    );
+    let ready = provider_health.iter().all(|provider| {
+        provider.role != "primary"
+            || !matches!(provider.health.status, blob_core::HealthStatus::Unavailable)
+    });
+
+    Ok(Json(ExtendedHealthPayload {
+        status: if ready { "ok" } else { "degraded" },
+        ready,
+        checked_at_unix_ms: current_unix_ms(),
+        runtime: runtime_status_payload(&state),
+        monitoring,
+        alerts,
+    }))
+}
+
+async fn metrics_readyz(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
+    let provider_health = provider_health_payloads(&state).await?;
+    let primary_ready = provider_health.iter().all(|provider| {
+        provider.role != "primary"
+            || !matches!(provider.health.status, blob_core::HealthStatus::Unavailable)
+    });
+
+    Ok(if primary_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    })
+}
+
+async fn metrics_prometheus(State(state): State<AppState>) -> Result<Response, ApiError> {
+    let runtime = runtime_status_payload(&state);
+    let replication_state = replication_state_payload(&state)?;
+    let provider_health = provider_health_payloads(&state).await?;
+    let onedrive_auth = read_onedrive_auth_status(&state);
+    let alerts = build_admin_alerts(&state, &provider_health, &replication_state, &onedrive_auth);
+    let object_action_history = control_plane_snapshot(&state).object_action_history;
+    let monitoring = monitoring_summary_payload(
+        &provider_health,
+        &replication_state,
+        &object_action_history,
+        &alerts,
+    );
+
+    let mut lines = Vec::new();
+    lines.push("# HELP ccbg_up Carrier Cloud Blob Gateway process health indicator.".to_string());
+    lines.push("# TYPE ccbg_up gauge".to_string());
+    lines.push("ccbg_up 1".to_string());
+    lines.push("# HELP ccbg_uptime_ms Gateway uptime in milliseconds.".to_string());
+    lines.push("# TYPE ccbg_uptime_ms gauge".to_string());
+    lines.push(format!("ccbg_uptime_ms {}", runtime.uptime_ms));
+    lines.push("# HELP ccbg_admin_alerts_open Current open alert count.".to_string());
+    lines.push("# TYPE ccbg_admin_alerts_open gauge".to_string());
+    lines.push(format!(
+        "ccbg_admin_alerts_open {}",
+        monitoring.open_alert_count
+    ));
+    lines.push("# HELP ccbg_provider_health Provider health status by role and provider (healthy=2,degraded=1,unavailable=0).".to_string());
+    lines.push("# TYPE ccbg_provider_health gauge".to_string());
+    for provider in &provider_health {
+        let value = match provider.health.status {
+            blob_core::HealthStatus::Healthy => 2,
+            blob_core::HealthStatus::Degraded => 1,
+            blob_core::HealthStatus::Unavailable => 0,
+        };
+        lines.push(format!(
+            "ccbg_provider_health{{provider=\"{}\",role=\"{}\"}} {}",
+            provider.provider, provider.role, value
+        ));
+    }
+    lines.push("# HELP ccbg_replication_jobs Replication jobs by persisted status.".to_string());
+    lines.push("# TYPE ccbg_replication_jobs gauge".to_string());
+    lines.push(format!(
+        "ccbg_replication_jobs{{status=\"pending\"}} {}",
+        monitoring.replication.pending_jobs
+    ));
+    lines.push(format!(
+        "ccbg_replication_jobs{{status=\"retry_scheduled\"}} {}",
+        monitoring.replication.retry_scheduled_jobs
+    ));
+    lines.push(format!(
+        "ccbg_replication_jobs{{status=\"failed\"}} {}",
+        monitoring.replication.failed_jobs
+    ));
+    lines.push(format!(
+        "ccbg_replication_jobs{{status=\"completed\"}} {}",
+        monitoring.replication.completed_jobs
+    ));
+    lines.push("# HELP ccbg_object_action_entries Object action history counts.".to_string());
+    lines.push("# TYPE ccbg_object_action_entries gauge".to_string());
+    lines.push(format!(
+        "ccbg_object_action_entries{{outcome=\"total\"}} {}",
+        monitoring.object_actions.total_entries
+    ));
+    lines.push(format!(
+        "ccbg_object_action_entries{{outcome=\"successful\"}} {}",
+        monitoring.object_actions.successful_entries
+    ));
+    lines.push(format!(
+        "ccbg_object_action_entries{{outcome=\"failed\"}} {}",
+        monitoring.object_actions.failed_entries
+    ));
+    lines.push("# HELP ccbg_object_action_unique_operators Unique operators in retained action history.".to_string());
+    lines.push("# TYPE ccbg_object_action_unique_operators gauge".to_string());
+    lines.push(format!(
+        "ccbg_object_action_unique_operators {}",
+        monitoring.object_actions.unique_operators
+    ));
+    lines.push("# HELP ccbg_replication_target_jobs Replication job counters per target.".to_string());
+    lines.push("# TYPE ccbg_replication_target_jobs gauge".to_string());
+    for target in &replication_state.target_statuses {
+        lines.push(format!(
+            "ccbg_replication_target_jobs{{target=\"{}\",status=\"queued\"}} {}",
+            target.provider, target.queued_count
+        ));
+        lines.push(format!(
+            "ccbg_replication_target_jobs{{target=\"{}\",status=\"pending\"}} {}",
+            target.provider, target.pending_count
+        ));
+        lines.push(format!(
+            "ccbg_replication_target_jobs{{target=\"{}\",status=\"retry_scheduled\"}} {}",
+            target.provider, target.retry_scheduled_count
+        ));
+        lines.push(format!(
+            "ccbg_replication_target_jobs{{target=\"{}\",status=\"completed\"}} {}",
+            target.provider, target.completed_count
+        ));
+        lines.push(format!(
+            "ccbg_replication_target_jobs{{target=\"{}\",status=\"failed\"}} {}",
+            target.provider, target.failed_count
+        ));
+    }
+
+    Ok((
+        [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        lines.join("\n") + "\n",
+    )
+        .into_response())
+}
+
 async fn list_containers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<blob_core::ContainerInfo>>, ApiError> {
@@ -9266,6 +9459,9 @@ mod tests {
             auth_callback_bind_addr: "127.0.0.1:61082"
                 .parse()
                 .expect("callback addr should parse"),
+            metrics_bind_addr: "127.0.0.1:61083"
+                .parse()
+                .expect("metrics addr should parse"),
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
             credentials_dir: temp_db_path().replace(".db", "-provider-credentials"),
             browser_flow_catalog_dir,
@@ -9636,6 +9832,66 @@ mod tests {
         assert_eq!(payload.provider, "stub");
         assert!(payload.roles.contains(&"primary"));
         assert!(matches!(payload.health.status, HealthStatus::Degraded));
+    }
+
+    #[tokio::test]
+    async fn metrics_health_endpoints_expose_runtime_and_metrics() {
+        let state = test_state();
+
+        let Json(health) = metrics_healthz(State(state.clone()))
+            .await
+            .expect("metrics health should succeed");
+        assert_eq!(health.status, "ok");
+        assert!(health.ready);
+        assert_eq!(health.runtime.metrics_bind_addr, "127.0.0.1:61083");
+        assert_eq!(health.monitoring.provider_summary.total, 2);
+
+        let ready_status = metrics_readyz(State(state.clone()))
+            .await
+            .expect("metrics ready should succeed");
+        assert_eq!(ready_status, StatusCode::OK);
+
+        let metrics_response = metrics_prometheus(State(state))
+            .await
+            .expect("metrics should succeed");
+        assert_eq!(metrics_response.status(), StatusCode::OK);
+        assert_eq!(
+            metrics_response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+        let body = to_bytes(metrics_response.into_body(), usize::MAX)
+            .await
+            .expect("metrics body should read");
+        let body = String::from_utf8(body.to_vec()).expect("metrics body should be utf-8");
+        assert!(body.contains("ccbg_up 1"));
+        assert!(body.contains("ccbg_admin_alerts_open"));
+        assert!(body.contains("ccbg_provider_health{provider=\"stub\",role=\"primary\"} 1"));
+        assert!(body.contains("ccbg_replication_jobs{status=\"failed\"} 0"));
+    }
+
+    #[tokio::test]
+    async fn metrics_readyz_reports_primary_unavailable() {
+        let mut state = test_state();
+        replace_backend(
+            &mut state,
+            ProviderId::Stub,
+            Arc::new(FailingBackend::new("stub", "primary backend unavailable")),
+        );
+
+        let ready_status = metrics_readyz(State(state.clone()))
+            .await
+            .expect("metrics ready should succeed");
+        assert_eq!(ready_status, StatusCode::SERVICE_UNAVAILABLE);
+
+        let Json(health) = metrics_healthz(State(state))
+            .await
+            .expect("metrics health should succeed");
+        assert_eq!(health.status, "degraded");
+        assert!(!health.ready);
+        assert!(health.alerts.iter().any(|alert| alert.title.contains("unavailable")));
     }
 
     #[tokio::test]
