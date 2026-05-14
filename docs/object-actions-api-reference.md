@@ -221,6 +221,7 @@
 与对象动作直接相关的字段包括:
 
 - `monitoring`
+- `operations_overview`
 - `notify`
 - `runtime_topology`
 - `object_action_history`
@@ -383,7 +384,63 @@
 - `latest_failed_objects`: 当前 latest-only 失败对象摘要，适合 webhook / 外部监控直接消费
 - `recent_failures`: 最近失败事件列表，来源包括失败的对象动作和失败的复制任务
 
-### 6.4 notify
+### 6.4 operations_overview
+
+类型:
+
+```json
+{
+  "primary_provider": "unicom",
+  "sync_targets": ["onedrive"],
+  "fallback_read_order": ["onedrive"],
+  "replication_mode": "async_backup",
+  "onedrive_async_backup_enabled": true,
+  "onedrive_fallback_enabled": false,
+  "replication_workers": 2,
+  "pending_jobs": 3,
+  "retry_scheduled_jobs": 1,
+  "latest_failed_objects": 2,
+  "oldest_pending_job_age_ms": 45000,
+  "oldest_retry_scheduled_job_age_ms": 180000,
+  "oldest_latest_failed_object_age_ms": 240000,
+  "latest_object_action_age_ms": 120000,
+  "notify_webhook_enabled": true,
+  "notify_last_success_age_ms": 15000,
+  "notify_last_error": null,
+  "replication_failed_alert_threshold": 2,
+  "replication_failed_alert_min_age_ms": 60000
+}
+```
+
+用途:
+
+- 给 Admin Web 的 `Operations Overview` 总览卡提供轻量运维视图
+- 让软路由场景下的值守方先看到主写 / 异步备份拓扑、复制积压年龄、失败对象年龄和 webhook 新鲜度
+- 这个字段只是复用现有状态做聚合，不代表服务端额外引入了 Prometheus server 或其他常驻监控组件
+
+字段说明:
+
+- `primary_provider`: 当前主写 provider
+- `sync_targets`: 当前异步复制目标列表
+- `fallback_read_order`: 当前 fallback 读顺序
+- `replication_mode`: 当前复制模式，现阶段固定为 `async_backup`
+- `onedrive_async_backup_enabled`: OneDrive 是否作为异步备份启用
+- `onedrive_fallback_enabled`: OneDrive fallback 读是否启用
+- `replication_workers`: 当前复制 worker 数量
+- `pending_jobs`: 当前持久化 pending job 数量
+- `retry_scheduled_jobs`: 当前持久化 retry_scheduled job 数量
+- `latest_failed_objects`: 当前 latest-only failed object 数量
+- `oldest_pending_job_age_ms`: 当前最老 pending job 的年龄
+- `oldest_retry_scheduled_job_age_ms`: 当前最老 retry_scheduled job 的年龄
+- `oldest_latest_failed_object_age_ms`: 当前最老 latest failed object 的年龄
+- `latest_object_action_age_ms`: 距离最近一次对象动作过去多久
+- `notify_webhook_enabled`: 当前是否启用了 notify webhook
+- `notify_last_success_age_ms`: 距离最近一次 webhook 成功投递过去多久
+- `notify_last_error`: 最近一次 webhook 错误
+- `replication_failed_alert_threshold`: latest failed object 正式触发告警的数量阈值
+- `replication_failed_alert_min_age_ms`: latest failed object 参与正式告警的最小失败年龄
+
+### 6.5 notify
 
 类型:
 
@@ -443,7 +500,7 @@
 - `alerts` 里的复制失败告警则会受 `CCBG_REPLICATION_FAILED_ALERT_THRESHOLD` 和 `CCBG_REPLICATION_FAILED_ALERT_MIN_AGE_MS` 控制
 - 也就是“摘要可见”和“正式告警触发”现在是分开的，方便值守时既看全量现状，又减少瞬时噪声
 
-### 6.5 object_action_history_limit
+### 6.6 object_action_history_limit
 
 类型:
 

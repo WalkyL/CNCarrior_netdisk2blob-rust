@@ -373,6 +373,7 @@ struct TopologyProviderOptionPayload {
 struct AdminStatusPayload {
     runtime: RuntimeStatusPayload,
     monitoring: MonitoringSummaryPayload,
+    operations_overview: OperationsOverviewPayload,
     notify: NotifyStatusPayload,
     runtime_topology: RuntimeTopologyPayload,
     desired_topology: DesiredTopologyPayload,
@@ -444,6 +445,29 @@ struct MonitoringSummaryPayload {
     object_actions: MonitoringObjectActionSummaryPayload,
     latest_failed_objects: Vec<MonitoringFailurePayload>,
     recent_failures: Vec<MonitoringFailurePayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct OperationsOverviewPayload {
+    primary_provider: &'static str,
+    sync_targets: Vec<&'static str>,
+    fallback_read_order: Vec<&'static str>,
+    replication_mode: &'static str,
+    onedrive_async_backup_enabled: bool,
+    onedrive_fallback_enabled: bool,
+    replication_workers: usize,
+    pending_jobs: usize,
+    retry_scheduled_jobs: usize,
+    latest_failed_objects: usize,
+    oldest_pending_job_age_ms: Option<u64>,
+    oldest_retry_scheduled_job_age_ms: Option<u64>,
+    oldest_latest_failed_object_age_ms: Option<u64>,
+    latest_object_action_age_ms: Option<u64>,
+    notify_webhook_enabled: bool,
+    notify_last_success_age_ms: Option<u64>,
+    notify_last_error: Option<String>,
+    replication_failed_alert_threshold: usize,
+    replication_failed_alert_min_age_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -536,6 +560,72 @@ fn current_notify_status_payload(state: &AppState) -> NotifyStatusPayload {
         last_attempt_at_unix_ms: snapshot.last_attempt_at_unix_ms,
         last_success_at_unix_ms: snapshot.last_success_at_unix_ms,
         last_error: snapshot.last_error,
+    }
+}
+
+fn replication_mode_name(mode: ReplicationMode) -> &'static str {
+    match mode {
+        ReplicationMode::AsyncBackup => "async_backup",
+    }
+}
+
+fn oldest_job_age_ms<'a>(
+    now_unix_ms: u64,
+    jobs: impl Iterator<Item = &'a ReplicationJob>,
+    predicate: impl Fn(&ReplicationJob) -> bool,
+) -> Option<u64> {
+    jobs.filter(|job| predicate(job))
+        .map(|job| now_unix_ms.saturating_sub(job.enqueued_at_unix_ms as u64))
+        .max()
+}
+
+fn operations_overview_payload(
+    state: &AppState,
+    replication_state: &ReplicationStatePayload,
+    monitoring: &MonitoringSummaryPayload,
+    notify: &NotifyStatusPayload,
+) -> OperationsOverviewPayload {
+    let now_unix_ms = current_unix_ms();
+    let topology = runtime_topology(state);
+    let onedrive_policy = current_onedrive_policy(state);
+
+    OperationsOverviewPayload {
+        primary_provider: topology.primary_provider_name(),
+        sync_targets: topology.sync_target_names(),
+        fallback_read_order: topology.fallback_read_order_names(),
+        replication_mode: replication_mode_name(topology.replication_mode),
+        onedrive_async_backup_enabled: onedrive_policy.replication_enabled,
+        onedrive_fallback_enabled: onedrive_policy.fallback_enabled,
+        replication_workers: state.config.replication_workers,
+        pending_jobs: replication_state.persisted.pending_count,
+        retry_scheduled_jobs: replication_state.persisted.retry_scheduled_count,
+        latest_failed_objects: replication_state.latest_failed_jobs.len(),
+        oldest_pending_job_age_ms: oldest_job_age_ms(
+            now_unix_ms,
+            replication_state.in_memory.pending_jobs.iter(),
+            |job| matches!(job.status, ReplicationStatus::Pending),
+        ),
+        oldest_retry_scheduled_job_age_ms: oldest_job_age_ms(
+            now_unix_ms,
+            replication_state.in_memory.pending_jobs.iter(),
+            |job| matches!(job.status, ReplicationStatus::RetryScheduled),
+        ),
+        oldest_latest_failed_object_age_ms: oldest_job_age_ms(
+            now_unix_ms,
+            replication_state.latest_failed_jobs.iter(),
+            |_| true,
+        ),
+        latest_object_action_age_ms: monitoring
+            .object_actions
+            .last_action_at_unix_ms
+            .map(|value| now_unix_ms.saturating_sub(value)),
+        notify_webhook_enabled: notify.webhook_enabled,
+        notify_last_success_age_ms: notify
+            .last_success_at_unix_ms
+            .map(|value| now_unix_ms.saturating_sub(value)),
+        notify_last_error: notify.last_error.clone(),
+        replication_failed_alert_threshold: state.config.replication_failed_alert_threshold,
+        replication_failed_alert_min_age_ms: state.config.replication_failed_alert_min_age_ms,
     }
 }
 
@@ -3474,6 +3564,11 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         <div id="monitoring-failures" class="health-notes">Loading monitoring summary…</div>
       </section>
       <section class="card">
+        <h2>Operations Overview</h2>
+        <div id="operations-overview" class="metric-grid"></div>
+        <div id="operations-overview-notes" class="health-notes">Loading operations overview…</div>
+      </section>
+      <section class="card">
         <h2>Notify</h2>
         <div id="notify-summary" class="health-notes">Loading notify status…</div>
       </section>
@@ -4102,6 +4197,59 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         `Last error: ${{notify?.last_error || 'none'}}`,
       ].join('\n');
       container.textContent = summary;
+    }}
+    function renderOperationsOverview(overview) {{
+      const summaryNode = document.getElementById('operations-overview');
+      const notesNode = document.getElementById('operations-overview-notes');
+      const syncTargets = overview?.sync_targets || [];
+      const fallbackReadOrder = overview?.fallback_read_order || [];
+      const oldestPending = overview?.oldest_pending_job_age_ms;
+      const oldestFailed = overview?.oldest_latest_failed_object_age_ms;
+      const notifyFreshness = overview?.notify_last_success_age_ms;
+      summaryNode.innerHTML = `
+        <div class="metric-card">
+          <div>Primary Write</div>
+          <strong>${{escapeHtml(providerLabel(overview?.primary_provider || 'n/a'))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Replication Mode</div>
+          <strong>${{escapeHtml(overview?.replication_mode || 'n/a')}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Sync Targets</div>
+          <strong>${{escapeHtml(String(syncTargets.length))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Latest Failed Objects</div>
+          <strong>${{escapeHtml(String(overview?.latest_failed_objects ?? 0))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Oldest Pending</div>
+          <strong>${{escapeHtml(oldestPending === null || oldestPending === undefined ? 'n/a' : formatDurationMs(oldestPending))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Oldest Failed Object</div>
+          <strong>${{escapeHtml(oldestFailed === null || oldestFailed === undefined ? 'n/a' : formatDurationMs(oldestFailed))}}</strong>
+        </div>
+        <div class="metric-card">
+          <div>Notify Freshness</div>
+          <strong>${{escapeHtml(notifyFreshness === null || notifyFreshness === undefined ? 'n/a' : formatDurationMs(notifyFreshness))}}</strong>
+        </div>
+      `;
+      const notes = [
+        `Primary write: ${{providerLabel(overview?.primary_provider || 'unknown')}}`,
+        `Async backup targets: ${{syncTargets.length ? syncTargets.map(providerLabel).join(', ') : 'none'}}`,
+        `Fallback read order: ${{fallbackReadOrder.length ? fallbackReadOrder.map(providerLabel).join(' -> ') : 'disabled'}}`,
+        `OneDrive async backup: ${{overview?.onedrive_async_backup_enabled ? 'enabled' : 'disabled'}}`,
+        `OneDrive fallback: ${{overview?.onedrive_fallback_enabled ? 'enabled' : 'disabled'}}`,
+        `Replication workers: ${{overview?.replication_workers ?? 'n/a'}}`,
+        `Pending jobs: ${{overview?.pending_jobs ?? 0}} | retry scheduled: ${{overview?.retry_scheduled_jobs ?? 0}} | latest failed objects: ${{overview?.latest_failed_objects ?? 0}}`,
+        `Failed alert gate: threshold=${{overview?.replication_failed_alert_threshold ?? 'n/a'}} | min_age_ms=${{overview?.replication_failed_alert_min_age_ms ?? 'n/a'}}`,
+        `Last object action age: ${{overview?.latest_object_action_age_ms === null || overview?.latest_object_action_age_ms === undefined ? 'n/a' : formatDurationMs(overview.latest_object_action_age_ms)}}`,
+        `Notify webhook: ${{overview?.notify_webhook_enabled ? 'enabled' : 'disabled'}} | last success age: ${{notifyFreshness === null || notifyFreshness === undefined ? 'n/a' : formatDurationMs(notifyFreshness)}}`,
+        `Notify last error: ${{overview?.notify_last_error || 'none'}}`,
+      ];
+      notesNode.textContent = notes.join('\n');
     }}
     function renderAuthSummary(auth) {{
       const container = document.getElementById('auth-summary');
@@ -5433,6 +5581,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         document.getElementById('gateway-status').textContent = JSON.stringify(status, null, 2);
         renderRuntimeSummary(status.runtime || {{}});
         renderMonitoringSummary(status.monitoring || {{}});
+        renderOperationsOverview(status.operations_overview || {{}});
         renderNotifySummary(status.notify || {{}});
         document.getElementById('auth-status').textContent = JSON.stringify(status.onedrive_auth, null, 2);
         document.getElementById('runtime-topology').textContent = JSON.stringify(status.runtime_topology, null, 2);
@@ -5770,10 +5919,14 @@ async fn admin_status(State(state): State<AppState>) -> Result<Json<AdminStatusP
         &object_action_history,
         &alerts,
     );
+    let notify = current_notify_status_payload(&state);
+    let operations_overview =
+        operations_overview_payload(&state, &replication_state, &monitoring, &notify);
     Ok(Json(AdminStatusPayload {
         runtime: runtime_status_payload(&state),
         monitoring,
-        notify: current_notify_status_payload(&state),
+        operations_overview,
+        notify,
         runtime_topology: runtime_topology_payload(&runtime_topology(&state)),
         desired_topology: desired_topology_payload(&state),
         replication: ReplicationQueueSummary {
@@ -10896,6 +11049,13 @@ mod tests {
         assert!(status.monitoring.recent_failures.len() >= 1);
         assert_eq!(status.monitoring.recent_failures[0].kind, "replication_job");
         assert!(status.monitoring.open_alert_count >= 1);
+        assert_eq!(status.operations_overview.primary_provider, "stub");
+        assert_eq!(status.operations_overview.replication_mode, "async_backup");
+        assert!(status.operations_overview.onedrive_async_backup_enabled);
+        assert!(status.operations_overview.onedrive_fallback_enabled);
+        assert_eq!(status.operations_overview.latest_failed_objects, 1);
+        assert_eq!(status.operations_overview.replication_failed_alert_threshold, 1);
+        assert_eq!(status.operations_overview.replication_failed_alert_min_age_ms, 0);
         assert_eq!(status.runtime_topology.primary_provider, "stub");
         assert_eq!(status.object_action_history_limit, 12);
         assert_eq!(status.provider_health.len(), 2);
@@ -11002,6 +11162,77 @@ mod tests {
                 .alerts
                 .iter()
                 .any(|alert| alert.title.contains("latest failed replication object"))
+        );
+    }
+
+    #[tokio::test]
+    async fn operations_overview_surfaces_queue_age_and_notify_freshness() {
+        let state = test_state();
+        let now_unix_ms = current_unix_ms();
+
+        let pending_job = ReplicationJob {
+            job_id: 1,
+            target: ProviderId::Onedrive.as_str().to_string(),
+            source_provider: Some(ProviderId::Stub.as_str().to_string()),
+            operation: ReplicationOperation::Put,
+            object: replication_engine::ReplicationObjectRef {
+                bucket: "root".to_string(),
+                key: "ops/pending.txt".to_string(),
+                etag: None,
+                size: Some(5),
+                content_type: Some("text/plain".to_string()),
+            },
+            status: ReplicationStatus::Pending,
+            attempts: 0,
+            enqueued_at_unix_ms: u128::from(now_unix_ms.saturating_sub(30_000)),
+            next_attempt_at_unix_ms: None,
+            last_error: None,
+        };
+        state.replication.enqueue_existing_job(pending_job.clone());
+        state
+            .metadata_store
+            .enqueue_jobs(&[pending_job])
+            .expect("pending job should persist");
+
+        record_replication_state(
+            &state,
+            ProviderId::Onedrive,
+            ReplicationOperation::Put,
+            ReplicationStatus::Failed,
+            "root",
+            "ops/failed.txt",
+            Some(5),
+            Some("text/plain"),
+        );
+
+        {
+            let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
+            notify_state.last_success_at_unix_ms = Some(now_unix_ms.saturating_sub(12_000));
+        }
+
+        let Json(status) = admin_status(State(state))
+            .await
+            .expect("admin status should succeed");
+
+        assert_eq!(status.operations_overview.pending_jobs, 1);
+        assert_eq!(status.operations_overview.latest_failed_objects, 1);
+        assert!(
+            status
+                .operations_overview
+                .oldest_pending_job_age_ms
+                .is_some_and(|age| age >= 25_000)
+        );
+        assert!(
+            status
+                .operations_overview
+                .oldest_latest_failed_object_age_ms
+                .is_some()
+        );
+        assert!(
+            status
+                .operations_overview
+                .notify_last_success_age_ms
+                .is_some_and(|age| age >= 10_000)
         );
     }
 
@@ -12263,6 +12494,10 @@ mod tests {
         assert!(html.contains("id=\"monitoring-summary\""));
         assert!(html.contains("id=\"monitoring-failures\""));
         assert!(html.contains("renderMonitoringSummary"));
+        assert!(html.contains("<h2>Operations Overview</h2>"));
+        assert!(html.contains("id=\"operations-overview\""));
+        assert!(html.contains("id=\"operations-overview-notes\""));
+        assert!(html.contains("renderOperationsOverview"));
         assert!(html.contains("id=\"replication-feedback\""));
         assert!(html.contains("id=\"replication-failed-target-filter\""));
         assert!(html.contains("id=\"replication-failed-object-filter\""));
