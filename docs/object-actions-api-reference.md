@@ -255,6 +255,7 @@
   "provider_capability_catalog_dir": "./config/provider-capabilities",
   "replication_workers": 2,
   "data_plane_max_in_flight": 8,
+  "data_plane_max_requests_per_second": 0,
   "object_action_history_limit": 12
 }
 ```
@@ -275,6 +276,7 @@
 - `provider_capability_catalog_dir`: provider capability catalog 目录
 - `replication_workers`: 复制 worker 数量
 - `data_plane_max_in_flight`: 数据面最大并发处理数；超限时 S3 路径直接返回 `503 ServiceUnavailable`
+- `data_plane_max_requests_per_second`: 数据面每秒请求上限；`0` 表示关闭，启用后超限同样直接返回 `503 ServiceUnavailable`
 - `object_action_history_limit`: 当前共享历史窗口大小
 
 ### 6.2 object_action_history
@@ -401,6 +403,8 @@
   "replication_workers": 2,
   "data_plane_max_in_flight": 8,
   "data_plane_permits_available": 7,
+  "data_plane_max_requests_per_second": 8,
+  "data_plane_requests_current_second": 3,
   "pending_jobs": 3,
   "retry_scheduled_jobs": 1,
   "latest_failed_objects": 2,
@@ -438,6 +442,8 @@
 - `replication_workers`: 当前复制 worker 数量
 - `data_plane_max_in_flight`: 当前数据面并发上限
 - `data_plane_permits_available`: 当前剩余可用 permit 数；如果经常贴近 `0`，说明上限可能过低或宿主负载过高
+- `data_plane_max_requests_per_second`: 当前数据面每秒请求阀门；`0` 表示关闭
+- `data_plane_requests_current_second`: 当前 1 秒窗口内已计入阀门的请求数
 - `pending_jobs`: 当前持久化 pending job 数量
 - `retry_scheduled_jobs`: 当前持久化 retry_scheduled job 数量
 - `latest_failed_objects`: 当前 latest-only failed object 数量

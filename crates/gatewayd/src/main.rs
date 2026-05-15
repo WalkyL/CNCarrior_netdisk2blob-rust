@@ -109,6 +109,13 @@ struct AppState {
 
 struct DataPlaneConcurrencyState {
     semaphore: Arc<Semaphore>,
+    rate_limiter: Mutex<DataPlaneRateLimiterState>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct DataPlaneRateLimiterState {
+    window_started_at_unix_ms: u64,
+    requests_in_window: usize,
 }
 
 #[derive(Clone)]
@@ -411,6 +418,7 @@ struct RuntimeStatusPayload {
     provider_capability_catalog_dir: String,
     replication_workers: usize,
     data_plane_max_in_flight: usize,
+    data_plane_max_requests_per_second: usize,
     object_action_history_limit: usize,
 }
 
@@ -465,6 +473,8 @@ struct OperationsOverviewPayload {
     replication_workers: usize,
     data_plane_max_in_flight: usize,
     data_plane_permits_available: usize,
+    data_plane_max_requests_per_second: usize,
+    data_plane_requests_current_second: usize,
     pending_jobs: usize,
     retry_scheduled_jobs: usize,
     latest_failed_objects: usize,
@@ -556,6 +566,7 @@ fn runtime_status_payload(state: &AppState) -> RuntimeStatusPayload {
         provider_capability_catalog_dir: state.config.provider_capability_catalog_dir.clone(),
         replication_workers: state.config.replication_workers,
         data_plane_max_in_flight: state.config.data_plane_max_in_flight,
+        data_plane_max_requests_per_second: state.config.data_plane_max_requests_per_second,
         object_action_history_limit: state.config.object_action_history_limit,
     }
 }
@@ -586,6 +597,54 @@ fn replication_mode_name(mode: ReplicationMode) -> &'static str {
 
 fn socket_addr_is_loopback(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
+}
+
+fn snapshot_data_plane_rate_limiter(
+    state: &AppState,
+    now_unix_ms: u64,
+) -> DataPlaneRateLimiterState {
+    let guard = state
+        .data_plane_concurrency
+        .rate_limiter
+        .lock()
+        .expect("data-plane rate limiter poisoned");
+    if now_unix_ms.saturating_sub(guard.window_started_at_unix_ms) >= 1_000 {
+        DataPlaneRateLimiterState {
+            window_started_at_unix_ms: now_unix_ms,
+            requests_in_window: 0,
+        }
+    } else {
+        *guard
+    }
+}
+
+fn try_acquire_data_plane_request_slot(state: &AppState, now_unix_ms: u64) -> Result<(), S3Error> {
+    let max_requests_per_second = state.config.data_plane_max_requests_per_second;
+    if max_requests_per_second == 0 {
+        return Ok(());
+    }
+
+    let mut guard = state
+        .data_plane_concurrency
+        .rate_limiter
+        .lock()
+        .expect("data-plane rate limiter poisoned");
+    if now_unix_ms.saturating_sub(guard.window_started_at_unix_ms) >= 1_000 {
+        guard.window_started_at_unix_ms = now_unix_ms;
+        guard.requests_in_window = 0;
+    }
+    if guard.requests_in_window >= max_requests_per_second {
+        return Err(S3Error::new(
+            "ServiceUnavailable",
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "data-plane request rate limit exceeded; try again later (limit_per_second={})",
+                max_requests_per_second
+            ),
+        ));
+    }
+    guard.requests_in_window += 1;
+    Ok(())
 }
 
 fn try_acquire_data_plane_permit(state: &AppState) -> Result<OwnedSemaphorePermit, S3Error> {
@@ -626,6 +685,7 @@ fn operations_overview_payload(
     let topology = runtime_topology(state);
     let onedrive_policy = current_onedrive_policy(state);
     let data_plane_permits_available = state.data_plane_concurrency.semaphore.available_permits();
+    let rate_limiter = snapshot_data_plane_rate_limiter(state, now_unix_ms);
 
     OperationsOverviewPayload {
         primary_provider: topology.primary_provider_name(),
@@ -637,6 +697,8 @@ fn operations_overview_payload(
         replication_workers: state.config.replication_workers,
         data_plane_max_in_flight: state.config.data_plane_max_in_flight,
         data_plane_permits_available,
+        data_plane_max_requests_per_second: state.config.data_plane_max_requests_per_second,
+        data_plane_requests_current_second: rate_limiter.requests_in_window,
         pending_jobs: replication_state.persisted.pending_count,
         retry_scheduled_jobs: replication_state.persisted.retry_scheduled_count,
         latest_failed_objects: replication_state.latest_failed_jobs.len(),
@@ -1012,6 +1074,7 @@ struct AppConfig {
     metadata_retention: MetadataRetentionPolicy,
     replication_workers: usize,
     data_plane_max_in_flight: usize,
+    data_plane_max_requests_per_second: usize,
     replication_recent_limit: usize,
     replication_max_attempts: u32,
     replication_base_retry_delay_ms: u64,
@@ -1481,6 +1544,10 @@ impl AppConfig {
             },
             replication_workers: env_usize("CCBG_REPLICATION_WORKERS", 2),
             data_plane_max_in_flight: env_usize("CCBG_DATA_PLANE_MAX_IN_FLIGHT", 8).max(1),
+            data_plane_max_requests_per_second: env_usize(
+                "CCBG_DATA_PLANE_MAX_REQUESTS_PER_SECOND",
+                0,
+            ),
             replication_recent_limit: env_usize("CCBG_REPLICATION_RECENT_LIMIT", 64),
             replication_max_attempts: env_u64("CCBG_REPLICATION_MAX_ATTEMPTS", 3) as u32,
             replication_base_retry_delay_ms: env_u64("CCBG_REPLICATION_BASE_RETRY_DELAY_MS", 1_000),
@@ -1978,6 +2045,7 @@ async fn main() -> Result<()> {
         browser_flow_catalogs,
         data_plane_concurrency: Arc::new(DataPlaneConcurrencyState {
             semaphore: Arc::new(Semaphore::new(config.data_plane_max_in_flight)),
+            rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
         }),
         started_at_unix_ms: current_unix_ms(),
     };
@@ -2018,6 +2086,7 @@ async fn main() -> Result<()> {
         auth_callback_bind_addr = %config.auth_callback_bind_addr,
         metrics_bind_addr = %config.metrics_bind_addr,
         data_plane_max_in_flight = config.data_plane_max_in_flight,
+        data_plane_max_requests_per_second = config.data_plane_max_requests_per_second,
         notify_webhook_enabled = config.notify_webhook_url.is_some(),
         notify_webhook_signature_enabled = config.notify_webhook_signing_secret.is_some(),
         notify_poll_interval_seconds = config.notify_poll_interval_seconds,
@@ -3323,6 +3392,19 @@ fn build_admin_alerts(
         });
     }
 
+    if state.config.data_plane_max_requests_per_second > 0
+        && state.config.data_plane_max_requests_per_second <= 4
+    {
+        alerts.push(AdminAlertPayload {
+            severity: "warn",
+            title: "Data plane request rate limit is set very low".to_string(),
+            detail: format!(
+                "CCBG_DATA_PLANE_MAX_REQUESTS_PER_SECOND={} | This is conservative for tiny routers, but bursty clients may see 503 responses sooner.",
+                state.config.data_plane_max_requests_per_second
+            ),
+        });
+    }
+
     if !socket_addr_is_loopback(&state.config.admin_bind_addr) {
         alerts.push(AdminAlertPayload {
             severity: "warn",
@@ -4386,6 +4468,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         `OneDrive async backup: ${{overview?.onedrive_async_backup_enabled ? 'enabled' : 'disabled'}}`,
         `OneDrive fallback: ${{overview?.onedrive_fallback_enabled ? 'enabled' : 'disabled'}}`,
         `Data plane concurrency: max=${{overview?.data_plane_max_in_flight ?? 'n/a'}} | available=${{overview?.data_plane_permits_available ?? 'n/a'}}`,
+        `Data plane rate cap: max=${{overview?.data_plane_max_requests_per_second ?? 'n/a'}} req/s | current=${{overview?.data_plane_requests_current_second ?? 'n/a'}}`,
         `Loopback-only listeners: data=${{overview?.data_plane_loopback_only ? 'yes' : 'no'}} | admin=${{overview?.admin_loopback_only ? 'yes' : 'no'}} | callback=${{overview?.auth_callback_loopback_only ? 'yes' : 'no'}} | metrics=${{overview?.metrics_loopback_only ? 'yes' : 'no'}}`,
         `S3 secret rotated: ${{overview?.s3_secret_uses_default ? 'no' : 'yes'}}`,
         `Replication workers: ${{overview?.replication_workers ?? 'n/a'}}`,
@@ -9159,6 +9242,25 @@ async fn metrics_prometheus(State(state): State<AppState>) -> Result<Response, A
         "ccbg_data_plane_concurrency_available {}",
         state.data_plane_concurrency.semaphore.available_permits()
     ));
+    let rate_limiter = snapshot_data_plane_rate_limiter(&state, current_unix_ms());
+    lines.push(
+        "# HELP ccbg_data_plane_rate_limit_configured Configured max data-plane requests per second (0 means disabled)."
+            .to_string(),
+    );
+    lines.push("# TYPE ccbg_data_plane_rate_limit_configured gauge".to_string());
+    lines.push(format!(
+        "ccbg_data_plane_rate_limit_configured {}",
+        runtime.data_plane_max_requests_per_second
+    ));
+    lines.push(
+        "# HELP ccbg_data_plane_rate_limit_current_second Data-plane requests observed in the current one-second window."
+            .to_string(),
+    );
+    lines.push("# TYPE ccbg_data_plane_rate_limit_current_second gauge".to_string());
+    lines.push(format!(
+        "ccbg_data_plane_rate_limit_current_second {}",
+        rate_limiter.requests_in_window
+    ));
     lines.push("# HELP ccbg_provider_health Provider health status by role and provider (healthy=2,degraded=1,unavailable=0).".to_string());
     lines.push("# TYPE ccbg_provider_health gauge".to_string());
     for provider in &provider_health {
@@ -9250,6 +9352,8 @@ async fn metrics_prometheus(State(state): State<AppState>) -> Result<Response, A
 async fn list_containers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<blob_core::ContainerInfo>>, DataPlaneApiError> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())
+        .map_err(DataPlaneApiError::from_s3_error)?;
     let _permit =
         try_acquire_data_plane_permit(&state).map_err(DataPlaneApiError::from_s3_error)?;
     Ok(Json(list_containers_with_fallback(&state).await?.value))
@@ -9259,6 +9363,8 @@ async fn list_objects(
     State(state): State<AppState>,
     Query(query): Query<ObjectsQuery>,
 ) -> Result<Json<Vec<blob_core::ObjectInfo>>, DataPlaneApiError> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())
+        .map_err(DataPlaneApiError::from_s3_error)?;
     let _permit =
         try_acquire_data_plane_permit(&state).map_err(DataPlaneApiError::from_s3_error)?;
     let (_, backend) = current_primary_backend(&state)?;
@@ -9277,6 +9383,7 @@ async fn list_buckets(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())?;
     let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
@@ -9311,6 +9418,7 @@ async fn head_bucket(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())?;
     let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
@@ -9336,6 +9444,7 @@ async fn list_objects_v2(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())?;
     let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
@@ -9420,6 +9529,7 @@ async fn head_object(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())?;
     let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
@@ -9467,6 +9577,7 @@ async fn get_object(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())?;
     let permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
 
@@ -9531,6 +9642,7 @@ async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, S3Error> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())?;
     let _permit = try_acquire_data_plane_permit(&state)?;
     let content_length = headers
         .get(CONTENT_LENGTH)
@@ -9677,6 +9789,7 @@ async fn delete_object(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, S3Error> {
+    try_acquire_data_plane_request_slot(&state, current_unix_ms())?;
     let _permit = try_acquire_data_plane_permit(&state)?;
     authorize_s3(&state.config, &method, &uri, &headers, None)?;
     let (primary_provider, primary_backend) =
@@ -10429,6 +10542,7 @@ mod tests {
             },
             replication_workers: 0,
             data_plane_max_in_flight: 8,
+            data_plane_max_requests_per_second: 0,
             replication_recent_limit: 64,
             replication_max_attempts: 3,
             replication_base_retry_delay_ms: 0,
@@ -10503,6 +10617,7 @@ mod tests {
             ),
             data_plane_concurrency: Arc::new(DataPlaneConcurrencyState {
                 semaphore: Arc::new(Semaphore::new(config.data_plane_max_in_flight)),
+                rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
             }),
             started_at_unix_ms: current_unix_ms().saturating_sub(5_000),
         }
@@ -10882,6 +10997,7 @@ mod tests {
         assert!(health.ready);
         assert_eq!(health.runtime.metrics_bind_addr, "127.0.0.1:61083");
         assert_eq!(health.runtime.data_plane_max_in_flight, 8);
+        assert_eq!(health.runtime.data_plane_max_requests_per_second, 0);
         assert_eq!(health.monitoring.provider_summary.total, 2);
 
         let ready_status = metrics_readyz(State(state.clone()))
@@ -10908,6 +11024,8 @@ mod tests {
         assert!(body.contains("ccbg_admin_alerts_open"));
         assert!(body.contains("ccbg_data_plane_concurrency_configured 8"));
         assert!(body.contains("ccbg_data_plane_concurrency_available 8"));
+        assert!(body.contains("ccbg_data_plane_rate_limit_configured 0"));
+        assert!(body.contains("ccbg_data_plane_rate_limit_current_second 0"));
         assert!(body.contains("ccbg_provider_health{provider=\"stub\",role=\"primary\"} 1"));
         assert!(body.contains("ccbg_replication_jobs{status=\"failed\"} 0"));
     }
@@ -11216,6 +11334,7 @@ mod tests {
         assert_eq!(status.runtime.auth_callback_bind_addr, "127.0.0.1:61082");
         assert_eq!(status.runtime.replication_workers, 0);
         assert_eq!(status.runtime.data_plane_max_in_flight, 8);
+        assert_eq!(status.runtime.data_plane_max_requests_per_second, 0);
         assert_eq!(status.runtime.object_action_history_limit, 12);
         assert!(status.runtime.started_at_unix_ms > 0);
         assert!(status.runtime.uptime_ms >= 5_000);
@@ -11247,6 +11366,8 @@ mod tests {
         assert!(status.operations_overview.onedrive_fallback_enabled);
         assert_eq!(status.operations_overview.data_plane_max_in_flight, 8);
         assert_eq!(status.operations_overview.data_plane_permits_available, 8);
+        assert_eq!(status.operations_overview.data_plane_max_requests_per_second, 0);
+        assert_eq!(status.operations_overview.data_plane_requests_current_second, 0);
         assert_eq!(status.operations_overview.latest_failed_objects, 1);
         assert_eq!(status.operations_overview.replication_failed_alert_threshold, 1);
         assert_eq!(status.operations_overview.replication_failed_alert_min_age_ms, 0);
@@ -11416,6 +11537,8 @@ mod tests {
         assert_eq!(status.operations_overview.pending_jobs, 1);
         assert_eq!(status.operations_overview.data_plane_max_in_flight, 8);
         assert_eq!(status.operations_overview.data_plane_permits_available, 8);
+        assert_eq!(status.operations_overview.data_plane_max_requests_per_second, 0);
+        assert_eq!(status.operations_overview.data_plane_requests_current_second, 0);
         assert_eq!(status.operations_overview.latest_failed_objects, 1);
         assert!(
             status
@@ -11488,6 +11611,7 @@ mod tests {
         Arc::make_mut(&mut state.config).data_plane_max_in_flight = 2;
         state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState {
             semaphore: Arc::new(Semaphore::new(2)),
+            rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
         });
 
         let Json(status) = admin_status(State(state))
@@ -11505,6 +11629,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_alerts_warn_when_data_plane_rate_limit_is_very_low() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).data_plane_max_requests_per_second = 4;
+
+        let Json(status) = admin_status(State(state))
+            .await
+            .expect("admin status should succeed");
+
+        assert_eq!(status.operations_overview.data_plane_max_requests_per_second, 4);
+        assert!(
+            status
+                .alerts
+                .iter()
+                .any(|alert| alert.title.contains("Data plane request rate limit is set very low"))
+        );
+    }
+
+    #[tokio::test]
     async fn data_plane_concurrency_rejects_excess_s3_requests_with_503() {
         let mut state = test_state();
         Arc::make_mut(&mut state.config).data_plane_max_in_flight = 1;
@@ -11513,7 +11655,10 @@ mod tests {
             .clone()
             .try_acquire_owned()
             .expect("initial permit should be available");
-        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState { semaphore });
+        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState {
+            semaphore,
+            rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
+        });
 
         let uri: Uri = "/".parse().expect("uri should parse");
         let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
@@ -11541,6 +11686,7 @@ mod tests {
         let semaphore = Arc::new(Semaphore::new(1));
         state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState {
             semaphore: semaphore.clone(),
+            rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
         });
 
         let primary_backend: DynBackend = Arc::new(StubBackend::new());
@@ -13897,7 +14043,10 @@ mod tests {
             .clone()
             .try_acquire_owned()
             .expect("initial permit should be available");
-        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState { semaphore });
+        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState {
+            semaphore,
+            rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
+        });
 
         let error = list_containers(State(state))
             .await
@@ -13924,7 +14073,10 @@ mod tests {
             .clone()
             .try_acquire_owned()
             .expect("initial permit should be available");
-        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState { semaphore });
+        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState {
+            semaphore,
+            rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
+        });
 
         let error = list_objects(
             State(state),
@@ -13947,6 +14099,37 @@ mod tests {
         assert!(body.contains("limit=1"));
 
         drop(held_permit);
+    }
+
+    #[tokio::test]
+    async fn data_plane_rate_limit_rejects_excess_requests_with_503() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).data_plane_max_requests_per_second = 1;
+
+        let uri: Uri = "/".parse().expect("uri should parse");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let first = list_buckets(
+            State(state.clone()),
+            Method::GET,
+            OriginalUri(uri.clone()),
+            headers.clone(),
+        )
+        .await
+        .expect("first request in rate window should succeed");
+        assert_eq!(first.status(), StatusCode::OK);
+
+        let error = list_buckets(State(state), Method::GET, OriginalUri(uri), headers)
+            .await
+            .expect_err("second request in same rate window should be rejected");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let body = String::from_utf8(body.to_vec()).expect("error body should be utf-8");
+        assert!(body.contains("data-plane request rate limit exceeded"));
+        assert!(body.contains("limit_per_second=1"));
     }
 
     #[tokio::test]
