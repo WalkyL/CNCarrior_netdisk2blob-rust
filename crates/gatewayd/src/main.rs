@@ -1748,6 +1748,44 @@ impl IntoResponse for ApiError {
 }
 
 #[derive(Debug)]
+struct DataPlaneApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl DataPlaneApiError {
+    fn from_s3_error(error: S3Error) -> Self {
+        Self {
+            status: error.status,
+            message: error.message,
+        }
+    }
+}
+
+impl From<BlobError> for DataPlaneApiError {
+    fn from(value: BlobError) -> Self {
+        let status = match &value {
+            BlobError::Configuration(_) => StatusCode::BAD_REQUEST,
+            BlobError::Upstream(_) => StatusCode::BAD_GATEWAY,
+            BlobError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
+            BlobError::NotFound(_) => StatusCode::NOT_FOUND,
+            BlobError::BodyStream(_) => StatusCode::BAD_REQUEST,
+        };
+
+        Self {
+            status,
+            message: value.to_string(),
+        }
+    }
+}
+
+impl IntoResponse for DataPlaneApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
+
+#[derive(Debug)]
 struct S3Error {
     code: &'static str,
     message: String,
@@ -9103,6 +9141,24 @@ async fn metrics_prometheus(State(state): State<AppState>) -> Result<Response, A
         "ccbg_admin_alerts_open {}",
         monitoring.open_alert_count
     ));
+    lines.push(
+        "# HELP ccbg_data_plane_concurrency_configured Configured max in-flight data-plane requests."
+            .to_string(),
+    );
+    lines.push("# TYPE ccbg_data_plane_concurrency_configured gauge".to_string());
+    lines.push(format!(
+        "ccbg_data_plane_concurrency_configured {}",
+        runtime.data_plane_max_in_flight
+    ));
+    lines.push(
+        "# HELP ccbg_data_plane_concurrency_available Currently available data-plane permits."
+            .to_string(),
+    );
+    lines.push("# TYPE ccbg_data_plane_concurrency_available gauge".to_string());
+    lines.push(format!(
+        "ccbg_data_plane_concurrency_available {}",
+        state.data_plane_concurrency.semaphore.available_permits()
+    ));
     lines.push("# HELP ccbg_provider_health Provider health status by role and provider (healthy=2,degraded=1,unavailable=0).".to_string());
     lines.push("# TYPE ccbg_provider_health gauge".to_string());
     for provider in &provider_health {
@@ -9193,14 +9249,18 @@ async fn metrics_prometheus(State(state): State<AppState>) -> Result<Response, A
 
 async fn list_containers(
     State(state): State<AppState>,
-) -> Result<Json<Vec<blob_core::ContainerInfo>>, ApiError> {
+) -> Result<Json<Vec<blob_core::ContainerInfo>>, DataPlaneApiError> {
+    let _permit =
+        try_acquire_data_plane_permit(&state).map_err(DataPlaneApiError::from_s3_error)?;
     Ok(Json(list_containers_with_fallback(&state).await?.value))
 }
 
 async fn list_objects(
     State(state): State<AppState>,
     Query(query): Query<ObjectsQuery>,
-) -> Result<Json<Vec<blob_core::ObjectInfo>>, ApiError> {
+) -> Result<Json<Vec<blob_core::ObjectInfo>>, DataPlaneApiError> {
+    let _permit =
+        try_acquire_data_plane_permit(&state).map_err(DataPlaneApiError::from_s3_error)?;
     let (_, backend) = current_primary_backend(&state)?;
     let request = ListObjectsRequest {
         container: query.container,
@@ -10846,6 +10906,8 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).expect("metrics body should be utf-8");
         assert!(body.contains("ccbg_up 1"));
         assert!(body.contains("ccbg_admin_alerts_open"));
+        assert!(body.contains("ccbg_data_plane_concurrency_configured 8"));
+        assert!(body.contains("ccbg_data_plane_concurrency_available 8"));
         assert!(body.contains("ccbg_provider_health{provider=\"stub\",role=\"primary\"} 1"));
         assert!(body.contains("ccbg_replication_jobs{status=\"failed\"} 0"));
     }
@@ -13824,6 +13886,67 @@ mod tests {
         .expect("objects api should succeed");
 
         assert!(objects.iter().any(|object| object.key == "shared/note.txt"));
+    }
+
+    #[tokio::test]
+    async fn containers_api_rejects_when_data_plane_concurrency_is_exhausted() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).data_plane_max_in_flight = 1;
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held_permit = semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("initial permit should be available");
+        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState { semaphore });
+
+        let error = list_containers(State(state))
+            .await
+            .expect_err("containers api should reject exhausted concurrency");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let body = String::from_utf8(body.to_vec()).expect("error body should be utf-8");
+        assert!(body.contains("too many concurrent data-plane requests"));
+        assert!(body.contains("limit=1"));
+
+        drop(held_permit);
+    }
+
+    #[tokio::test]
+    async fn objects_api_rejects_when_data_plane_concurrency_is_exhausted() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).data_plane_max_in_flight = 1;
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held_permit = semaphore
+            .clone()
+            .try_acquire_owned()
+            .expect("initial permit should be available");
+        state.data_plane_concurrency = Arc::new(DataPlaneConcurrencyState { semaphore });
+
+        let error = list_objects(
+            State(state),
+            Query(ObjectsQuery {
+                container: Some("family".to_string()),
+                prefix: None,
+                limit: None,
+            }),
+        )
+        .await
+        .expect_err("objects api should reject exhausted concurrency");
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let body = String::from_utf8(body.to_vec()).expect("error body should be utf-8");
+        assert!(body.contains("too many concurrent data-plane requests"));
+        assert!(body.contains("limit=1"));
+
+        drop(held_permit);
     }
 
     #[tokio::test]
