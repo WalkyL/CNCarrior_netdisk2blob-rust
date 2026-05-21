@@ -197,6 +197,7 @@ fn should_forward_browser_profile_header(name: &str, blocked_names: &[&str]) -> 
         return false;
     };
     let default_blocked = [
+        "accept-encoding",
         "authorization",
         "browser-id",
         "connection",

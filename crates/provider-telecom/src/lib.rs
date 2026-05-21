@@ -28,7 +28,9 @@ use reqwest::{
     Method, Response, StatusCode,
     header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderName, HeaderValue, REFERER, USER_AGENT},
 };
-use rsa::{Pkcs1v15Encrypt, RsaPublicKey, pkcs8::DecodePublicKey};
+use rsa::{
+    Pkcs1v15Encrypt, RsaPublicKey, pkcs1::DecodeRsaPublicKey, pkcs8::DecodePublicKey,
+};
 use serde::{Deserialize, Deserializer, Serialize, de, de::DeserializeOwned};
 use serde_json::Value;
 use sha1::Sha1;
@@ -704,7 +706,11 @@ impl TelecomBlobAdapter {
         file_id: &str,
         signed_token: Option<&str>,
     ) -> Result<String, BlobError> {
-        let query = vec![("fileId".to_string(), file_id.to_string())];
+        let query = vec![
+            ("fileId".to_string(), file_id.to_string()),
+            ("dt".to_string(), "1".to_string()),
+            ("shareId".to_string(), String::new()),
+        ];
         let response = self
             .send_get_json::<TelecomDownloadUrlResponse>(
                 self.download_url_api().as_str(),
@@ -2161,15 +2167,57 @@ fn telecom_upload_signature(
 }
 
 fn rsa_encrypt_upload_secret(public_key_pem: &str, secret: &str) -> Result<String, BlobError> {
-    let public_key = RsaPublicKey::from_public_key_pem(public_key_pem).map_err(|error| {
-        BlobError::Configuration(format!("invalid Telecom upload RSA public key: {error}"))
-    })?;
+    let public_key = parse_upload_public_key(public_key_pem)?;
     let ciphertext = public_key
         .encrypt(&mut OsRng, Pkcs1v15Encrypt, secret.as_bytes())
         .map_err(|error| {
             BlobError::Upstream(format!("failed to encrypt Telecom upload secret: {error}"))
         })?;
     Ok(BASE64_STANDARD.encode(ciphertext))
+}
+
+fn parse_upload_public_key(public_key: &str) -> Result<RsaPublicKey, BlobError> {
+    let normalized = normalize_upload_public_key(public_key);
+    match RsaPublicKey::from_public_key_pem(normalized.as_str()) {
+        Ok(public_key) => return Ok(public_key),
+        Err(pem_error) => {
+            let base64_body = upload_public_key_base64_body(normalized.as_str());
+            if !base64_body.is_empty() {
+                let der = BASE64_STANDARD.decode(base64_body.as_bytes()).map_err(|error| {
+                    BlobError::Configuration(format!(
+                        "invalid Telecom upload RSA public key base64: {error}"
+                    ))
+                })?;
+                if let Ok(public_key) = RsaPublicKey::from_public_key_der(der.as_slice()) {
+                    return Ok(public_key);
+                }
+                if let Ok(public_key) = RsaPublicKey::from_pkcs1_der(der.as_slice()) {
+                    return Ok(public_key);
+                }
+            }
+            Err(BlobError::Configuration(format!(
+                "invalid Telecom upload RSA public key: {pem_error}"
+            )))
+        }
+    }
+}
+
+fn normalize_upload_public_key(public_key: &str) -> String {
+    public_key
+        .chars()
+        .filter(|value| *value != '\0')
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn upload_public_key_base64_body(public_key: &str) -> String {
+    public_key
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("-----"))
+        .flat_map(str::chars)
+        .filter(|value| !value.is_whitespace() && *value != '\0')
+        .collect()
 }
 
 fn random_request_id() -> String {
@@ -2383,7 +2431,8 @@ mod tests {
 
     use super::{
         DEFAULT_ROOT_FOLDER_ID, ListObjectsRequest, TELECOM_ROOT_CONTAINER, TelecomBlobAdapter,
-        TelecomConfig, TokenSource, telecom_signature,
+        TelecomConfig, TokenSource, normalize_upload_public_key, telecom_signature,
+        upload_public_key_base64_body,
     };
     use axum::{
         Router,
@@ -2888,6 +2937,8 @@ mod tests {
             .get("fileId")
             .cloned()
             .expect("mock telecom download request should contain fileId");
+        let dt = query.get("dt").cloned();
+        let share_id = query.get("shareId").cloned();
         let access_token = header_to_string(&headers, "AccessToken");
         let timestamp = header_to_string(&headers, "Timestamp");
         let signature = header_to_string(&headers, "Signature");
@@ -2900,6 +2951,8 @@ mod tests {
             .push(json!({
                 "kind": "download_url",
                 "fileId": file_id,
+                "dt": dt,
+                "shareId": share_id,
                 "signed": signed,
                 "browserId": header_to_string(&headers, "Browser-Id"),
                 "cookie": header_to_string(&headers, "Cookie"),
@@ -2939,6 +2992,8 @@ mod tests {
                 ("AccessToken".to_string(), access_token.clone()),
                 ("Timestamp".to_string(), timestamp),
                 ("fileId".to_string(), file_id.clone()),
+                ("dt".to_string(), "1".to_string()),
+                ("shareId".to_string(), String::new()),
             ]);
             if access_token != state.access_token || signature != expected {
                 return axum::Json(json!({
@@ -3311,6 +3366,24 @@ AwIDAQAB\n\
         );
     }
 
+    #[test]
+    fn upload_public_key_normalization_removes_nul_padding() {
+        assert_eq!(
+            normalize_upload_public_key("\0  -----BEGIN PUBLIC KEY-----\nabc\0\n-----END PUBLIC KEY-----  \0"),
+            "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----"
+        );
+    }
+
+    #[test]
+    fn upload_public_key_base64_body_ignores_pem_boundaries() {
+        assert_eq!(
+            upload_public_key_base64_body(
+                "-----BEGIN PUBLIC KEY-----\nYWJj\nZGVm\n-----END PUBLIC KEY-----"
+            ),
+            "YWJjZGVm"
+        );
+    }
+
     #[tokio::test]
     async fn health_and_list_containers_hit_real_list_endpoint() {
         let server = MockServer::start(
@@ -3471,7 +3544,11 @@ AwIDAQAB\n\
             .collect::<Vec<_>>();
         assert_eq!(download_requests.len(), 2);
         assert_eq!(download_requests[0]["signed"], false);
+        assert_eq!(download_requests[0]["dt"], "1");
+        assert_eq!(download_requests[0]["shareId"], "");
         assert_eq!(download_requests[1]["signed"], true);
+        assert_eq!(download_requests[1]["dt"], "1");
+        assert_eq!(download_requests[1]["shareId"], "");
         assert_eq!(download_requests[1]["accessToken"], token);
     }
 
