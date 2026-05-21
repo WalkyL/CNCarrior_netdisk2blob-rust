@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "provider": "unicom",
+  "surface": "pan.wo.cn-web",
+  "label": "China Unicom Browser Bridge",
+  "description": "Bridge metadata for China Unicom browser-assisted auth and capture.",
+  "flow_aliases": {
+    "sms_request_code": "unicom_sms_login_request_code_validate",
+    "sms_resume_submit_code": "unicom_sms_login_resume_submit_code",
+    "capture_session": "unicom_capture_current_session",
+    "prepare_personal_root_upload": "unicom_prepare_personal_root_upload",
+    "personal_root_upload": "unicom_personal_root_upload"
+  },
+  "runtime_credential_mappings": [
+    {
+      "runtime_key": "access_token",
+      "credential_key": "token"
+    },
+    {
+      "runtime_key": "cookie_header",
+      "credential_key": "cookie_header"
+    },
+    {
+      "runtime_key": "family_id",
+      "credential_key": "family_id"
+    },
+    {
+      "runtime_key": "client_id",
+      "credential_key": "client_id"
+    }
+  ],
+  "browser_profile": {
+    "source_url_runtime_key": "current_url",
+    "headers_runtime_key": "browser_profile_headers"
+  },
+  "logged_in_probes": [
+    {
+      "id": "personal",
+      "flow_alias": "capture_session"
+    }
+  ],
+  "notes": [
+    "Unicom upload-related browser bridge flow ids live here so page-driven prep flows can evolve without touching provider Rust code."
+  ]
+}

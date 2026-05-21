@@ -2,7 +2,7 @@ use std::{
     fs,
     path::Path,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -67,6 +67,18 @@ struct PreparedOneDriveDestination {
     parent_path: String,
     parent_id: String,
     name: String,
+}
+
+#[derive(Debug)]
+struct TimedDriveItemResponse {
+    item: DriveItemResponse,
+    first_response_latency_ms: u64,
+}
+
+#[derive(Debug)]
+struct TimedBytesPayload {
+    body: Bytes,
+    first_response_latency_ms: u64,
 }
 
 #[async_trait]
@@ -617,7 +629,8 @@ impl OneDriveBlobAdapter {
         body: Bytes,
         content_type: Option<&str>,
         action: &str,
-    ) -> Result<DriveItemResponse, BlobError> {
+    ) -> Result<TimedDriveItemResponse, BlobError> {
+        let request_started_at = Instant::now();
         let response = self
             .request(Method::PUT, url)
             .await?
@@ -629,23 +642,30 @@ impl OneDriveBlobAdapter {
             .send()
             .await
             .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+        let first_response_latency_ms = elapsed_millis(request_started_at);
 
         if !response.status().is_success() {
             return Err(response_to_error(response, action).await);
         }
 
-        response.json::<DriveItemResponse>().await.map_err(|error| {
+        let item = response.json::<DriveItemResponse>().await.map_err(|error| {
             BlobError::Upstream(format!("{action} returned invalid JSON: {error}"))
+        })?;
+        Ok(TimedDriveItemResponse {
+            item,
+            first_response_latency_ms,
         })
     }
 
-    async fn get_bytes(&self, url: &str, action: &str) -> Result<Bytes, BlobError> {
+    async fn get_bytes(&self, url: &str, action: &str) -> Result<TimedBytesPayload, BlobError> {
+        let request_started_at = Instant::now();
         let response = self
             .request(Method::GET, url)
             .await?
             .send()
             .await
             .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+        let first_response_latency_ms = elapsed_millis(request_started_at);
 
         if response.status() == StatusCode::NOT_FOUND {
             return Err(BlobError::NotFound(action.to_string()));
@@ -655,8 +675,12 @@ impl OneDriveBlobAdapter {
             return Err(response_to_error(response, action).await);
         }
 
-        response.bytes().await.map_err(|error| {
+        let body = response.bytes().await.map_err(|error| {
             BlobError::Upstream(format!("{action} returned invalid bytes: {error}"))
+        })?;
+        Ok(TimedBytesPayload {
+            body,
+            first_response_latency_ms,
         })
     }
 
@@ -739,11 +763,7 @@ impl OneDriveBlobAdapter {
             })
     }
 
-    async fn poll_copy_operation(
-        &self,
-        monitor_url: &str,
-        action: &str,
-    ) -> Result<(), BlobError> {
+    async fn poll_copy_operation(&self, monitor_url: &str, action: &str) -> Result<(), BlobError> {
         for attempt in 1..=COPY_STATUS_POLL_MAX_ATTEMPTS {
             let response = self
                 .request(Method::GET, monitor_url)
@@ -761,11 +781,14 @@ impl OneDriveBlobAdapter {
                 return Err(response_to_error(response, action).await);
             }
 
-            let status = response.json::<CopyOperationStatus>().await.map_err(|error| {
-                BlobError::Upstream(format!(
-                    "{action} monitor returned invalid JSON on attempt {attempt}: {error}"
-                ))
-            })?;
+            let status = response
+                .json::<CopyOperationStatus>()
+                .await
+                .map_err(|error| {
+                    BlobError::Upstream(format!(
+                        "{action} monitor returned invalid JSON on attempt {attempt}: {error}"
+                    ))
+                })?;
 
             match status
                 .status
@@ -780,10 +803,12 @@ impl OneDriveBlobAdapter {
                         .error
                         .map(|value| trim_response_body(&value.to_string()))
                         .unwrap_or_else(|| "copy operation failed".to_string());
-                    return Err(BlobError::Upstream(format!("{action} monitor failed: {detail}")));
+                    return Err(BlobError::Upstream(format!(
+                        "{action} monitor failed: {detail}"
+                    )));
                 }
-                Some("inprogress") | Some("in_progress") | Some("notstarted") | Some("not_started")
-                | None => {
+                Some("inprogress") | Some("in_progress") | Some("notstarted")
+                | Some("not_started") | None => {
                     let _ = status.percentage_complete;
                     let _ = status.resource_id;
                     sleep(Duration::from_millis(COPY_STATUS_POLL_INTERVAL_MS)).await;
@@ -894,10 +919,9 @@ impl OneDriveBlobAdapter {
             ))
         })?;
         self.ensure_folder_tree(&parent_path).await?;
-        let parent = self
-            .get_item_by_path(&parent_path)
-            .await?
-            .ok_or_else(|| BlobError::Upstream(format!("destination folder missing: {parent_path}")))?;
+        let parent = self.get_item_by_path(&parent_path).await?.ok_or_else(|| {
+            BlobError::Upstream(format!("destination folder missing: {parent_path}"))
+        })?;
         ensure_folder(&parent, &format!("destination folder {parent_path}"))?;
         let name = path
             .split('/')
@@ -1070,6 +1094,8 @@ impl BlobBackend for OneDriveBlobAdapter {
             write: true,
             delete: true,
             multipart_upload: false,
+            streaming_get: false,
+            streaming_put: false,
         }
     }
 
@@ -1253,7 +1279,7 @@ impl BlobBackend for OneDriveBlobAdapter {
         self.ensure_enabled()?;
 
         let item = self.resolve_object(container, key).await?;
-        let body = self
+        let downloaded = self
             .get_bytes(
                 &self.item_content_url(&item.id),
                 &format!("download object {container}/{key}"),
@@ -1262,7 +1288,8 @@ impl BlobBackend for OneDriveBlobAdapter {
 
         Ok(ObjectPayload {
             info: item.into_object_info(normalize_path(key)),
-            body: body.into(),
+            body: downloaded.body.into(),
+            first_response_latency_ms: Some(downloaded.first_response_latency_ms),
         })
     }
 
@@ -1285,7 +1312,8 @@ impl BlobBackend for OneDriveBlobAdapter {
             .await?;
 
         Ok(PutObjectResult {
-            etag: uploaded.etag,
+            etag: uploaded.item.etag,
+            first_response_latency_ms: Some(uploaded.first_response_latency_ms),
         })
     }
 
@@ -1421,6 +1449,10 @@ fn normalize_path(value: &str) -> String {
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn parent_path(path: &str) -> Option<String> {
@@ -1831,11 +1863,7 @@ mod tests {
             }
         }
 
-        fn patch_item(
-            &mut self,
-            item_id: &str,
-            payload: &Value,
-        ) -> Result<MockItem, StatusCode> {
+        fn patch_item(&mut self, item_id: &str, payload: &Value) -> Result<MockItem, StatusCode> {
             let Some(existing) = self.items_by_id.get(item_id).cloned() else {
                 return Err(StatusCode::NOT_FOUND);
             };
@@ -2142,12 +2170,10 @@ mod tests {
                 }
             }
             Method::POST if path.starts_with("/items/") && path.ends_with("/copy") => {
-                let item_id = decode_segment(
-                    path.trim_start_matches("/items/")
-                        .trim_end_matches("/copy"),
-                );
-                let payload = serde_json::from_slice::<Value>(&body)
-                    .expect("copy payload should be JSON");
+                let item_id =
+                    decode_segment(path.trim_start_matches("/items/").trim_end_matches("/copy"));
+                let payload =
+                    serde_json::from_slice::<Value>(&body).expect("copy payload should be JSON");
                 match drive.create_copy_operation(&item_id, &payload) {
                     Ok(operation_id) => (
                         StatusCode::ACCEPTED,
@@ -2391,9 +2417,7 @@ mod tests {
             .await
             .expect("rename should succeed");
 
-        let result = adapter
-            .get_object("alpha", "nested/b.txt")
-            .await;
+        let result = adapter.get_object("alpha", "nested/b.txt").await;
         assert!(matches!(result, Err(BlobError::NotFound(_))));
 
         let renamed = adapter
@@ -2492,9 +2516,7 @@ mod tests {
             .await
             .expect("move should succeed");
 
-        let result = adapter
-            .get_object("alpha", "nested/b.txt")
-            .await;
+        let result = adapter.get_object("alpha", "nested/b.txt").await;
         assert!(matches!(result, Err(BlobError::NotFound(_))));
 
         let moved = adapter

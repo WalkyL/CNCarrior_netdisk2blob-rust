@@ -1,11 +1,12 @@
 mod browser_flow;
+mod provider_bridge;
 
 use std::{
     collections::BTreeMap,
     env, fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     pin::Pin,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
@@ -23,7 +24,15 @@ pub use browser_flow::{
     BrowserFlowHeaderMatcher, BrowserFlowInput, BrowserFlowInputKind, BrowserFlowOperation,
     BrowserFlowOperationKind, BrowserFlowOutput, BrowserFlowOutputKind, BrowserFlowPage,
     BrowserFlowRequest, BrowserFlowSelector, BrowserFlowSelectorEngine, BrowserFlowSession,
-    BrowserFlowSessionExecutor, BrowserFlowStep, DryRunBrowserFlowExecutor,
+    BrowserFlowSessionExecutor, BrowserFlowStep, BrowserFlowVisualCaptchaRequest,
+    BrowserFlowVisualLayoutTarget, BrowserFlowVisualLayoutValidationRequest,
+    BrowserFlowVisualLayoutValidationTargetRequest, DryRunBrowserFlowExecutor,
+};
+pub use provider_bridge::{
+    PROVIDER_BRIDGE_SCHEMA_VERSION, ProviderBridgeBrowserProfileBinding,
+    ProviderBridgeCatalog, ProviderBridgeCatalogCollection,
+    ProviderBridgeCatalogDirectoryEntry, ProviderBridgeCredentialMapping,
+    ProviderBridgeLoggedInProbe,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +49,10 @@ pub struct BackendCapabilities {
     pub write: bool,
     pub delete: bool,
     pub multipart_upload: bool,
+    #[serde(default)]
+    pub streaming_get: bool,
+    #[serde(default)]
+    pub streaming_put: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,10 +117,122 @@ pub struct ListObjectsRequest {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserRequestProfile {
+    #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
+    pub captured_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+impl BrowserRequestProfile {
+    pub fn normalize(mut self) -> Self {
+        self.source_url = normalize_optional_string(self.source_url);
+        self.user_agent = normalize_optional_string(self.user_agent);
+        self.headers = self
+            .headers
+            .into_iter()
+            .filter_map(|(name, value)| {
+                let normalized_name = normalize_header_name(name.as_str())?;
+                let normalized_value = normalize_optional_string(Some(value))?;
+                Some((normalized_name, normalized_value))
+            })
+            .collect();
+        if self.user_agent.is_none() {
+            self.user_agent = self.header("user-agent").map(ToString::to_string);
+        }
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.user_agent.is_none() && self.headers.is_empty() && self.source_url.is_none()
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let normalized = normalize_header_name(name)?;
+        self.headers.get(normalized.as_str()).map(String::as_str)
+    }
+
+    pub fn effective_user_agent(&self) -> Option<&str> {
+        self.user_agent
+            .as_deref()
+            .or_else(|| self.header("user-agent"))
+    }
+
+    pub fn forwarded_headers(&self, blocked_names: &[&str]) -> Vec<(String, String)> {
+        self.headers
+            .iter()
+            .filter(|(name, _)| should_forward_browser_profile_header(name.as_str(), blocked_names))
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    }
+}
+
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_header_name(name: &str) -> Option<String> {
+    let trimmed = name.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn should_forward_browser_profile_header(name: &str, blocked_names: &[&str]) -> bool {
+    let Some(normalized) = normalize_header_name(name) else {
+        return false;
+    };
+    let default_blocked = [
+        "authorization",
+        "browser-id",
+        "connection",
+        "content-length",
+        "cookie",
+        "host",
+        "proxy-authorization",
+        "signature",
+        "timestamp",
+        "transfer-encoding",
+    ];
+    if default_blocked.iter().any(|item| *item == normalized) {
+        return false;
+    }
+    !blocked_names.iter().any(|item| {
+        normalize_header_name(item)
+            .as_deref()
+            .is_some_and(|blocked| blocked == normalized)
+    })
+}
+
 pub struct ObjectPayload {
     pub info: ObjectInfo,
     pub body: ObjectBody,
+    pub first_response_latency_ms: Option<u64>,
 }
+
+pub trait BodySpoolLease: Send + Sync + std::fmt::Debug {
+    fn update_tracked_bytes(&mut self, next_bytes: u64);
+}
+
+pub trait BodySpoolObserver: Send + Sync + std::fmt::Debug {
+    fn start_tracking(&self) -> Box<dyn BodySpoolLease>;
+}
+
+pub type SharedBodySpoolObserver = Arc<dyn BodySpoolObserver>;
 
 pub struct PutObjectRequest {
     pub container: String,
@@ -120,6 +245,8 @@ pub struct PutObjectRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutObjectResult {
     pub etag: Option<String>,
+    #[serde(default)]
+    pub first_response_latency_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +278,8 @@ pub enum BlobError {
     Configuration(String),
     #[error("upstream error: {0}")]
     Upstream(String),
+    #[error("interactive input required: {0}")]
+    InteractiveInputRequired(String),
     #[error("feature not implemented: {0}")]
     NotImplemented(String),
     #[error("not found: {0}")]
@@ -413,6 +542,8 @@ impl BlobBackend for StubBackend {
             write: true,
             delete: true,
             multipart_upload: false,
+            streaming_get: false,
+            streaming_put: false,
         }
     }
 
@@ -502,6 +633,7 @@ impl BlobBackend for StubBackend {
                 last_modified: Some(object.last_modified.clone()),
             },
             body: ObjectBody::from_bytes(object.body.clone()),
+            first_response_latency_ms: Some(0),
         })
     }
 
@@ -521,7 +653,10 @@ impl BlobBackend for StubBackend {
             },
         );
 
-        Ok(PutObjectResult { etag: Some(etag) })
+        Ok(PutObjectResult {
+            etag: Some(etag),
+            first_response_latency_ms: Some(0),
+        })
     }
 
     async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {

@@ -1,25 +1,73 @@
 use std::{
     collections::BTreeMap,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    fs,
+    path::Path,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use aes::{
+    Aes128,
+    cipher::{BlockEncryptMut, KeyInit, block_padding::Pkcs7},
+};
 use async_trait::async_trait;
 use blob_core::{
-    BackendCapabilities, BlobBackend, BlobError, ContainerInfo, HealthStatus, ListObjectsRequest,
-    ObjectInfo, ObjectPayload, OutboundIpFamily, ServiceHealth, StorageCapacity,
+    BackendCapabilities, BlobBackend, BlobError, BodySpoolLease, BrowserRequestProfile,
+    ContainerInfo, CopyObjectRequest, HealthStatus, ListObjectsRequest, MoveObjectRequest,
+    ObjectBody, ObjectInfo, ObjectPayload, OutboundIpFamily, PutObjectRequest, PutObjectResult,
+    RenameObjectRequest, ServiceHealth, SharedBodySpoolObserver, StorageCapacity,
     StorageScopeHealth, StorageScopeKind, TokenSource,
 };
-use bytes::Bytes;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use ecb::Encryptor;
+use futures_util::{StreamExt, stream::try_unfold};
+use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
+use rand::{Rng, rngs::OsRng};
 use reqwest::{
     Method, Response, StatusCode,
-    header::{ACCEPT, COOKIE, HeaderValue, REFERER, USER_AGENT},
+    header::{ACCEPT, CONTENT_TYPE, COOKIE, HeaderName, HeaderValue, REFERER, USER_AGENT},
 };
+use rsa::{Pkcs1v15Encrypt, RsaPublicKey, pkcs8::DecodePublicKey};
 use serde::{Deserialize, Deserializer, Serialize, de, de::DeserializeOwned};
+use serde_json::Value;
+use sha1::Sha1;
+use tempfile::{Builder as TempFileBuilder, NamedTempFile};
+use tokio::{
+    fs::File as TokioFile,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
+};
 
 const TELECOM_ROOT_CONTAINER: &str = "root";
 const DEFAULT_ROOT_FOLDER_ID: &str = "-11";
 const DEFAULT_PAGE_SIZE: usize = 60;
+const DEFAULT_UPLOAD_PART_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_UPLOAD_CONTROL_BASE_URL: &str = "https://upload.cloud.189.cn";
+const URI_COMPONENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelecomConfig {
@@ -29,10 +77,22 @@ pub struct TelecomConfig {
     pub browser_id: Option<String>,
     pub cookie_header: Option<String>,
     pub user_agent: String,
+    #[serde(default)]
+    pub browser_profile: Option<BrowserRequestProfile>,
     pub request_timeout_secs: u64,
     pub sign_type: String,
+    #[serde(default)]
+    pub family_id: Option<String>,
     pub root_folder_id: String,
     pub page_size: usize,
+    #[serde(default)]
+    pub root_prefix: Option<String>,
+    #[serde(default)]
+    pub upload_part_size_bytes: u64,
+    #[serde(default)]
+    pub body_spool_dir: Option<String>,
+    #[serde(skip, default)]
+    pub body_spool_observer: Option<SharedBodySpoolObserver>,
 }
 
 pub struct TelecomBlobAdapter {
@@ -144,6 +204,45 @@ struct TelecomFileEntry {
     download_url: Option<String>,
 }
 
+#[derive(Debug)]
+struct TimedObjectBody {
+    body: ObjectBody,
+    first_response_latency_ms: u64,
+}
+
+#[derive(Debug)]
+struct PreparedTelecomUpload {
+    spool_file: NamedTempFile,
+    size: u64,
+    file_md5_upper: String,
+    slice_md5_upper: String,
+    part_md5_upper: Vec<String>,
+    part_md5_base64: Vec<String>,
+    part_size_bytes: u64,
+    _spool_lease: Option<Box<dyn BodySpoolLease>>,
+}
+
+#[derive(Debug, Clone)]
+struct TelecomUploadRsaKey {
+    pk_id: String,
+    pub_key: String,
+}
+
+#[derive(Debug, Clone)]
+struct TelecomUploadBootstrap {
+    session_key: String,
+    rsa_key: TelecomUploadRsaKey,
+}
+
+#[derive(Debug)]
+struct TelecomUploadPlan {
+    upload_host: String,
+    upload_file_id: String,
+    file_data_exists: bool,
+}
+
+type HmacSha1 = Hmac<Sha1>;
+
 impl TelecomFileListAo {
     fn fetched_count(&self) -> usize {
         self.file_list.len() + self.folder_list.len()
@@ -240,9 +339,26 @@ impl TelecomBlobAdapter {
         self.config.base_url.trim_end_matches('/')
     }
 
+    fn effective_user_agent(&self) -> &str {
+        self.config
+            .browser_profile
+            .as_ref()
+            .and_then(BrowserRequestProfile::effective_user_agent)
+            .unwrap_or(self.config.user_agent.as_str())
+    }
+
+    fn profile_header(&self, header_name: &str) -> Option<&str> {
+        self.config
+            .browser_profile
+            .as_ref()
+            .and_then(|profile| profile.header(header_name))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
     fn sign_type(&self) -> &str {
-        let sign_type = self.config.sign_type.trim();
-        if sign_type.is_empty() { "1" } else { sign_type }
+        let configured = self.config.sign_type.trim();
+        if configured.is_empty() { "1" } else { configured }
     }
 
     fn root_folder_id(&self) -> &str {
@@ -262,10 +378,73 @@ impl TelecomBlobAdapter {
         }
     }
 
+    fn upload_part_size_bytes(&self) -> u64 {
+        if self.config.upload_part_size_bytes == 0 {
+            DEFAULT_UPLOAD_PART_SIZE_BYTES
+        } else {
+            self.config.upload_part_size_bytes
+        }
+    }
+
+    fn normalized_root_prefix(&self) -> Option<String> {
+        self.config
+            .root_prefix
+            .as_deref()
+            .map(normalize_object_key)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn managed_container_root(&self, container: &str) -> Result<String, BlobError> {
+        self.validate_container(container)?;
+        Ok(self.normalized_root_prefix().unwrap_or_default())
+    }
+
+    fn provider_object_key(&self, container: &str, key: &str) -> Result<String, BlobError> {
+        self.validate_container(container)?;
+        let key = normalize_object_key(key);
+        if key.is_empty() {
+            return Err(BlobError::NotFound("object key is empty".to_string()));
+        }
+        let managed_root = self.managed_container_root(container)?;
+        if managed_root.is_empty() {
+            Ok(key)
+        } else {
+            Ok(join_relative_key(managed_root.as_str(), key.as_str()))
+        }
+    }
+
+    fn user_visible_object_key(
+        &self,
+        container: &str,
+        provider_key: &str,
+    ) -> Result<String, BlobError> {
+        self.validate_container(container)?;
+        let provider_key = normalize_object_key(provider_key);
+        if provider_key.is_empty() {
+            return Err(BlobError::NotFound("object key is empty".to_string()));
+        }
+
+        let managed_root = self.managed_container_root(container)?;
+        if managed_root.is_empty() {
+            return Ok(provider_key);
+        }
+
+        let prefix = format!("{managed_root}/");
+        provider_key
+            .strip_prefix(prefix.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                BlobError::NotFound(format!(
+                    "object is outside managed root for {container}: {provider_key}"
+                ))
+            })
+    }
+
     fn browser_id(&self) -> Result<&str, BlobError> {
         self.config
             .browser_id
             .as_deref()
+            .or_else(|| self.profile_header("browser-id"))
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
@@ -279,6 +458,7 @@ impl TelecomBlobAdapter {
         self.config
             .cookie_header
             .as_deref()
+            .or_else(|| self.profile_header("cookie"))
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
@@ -297,6 +477,36 @@ impl TelecomBlobAdapter {
             .filter(|value| !value.is_empty())
     }
 
+    fn apply_browser_profile_headers(
+        &self,
+        mut request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, BlobError> {
+        let Some(profile) = self.config.browser_profile.as_ref() else {
+            return Ok(request);
+        };
+        for (name, value) in profile.forwarded_headers(&[
+            "accept",
+            "browser-id",
+            "cookie",
+            "referer",
+            "sign-type",
+            "user-agent",
+        ]) {
+            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                BlobError::Configuration(format!(
+                    "invalid forwarded China Telecom browser profile header name {name}: {error}"
+                ))
+            })?;
+            let header_value = HeaderValue::from_str(value.as_str()).map_err(|error| {
+                BlobError::Configuration(format!(
+                    "invalid forwarded China Telecom browser profile header {name}: {error}"
+                ))
+            })?;
+            request = request.header(header_name, header_value);
+        }
+        Ok(request)
+    }
+
     fn request(
         &self,
         method: Method,
@@ -308,7 +518,7 @@ impl TelecomBlobAdapter {
         let mut request = self
             .client
             .request(method, url)
-            .header(USER_AGENT, self.config.user_agent.as_str())
+            .header(USER_AGENT, self.effective_user_agent())
             .header(ACCEPT, "application/json;charset=UTF-8")
             .header("Browser-Id", browser_id)
             .header("Sign-Type", self.sign_type())
@@ -321,7 +531,11 @@ impl TelecomBlobAdapter {
             })?,
         );
 
-        if let Some(referer) = referer.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(referer) = referer
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.profile_header("referer"))
+        {
             request = request.header(
                 REFERER,
                 HeaderValue::from_str(referer).map_err(|error| {
@@ -332,7 +546,7 @@ impl TelecomBlobAdapter {
             );
         }
 
-        Ok(request)
+        self.apply_browser_profile_headers(request)
     }
 
     fn list_files_url(&self) -> String {
@@ -621,7 +835,7 @@ impl TelecomBlobAdapter {
             id: "personal".to_string(),
             label: "Personal Cloud".to_string(),
             kind: StorageScopeKind::Personal,
-            writable: false,
+            writable: true,
             root: Some(self.root_folder_id().to_string()),
             container: Some(TELECOM_ROOT_CONTAINER.to_string()),
             object_count,
@@ -691,6 +905,39 @@ impl TelecomBlobAdapter {
         )))
     }
 
+    async fn find_child_folder_id(
+        &self,
+        parent_folder_id: &str,
+        child_name: &str,
+    ) -> Result<Option<String>, BlobError> {
+        let mut page_num = 1;
+        loop {
+            let page = self.list_files_page(parent_folder_id, page_num).await?;
+            let fetched_count = page.fetched_count();
+
+            if let Some(entry) = page
+                .folder_list
+                .into_iter()
+                .find(|entry| entry.display_name() == Some(child_name))
+            {
+                return entry
+                    .id()
+                    .map(str::to_string)
+                    .ok_or_else(|| {
+                        BlobError::Upstream(
+                            "listFiles.action returned a folder without an id".to_string(),
+                        )
+                    })
+                    .map(Some);
+            }
+
+            if fetched_count < self.page_size() {
+                return Ok(None);
+            }
+            page_num += 1;
+        }
+    }
+
     async fn find_child_file(
         &self,
         parent_folder_id: &str,
@@ -720,8 +967,48 @@ impl TelecomBlobAdapter {
         )))
     }
 
-    async fn resolve_file_entry(&self, key: &str) -> Result<(TelecomFileEntry, String), BlobError> {
-        let normalized_key = normalize_object_key(key);
+    async fn resolve_child_directory_path_if_exists_in_scope(
+        &self,
+        parent_folder_id: &str,
+        directory_path: &str,
+    ) -> Result<Option<String>, BlobError> {
+        let normalized = normalize_object_key(directory_path);
+        if normalized.is_empty() {
+            return Ok(Some(parent_folder_id.to_string()));
+        }
+
+        let mut current_id = parent_folder_id.to_string();
+        for segment in normalized
+            .split('/')
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+        {
+            let Some(child_id) = self.find_child_folder_id(current_id.as_str(), segment).await? else {
+                return Ok(None);
+            };
+            current_id = child_id;
+        }
+
+        Ok(Some(current_id))
+    }
+
+    async fn resolve_scope_container_root_folder_id(
+        &self,
+        container: &str,
+    ) -> Result<Option<String>, BlobError> {
+        let managed_root = self.managed_container_root(container)?;
+        if managed_root.is_empty() {
+            return Ok(Some(self.root_folder_id().to_string()));
+        }
+        self.resolve_child_directory_path_if_exists_in_scope(self.root_folder_id(), &managed_root)
+            .await
+    }
+
+    async fn resolve_provider_file_entry(
+        &self,
+        provider_key: &str,
+    ) -> Result<(TelecomFileEntry, String), BlobError> {
+        let normalized_key = normalize_object_key(provider_key);
         if normalized_key.is_empty() {
             return Err(BlobError::NotFound("object key is empty".to_string()));
         }
@@ -748,15 +1035,17 @@ impl TelecomBlobAdapter {
         Ok((file, normalized_key))
     }
 
-    async fn get_bytes(&self, url: &str, action: &str) -> Result<Bytes, BlobError> {
+    async fn get_stream(&self, url: &str, action: &str) -> Result<TimedObjectBody, BlobError> {
+        let request_started_at = Instant::now();
         let response = self
             .client
             .request(Method::GET, url)
-            .header(USER_AGENT, self.config.user_agent.as_str())
+            .header(USER_AGENT, self.effective_user_agent())
             .timeout(self.timeout())
             .send()
             .await
             .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+        let first_response_latency_ms = elapsed_millis(request_started_at);
 
         if response.status() == StatusCode::NOT_FOUND {
             return Err(BlobError::NotFound(action.to_string()));
@@ -766,9 +1055,625 @@ impl TelecomBlobAdapter {
             return Err(response_to_error(response, action).await);
         }
 
-        response.bytes().await.map_err(|error| {
-            BlobError::Upstream(format!("{action} returned invalid bytes: {error}"))
+        let action = action.to_string();
+        Ok(TimedObjectBody {
+            body: ObjectBody::from_stream(try_unfold(response, move |mut response| {
+                let action = action.clone();
+                async move {
+                    let chunk = response.chunk().await.map_err(|error| {
+                        BlobError::Upstream(format!(
+                            "{action} returned invalid bytes: {error}"
+                        ))
+                    })?;
+                    Ok(chunk.map(|chunk| (chunk, response)))
+                }
+            })),
+            first_response_latency_ms,
         })
+    }
+
+    fn create_upload_spool_file(&self) -> Result<NamedTempFile, BlobError> {
+        let mut builder = TempFileBuilder::new();
+        builder.prefix("ccbg-telecom-upload-").suffix(".spool");
+        match self
+            .config
+            .body_spool_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(path) => {
+                fs::create_dir_all(path).map_err(|error| {
+                    BlobError::Upstream(format!(
+                        "failed to create China Telecom upload spool directory {path}: {error}"
+                    ))
+                })?;
+                builder.tempfile_in(Path::new(path)).map_err(|error| {
+                    BlobError::Upstream(format!(
+                        "failed to create China Telecom upload spool file in {path}: {error}"
+                    ))
+                })
+            }
+            None => builder.tempfile().map_err(|error| {
+                BlobError::Upstream(format!(
+                    "failed to create China Telecom upload spool file in system temp directory: {error}"
+                ))
+            }),
+        }
+    }
+
+    fn upload_control_base_url(&self) -> &str {
+        let base = self.trimmed_base_url();
+        if base.contains("cloud.189.cn") {
+            DEFAULT_UPLOAD_CONTROL_BASE_URL
+        } else {
+            base
+        }
+    }
+
+    fn upload_session_url(&self) -> String {
+        format!(
+            "{}/api/portal/v2/getUserBriefInfo.action",
+            self.trimmed_base_url()
+        )
+    }
+
+    fn generate_rsa_key_url(&self) -> String {
+        format!(
+            "{}/api/security/generateRsaKey.action",
+            self.trimmed_base_url()
+        )
+    }
+
+    fn create_folder_url(&self) -> String {
+        format!("{}/api/open/file/createFolder.action", self.trimmed_base_url())
+    }
+
+    async fn send_get_value(
+        &self,
+        url: &str,
+        referer: &str,
+        query_params: &[(String, String)],
+        action: &str,
+    ) -> Result<Value, BlobError> {
+        let mut query = query_params.to_vec();
+        query.push(("noCache".to_string(), random_nocache_value()));
+        let response = self
+            .request(Method::GET, url, Some(referer))?
+            .query(&query)
+            .send()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+        if !response.status().is_success() {
+            return Err(response_to_error(response, action).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} returned invalid JSON: {error}")))
+    }
+
+    async fn send_form_value(
+        &self,
+        url: &str,
+        referer: &str,
+        form_fields: &[(String, String)],
+        action: &str,
+    ) -> Result<Value, BlobError> {
+        let response = self
+            .request(Method::POST, url, Some(referer))?
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .query(&[("noCache".to_string(), random_nocache_value())])
+            .form(form_fields)
+            .send()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+        if !response.status().is_success() {
+            return Err(response_to_error(response, action).await);
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} returned invalid JSON: {error}")))
+    }
+
+    async fn fetch_upload_session_key(&self) -> Result<String, BlobError> {
+        let value = self
+            .send_get_value(
+                self.upload_session_url().as_str(),
+                self.main_referer().as_str(),
+                &[],
+                "getUserBriefInfo.action",
+            )
+            .await?;
+        json_lookup_string(&value, &[&["sessionKey"], &["data", "sessionKey"]]).ok_or_else(
+            || {
+                BlobError::Upstream(
+                    "getUserBriefInfo.action returned no sessionKey".to_string(),
+                )
+            },
+        )
+    }
+
+    async fn fetch_upload_rsa_key(&self) -> Result<TelecomUploadRsaKey, BlobError> {
+        let value = self
+            .send_get_value(
+                self.generate_rsa_key_url().as_str(),
+                self.main_referer().as_str(),
+                &[],
+                "generateRsaKey.action",
+            )
+            .await?;
+        let pub_key = json_lookup_string(&value, &[&["pubKey"], &["data", "pubKey"]])
+            .ok_or_else(|| {
+                BlobError::Upstream(
+                    "generateRsaKey.action returned no pubKey".to_string(),
+                )
+            })?;
+        let pk_id = json_lookup_string(&value, &[&["pkId"], &["data", "pkId"]]).ok_or_else(
+            || BlobError::Upstream("generateRsaKey.action returned no pkId".to_string()),
+        )?;
+        Ok(TelecomUploadRsaKey { pk_id, pub_key })
+    }
+
+    async fn fetch_upload_bootstrap(&self) -> Result<TelecomUploadBootstrap, BlobError> {
+        Ok(TelecomUploadBootstrap {
+            session_key: self.fetch_upload_session_key().await?,
+            rsa_key: self.fetch_upload_rsa_key().await?,
+        })
+    }
+
+    async fn prepare_upload_body(
+        &self,
+        body: ObjectBody,
+        declared_size: Option<u64>,
+    ) -> Result<PreparedTelecomUpload, BlobError> {
+        let spool_file = self.create_upload_spool_file()?;
+        let mut spool_lease = self
+            .config
+            .body_spool_observer
+            .as_ref()
+            .map(|observer| observer.start_tracking());
+        let async_file = spool_file.reopen().map_err(|error| {
+            BlobError::Upstream(format!(
+                "failed to reopen China Telecom upload spool file for writing: {error}"
+            ))
+        })?;
+        let mut file = TokioFile::from_std(async_file);
+        let mut stream = body.into_stream();
+        let part_size_bytes = self.upload_part_size_bytes().max(1);
+        let mut total_len = 0u64;
+        let mut file_hasher = Md5::new();
+        let mut part_hasher = Md5::new();
+        let mut current_part_len = 0u64;
+        let mut part_md5_upper = Vec::new();
+        let mut part_md5_base64 = Vec::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            file.write_all(&chunk)
+                .await
+                .map_err(|error| BlobError::BodyStream(error.to_string()))?;
+            total_len = total_len.saturating_add(chunk.len() as u64);
+            file_hasher.update(&chunk);
+            if let Some(lease) = spool_lease.as_mut() {
+                lease.update_tracked_bytes(total_len);
+            }
+
+            let mut remaining = chunk.as_ref();
+            while !remaining.is_empty() {
+                let room = (part_size_bytes - current_part_len).min(remaining.len() as u64) as usize;
+                let (current, rest) = remaining.split_at(room);
+                part_hasher.update(current);
+                current_part_len += current.len() as u64;
+                remaining = rest;
+
+                if current_part_len == part_size_bytes {
+                    let digest = std::mem::replace(&mut part_hasher, Md5::new()).finalize();
+                    part_md5_upper.push(hex_upper(digest.as_slice()));
+                    part_md5_base64.push(BASE64_STANDARD.encode(digest.as_slice()));
+                    current_part_len = 0;
+                }
+            }
+        }
+
+        if let Some(expected) = declared_size {
+            if expected != total_len {
+                return Err(BlobError::BodyStream(format!(
+                    "object body size mismatch: declared {expected} bytes, received {total_len}"
+                )));
+            }
+        }
+
+        if current_part_len > 0 || part_md5_upper.is_empty() {
+            let digest = part_hasher.finalize();
+            part_md5_upper.push(hex_upper(digest.as_slice()));
+            part_md5_base64.push(BASE64_STANDARD.encode(digest.as_slice()));
+        }
+
+        file.flush()
+            .await
+            .map_err(|error| BlobError::BodyStream(error.to_string()))?;
+
+        let file_md5_upper = hex_upper(file_hasher.finalize().as_slice());
+        let slice_md5_upper = if part_md5_upper.len() <= 1 {
+            file_md5_upper.clone()
+        } else {
+            hex_upper(Md5::digest(part_md5_upper.join("\n").as_bytes()).as_slice())
+        };
+
+        Ok(PreparedTelecomUpload {
+            spool_file,
+            size: total_len,
+            file_md5_upper,
+            slice_md5_upper,
+            part_md5_upper,
+            part_md5_base64,
+            part_size_bytes,
+            _spool_lease: spool_lease,
+        })
+    }
+
+    async fn ensure_folder(
+        &self,
+        parent_folder_id: &str,
+        folder_name: &str,
+    ) -> Result<String, BlobError> {
+        if let Some(existing) = self.find_child_folder_id(parent_folder_id, folder_name).await? {
+            return Ok(existing);
+        }
+
+        let payload = self
+            .send_form_value(
+                self.create_folder_url().as_str(),
+                self.folder_referer(parent_folder_id).as_str(),
+                &[
+                    ("parentFolderId".to_string(), parent_folder_id.to_string()),
+                    ("folderName".to_string(), folder_name.to_string()),
+                ],
+                "createFolder.action",
+            )
+            .await?;
+
+        if let Some(res_code) = json_lookup_string(&payload, &[&["res_code"], &["resCode"]]) {
+            if res_code != "0" {
+                if res_code == "FileAlreadyExists" {
+                    return self
+                        .find_child_folder_id(parent_folder_id, folder_name)
+                        .await?
+                        .ok_or_else(|| {
+                            BlobError::Upstream(format!(
+                                "createFolder.action reported an existing folder but it could not be listed: {folder_name}"
+                            ))
+                        });
+                }
+                let message = json_lookup_string(
+                    &payload,
+                    &[&["res_message"], &["message"], &["msg"]],
+                )
+                .unwrap_or_else(|| "unknown error".to_string());
+                return Err(BlobError::Upstream(format!(
+                    "createFolder.action returned res_code={res_code} ({message})"
+                )));
+            }
+        }
+
+        json_lookup_string(
+            &payload,
+            &[&["id"], &["folderId"], &["data", "id"], &["data", "folderId"]],
+        )
+        .ok_or_else(|| {
+            BlobError::Upstream(
+                "createFolder.action returned no folder id for the created directory".to_string(),
+            )
+        })
+    }
+
+    async fn ensure_managed_parent_folder_id(
+        &self,
+        container: &str,
+        key: &str,
+    ) -> Result<(String, String), BlobError> {
+        let provider_key = self.provider_object_key(container, key)?;
+        let (parent_path, file_name) = match provider_key.rsplit_once('/') {
+            Some((parent_path, file_name)) => (Some(parent_path), file_name.to_string()),
+            None => return Ok((self.root_folder_id().to_string(), provider_key)),
+        };
+
+        let mut parent_id = self.root_folder_id().to_string();
+        if let Some(parent_path) = parent_path {
+            for segment in parent_path
+                .split('/')
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+            {
+                parent_id = self.ensure_folder(parent_id.as_str(), segment).await?;
+            }
+        }
+
+        Ok((parent_id, file_name))
+    }
+
+    async fn send_upload_control_get(
+        &self,
+        host: &str,
+        uri: &str,
+        data_pairs: &[(String, String)],
+        bootstrap: &TelecomUploadBootstrap,
+        action: &str,
+    ) -> Result<Value, BlobError> {
+        let request_id = random_request_id();
+        let secret = random_upload_secret();
+        let request_date = current_unix_ms().to_string();
+        let params_plain = build_upload_params_plaintext(data_pairs);
+        let encrypted_params = encrypt_upload_params_hex(secret.as_str(), params_plain.as_str())?;
+        let signature = telecom_upload_signature(
+            bootstrap.session_key.as_str(),
+            "GET",
+            uri,
+            request_date.as_str(),
+            encrypted_params.as_str(),
+            secret.as_str(),
+        )?;
+        let encryption_text = rsa_encrypt_upload_secret(
+            bootstrap.rsa_key.pub_key.as_str(),
+            secret.as_str(),
+        )?;
+        let url = format!(
+            "{}{}?params={}",
+            host.trim_end_matches('/'),
+            uri,
+            encrypted_params
+        );
+
+        let response = self
+            .client
+            .request(Method::GET, &url)
+            .header(USER_AGENT, self.effective_user_agent())
+            .header(ACCEPT, "application/json;charset=UTF-8")
+            .header("SessionKey", bootstrap.session_key.as_str())
+            .header("Signature", signature)
+            .header("X-Request-Date", request_date)
+            .header("X-Request-ID", request_id)
+            .header("EncryptionText", encryption_text)
+            .header("PkId", bootstrap.rsa_key.pk_id.as_str())
+            .timeout(self.timeout())
+            .send()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+
+        if !response.status().is_success() {
+            return Err(response_to_error(response, action).await);
+        }
+
+        let value = response
+            .json::<Value>()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("{action} returned invalid JSON: {error}")))?;
+        ensure_upload_success(&value, action)?;
+        Ok(value)
+    }
+
+    async fn init_multi_upload(
+        &self,
+        bootstrap: &TelecomUploadBootstrap,
+        parent_folder_id: &str,
+        file_name: &str,
+        upload: &PreparedTelecomUpload,
+    ) -> Result<TelecomUploadPlan, BlobError> {
+        let mut fields = vec![
+            ("parentFolderId".to_string(), parent_folder_id.to_string()),
+            ("fileName".to_string(), encode_uri_component(file_name)),
+            ("fileSize".to_string(), upload.size.to_string()),
+            ("sliceSize".to_string(), upload.part_size_bytes.to_string()),
+        ];
+        if upload.part_md5_upper.len() == 1 {
+            fields.push(("fileMd5".to_string(), upload.file_md5_upper.clone()));
+            fields.push(("sliceMd5".to_string(), upload.slice_md5_upper.clone()));
+        } else {
+            fields.push(("lazyCheck".to_string(), "1".to_string()));
+        }
+
+        let value = self
+            .send_upload_control_get(
+                self.upload_control_base_url(),
+                "/person/initMultiUpload",
+                &fields,
+                bootstrap,
+                "initMultiUpload",
+            )
+            .await?;
+        let upload_host = json_lookup_string(&value, &[&["data", "uploadHost"]])
+            .unwrap_or_else(|| self.upload_control_base_url().to_string());
+        let upload_file_id = json_lookup_string(&value, &[&["data", "uploadFileId"]]).ok_or_else(
+            || BlobError::Upstream("initMultiUpload returned no uploadFileId".to_string()),
+        )?;
+        let file_data_exists = json_lookup_boolish(&value, &[&["data", "fileDataExists"]])
+            .unwrap_or(false);
+
+        Ok(TelecomUploadPlan {
+            upload_host,
+            upload_file_id,
+            file_data_exists,
+        })
+    }
+
+    async fn get_multi_upload_url(
+        &self,
+        bootstrap: &TelecomUploadBootstrap,
+        upload_host: &str,
+        upload_file_id: &str,
+        part_number: usize,
+        part_md5_base64: &str,
+    ) -> Result<(String, String), BlobError> {
+        let value = self
+            .send_upload_control_get(
+                upload_host,
+                "/person/getMultiUploadUrls",
+                &[
+                    ("uploadFileId".to_string(), upload_file_id.to_string()),
+                    (
+                        "partInfo".to_string(),
+                        format!("{part_number}-{part_md5_base64}"),
+                    ),
+                ],
+                bootstrap,
+                "getMultiUploadUrls",
+            )
+            .await?;
+        let key = format!("partNumber_{part_number}");
+        let request_url =
+            json_lookup_string(&value, &[&["uploadUrls", key.as_str(), "requestURL"]]).ok_or_else(
+                || {
+                    BlobError::Upstream(format!(
+                        "getMultiUploadUrls returned no requestURL for part {part_number}"
+                    ))
+                },
+            )?;
+        let request_header =
+            json_lookup_string(&value, &[&["uploadUrls", key.as_str(), "requestHeader"]])
+                .ok_or_else(|| {
+                    BlobError::Upstream(format!(
+                        "getMultiUploadUrls returned no requestHeader for part {part_number}"
+                    ))
+                })?;
+        Ok((request_url, request_header))
+    }
+
+    async fn upload_part(
+        &self,
+        upload: &PreparedTelecomUpload,
+        part_number: usize,
+        request_url: &str,
+        request_header: &str,
+    ) -> Result<(), BlobError> {
+        let offset = (part_number.saturating_sub(1) as u64).saturating_mul(upload.part_size_bytes);
+        let part_len = (upload.size.saturating_sub(offset)).min(upload.part_size_bytes) as usize;
+        let file = upload.spool_file.reopen().map_err(|error| {
+            BlobError::Upstream(format!(
+                "failed to reopen China Telecom upload spool file for reading: {error}"
+            ))
+        })?;
+        let mut file = TokioFile::from_std(file);
+        file.seek(SeekFrom::Start(offset))
+            .await
+            .map_err(|error| BlobError::Upstream(format!("failed to seek upload spool file: {error}")))?;
+        let mut body = vec![0u8; part_len];
+        if part_len > 0 {
+            file.read_exact(&mut body)
+                .await
+                .map_err(|error| BlobError::Upstream(format!("failed to read upload spool file: {error}")))?;
+        }
+
+        let mut request = self
+            .client
+            .request(Method::PUT, request_url)
+            .timeout(Duration::from_secs(self.config.request_timeout_secs.max(180)));
+        for (name, value) in parse_upload_request_headers(request_header)? {
+            request = request.header(name, value);
+        }
+        let response = request
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| BlobError::Upstream(format!("upload part {part_number} failed: {error}")))?;
+        if !response.status().is_success() {
+            return Err(response_to_error(response, &format!("upload part {part_number}")).await);
+        }
+        Ok(())
+    }
+
+    async fn upload_multi_parts(
+        &self,
+        bootstrap: &TelecomUploadBootstrap,
+        plan: &TelecomUploadPlan,
+        upload: &PreparedTelecomUpload,
+    ) -> Result<(), BlobError> {
+        for (index, part_md5_base64) in upload.part_md5_base64.iter().enumerate() {
+            let part_number = index + 1;
+            let (request_url, request_header) = self
+                .get_multi_upload_url(
+                    bootstrap,
+                    plan.upload_host.as_str(),
+                    plan.upload_file_id.as_str(),
+                    part_number,
+                    part_md5_base64.as_str(),
+                )
+                .await?;
+            self.upload_part(
+                upload,
+                part_number,
+                request_url.as_str(),
+                request_header.as_str(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn check_trans_second(
+        &self,
+        bootstrap: &TelecomUploadBootstrap,
+        plan: &mut TelecomUploadPlan,
+        upload: &PreparedTelecomUpload,
+    ) -> Result<(), BlobError> {
+        let value = self
+            .send_upload_control_get(
+                plan.upload_host.as_str(),
+                "/person/checkTransSecond",
+                &[
+                    ("fileMd5".to_string(), upload.file_md5_upper.clone()),
+                    ("sliceMd5".to_string(), upload.slice_md5_upper.clone()),
+                    ("uploadFileId".to_string(), plan.upload_file_id.clone()),
+                ],
+                bootstrap,
+                "checkTransSecond",
+            )
+            .await?;
+        if let Some(upload_file_id) =
+            json_lookup_string(&value, &[&["data", "uploadFileId"]])
+        {
+            plan.upload_file_id = upload_file_id;
+        }
+        if let Some(file_data_exists) =
+            json_lookup_boolish(&value, &[&["data", "fileDataExists"]])
+        {
+            plan.file_data_exists = file_data_exists;
+        }
+        Ok(())
+    }
+
+    async fn commit_multi_upload(
+        &self,
+        bootstrap: &TelecomUploadBootstrap,
+        plan: &TelecomUploadPlan,
+        upload: &PreparedTelecomUpload,
+    ) -> Result<String, BlobError> {
+        let value = self
+            .send_upload_control_get(
+                plan.upload_host.as_str(),
+                "/person/commitMultiUploadFile",
+                &[
+                    ("uploadFileId".to_string(), plan.upload_file_id.clone()),
+                    (
+                        "lazyCheck".to_string(),
+                        if upload.part_md5_upper.len() > 1 { "1" } else { "0" }.to_string(),
+                    ),
+                    ("fileMd5".to_string(), upload.file_md5_upper.clone()),
+                    ("sliceMd5".to_string(), upload.slice_md5_upper.clone()),
+                    ("opertype".to_string(), "3".to_string()),
+                ],
+                bootstrap,
+                "commitMultiUploadFile",
+            )
+            .await?;
+        Ok(
+            json_lookup_string(
+                &value,
+                &[&["file", "fileMd5"], &["file", "userFileId"], &["fileMd5"]],
+            )
+            .unwrap_or_else(|| upload.file_md5_upper.clone()),
+        )
     }
 
     fn validate_container(&self, container: &str) -> Result<(), BlobError> {
@@ -783,6 +1688,7 @@ impl TelecomBlobAdapter {
 
     async fn list_objects_in_root(
         &self,
+        container: &str,
         request: &ListObjectsRequest,
     ) -> Result<Vec<ObjectInfo>, BlobError> {
         if matches!(request.limit, Some(0)) {
@@ -790,8 +1696,11 @@ impl TelecomBlobAdapter {
         }
 
         let normalized_prefix = request.prefix.as_deref().map(normalize_object_key);
+        let Some(start_folder_id) = self.resolve_scope_container_root_folder_id(container).await? else {
+            return Ok(Vec::new());
+        };
         let mut objects = BTreeMap::new();
-        let mut stack = vec![(self.root_folder_id().to_string(), String::new())];
+        let mut stack = vec![(start_folder_id, String::new())];
 
         while let Some((folder_id, folder_prefix)) = stack.pop() {
             let mut page_num = 1;
@@ -853,13 +1762,18 @@ impl BlobBackend for TelecomBlobAdapter {
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
             read: true,
-            write: false,
+            write: true,
             delete: false,
             multipart_upload: false,
+            streaming_get: true,
+            streaming_put: true,
         }
     }
 
     async fn health(&self) -> Result<ServiceHealth, BlobError> {
+        let managed_root = self
+            .normalized_root_prefix()
+            .unwrap_or_else(|| "<provider-root>".to_string());
         let mut notes = vec![
             format!("base_url={}", self.config.base_url),
             format!(
@@ -870,6 +1784,8 @@ impl BlobBackend for TelecomBlobAdapter {
             format!("page_size={}", self.page_size()),
             format!("sign_type={}", self.sign_type()),
             format!("download_token_present={}", self.optional_token().is_some()),
+            format!("managed_root={managed_root}"),
+            format!("upload_part_size_bytes={}", self.upload_part_size_bytes()),
         ];
         let mut scopes = Vec::new();
 
@@ -930,24 +1846,28 @@ impl BlobBackend for TelecomBlobAdapter {
             return Ok(Vec::new());
         };
         self.validate_container(container)?;
-        self.list_objects_in_root(&request).await
+        self.list_objects_in_root(container, &request).await
     }
 
     async fn head_object(&self, container: &str, key: &str) -> Result<ObjectInfo, BlobError> {
         self.validate_container(container)?;
-        let (entry, normalized_key) = self.resolve_file_entry(key).await?;
-        Ok(entry.to_object_info(normalized_key))
+        let provider_key = self.provider_object_key(container, key)?;
+        let (entry, _) = self.resolve_provider_file_entry(&provider_key).await?;
+        Ok(entry.to_object_info(
+            self.user_visible_object_key(container, &provider_key)?,
+        ))
     }
 
     async fn get_object(&self, container: &str, key: &str) -> Result<ObjectPayload, BlobError> {
         self.validate_container(container)?;
-        let (entry, normalized_key) = self.resolve_file_entry(key).await?;
+        let provider_key = self.provider_object_key(container, key)?;
+        let (entry, _) = self.resolve_provider_file_entry(&provider_key).await?;
         let download_url = entry
             .download_url
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .map(|value| normalize_remote_url(self.trimmed_base_url(), value))
-            .unwrap_or_else(|| String::new());
+            .unwrap_or_else(String::new);
         let download_url = if download_url.is_empty() {
             let file_id = entry.id().ok_or_else(|| {
                 BlobError::Upstream(
@@ -959,14 +1879,82 @@ impl BlobBackend for TelecomBlobAdapter {
         } else {
             download_url
         };
-        let info = entry.to_object_info(normalized_key);
-        let body = self
-            .get_bytes(&download_url, "telecom object download")
+        let visible_key = self.user_visible_object_key(container, &provider_key)?;
+        let downloaded = self
+            .get_stream(&download_url, "telecom object download")
             .await?;
         Ok(ObjectPayload {
-            info,
-            body: body.into(),
+            info: entry.to_object_info(visible_key),
+            body: downloaded.body,
+            first_response_latency_ms: Some(downloaded.first_response_latency_ms),
         })
+    }
+
+    async fn put_object(&self, request: PutObjectRequest) -> Result<PutObjectResult, BlobError> {
+        let (parent_folder_id, file_name) = self
+            .ensure_managed_parent_folder_id(&request.container, &request.key)
+            .await?;
+        let upload = self.prepare_upload_body(request.body, request.size).await?;
+        let bootstrap = self.fetch_upload_bootstrap().await?;
+        let first_response_started_at = Instant::now();
+        let mut plan = self
+            .init_multi_upload(
+                &bootstrap,
+                parent_folder_id.as_str(),
+                file_name.as_str(),
+                &upload,
+            )
+            .await?;
+        let first_response_latency_ms = elapsed_millis(first_response_started_at);
+        if !plan.file_data_exists {
+            self.upload_multi_parts(&bootstrap, &plan, &upload).await?;
+            self.check_trans_second(&bootstrap, &mut plan, &upload)
+                .await?;
+        }
+        let etag = self
+            .commit_multi_upload(&bootstrap, &plan, &upload)
+            .await?;
+        Ok(PutObjectResult {
+            etag: Some(etag),
+            first_response_latency_ms: Some(first_response_latency_ms),
+        })
+    }
+
+    async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+        let object_key = self.provider_object_key(container, key)?;
+        Err(BlobError::NotImplemented(format!(
+            "China Telecom native delete is not completed yet; managed object key resolved to {object_key}"
+        )))
+    }
+
+    async fn rename_object(&self, request: RenameObjectRequest) -> Result<(), BlobError> {
+        let source = self.provider_object_key(&request.container, &request.key)?;
+        let destination = self.provider_object_key(&request.container, &request.new_key)?;
+        Err(BlobError::NotImplemented(format!(
+            "China Telecom native rename is not completed yet; source={source} destination={destination}"
+        )))
+    }
+
+    async fn copy_object(&self, request: CopyObjectRequest) -> Result<(), BlobError> {
+        let source = self.provider_object_key(&request.source_container, &request.source_key)?;
+        let destination = self.provider_object_key(
+            &request.destination_container,
+            &request.destination_key,
+        )?;
+        Err(BlobError::NotImplemented(format!(
+            "China Telecom native copy is not completed yet; source={source} destination={destination}"
+        )))
+    }
+
+    async fn move_object(&self, request: MoveObjectRequest) -> Result<(), BlobError> {
+        let source = self.provider_object_key(&request.source_container, &request.source_key)?;
+        let destination = self.provider_object_key(
+            &request.destination_container,
+            &request.destination_key,
+        )?;
+        Err(BlobError::NotImplemented(format!(
+            "China Telecom native move is not completed yet; source={source} destination={destination}"
+        )))
     }
 }
 
@@ -999,10 +1987,11 @@ fn normalize_object_key(key: &str) -> String {
 }
 
 fn join_relative_key(prefix: &str, child_name: &str) -> String {
-    if prefix.is_empty() {
-        child_name.to_string()
+    let normalized_prefix = prefix.trim_matches('/');
+    if normalized_prefix.is_empty() {
+        child_name.trim_matches('/').to_string()
     } else {
-        format!("{prefix}/{child_name}")
+        format!("{normalized_prefix}/{}", child_name.trim_matches('/'))
     }
 }
 
@@ -1108,6 +2097,191 @@ fn telecom_signature(params: &[(String, String)]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn hex_upper(bytes: &[u8]) -> String {
+    hex::encode_upper(bytes)
+}
+
+fn encode_uri_component(value: &str) -> String {
+    utf8_percent_encode(value, URI_COMPONENT_ENCODE_SET).to_string()
+}
+
+fn build_upload_params_plaintext(data_pairs: &[(String, String)]) -> String {
+    data_pairs
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn encrypt_upload_params_hex(secret: &str, plaintext: &str) -> Result<String, BlobError> {
+    if secret.len() < 16 {
+        return Err(BlobError::Configuration(
+            "upload encryption secret is shorter than 16 characters".to_string(),
+        ));
+    }
+    let key_bytes: [u8; 16] = secret.as_bytes()[..16]
+        .try_into()
+        .map_err(|_| BlobError::Configuration("invalid upload AES key length".to_string()))?;
+    let cipher = Encryptor::<Aes128>::new(&key_bytes.into());
+    let mut buffer = plaintext.as_bytes().to_vec();
+    let message_len = buffer.len();
+    let next_block_len = ((message_len / 16) + 1) * 16;
+    buffer.resize(next_block_len, 0);
+    let ciphertext = cipher
+        .encrypt_padded_mut::<Pkcs7>(&mut buffer, message_len)
+        .map_err(|error| {
+            BlobError::Configuration(format!(
+                "failed to AES-encrypt Telecom upload params: {error}"
+            ))
+        })?;
+    Ok(hex::encode(ciphertext))
+}
+
+fn telecom_upload_signature(
+    session_key: &str,
+    operate: &str,
+    request_uri: &str,
+    request_date: &str,
+    encrypted_params: &str,
+    secret: &str,
+) -> Result<String, BlobError> {
+    let payload = [
+        format!("SessionKey={session_key}"),
+        format!("Operate={operate}"),
+        format!("RequestURI={request_uri}"),
+        format!("Date={request_date}"),
+        format!("params={encrypted_params}"),
+    ]
+    .join("&");
+    let mut mac = <HmacSha1 as Mac>::new_from_slice(secret.as_bytes()).map_err(|error| {
+        BlobError::Configuration(format!("failed to initialize Telecom upload HMAC: {error}"))
+    })?;
+    mac.update(payload.as_bytes());
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+fn rsa_encrypt_upload_secret(public_key_pem: &str, secret: &str) -> Result<String, BlobError> {
+    let public_key = RsaPublicKey::from_public_key_pem(public_key_pem).map_err(|error| {
+        BlobError::Configuration(format!("invalid Telecom upload RSA public key: {error}"))
+    })?;
+    let ciphertext = public_key
+        .encrypt(&mut OsRng, Pkcs1v15Encrypt, secret.as_bytes())
+        .map_err(|error| {
+            BlobError::Upstream(format!("failed to encrypt Telecom upload secret: {error}"))
+        })?;
+    Ok(BASE64_STANDARD.encode(ciphertext))
+}
+
+fn random_request_id() -> String {
+    let mut rng = rand::thread_rng();
+    "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
+        .chars()
+        .map(|ch| match ch {
+            'x' => format!("{:x}", rng.gen_range(0..16)),
+            'y' => format!("{:x}", rng.gen_range(8..12)),
+            other => other.to_string(),
+        })
+        .collect::<String>()
+}
+
+fn random_upload_secret() -> String {
+    let mut rng = rand::thread_rng();
+    let full = "xxxxxxxxxxxx4xxxyxxxxxxxxxxxxxxx"
+        .chars()
+        .map(|ch| match ch {
+            'x' => format!("{:x}", rng.gen_range(0..16)),
+            'y' => format!("{:x}", rng.gen_range(8..12)),
+            other => other.to_string(),
+        })
+        .collect::<String>();
+    let len = rng.gen_range(16..32);
+    full[..len].to_string()
+}
+
+fn parse_upload_request_headers(
+    raw_headers: &str,
+) -> Result<Vec<(HeaderName, HeaderValue)>, BlobError> {
+    let mut headers = Vec::new();
+    for pair in raw_headers.split('&').filter(|value| !value.trim().is_empty()) {
+        let Some((name, value)) = pair.split_once('=') else {
+            return Err(BlobError::Upstream(format!(
+                "invalid Telecom upload requestHeader segment: {pair}"
+            )));
+        };
+        headers.push((
+            HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                BlobError::Upstream(format!(
+                    "invalid Telecom upload requestHeader name {name}: {error}"
+                ))
+            })?,
+            HeaderValue::from_str(value).map_err(|error| {
+                BlobError::Upstream(format!(
+                    "invalid Telecom upload requestHeader value for {name}: {error}"
+                ))
+            })?,
+        ));
+    }
+    Ok(headers)
+}
+
+fn json_lookup<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn json_lookup_string(value: &Value, candidates: &[&[&str]]) -> Option<String> {
+    candidates.iter().find_map(|path| {
+        json_lookup(value, path)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn json_lookup_boolish(value: &Value, candidates: &[&[&str]]) -> Option<bool> {
+    candidates.iter().find_map(|path| {
+        let value = json_lookup(value, path)?;
+        match value {
+            Value::Bool(value) => Some(*value),
+            Value::Number(value) => value.as_u64().map(|value| value != 0),
+            Value::String(value) => {
+                let normalized = value.trim();
+                match normalized {
+                    "1" | "true" | "TRUE" => Some(true),
+                    "0" | "false" | "FALSE" => Some(false),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    })
+}
+
+fn ensure_upload_success(value: &Value, action: &str) -> Result<(), BlobError> {
+    if let Some(code) = json_lookup_string(value, &[&["code"], &["res_code"], &["resCode"]]) {
+        if code == "SUCCESS" || code == "0" {
+            return Ok(());
+        }
+        let message = json_lookup_string(value, &[&["msg"], &["message"], &["res_message"]])
+            .unwrap_or_else(|| "unknown error".to_string());
+        return Err(BlobError::Upstream(format!(
+            "{action} returned code={code} ({message})"
+        )));
+    }
+    if value
+        .get("success")
+        .and_then(Value::as_bool)
+        .is_some_and(|success| success)
+    {
+        return Ok(());
+    }
+    Ok(())
+}
+
 fn build_http_client(config: &TelecomConfig) -> Result<reqwest::Client, BlobError> {
     let mut builder = reqwest::Client::builder();
     if let Some(local_address) = config.outbound_ip_family.local_address() {
@@ -1118,6 +2292,10 @@ fn build_http_client(config: &TelecomConfig) -> Result<reqwest::Client, BlobErro
             "failed to build China Telecom HTTP client: {error}"
         ))
     })
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 async fn response_to_error(response: Response, action: &str) -> BlobError {
@@ -1197,7 +2375,10 @@ where
 mod tests {
     use std::{
         collections::{BTreeMap, HashMap},
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use super::{
@@ -1206,13 +2387,18 @@ mod tests {
     };
     use axum::{
         Router,
-        body::Body,
+        body::{Body, Bytes as AxumBytes},
         extract::{Path, Query, State},
         http::{HeaderMap, StatusCode},
         response::IntoResponse,
-        routing::get,
+        routing::{get, post, put},
     };
-    use blob_core::{BlobBackend, HealthStatus, OutboundIpFamily, StorageScopeKind};
+    use blob_core::{
+        BlobBackend, BodySpoolLease, BodySpoolObserver, HealthStatus, ObjectBody,
+        OutboundIpFamily, PutObjectRequest, StorageScopeKind,
+    };
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+    use md5::{Digest, Md5};
     use serde_json::{Value, json};
 
     #[derive(Clone)]
@@ -1228,6 +2414,73 @@ mod tests {
     struct MockServer {
         base_url: String,
         requests: Arc<Mutex<Vec<Value>>>,
+        _task: tokio::task::JoinHandle<()>,
+    }
+
+    #[derive(Debug, Default)]
+    struct MockSpoolStats {
+        active_files: u64,
+        active_bytes: u64,
+        peak_files: u64,
+        peak_bytes: u64,
+    }
+
+    #[derive(Debug)]
+    struct MockSpoolObserver {
+        stats: Arc<Mutex<MockSpoolStats>>,
+    }
+
+    #[derive(Debug)]
+    struct MockSpoolLeaseImpl {
+        stats: Arc<Mutex<MockSpoolStats>>,
+        tracked_bytes: u64,
+    }
+
+    impl BodySpoolObserver for MockSpoolObserver {
+        fn start_tracking(&self) -> Box<dyn BodySpoolLease> {
+            let mut stats = self.stats.lock().expect("mock spool stats poisoned");
+            stats.active_files += 1;
+            stats.peak_files = stats.peak_files.max(stats.active_files);
+            Box::new(MockSpoolLeaseImpl {
+                stats: Arc::clone(&self.stats),
+                tracked_bytes: 0,
+            })
+        }
+    }
+
+    impl BodySpoolLease for MockSpoolLeaseImpl {
+        fn update_tracked_bytes(&mut self, next_bytes: u64) {
+            let mut stats = self.stats.lock().expect("mock spool stats poisoned");
+            stats.active_bytes = stats.active_bytes + next_bytes.saturating_sub(self.tracked_bytes);
+            stats.peak_bytes = stats.peak_bytes.max(stats.active_bytes);
+            self.tracked_bytes = next_bytes;
+        }
+    }
+
+    impl Drop for MockSpoolLeaseImpl {
+        fn drop(&mut self) {
+            let mut stats = self.stats.lock().expect("mock spool stats poisoned");
+            stats.active_files = stats.active_files.saturating_sub(1);
+            stats.active_bytes = stats.active_bytes.saturating_sub(self.tracked_bytes);
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockUploadServerState {
+        base_url: String,
+        entries_by_parent: Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
+        next_folder_id: Arc<AtomicUsize>,
+        next_part_number: Arc<AtomicUsize>,
+        created_folders: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        uploaded_parts: Arc<Mutex<Vec<(usize, Vec<u8>, Option<String>)>>>,
+        control_headers: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    }
+
+    struct MockUploadServer {
+        base_url: String,
+        created_folders: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        uploaded_parts: Arc<Mutex<Vec<(usize, Vec<u8>, Option<String>)>>>,
+        control_headers: Arc<Mutex<Vec<HashMap<String, String>>>>,
         _task: tokio::task::JoinHandle<()>,
     }
 
@@ -1281,6 +2534,259 @@ mod tests {
         fn requests(&self) -> Vec<Value> {
             self.requests.lock().expect("mock telecom requests").clone()
         }
+    }
+
+    impl MockUploadServer {
+        async fn start() -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind mock telecom upload listener");
+            let addr = listener
+                .local_addr()
+                .expect("mock telecom upload local addr");
+            let base_url = format!("http://{addr}");
+            let state = MockUploadServerState {
+                base_url: base_url.clone(),
+                entries_by_parent: Arc::new(Mutex::new(BTreeMap::from([(
+                    DEFAULT_ROOT_FOLDER_ID.to_string(),
+                    Vec::new(),
+                )]))),
+                next_folder_id: Arc::new(AtomicUsize::new(1)),
+                next_part_number: Arc::new(AtomicUsize::new(1)),
+                created_folders: Arc::new(Mutex::new(Vec::new())),
+                uploaded_parts: Arc::new(Mutex::new(Vec::new())),
+                control_headers: Arc::new(Mutex::new(Vec::new())),
+            };
+            let app = Router::new()
+                .route("/api/open/file/listFiles.action", get(mock_upload_list_files))
+                .route("/api/open/file/createFolder.action", post(mock_upload_create_folder))
+                .route(
+                    "/api/portal/v2/getUserBriefInfo.action",
+                    get(mock_upload_get_user_brief_info),
+                )
+                .route(
+                    "/api/security/generateRsaKey.action",
+                    get(mock_upload_generate_rsa_key),
+                )
+                .route("/person/initMultiUpload", get(mock_upload_init_multi_upload))
+                .route("/person/getMultiUploadUrls", get(mock_upload_get_multi_upload_urls))
+                .route("/person/checkTransSecond", get(mock_upload_check_trans_second))
+                .route("/person/commitMultiUploadFile", get(mock_upload_commit_multi_upload_file))
+                .route("/upload/{part_number}", put(mock_upload_part))
+                .with_state(state.clone());
+            let created_folders = Arc::clone(&state.created_folders);
+            let uploaded_parts = Arc::clone(&state.uploaded_parts);
+            let control_headers = Arc::clone(&state.control_headers);
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("mock telecom upload server should stay available");
+            });
+
+            Self {
+                base_url,
+                created_folders,
+                uploaded_parts,
+                control_headers,
+                _task: task,
+            }
+        }
+    }
+
+    async fn mock_upload_list_files(
+        State(state): State<MockUploadServerState>,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> axum::Json<Value> {
+        let folder_id = query
+            .get("folderId")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_ROOT_FOLDER_ID.to_string());
+        let entries = state
+            .entries_by_parent
+            .lock()
+            .expect("mock upload entries poisoned")
+            .get(&folder_id)
+            .cloned()
+            .unwrap_or_default();
+        let total_count = entries.len();
+        let mut folder_list = Vec::new();
+        let mut file_list = Vec::new();
+        for entry in entries {
+            if entry["isFolder"].as_bool().unwrap_or(false) {
+                folder_list.push(entry);
+            } else {
+                file_list.push(entry);
+            }
+        }
+        axum::Json(json!({
+            "res_code": 0,
+            "res_message": "成功",
+            "fileListAO": {
+                "count": total_count,
+                "fileList": file_list,
+                "folderList": folder_list,
+            }
+        }))
+    }
+
+    async fn mock_upload_create_folder(
+        State(state): State<MockUploadServerState>,
+        body: AxumBytes,
+    ) -> axum::Json<Value> {
+        let fields = parse_form_fields(body.as_ref());
+        let parent_folder_id = fields
+            .get("parentFolderId")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_ROOT_FOLDER_ID.to_string());
+        let folder_name = fields
+            .get("folderName")
+            .cloned()
+            .unwrap_or_else(|| "folder".to_string());
+        state
+            .created_folders
+            .lock()
+            .expect("mock created folders poisoned")
+            .push(fields.clone());
+        let folder_id = format!(
+            "dir-created-{}",
+            state.next_folder_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let entry = json!({
+            "isFolder": true,
+            "id": folder_id,
+            "parentId": parent_folder_id,
+            "name": folder_name,
+            "createDate": "2026-05-21 03:43:54",
+            "lastOpTime": "2026-05-21 03:43:54",
+            "fileCount": 0,
+        });
+        state
+            .entries_by_parent
+            .lock()
+            .expect("mock upload entries poisoned")
+            .entry(parent_folder_id)
+            .or_default()
+            .push(entry.clone());
+        axum::Json(json!({
+            "res_code": 0,
+            "res_message": "成功",
+            "id": entry["id"],
+            "name": entry["name"],
+            "createDate": entry["createDate"],
+            "lastOpTime": entry["lastOpTime"],
+        }))
+    }
+
+    async fn mock_upload_get_user_brief_info() -> axum::Json<Value> {
+        axum::Json(json!({
+            "sessionKey": "telecom-session-key"
+        }))
+    }
+
+    async fn mock_upload_generate_rsa_key() -> axum::Json<Value> {
+        axum::Json(json!({
+            "pkId": "pk-test-1",
+            "pubKey": TEST_UPLOAD_PUBLIC_KEY
+        }))
+    }
+
+    async fn mock_upload_init_multi_upload(
+        State(state): State<MockUploadServerState>,
+        headers: HeaderMap,
+    ) -> axum::Json<Value> {
+        state
+            .control_headers
+            .lock()
+            .expect("mock control headers poisoned")
+            .push(control_header_snapshot(&headers));
+        axum::Json(json!({
+            "code": "SUCCESS",
+            "data": {
+                "uploadType": 1,
+                "uploadHost": state.base_url,
+                "uploadFileId": "upload-file-1",
+                "fileDataExists": 0
+            }
+        }))
+    }
+
+    async fn mock_upload_get_multi_upload_urls(
+        State(state): State<MockUploadServerState>,
+        headers: HeaderMap,
+    ) -> axum::Json<Value> {
+        state
+            .control_headers
+            .lock()
+            .expect("mock control headers poisoned")
+            .push(control_header_snapshot(&headers));
+        let part_number = state.next_part_number.fetch_add(1, Ordering::SeqCst);
+        let part_md5_base64 = sample_upload_part_md5_base64s()
+            .get(part_number.saturating_sub(1))
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        axum::Json(json!({
+            "code": "SUCCESS",
+            "uploadUrls": {
+                format!("partNumber_{part_number}"): {
+                    "requestURL": format!("{}/upload/{}", state.base_url, part_number),
+                    "requestHeader": format!("Content-Type=application/octet-stream&Authorization=AWS test:key&Content-MD5={part_md5_base64}&x-amz-date=Wed, 20 May 2026 19:43:33 GMT&x-amz-limit=rate=12800")
+                }
+            }
+        }))
+    }
+
+    async fn mock_upload_check_trans_second(
+        State(state): State<MockUploadServerState>,
+        headers: HeaderMap,
+    ) -> axum::Json<Value> {
+        state
+            .control_headers
+            .lock()
+            .expect("mock control headers poisoned")
+            .push(control_header_snapshot(&headers));
+        axum::Json(json!({
+            "code": "SUCCESS",
+            "data": {
+                "uploadFileId": "upload-file-1",
+                "fileDataExists": 1
+            }
+        }))
+    }
+
+    async fn mock_upload_commit_multi_upload_file(
+        State(state): State<MockUploadServerState>,
+        headers: HeaderMap,
+    ) -> axum::Json<Value> {
+        state
+            .control_headers
+            .lock()
+            .expect("mock control headers poisoned")
+            .push(control_header_snapshot(&headers));
+        axum::Json(json!({
+            "code": "SUCCESS",
+            "file": {
+                "userFileId": "user-file-1",
+                "fileMd5": "5EB63BBBE01EEED093CB22BB8F5ACDC3"
+            }
+        }))
+    }
+
+    async fn mock_upload_part(
+        State(state): State<MockUploadServerState>,
+        Path(part_number): Path<usize>,
+        headers: HeaderMap,
+        body: AxumBytes,
+    ) -> impl IntoResponse {
+        state
+            .uploaded_parts
+            .lock()
+            .expect("mock uploaded parts poisoned")
+            .push((
+                part_number,
+                body.to_vec(),
+                header_to_string(&headers, "Content-MD5"),
+            ));
+        (StatusCode::OK, Body::from(Vec::<u8>::new()))
     }
 
     async fn mock_list_files(
@@ -1476,6 +2982,48 @@ mod tests {
             .map(str::to_string)
     }
 
+    fn control_header_snapshot(headers: &HeaderMap) -> HashMap<String, String> {
+        let mut snapshot = HashMap::new();
+        for key in [
+            "SessionKey",
+            "Signature",
+            "X-Request-Date",
+            "X-Request-ID",
+            "EncryptionText",
+            "PkId",
+        ] {
+            if let Some(value) = header_to_string(headers, key) {
+                snapshot.insert(key.to_string(), value);
+            }
+        }
+        snapshot
+    }
+
+    fn parse_form_fields(body: &[u8]) -> HashMap<String, String> {
+        String::from_utf8_lossy(body)
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(key, value)| (key.to_string(), value.replace('+', " ")))
+            .collect()
+    }
+
+    fn sample_upload_part_md5_base64s() -> Vec<String> {
+        [b"hello".as_slice(), b" worl".as_slice(), b"d".as_slice()]
+            .into_iter()
+            .map(|chunk| BASE64_STANDARD.encode(Md5::digest(chunk)))
+            .collect()
+    }
+
+    const TEST_UPLOAD_PUBLIC_KEY: &str = "-----BEGIN PUBLIC KEY-----\n\
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp4kWHd3tlFN8eN/7UySQ\n\
+evD4chicCtg2JX5Nxzx0XvQAh/EWIUoxVIv0uR20AibvvyT0Fve5RFl/NH9ucPgL\n\
+LlEhEXkyrMO4NW3TvuRcPiZZ5L2nYeqPNlbWHWSQRDoQ5L6mECQvKQdpC8d45Gji\n\
+xMJsVFkWiEytImij397eCWa+m20V7sgNETyef6juyb1ayQT2Tj5rmOULRCb04/Sx\n\
+phMsqpP32N4U1nXUE/1A5NYRCEKeUD6R3DOy5+H5n3n+AGzmhzVXszQ3Mhk5BhLx\n\
+b7M846HRxQsjn/7FbjVA3Fqhui/LE3FAoE4iLwmVsICOXtZUFqcuc5iSMLqmAWAh\n\
+AwIDAQAB\n\
+-----END PUBLIC KEY-----";
+
     fn mock_telecom_adapter(
         base_url: &str,
         browser_id: &str,
@@ -1495,12 +3043,74 @@ mod tests {
             browser_id: Some(browser_id.to_string()),
             cookie_header: Some(cookie_header.to_string()),
             user_agent: "carrier-cloud-blob-gateway/test".to_string(),
+            browser_profile: None,
             request_timeout_secs: 10,
             sign_type: "1".to_string(),
+            family_id: None,
             root_folder_id: DEFAULT_ROOT_FOLDER_ID.to_string(),
             page_size: 2,
+            root_prefix: None,
+            upload_part_size_bytes: 0,
+            body_spool_dir: None,
+            body_spool_observer: None,
         })
         .expect("telecom test adapter should build")
+    }
+
+    fn mock_telecom_adapter_with_root_prefix(
+        base_url: &str,
+        browser_id: &str,
+        cookie_header: &str,
+        root_prefix: &str,
+    ) -> TelecomBlobAdapter {
+        TelecomBlobAdapter::new(TelecomConfig {
+            base_url: base_url.to_string(),
+            token_source: TokenSource::EnvVar {
+                key: "UNUSED_TELECOM_TOKEN".to_string(),
+            },
+            outbound_ip_family: OutboundIpFamily::Auto,
+            browser_id: Some(browser_id.to_string()),
+            cookie_header: Some(cookie_header.to_string()),
+            user_agent: "carrier-cloud-blob-gateway/test".to_string(),
+            browser_profile: None,
+            request_timeout_secs: 10,
+            sign_type: "1".to_string(),
+            family_id: None,
+            root_folder_id: DEFAULT_ROOT_FOLDER_ID.to_string(),
+            page_size: 2,
+            root_prefix: Some(root_prefix.to_string()),
+            upload_part_size_bytes: 0,
+            body_spool_dir: None,
+            body_spool_observer: None,
+        })
+        .expect("telecom managed-root adapter should build")
+    }
+
+    fn mock_upload_adapter(
+        base_url: &str,
+        spool_stats: Arc<Mutex<MockSpoolStats>>,
+    ) -> TelecomBlobAdapter {
+        TelecomBlobAdapter::new(TelecomConfig {
+            base_url: base_url.to_string(),
+            token_source: TokenSource::EnvVar {
+                key: "UNUSED_TELECOM_TOKEN".to_string(),
+            },
+            outbound_ip_family: OutboundIpFamily::Auto,
+            browser_id: Some("browser-id-123".to_string()),
+            cookie_header: Some("JSESSIONID=abc; COOKIE_LOGIN_USER=def".to_string()),
+            user_agent: "carrier-cloud-blob-gateway/test".to_string(),
+            browser_profile: None,
+            request_timeout_secs: 10,
+            sign_type: "1".to_string(),
+            family_id: None,
+            root_folder_id: DEFAULT_ROOT_FOLDER_ID.to_string(),
+            page_size: 20,
+            root_prefix: Some("ccbg-tests".to_string()),
+            upload_part_size_bytes: 5,
+            body_spool_dir: None,
+            body_spool_observer: Some(Arc::new(MockSpoolObserver { stats: spool_stats })),
+        })
+        .expect("telecom upload adapter should build")
     }
 
     fn sample_entries() -> BTreeMap<String, Vec<Value>> {
@@ -1598,6 +3208,84 @@ mod tests {
         ])
     }
 
+    fn sample_entries_under_managed_root() -> BTreeMap<String, Vec<Value>> {
+        BTreeMap::from([
+            (
+                DEFAULT_ROOT_FOLDER_ID.to_string(),
+                vec![
+                    json!({
+                        "isFolder": true,
+                        "id": "dir-ccbg",
+                        "parentId": DEFAULT_ROOT_FOLDER_ID,
+                        "name": "ccbg-managed",
+                        "createDate": "2026-04-17 00:14:15",
+                        "lastOpTime": "2026-04-17 00:14:15",
+                        "fileCount": 2,
+                    }),
+                    json!({
+                        "isFolder": true,
+                        "id": "dir-other",
+                        "parentId": DEFAULT_ROOT_FOLDER_ID,
+                        "name": "unrelated",
+                        "createDate": "2026-04-17 00:14:15",
+                        "lastOpTime": "2026-04-17 00:14:15",
+                        "fileCount": 1,
+                    }),
+                ],
+            ),
+            (
+                "dir-ccbg".to_string(),
+                vec![
+                    json!({
+                        "isFolder": true,
+                        "id": "dir-managed-docs",
+                        "parentId": "dir-ccbg",
+                        "name": "docs",
+                        "createDate": "2026-04-25 13:00:00",
+                        "lastOpTime": "2026-04-25 13:00:00",
+                        "fileCount": 1,
+                    }),
+                    json!({
+                        "isFolder": false,
+                        "id": "file-managed-root",
+                        "parentId": "dir-ccbg",
+                        "name": "root-note.txt",
+                        "fileSize": 10,
+                        "createDate": "2026-04-25 12:30:45",
+                        "lastOpTime": "2026-04-25 12:30:45",
+                        "md5": "md5-root-note",
+                    }),
+                ],
+            ),
+            (
+                "dir-managed-docs".to_string(),
+                vec![json!({
+                    "isFolder": false,
+                    "id": "file-managed-alpha",
+                    "parentId": "dir-managed-docs",
+                    "name": "alpha.txt",
+                    "fileSize": 5,
+                    "createDate": "2026-04-25 12:30:45",
+                    "lastOpTime": "2026-04-25 12:30:45",
+                    "md5": "md5-managed-alpha",
+                })],
+            ),
+            (
+                "dir-other".to_string(),
+                vec![json!({
+                    "isFolder": false,
+                    "id": "file-unrelated",
+                    "parentId": "dir-other",
+                    "name": "secret.txt",
+                    "fileSize": 6,
+                    "createDate": "2026-04-25 12:30:45",
+                    "lastOpTime": "2026-04-25 12:30:45",
+                    "md5": "md5-unrelated",
+                })],
+            ),
+        ])
+    }
+
     fn sample_file_bodies() -> BTreeMap<String, Vec<u8>> {
         BTreeMap::from([
             ("file-root".to_string(), b"root!!!".to_vec()),
@@ -1605,6 +3293,9 @@ mod tests {
             ("file-beta".to_string(), b"123456".to_vec()),
             ("file-zeta".to_string(), b"123456789".to_vec()),
             ("file-photo".to_string(), b"hello-photo".to_vec()),
+            ("file-managed-root".to_string(), b"root-note!".to_vec()),
+            ("file-managed-alpha".to_string(), b"alpha".to_vec()),
+            ("file-unrelated".to_string(), b"hidden".to_vec()),
         ])
     }
 
@@ -1762,6 +3453,7 @@ mod tests {
             .await
             .expect("telecom get_object should succeed");
         assert_eq!(payload.info.key, "docs/alpha.txt");
+        assert!(payload.first_response_latency_ms.is_some());
         assert_eq!(
             payload
                 .body
@@ -1781,5 +3473,142 @@ mod tests {
         assert_eq!(download_requests[0]["signed"], false);
         assert_eq!(download_requests[1]["signed"], true);
         assert_eq!(download_requests[1]["accessToken"], token);
+    }
+
+    #[tokio::test]
+    async fn managed_root_head_list_and_get_are_scoped_under_one_provider_folder() {
+        let server = MockServer::start(
+            sample_entries_under_managed_root(),
+            sample_file_bodies(),
+            "unused-token",
+            false,
+        )
+        .await;
+        let adapter = mock_telecom_adapter_with_root_prefix(
+            &server.base_url,
+            "browser-id-123",
+            "JSESSIONID=abc; COOKIE_LOGIN_USER=def",
+            "ccbg-managed",
+        );
+
+        let objects = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(TELECOM_ROOT_CONTAINER.to_string()),
+                prefix: None,
+                limit: None,
+            })
+            .await
+            .expect("managed root list should succeed");
+        let keys = objects
+            .iter()
+            .map(|object| object.key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["docs/alpha.txt", "root-note.txt"]);
+
+        let head = adapter
+            .head_object(TELECOM_ROOT_CONTAINER, "docs/alpha.txt")
+            .await
+            .expect("managed root head should succeed");
+        assert_eq!(head.key, "docs/alpha.txt");
+        assert_eq!(head.etag.as_deref(), Some("md5-managed-alpha"));
+
+        let payload = adapter
+            .get_object(TELECOM_ROOT_CONTAINER, "root-note.txt")
+            .await
+            .expect("managed root get should succeed");
+        assert_eq!(
+            payload
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"root-note!"
+        );
+
+        assert!(
+            adapter
+                .head_object(TELECOM_ROOT_CONTAINER, "secret.txt")
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn put_object_streams_to_spool_and_uploads_telecom_parts() {
+        let server = MockUploadServer::start().await;
+        let spool_stats = Arc::new(Mutex::new(MockSpoolStats::default()));
+        let adapter = mock_upload_adapter(&server.base_url, Arc::clone(&spool_stats));
+
+        let result = adapter
+            .put_object(PutObjectRequest {
+                container: TELECOM_ROOT_CONTAINER.to_string(),
+                key: "docs/probe.bin".to_string(),
+                body: ObjectBody::from_stream(futures_util::stream::iter([
+                    Ok(bytes::Bytes::from_static(b"hello ")),
+                    Ok(bytes::Bytes::from_static(b"world")),
+                ])),
+                size: Some(11),
+                content_type: Some("application/octet-stream".to_string()),
+            })
+            .await
+            .expect("telecom put_object should succeed");
+
+        assert_eq!(
+            result.etag.as_deref(),
+            Some("5EB63BBBE01EEED093CB22BB8F5ACDC3")
+        );
+        assert!(result.first_response_latency_ms.is_some());
+
+        let created_folders = server
+            .created_folders
+            .lock()
+            .expect("created folders poisoned")
+            .clone();
+        let folder_names = created_folders
+            .iter()
+            .filter_map(|fields| fields.get("folderName").cloned())
+            .collect::<Vec<_>>();
+        assert_eq!(folder_names, vec!["ccbg-tests", "docs"]);
+
+        let mut uploaded_parts = server
+            .uploaded_parts
+            .lock()
+            .expect("uploaded parts poisoned")
+            .clone();
+        uploaded_parts.sort_by_key(|(part_number, _, _)| *part_number);
+        let uploaded_bodies = uploaded_parts
+            .iter()
+            .map(|(_, body, _)| body.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uploaded_bodies,
+            vec![b"hello".to_vec(), b" worl".to_vec(), b"d".to_vec()]
+        );
+        let uploaded_md5_headers = uploaded_parts
+            .iter()
+            .map(|(_, _, content_md5)| content_md5.clone().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(uploaded_md5_headers, sample_upload_part_md5_base64s());
+
+        let control_headers = server
+            .control_headers
+            .lock()
+            .expect("control headers poisoned")
+            .clone();
+        assert!(control_headers.iter().all(|headers| {
+            headers.get("SessionKey") == Some(&"telecom-session-key".to_string())
+                && headers.contains_key("Signature")
+                && headers.contains_key("X-Request-Date")
+                && headers.contains_key("X-Request-ID")
+                && headers.get("PkId") == Some(&"pk-test-1".to_string())
+                && headers.contains_key("EncryptionText")
+        }));
+
+        let spool_stats = spool_stats.lock().expect("spool stats poisoned");
+        assert_eq!(spool_stats.active_files, 0);
+        assert_eq!(spool_stats.active_bytes, 0);
+        assert_eq!(spool_stats.peak_files, 1);
+        assert_eq!(spool_stats.peak_bytes, 11);
     }
 }

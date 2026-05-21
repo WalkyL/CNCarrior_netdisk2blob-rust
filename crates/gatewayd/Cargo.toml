@@ -12,6 +12,7 @@ blob-core = { path = "../blob-core" }
 browser-cdp = { path = "../browser-cdp" }
 hex = { workspace = true }
 hmac = { workspace = true }
+libc = { workspace = true }
 futures-util = { workspace = true }
 metadata-store = { path = "../metadata-store" }
 percent-encoding = { workspace = true }
@@ -26,7 +27,9 @@ replication-engine = { path = "../replication-engine" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
-tokio = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tower = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

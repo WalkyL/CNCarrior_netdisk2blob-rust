@@ -289,6 +289,9 @@ impl ReplicationEngine {
         let mut created = Vec::with_capacity(topology.sync_targets.len());
 
         for target in &topology.sync_targets {
+            if source_provider.as_deref() == Some(target.as_str()) {
+                continue;
+            }
             let job = ReplicationJob {
                 job_id: self.allocate_job_id(),
                 target: target.as_str().to_string(),
@@ -372,6 +375,24 @@ mod tests {
         assert_eq!(jobs[1].target, "onedrive");
         assert_eq!(jobs[0].source_provider.as_deref(), Some("unicom"));
         assert!(matches!(jobs[0].operation, ReplicationOperation::Put));
+    }
+
+    #[test]
+    fn enqueue_put_skips_target_that_matches_source_provider() {
+        let engine = ReplicationEngine::new();
+        let jobs = engine.enqueue_put(
+            &topology(),
+            Some("telecom".to_string()),
+            "bucket-a",
+            "hello.txt",
+            Some("etag-1".to_string()),
+            42,
+            Some("text/plain".to_string()),
+        );
+
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].target, "onedrive");
+        assert_eq!(jobs[0].source_provider.as_deref(), Some("telecom"));
     }
 
     #[test]

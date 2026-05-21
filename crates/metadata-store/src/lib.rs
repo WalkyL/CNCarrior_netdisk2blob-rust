@@ -24,6 +24,14 @@ pub struct MetadataSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectPlacementRecord {
+    pub provider: String,
+    pub bucket: String,
+    pub key: String,
+    pub updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataTargetStatus {
     pub target: String,
     pub queued_count: usize,
@@ -505,6 +513,91 @@ impl MetadataStore {
             .map_err(MetadataError::Sqlite)
     }
 
+    pub fn upsert_object_placement(
+        &self,
+        provider: &str,
+        bucket: &str,
+        key: &str,
+        updated_at_unix_ms: u64,
+    ) -> Result<(), MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        connection
+            .execute(
+                "INSERT INTO object_placements (provider, bucket, key, updated_at_unix_ms)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(bucket, key) DO UPDATE SET
+                    provider = excluded.provider,
+                    updated_at_unix_ms = excluded.updated_at_unix_ms",
+                params![provider, bucket, key, updated_at_unix_ms as i64],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        Ok(())
+    }
+
+    pub fn delete_object_placement(&self, bucket: &str, key: &str) -> Result<(), MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        connection
+            .execute(
+                "DELETE FROM object_placements WHERE bucket = ?1 AND key = ?2",
+                params![bucket, key],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        Ok(())
+    }
+
+    pub fn object_placement(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<ObjectPlacementRecord>, MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        connection
+            .query_row(
+                "SELECT provider, bucket, key, updated_at_unix_ms
+                 FROM object_placements
+                 WHERE bucket = ?1 AND key = ?2",
+                params![bucket, key],
+                |row| {
+                    Ok(ObjectPlacementRecord {
+                        provider: row.get(0)?,
+                        bucket: row.get(1)?,
+                        key: row.get(2)?,
+                        updated_at_unix_ms: row.get::<_, i64>(3)? as u64,
+                    })
+                },
+            )
+            .optional()
+            .map_err(MetadataError::Sqlite)
+    }
+
+    pub fn object_placements_for_bucket(
+        &self,
+        bucket: &str,
+    ) -> Result<Vec<ObjectPlacementRecord>, MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        let mut statement = connection
+            .prepare(
+                "SELECT provider, bucket, key, updated_at_unix_ms
+                 FROM object_placements
+                 WHERE bucket = ?1
+                 ORDER BY key ASC",
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        statement
+            .query_map([bucket], |row| {
+                Ok(ObjectPlacementRecord {
+                    provider: row.get(0)?,
+                    bucket: row.get(1)?,
+                    key: row.get(2)?,
+                    updated_at_unix_ms: row.get::<_, i64>(3)? as u64,
+                })
+            })
+            .map_err(MetadataError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(MetadataError::Sqlite)
+    }
+
     fn init_schema(&self) -> Result<(), MetadataError> {
         let connection = self.connection.lock().expect("metadata store poisoned");
         connection
@@ -526,7 +619,16 @@ impl MetadataStore {
                     last_error TEXT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_replication_jobs_status_job_id
-                    ON replication_jobs(status, job_id);",
+                    ON replication_jobs(status, job_id);
+                CREATE TABLE IF NOT EXISTS object_placements (
+                    provider TEXT NOT NULL,
+                    bucket TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    updated_at_unix_ms INTEGER NOT NULL,
+                    PRIMARY KEY(bucket, key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_object_placements_provider_bucket
+                    ON object_placements(provider, bucket);",
             )
             .map_err(MetadataError::Sqlite)?;
         ensure_replication_jobs_column(&connection, "source_provider", "TEXT NULL").and_then(|_| {
@@ -863,7 +965,10 @@ mod tests {
         ReplicationJob, ReplicationObjectRef, ReplicationOperation, ReplicationStatus,
     };
 
-    use super::{MetadataError, MetadataRetentionPolicy, MetadataStore, MetadataStoreOptions};
+    use super::{
+        MetadataError, MetadataRetentionPolicy, MetadataStore, MetadataStoreOptions,
+        ObjectPlacementRecord,
+    };
 
     fn temp_db_path() -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
@@ -1373,6 +1478,55 @@ mod tests {
         assert_eq!(onedrive.completed_count, 1);
         assert_eq!(onedrive.failed_count, 0);
         assert_eq!(onedrive.latest_job.as_ref().map(|job| job.job_id), Some(41));
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn object_placement_round_trip_and_delete() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        store
+            .upsert_object_placement("telecom", "root", "docs/a.txt", 100)
+            .expect("placement should persist");
+        store
+            .upsert_object_placement("unicom", "root", "docs/b.txt", 200)
+            .expect("placement should persist");
+        store
+            .upsert_object_placement("unicom", "root", "docs/a.txt", 300)
+            .expect("placement should update");
+
+        let placement = store
+            .object_placement("root", "docs/a.txt")
+            .expect("placement query should succeed")
+            .expect("placement should exist");
+        assert_eq!(
+            placement,
+            ObjectPlacementRecord {
+                provider: "unicom".to_string(),
+                bucket: "root".to_string(),
+                key: "docs/a.txt".to_string(),
+                updated_at_unix_ms: 300,
+            }
+        );
+
+        let placements = store
+            .object_placements_for_bucket("root")
+            .expect("bucket placement listing should succeed");
+        assert_eq!(placements.len(), 2);
+        assert_eq!(placements[0].key, "docs/a.txt");
+        assert_eq!(placements[1].key, "docs/b.txt");
+
+        store
+            .delete_object_placement("root", "docs/a.txt")
+            .expect("placement delete should succeed");
+        assert!(
+            store
+                .object_placement("root", "docs/a.txt")
+                .expect("placement query should succeed")
+                .is_none()
+        );
 
         fs::remove_file(db_path).ok();
     }

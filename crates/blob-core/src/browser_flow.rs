@@ -65,6 +65,8 @@ pub struct BrowserFlowElement {
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
+    pub frame: Option<String>,
+    #[serde(default)]
     pub selectors: Vec<BrowserFlowSelector>,
     #[serde(default)]
     pub notes: Vec<String>,
@@ -117,6 +119,8 @@ pub struct BrowserFlowOperation {
     pub id: String,
     #[serde(default)]
     pub page: Option<String>,
+    #[serde(default)]
+    pub frame: Option<String>,
     pub kind: BrowserFlowOperationKind,
     pub source: String,
     #[serde(default)]
@@ -232,6 +236,8 @@ pub struct BrowserFlowInput {
     #[serde(default)]
     pub secret: bool,
     #[serde(default)]
+    pub transient: bool,
+    #[serde(default)]
     pub description: Option<String>,
 }
 
@@ -248,7 +254,15 @@ pub enum BrowserFlowInputKind {
 pub struct BrowserFlowOutput {
     pub id: String,
     pub kind: BrowserFlowOutputKind,
+    #[serde(default)]
+    pub frame: Option<String>,
     pub source: String,
+    #[serde(default)]
+    pub fallback_sources: Vec<String>,
+    #[serde(default)]
+    pub header_names: Vec<String>,
+    #[serde(default = "default_true")]
+    pub required_for_prerequisite: bool,
     #[serde(default)]
     pub redact: bool,
     #[serde(default)]
@@ -259,11 +273,68 @@ pub struct BrowserFlowOutput {
 #[serde(rename_all = "snake_case")]
 pub enum BrowserFlowOutputKind {
     RequestHeader,
+    RequestHeaders,
     RequestField,
     ResponseField,
     ScriptValue,
     Url,
     DomText,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserFlowVisualCaptchaRequest {
+    pub image_element: BrowserFlowElement,
+    pub input_element: BrowserFlowElement,
+    #[serde(default)]
+    pub refresh_element: Option<BrowserFlowElement>,
+    pub input_id: String,
+    #[serde(default)]
+    pub manual_value: Option<String>,
+    #[serde(default)]
+    pub field_label: Option<String>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    #[serde(default)]
+    pub dispatch_events: Vec<String>,
+    #[serde(default)]
+    pub instruction: Option<String>,
+    #[serde(default)]
+    pub expected_length: Option<usize>,
+    #[serde(default)]
+    pub llm_system_prompt: Option<String>,
+    #[serde(default)]
+    pub llm_prompt_template: Option<String>,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default)]
+    pub max_attempts: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserFlowVisualLayoutTarget {
+    pub element: String,
+    pub role: String,
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserFlowVisualLayoutValidationTargetRequest {
+    pub element: BrowserFlowElement,
+    pub role: String,
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BrowserFlowVisualLayoutValidationRequest {
+    pub targets: Vec<BrowserFlowVisualLayoutValidationTargetRequest>,
+    #[serde(default)]
+    pub instruction: Option<String>,
+    #[serde(default)]
+    pub relationship_rules: Vec<String>,
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -302,11 +373,49 @@ pub enum BrowserFlowStep {
         element: String,
         events: Vec<String>,
     },
+    ValidateVisualLayout {
+        id: String,
+        targets: Vec<BrowserFlowVisualLayoutTarget>,
+        #[serde(default)]
+        instruction: Option<String>,
+        #[serde(default)]
+        relationship_rules: Vec<String>,
+        #[serde(default)]
+        optional: bool,
+    },
+    SolveVisualCaptcha {
+        id: String,
+        image_element: String,
+        input_element: String,
+        input_id: String,
+        #[serde(default)]
+        field_label: Option<String>,
+        #[serde(default)]
+        placeholder: Option<String>,
+        #[serde(default)]
+        dispatch_events: Vec<String>,
+        #[serde(default)]
+        instruction: Option<String>,
+        #[serde(default)]
+        expected_length: Option<usize>,
+        #[serde(default)]
+        llm_system_prompt: Option<String>,
+        #[serde(default)]
+        llm_prompt_template: Option<String>,
+        #[serde(default)]
+        refresh_element: Option<String>,
+        #[serde(default)]
+        optional: bool,
+        #[serde(default)]
+        max_attempts: Option<u64>,
+    },
     WaitForRequest {
         id: String,
         request: String,
         #[serde(default)]
         timeout_ms: Option<u64>,
+        #[serde(default)]
+        optional: bool,
     },
     WaitForPage {
         id: String,
@@ -383,6 +492,23 @@ impl BrowserFlowCatalog {
                 | BrowserFlowStep::DispatchEvents { element, .. } => {
                     referenced_element_ids.insert(element.clone());
                 }
+                BrowserFlowStep::ValidateVisualLayout { targets, .. } => {
+                    for target in targets {
+                        referenced_element_ids.insert(target.element.clone());
+                    }
+                }
+                BrowserFlowStep::SolveVisualCaptcha {
+                    image_element,
+                    input_element,
+                    refresh_element,
+                    ..
+                } => {
+                    referenced_element_ids.insert(image_element.clone());
+                    referenced_element_ids.insert(input_element.clone());
+                    if let Some(refresh_element) = refresh_element {
+                        referenced_element_ids.insert(refresh_element.clone());
+                    }
+                }
                 BrowserFlowStep::InvokeOperation { operation, .. } => {
                     referenced_operation_ids.insert(operation.clone());
                 }
@@ -398,6 +524,31 @@ impl BrowserFlowCatalog {
 
         for request in &bound_flow.expected_requests {
             referenced_request_ids.insert(request.clone());
+        }
+
+        for output in &bound_flow.outputs {
+            match output.kind {
+                BrowserFlowOutputKind::RequestHeader
+                | BrowserFlowOutputKind::RequestHeaders
+                | BrowserFlowOutputKind::RequestField => {
+                    for source in std::iter::once(output.source.as_str())
+                        .chain(output.fallback_sources.iter().map(String::as_str))
+                    {
+                        if let Some((request_id, _)) = source.split_once(':') {
+                            let request_id = request_id.trim();
+                            if !request_id.is_empty() {
+                                referenced_request_ids.insert(request_id.to_string());
+                            }
+                        } else if matches!(output.kind, BrowserFlowOutputKind::RequestHeaders) {
+                            let request_id = source.trim();
+                            if !request_id.is_empty() {
+                                referenced_request_ids.insert(request_id.to_string());
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         let mut presets = BTreeMap::new();
@@ -513,6 +664,9 @@ impl BrowserFlowCatalog {
             ensure_non_empty("element.id", element.id.as_str())?;
             ensure_non_empty("element.page", element.page.as_str())?;
             ensure_non_empty("element.role", element.role.as_str())?;
+            if let Some(frame) = element.frame.as_deref() {
+                ensure_non_empty("element.frame", frame)?;
+            }
             if !page_ids.contains(element.page.as_str()) {
                 return Err(BlobError::Configuration(format!(
                     "element {} references unknown page {}",
@@ -567,6 +721,9 @@ impl BrowserFlowCatalog {
         for operation in &self.operations {
             ensure_non_empty("operation.id", operation.id.as_str())?;
             ensure_non_empty("operation.source", operation.source.as_str())?;
+            if let Some(frame) = operation.frame.as_deref() {
+                ensure_non_empty("operation.frame", frame)?;
+            }
             if let Some(page) = operation.page.as_deref() {
                 if !page_ids.contains(page) {
                     return Err(BlobError::Configuration(format!(
@@ -639,6 +796,23 @@ impl BrowserFlowCatalog {
             for output in &flow.outputs {
                 ensure_non_empty("flow.output.id", output.id.as_str())?;
                 ensure_non_empty("flow.output.source", output.source.as_str())?;
+                for source in &output.fallback_sources {
+                    ensure_non_empty("flow.output.fallback_sources[]", source.as_str())?;
+                }
+                if matches!(output.kind, BrowserFlowOutputKind::RequestHeaders) {
+                    if output.header_names.is_empty() {
+                        return Err(BlobError::Configuration(format!(
+                            "flow output {} requires at least one header_names entry",
+                            output.id
+                        )));
+                    }
+                    for header_name in &output.header_names {
+                        ensure_non_empty("flow.output.header_names[]", header_name.as_str())?;
+                    }
+                }
+                if let Some(frame) = output.frame.as_deref() {
+                    ensure_non_empty("flow.output.frame", frame)?;
+                }
                 if let Some(description) = output.description.as_deref() {
                     ensure_non_empty("flow.output.description", description)?;
                 }
@@ -674,6 +848,83 @@ impl BrowserFlowCatalog {
                                 flow.id,
                                 step.id(),
                                 element
+                            )));
+                        }
+                    }
+                    BrowserFlowStep::ValidateVisualLayout { targets, .. } => {
+                        if targets.is_empty() {
+                            return Err(BlobError::Configuration(format!(
+                                "flow {} step {} must contain at least one visual validation target",
+                                flow.id,
+                                step.id()
+                            )));
+                        }
+                        for target in targets {
+                            ensure_non_empty(
+                                "flow.step.visual_target.element",
+                                target.element.as_str(),
+                            )?;
+                            ensure_non_empty("flow.step.visual_target.role", target.role.as_str())?;
+                            if !element_ids.contains(target.element.as_str()) {
+                                return Err(BlobError::Configuration(format!(
+                                    "flow {} step {} references unknown visual validation element {}",
+                                    flow.id,
+                                    step.id(),
+                                    target.element
+                                )));
+                            }
+                        }
+                    }
+                    BrowserFlowStep::SolveVisualCaptcha {
+                        image_element,
+                        input_element,
+                        refresh_element,
+                        input_id,
+                        expected_length,
+                        max_attempts,
+                        ..
+                    } => {
+                        ensure_non_empty("flow.step.image_element", image_element.as_str())?;
+                        ensure_non_empty("flow.step.input_element", input_element.as_str())?;
+                        ensure_non_empty("flow.step.input_id", input_id.as_str())?;
+                        if !element_ids.contains(image_element.as_str()) {
+                            return Err(BlobError::Configuration(format!(
+                                "flow {} step {} references unknown image element {}",
+                                flow.id,
+                                step.id(),
+                                image_element
+                            )));
+                        }
+                        if !element_ids.contains(input_element.as_str()) {
+                            return Err(BlobError::Configuration(format!(
+                                "flow {} step {} references unknown input element {}",
+                                flow.id,
+                                step.id(),
+                                input_element
+                            )));
+                        }
+                        if let Some(refresh_element) = refresh_element {
+                            if !element_ids.contains(refresh_element.as_str()) {
+                                return Err(BlobError::Configuration(format!(
+                                    "flow {} step {} references unknown refresh element {}",
+                                    flow.id,
+                                    step.id(),
+                                    refresh_element
+                                )));
+                            }
+                        }
+                        if expected_length.is_some_and(|value| value == 0) {
+                            return Err(BlobError::Configuration(format!(
+                                "flow {} step {} expected_length must be at least 1",
+                                flow.id,
+                                step.id()
+                            )));
+                        }
+                        if max_attempts.is_some_and(|value| value == 0) {
+                            return Err(BlobError::Configuration(format!(
+                                "flow {} step {} max_attempts must be at least 1",
+                                flow.id,
+                                step.id()
                             )));
                         }
                     }
@@ -743,6 +994,41 @@ impl BrowserFlowCatalog {
                         }
                         for event in events {
                             ensure_non_empty("flow.step.events[]", event.as_str())?;
+                        }
+                    }
+                    BrowserFlowStep::ValidateVisualLayout {
+                        instruction,
+                        relationship_rules,
+                        ..
+                    } => {
+                        if let Some(instruction) = instruction.as_deref() {
+                            ensure_non_empty("flow.step.instruction", instruction)?;
+                        }
+                        for rule in relationship_rules {
+                            ensure_non_empty("flow.step.relationship_rules[]", rule.as_str())?;
+                        }
+                    }
+                    BrowserFlowStep::SolveVisualCaptcha {
+                        dispatch_events,
+                        llm_system_prompt,
+                        llm_prompt_template,
+                        ..
+                    } => {
+                        if dispatch_events.is_empty() {
+                            return Err(BlobError::Configuration(format!(
+                                "flow {} step {} must contain at least one dispatch event",
+                                flow.id,
+                                step.id()
+                            )));
+                        }
+                        for event in dispatch_events {
+                            ensure_non_empty("flow.step.dispatch_events[]", event.as_str())?;
+                        }
+                        if let Some(llm_system_prompt) = llm_system_prompt.as_deref() {
+                            ensure_non_empty("flow.step.llm_system_prompt", llm_system_prompt)?;
+                        }
+                        if let Some(llm_prompt_template) = llm_prompt_template.as_deref() {
+                            ensure_non_empty("flow.step.llm_prompt_template", llm_prompt_template)?;
                         }
                     }
                     _ => {}
@@ -884,6 +1170,10 @@ impl BoundBrowserFlowPlan {
             .find(|operation| operation.id == operation_id)
     }
 
+    pub fn find_input(&self, input_id: &str) -> Option<&BrowserFlowInput> {
+        self.flow.inputs.iter().find(|input| input.id == input_id)
+    }
+
     pub fn input_value(&self, input_id: &str) -> Option<&Value> {
         self.context.inputs.get(input_id)
     }
@@ -935,6 +1225,16 @@ pub trait BrowserFlowSession: Send + Sync {
         &self,
         element: &BrowserFlowElement,
         events: &[String],
+    ) -> Result<(), BlobError>;
+
+    async fn validate_visual_layout(
+        &self,
+        request: &BrowserFlowVisualLayoutValidationRequest,
+    ) -> Result<(), BlobError>;
+
+    async fn solve_visual_captcha(
+        &self,
+        request: &BrowserFlowVisualCaptchaRequest,
     ) -> Result<(), BlobError>;
 
     async fn wait_for_request(
@@ -1004,9 +1304,10 @@ where
         &self,
         plan: &BoundBrowserFlowPlan,
     ) -> Result<BrowserFlowExecutionReport, BlobError> {
+        let mut state = BrowserFlowSessionExecutionState::default();
         let mut steps = Vec::with_capacity(plan.flow.steps.len());
         for step in &plan.flow.steps {
-            steps.push(execute_session_step(plan, &self.session, step).await?);
+            steps.push(execute_session_step(plan, &self.session, step, &mut state).await?);
         }
 
         Ok(BrowserFlowExecutionReport {
@@ -1021,6 +1322,11 @@ where
     }
 }
 
+#[derive(Default)]
+struct BrowserFlowSessionExecutionState {
+    consumed_transient_inputs: BTreeSet<String>,
+}
+
 impl BrowserFlowStep {
     pub fn id(&self) -> &str {
         match self {
@@ -1030,6 +1336,8 @@ impl BrowserFlowStep {
             | Self::InvokeOperation { id, .. }
             | Self::SetFiles { id, .. }
             | Self::DispatchEvents { id, .. }
+            | Self::ValidateVisualLayout { id, .. }
+            | Self::SolveVisualCaptcha { id, .. }
             | Self::WaitForRequest { id, .. }
             | Self::WaitForPage { id, .. }
             | Self::Wait { id, .. } => id.as_str(),
@@ -1044,6 +1352,8 @@ impl BrowserFlowStep {
             Self::InvokeOperation { .. } => "invoke_operation",
             Self::SetFiles { .. } => "set_files",
             Self::DispatchEvents { .. } => "dispatch_events",
+            Self::ValidateVisualLayout { .. } => "validate_visual_layout",
+            Self::SolveVisualCaptcha { .. } => "solve_visual_captcha",
             Self::WaitForRequest { .. } => "wait_for_request",
             Self::WaitForPage { .. } => "wait_for_page",
             Self::Wait { .. } => "wait",
@@ -1126,11 +1436,50 @@ fn bind_flow_templates(
             BrowserFlowStep::SetInput { value_template, .. } => {
                 *value_template = bind_string_template(value_template, context)?;
             }
+            BrowserFlowStep::ValidateVisualLayout {
+                instruction,
+                relationship_rules,
+                ..
+            } => {
+                if let Some(instruction) = instruction {
+                    *instruction = bind_string_template(instruction, context)?;
+                }
+                for rule in relationship_rules {
+                    *rule = bind_string_template(rule, context)?;
+                }
+            }
+            BrowserFlowStep::SolveVisualCaptcha {
+                field_label,
+                placeholder,
+                instruction,
+                llm_system_prompt,
+                llm_prompt_template,
+                ..
+            } => {
+                if let Some(field_label) = field_label {
+                    *field_label = bind_string_template(field_label, context)?;
+                }
+                if let Some(placeholder) = placeholder {
+                    *placeholder = bind_string_template(placeholder, context)?;
+                }
+                if let Some(instruction) = instruction {
+                    *instruction = bind_string_template(instruction, context)?;
+                }
+                if let Some(llm_system_prompt) = llm_system_prompt {
+                    *llm_system_prompt = bind_string_template(llm_system_prompt, context)?;
+                }
+                if let Some(llm_prompt_template) = llm_prompt_template {
+                    *llm_prompt_template = bind_string_template(llm_prompt_template, context)?;
+                }
+            }
             _ => {}
         }
     }
 
     for output in &mut flow.outputs {
+        if let Some(frame) = &mut output.frame {
+            *frame = bind_string_template(frame, context)?;
+        }
         output.source = bind_string_template(&output.source, context)?;
     }
 
@@ -1153,6 +1502,9 @@ fn bind_element(
     context: &BrowserFlowBindingContext,
 ) -> Result<BrowserFlowElement, BlobError> {
     let mut bound = element.clone();
+    if let Some(frame) = &mut bound.frame {
+        *frame = bind_string_template(frame, context)?;
+    }
     for selector in &mut bound.selectors {
         selector.value = bind_string_template(&selector.value, context)?;
         if let Some(text_contains) = &mut selector.text_contains {
@@ -1184,6 +1536,9 @@ fn bind_operation(
     context: &BrowserFlowBindingContext,
 ) -> Result<BrowserFlowOperation, BlobError> {
     let mut bound = operation.clone();
+    if let Some(frame) = &mut bound.frame {
+        *frame = bind_string_template(frame, context)?;
+    }
     bound.source = bind_string_template(&bound.source, context)?;
     Ok(bound)
 }
@@ -1434,9 +1789,138 @@ fn dry_run_step_report(
                 Value::Array(events.iter().cloned().map(Value::String).collect()),
             );
         }
+        BrowserFlowStep::ValidateVisualLayout {
+            targets,
+            instruction,
+            relationship_rules,
+            optional,
+            ..
+        } => {
+            detail.insert("optional".to_string(), Value::Bool(*optional));
+            detail.insert(
+                "targets".to_string(),
+                Value::Array(
+                    targets
+                        .iter()
+                        .map(|target| {
+                            Value::Object(serde_json::Map::from_iter([
+                                ("element".to_string(), Value::String(target.element.clone())),
+                                ("role".to_string(), Value::String(target.role.clone())),
+                                ("required".to_string(), Value::Bool(target.required)),
+                            ]))
+                        })
+                        .collect(),
+                ),
+            );
+            if let Some(instruction) = instruction {
+                detail.insert(
+                    "instruction".to_string(),
+                    Value::String(instruction.clone()),
+                );
+            }
+            if !relationship_rules.is_empty() {
+                detail.insert(
+                    "relationship_rules".to_string(),
+                    Value::Array(
+                        relationship_rules
+                            .iter()
+                            .cloned()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                );
+            }
+        }
+        BrowserFlowStep::SolveVisualCaptcha {
+            image_element,
+            input_element,
+            input_id,
+            field_label,
+            placeholder,
+            dispatch_events,
+            instruction,
+            expected_length,
+            llm_system_prompt,
+            llm_prompt_template,
+            refresh_element,
+            optional,
+            max_attempts,
+            ..
+        } => {
+            detail.insert(
+                "image_element".to_string(),
+                Value::String(image_element.clone()),
+            );
+            detail.insert(
+                "input_element".to_string(),
+                Value::String(input_element.clone()),
+            );
+            detail.insert("input_id".to_string(), Value::String(input_id.clone()));
+            detail.insert("optional".to_string(), Value::Bool(*optional));
+            detail.insert(
+                "dispatch_events".to_string(),
+                Value::Array(dispatch_events.iter().cloned().map(Value::String).collect()),
+            );
+            detail.insert(
+                "manual_value_present".to_string(),
+                Value::Bool(
+                    plan.input_value(input_id)
+                        .is_some_and(|value| value_is_present(value)),
+                ),
+            );
+            if let Some(field_label) = field_label {
+                detail.insert(
+                    "field_label".to_string(),
+                    Value::String(field_label.clone()),
+                );
+            }
+            if let Some(placeholder) = placeholder {
+                detail.insert(
+                    "placeholder".to_string(),
+                    Value::String(placeholder.clone()),
+                );
+            }
+            if let Some(instruction) = instruction {
+                detail.insert(
+                    "instruction".to_string(),
+                    Value::String(instruction.clone()),
+                );
+            }
+            if let Some(llm_system_prompt) = llm_system_prompt {
+                detail.insert(
+                    "llm_system_prompt".to_string(),
+                    Value::String(llm_system_prompt.clone()),
+                );
+            }
+            if let Some(llm_prompt_template) = llm_prompt_template {
+                detail.insert(
+                    "llm_prompt_template".to_string(),
+                    Value::String(llm_prompt_template.clone()),
+                );
+            }
+            if let Some(expected_length) = expected_length {
+                detail.insert(
+                    "expected_length".to_string(),
+                    Value::Number(serde_json::Number::from(*expected_length as u64)),
+                );
+            }
+            if let Some(refresh_element) = refresh_element {
+                detail.insert(
+                    "refresh_element".to_string(),
+                    Value::String(refresh_element.clone()),
+                );
+            }
+            if let Some(max_attempts) = max_attempts {
+                detail.insert(
+                    "max_attempts".to_string(),
+                    Value::Number(serde_json::Number::from(*max_attempts)),
+                );
+            }
+        }
         BrowserFlowStep::WaitForRequest {
             request,
             timeout_ms,
+            optional,
             ..
         } => {
             detail.insert("request".to_string(), Value::String(request.clone()));
@@ -1456,6 +1940,7 @@ fn dry_run_step_report(
                     Value::Number(serde_json::Number::from(*timeout_ms)),
                 );
             }
+            detail.insert("optional".to_string(), Value::Bool(*optional));
         }
         BrowserFlowStep::WaitForPage {
             page, timeout_ms, ..
@@ -1488,6 +1973,7 @@ async fn execute_session_step<S>(
     plan: &BoundBrowserFlowPlan,
     session: &S,
     step: &BrowserFlowStep,
+    state: &mut BrowserFlowSessionExecutionState,
 ) -> Result<BrowserFlowExecutionStepReport, BlobError>
 where
     S: BrowserFlowSession,
@@ -1589,20 +2075,158 @@ where
                 .await?;
             report.status = BrowserFlowExecutionStepStatus::Succeeded;
         }
+        BrowserFlowStep::ValidateVisualLayout {
+            targets,
+            instruction,
+            relationship_rules,
+            optional,
+            ..
+        } => {
+            let request = BrowserFlowVisualLayoutValidationRequest {
+                targets: targets
+                    .iter()
+                    .map(|target| {
+                        Ok(BrowserFlowVisualLayoutValidationTargetRequest {
+                            element: plan
+                                .find_element(&target.element)
+                                .ok_or_else(|| {
+                                    missing_bound_reference(
+                                        "element",
+                                        &target.element,
+                                        &plan.flow.id,
+                                    )
+                                })?
+                                .clone(),
+                            role: target.role.clone(),
+                            required: target.required,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, BlobError>>()?,
+                instruction: instruction.clone(),
+                relationship_rules: relationship_rules.clone(),
+                optional: *optional,
+            };
+            match session.validate_visual_layout(&request).await {
+                Ok(()) => {
+                    report.status = BrowserFlowExecutionStepStatus::Succeeded;
+                }
+                Err(BlobError::NotImplemented(_)) if *optional => {
+                    report.status = BrowserFlowExecutionStepStatus::Skipped;
+                    report.detail.insert(
+                        "skip_reason".to_string(),
+                        Value::String("visual_validation_unavailable".to_string()),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        BrowserFlowStep::SolveVisualCaptcha {
+            image_element,
+            input_element,
+            input_id,
+            field_label,
+            placeholder,
+            dispatch_events,
+            instruction,
+            expected_length,
+            llm_system_prompt,
+            llm_prompt_template,
+            refresh_element,
+            optional,
+            max_attempts,
+            ..
+        } => {
+            let input_is_transient = plan
+                .find_input(input_id)
+                .is_some_and(|input| input.transient);
+            let manual_value =
+                if input_is_transient && state.consumed_transient_inputs.contains(input_id) {
+                    None
+                } else {
+                    plan.input_value(input_id)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                };
+            let request = BrowserFlowVisualCaptchaRequest {
+                image_element: plan
+                    .find_element(image_element)
+                    .ok_or_else(|| {
+                        missing_bound_reference("element", image_element, &plan.flow.id)
+                    })?
+                    .clone(),
+                input_element: plan
+                    .find_element(input_element)
+                    .ok_or_else(|| {
+                        missing_bound_reference("element", input_element, &plan.flow.id)
+                    })?
+                    .clone(),
+                refresh_element: refresh_element
+                    .as_deref()
+                    .map(|element_id| {
+                        plan.find_element(element_id).ok_or_else(|| {
+                            missing_bound_reference("element", element_id, &plan.flow.id)
+                        })
+                    })
+                    .transpose()?
+                    .cloned(),
+                input_id: input_id.clone(),
+                manual_value,
+                field_label: field_label.clone(),
+                placeholder: placeholder.clone(),
+                dispatch_events: dispatch_events.clone(),
+                instruction: instruction.clone(),
+                expected_length: *expected_length,
+                llm_system_prompt: llm_system_prompt.clone(),
+                llm_prompt_template: llm_prompt_template.clone(),
+                optional: *optional,
+                max_attempts: *max_attempts,
+            };
+            match session.solve_visual_captcha(&request).await {
+                Ok(()) => {
+                    if input_is_transient && request.manual_value.is_some() {
+                        state.consumed_transient_inputs.insert(input_id.clone());
+                    }
+                    report.status = BrowserFlowExecutionStepStatus::Succeeded;
+                }
+                Err(BlobError::NotFound(_)) if *optional => {
+                    report.status = BrowserFlowExecutionStepStatus::Skipped;
+                    report.detail.insert(
+                        "skip_reason".to_string(),
+                        Value::String("optional_captcha_not_found".to_string()),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
         BrowserFlowStep::WaitForRequest {
             request,
             timeout_ms,
+            optional,
             ..
         } => {
-            session
+            match session
                 .wait_for_request(
                     plan.find_request(request).ok_or_else(|| {
                         missing_bound_reference("request", request, &plan.flow.id)
                     })?,
                     *timeout_ms,
                 )
-                .await?;
-            report.status = BrowserFlowExecutionStepStatus::Succeeded;
+                .await
+            {
+                Ok(()) => {
+                    report.status = BrowserFlowExecutionStepStatus::Succeeded;
+                }
+                Err(BlobError::Upstream(_)) if *optional => {
+                    report.status = BrowserFlowExecutionStepStatus::Skipped;
+                    report.detail.insert(
+                        "skip_reason".to_string(),
+                        Value::String("optional_request_not_observed".to_string()),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
         BrowserFlowStep::WaitForPage {
             page, timeout_ms, ..
@@ -1647,7 +2271,9 @@ mod tests {
     use super::{
         BrowserFlowBindingContext, BrowserFlowCatalog, BrowserFlowCatalogCollection,
         BrowserFlowExecutionMode, BrowserFlowExecutionStepStatus, BrowserFlowExecutor,
-        BrowserFlowSession, BrowserFlowSessionExecutor, DryRunBrowserFlowExecutor,
+        BrowserFlowSession, BrowserFlowSessionExecutor, BrowserFlowStep,
+        BrowserFlowVisualCaptchaRequest, BrowserFlowVisualLayoutValidationRequest,
+        DryRunBrowserFlowExecutor,
     };
     use crate::BlobError;
 
@@ -1656,6 +2282,7 @@ mod tests {
         actions: Mutex<Vec<String>>,
         missing_click_elements: Mutex<HashSet<String>>,
         failing_operation: Mutex<Option<String>>,
+        missing_wait_requests: Mutex<HashSet<String>>,
     }
 
     impl RecordingBrowserFlowSession {
@@ -1678,6 +2305,13 @@ mod tests {
                 .failing_operation
                 .lock()
                 .expect("failing operation should lock") = Some(operation_id.to_string());
+        }
+
+        fn mark_wait_request_missing(&self, request_id: &str) {
+            self.missing_wait_requests
+                .lock()
+                .expect("missing wait request set should lock")
+                .insert(request_id.to_string());
         }
 
         fn record(&self, action: impl Into<String>) {
@@ -1768,11 +2402,60 @@ mod tests {
             Ok(())
         }
 
+        async fn validate_visual_layout(
+            &self,
+            request: &BrowserFlowVisualLayoutValidationRequest,
+        ) -> Result<(), BlobError> {
+            self.record(format!(
+                "validate_visual_layout:{}",
+                request
+                    .targets
+                    .iter()
+                    .map(|target| format!("{}={}", target.role, target.element.id))
+                    .collect::<Vec<_>>()
+                    .join("|")
+            ));
+            Ok(())
+        }
+
+        async fn solve_visual_captcha(
+            &self,
+            request: &BrowserFlowVisualCaptchaRequest,
+        ) -> Result<(), BlobError> {
+            match request.manual_value.as_deref() {
+                Some(value) => {
+                    self.record(format!(
+                        "solve_visual_captcha:{}:{}:{}",
+                        request.image_element.id, request.input_element.id, value
+                    ));
+                    Ok(())
+                }
+                None if request.optional => Err(BlobError::NotFound(format!(
+                    "optional captcha not present: {}",
+                    request.image_element.id
+                ))),
+                None => Err(BlobError::InteractiveInputRequired(
+                    request.input_id.clone(),
+                )),
+            }
+        }
+
         async fn wait_for_request(
             &self,
             request: &super::BrowserFlowRequest,
             timeout_ms: Option<u64>,
         ) -> Result<(), BlobError> {
+            if self
+                .missing_wait_requests
+                .lock()
+                .expect("missing wait request set should lock")
+                .contains(&request.id)
+            {
+                return Err(BlobError::Upstream(format!(
+                    "timed out waiting for request {}",
+                    request.id
+                )));
+            }
             self.record(format!(
                 "wait_for_request:{}:{}",
                 request.id,
@@ -1864,6 +2547,20 @@ mod tests {
                   "role": "button",
                   "required": false,
                   "selectors": [{ "engine": "css", "value": ".optional-button" }]
+                },
+                {
+                  "id": "form.captcha_image",
+                  "page": "start",
+                  "role": "image",
+                  "required": false,
+                  "selectors": [{ "engine": "css", "value": "img.captcha" }]
+                },
+                {
+                  "id": "form.captcha_input",
+                  "page": "start",
+                  "role": "text_input",
+                  "required": false,
+                  "selectors": [{ "engine": "css", "value": "input[name='captcha']" }]
                 }
               ],
               "requests": [
@@ -1965,13 +2662,20 @@ mod tests {
                   "purpose": "Exercise skipped steps",
                   "start_page": "start",
                   "inputs": [
+                {
+                  "id": "optional_files",
+                  "label": "Optional Files",
+                  "kind": "file",
+                  "required": false
+                },
                     {
-                      "id": "optional_files",
-                      "label": "Optional Files",
-                      "kind": "file",
+                      "id": "captcha_code",
+                      "label": "Captcha Code",
+                      "kind": "text",
+                      "transient": true,
                       "required": false
                     }
-                  ],
+              ],
                   "steps": [
                     {
                       "kind": "click",
@@ -1980,10 +2684,81 @@ mod tests {
                       "optional": true
                     },
                     {
-                      "kind": "set_files",
-                      "id": "optional-files",
-                      "element": "form.file_input",
-                      "input_ref": "optional_files"
+                  "kind": "set_files",
+                  "id": "optional-files",
+                  "element": "form.file_input",
+                  "input_ref": "optional_files"
+                },
+                    {
+                      "kind": "solve_visual_captcha",
+                      "id": "optional-captcha",
+                      "image_element": "form.captcha_image",
+                      "input_element": "form.captcha_input",
+                  "input_id": "captcha_code",
+                      "dispatch_events": ["input", "change"],
+                      "optional": true
+                    }
+                  ]
+                },
+                {
+                  "id": "double_captcha_flow",
+                  "title": "Double Captcha Flow",
+                  "purpose": "Exercise one-shot transient captcha inputs",
+                  "start_page": "start",
+                  "inputs": [
+                    {
+                      "id": "captcha_code",
+                      "label": "Captcha Code",
+                      "kind": "text",
+                      "transient": true,
+                      "required": false
+                    }
+                  ],
+                  "steps": [
+                    {
+                      "kind": "solve_visual_captcha",
+                      "id": "first-captcha",
+                      "image_element": "form.captcha_image",
+                      "input_element": "form.captcha_input",
+                      "input_id": "captcha_code",
+                      "dispatch_events": ["input", "change"],
+                      "optional": true
+                    },
+                    {
+                      "kind": "solve_visual_captcha",
+                      "id": "second-captcha",
+                      "image_element": "form.captcha_image",
+                      "input_element": "form.captcha_input",
+                      "input_id": "captcha_code",
+                      "dispatch_events": ["input", "change"],
+                      "optional": true
+                    }
+                  ]
+                },
+                {
+                  "id": "visual_validation_flow",
+                  "title": "Visual Validation Flow",
+                  "purpose": "Exercise layout validation",
+                  "start_page": "start",
+                  "steps": [
+                    {
+                      "kind": "validate_visual_layout",
+                      "id": "validate-layout",
+                      "targets": [
+                        {
+                          "element": "form.name_input",
+                          "role": "name_input"
+                        },
+                        {
+                          "element": "form.submit_button",
+                          "role": "submit_button"
+                        }
+                      ],
+                      "instruction": "Confirm the form still looks like the expected start page.",
+                      "relationship_rules": [
+                        "The submit button should appear below or after the main input."
+                      ],
+                      "optional": false
                     }
                   ]
                 }
@@ -2001,7 +2776,7 @@ mod tests {
 
         assert_eq!(catalog.provider, "unicom");
         assert_eq!(catalog.surface, "pan.wo.cn-web");
-        assert_eq!(catalog.flows.len(), 9);
+        assert_eq!(catalog.flows.len(), 14);
         assert!(
             catalog
                 .flows
@@ -2037,6 +2812,18 @@ mod tests {
                 .flows
                 .iter()
                 .any(|flow| flow.id == "unicom_move_entry")
+        );
+        assert!(
+            catalog
+                .flows
+                .iter()
+                .any(|flow| flow.id == "unicom_sms_login_capture_send_code_before")
+        );
+        assert!(
+            catalog
+                .flows
+                .iter()
+                .any(|flow| flow.id == "unicom_sms_login_request_code_validate")
         );
     }
 
@@ -2335,7 +3122,7 @@ mod tests {
             .bind_flow("unicom_capture_current_session", &context)
             .expect("capture current session flow should bind");
 
-        assert_eq!(plan.flow.outputs.len(), 4);
+        assert_eq!(plan.flow.outputs.len(), 8);
         assert!(
             plan.flow
                 .outputs
@@ -2359,6 +3146,571 @@ mod tests {
                 .outputs
                 .iter()
                 .any(|output| output.id == "current_url")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "session_expires_at_unix_ms")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "session_timeout_ms")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "cookie_header")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "browser_profile_headers")
+        );
+    }
+
+    #[test]
+    fn browser_flow_catalog_bind_flow_validation_flow_uses_prerequisite_outputs() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([(
+                "phone_number".to_string(),
+                Value::String("18500001111".to_string()),
+            )]),
+            runtime: BTreeMap::new(),
+        };
+
+        let plan = catalog
+            .bind_flow("unicom_sms_login_request_code_validate", &context)
+            .expect("validation flow should bind");
+
+        assert_eq!(plan.flow.id, "unicom_sms_login_request_code_validate");
+        assert_eq!(
+            plan.flow.prerequisite_flow_id.as_deref(),
+            Some("unicom_sms_login_capture_send_code_before")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "send_code_text_after")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "send_code_countdown_detected")
+        );
+    }
+
+    #[test]
+    fn browser_flow_catalog_bind_flow_resume_submit_code_avoids_llm_steps() {
+        let raw = include_str!("../../../config/browser-flows/unicom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("unicom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([
+                (
+                    "phone_number".to_string(),
+                    Value::String("18500001111".to_string()),
+                ),
+                ("sms_code".to_string(), Value::String("123456".to_string())),
+            ]),
+            runtime: BTreeMap::new(),
+        };
+
+        let plan = catalog
+            .bind_flow("unicom_sms_login_resume_submit_code", &context)
+            .expect("resume submit code flow should bind");
+
+        assert_eq!(plan.flow.id, "unicom_sms_login_resume_submit_code");
+        assert!(plan.flow.steps.iter().all(|step| {
+            !matches!(
+                step,
+                BrowserFlowStep::ValidateVisualLayout { .. }
+                    | BrowserFlowStep::SolveVisualCaptcha { .. }
+            )
+        }));
+    }
+
+    #[test]
+    fn telecom_browser_flow_catalog_binds_frame_aware_sms_request_flow() {
+        let raw = include_str!("../../../config/browser-flows/telecom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("telecom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([(
+                "phone_number".to_string(),
+                Value::String("18900001111".to_string()),
+            )]),
+            runtime: BTreeMap::new(),
+        };
+
+        let plan = catalog
+            .bind_flow("telecom_sms_login_request_code", &context)
+            .expect("telecom sms request flow should bind");
+
+        let phone_input = plan
+            .find_element("login.phone_input")
+            .expect("telecom phone input should be bound");
+        assert_eq!(phone_input.frame.as_deref(), Some("name:udb_login"));
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "send_code_feedback_last_message"
+                    && output.frame.as_deref() == Some("name:udb_login"))
+        );
+    }
+
+    #[test]
+    fn telecom_browser_flow_catalog_binds_resume_flow_capture_outputs() {
+        let raw = include_str!("../../../config/browser-flows/telecom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("telecom browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([
+                (
+                    "phone_number".to_string(),
+                    Value::String("18900001111".to_string()),
+                ),
+                ("sms_code".to_string(), Value::String("123456".to_string())),
+            ]),
+            runtime: BTreeMap::new(),
+        };
+
+        let plan = catalog
+            .bind_flow("telecom_sms_login_resume_submit_code", &context)
+            .expect("telecom sms resume flow should bind");
+
+        assert_eq!(
+            plan.flow.expected_requests,
+            vec!["telecom_list_files".to_string()]
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "browser_id")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "cookie_header")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "root_folder_id")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "browser_profile_headers")
+        );
+    }
+
+    #[test]
+    fn telecom_browser_flow_catalog_binds_upload_probe_flows() {
+        let raw = include_str!("../../../config/browser-flows/telecom-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("telecom browser flow catalog should parse and validate");
+
+        let prepare_plan = catalog
+            .bind_flow(
+                "telecom_prepare_upload_probe",
+                &BrowserFlowBindingContext::default(),
+            )
+            .expect("telecom prepare upload probe flow should bind");
+        assert_eq!(
+            prepare_plan.flow.prerequisite_flow_id.as_deref(),
+            Some("telecom_capture_current_session")
+        );
+        assert!(
+            prepare_plan
+                .flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "install-upload-hooks")
+        );
+        assert!(
+            prepare_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_probe_summary")
+        );
+        assert!(
+            prepare_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_surface_latest")
+        );
+
+        let capture_plan = catalog
+            .bind_flow(
+                "telecom_capture_upload_probe_state",
+                &BrowserFlowBindingContext::default(),
+            )
+            .expect("telecom capture upload probe state flow should bind");
+        assert!(
+            capture_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_probe_recent_events")
+        );
+        assert!(
+            capture_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_probe_last_candidate_event")
+        );
+    }
+
+    #[test]
+    fn mobile_browser_flow_catalog_binds_capture_current_session_outputs() {
+        let raw = include_str!("../../../config/browser-flows/mobile-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("mobile browser flow catalog should parse and validate");
+        let context = BrowserFlowBindingContext::default();
+
+        let plan = catalog
+            .bind_flow("mobile_capture_current_session", &context)
+            .expect("mobile capture current session flow should bind");
+
+        assert_eq!(plan.flow.steps.len(), 9);
+        assert!(
+            plan.flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "guard-against-expired-or-login-page")
+        );
+        assert!(plan.flow.outputs.iter().any(|output| output.id == "token"));
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "root_folder_id")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "user_domain_id")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "browser_profile_headers")
+        );
+        let user_domain_output = plan
+            .flow
+            .outputs
+            .iter()
+            .find(|output| output.id == "user_domain_id")
+            .expect("user_domain_id output should be present");
+        assert_eq!(user_domain_output.fallback_sources.len(), 4);
+    }
+
+    #[test]
+    fn mobile_browser_flow_catalog_binds_sms_login_flows() {
+        let raw = include_str!("../../../config/browser-flows/mobile-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("mobile browser flow catalog should parse and validate");
+
+        let request_plan = catalog
+            .bind_flow(
+                "mobile_sms_login_request_code_validate",
+                &BrowserFlowBindingContext {
+                    inputs: BTreeMap::from([(
+                        "phone_number".to_string(),
+                        Value::String("13800138000".to_string()),
+                    )]),
+                    runtime: BTreeMap::new(),
+                },
+            )
+            .expect("mobile sms request-code flow should bind");
+        assert!(
+            request_plan
+                .flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "resolve-expired-session-dialog")
+        );
+        assert!(
+            request_plan
+                .flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "send-code")
+        );
+        assert!(
+            request_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "send_code_feedback_last_message")
+        );
+        assert!(
+            request_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "send_code_countdown_detected")
+        );
+
+        let resume_plan = catalog
+            .bind_flow(
+                "mobile_sms_login_resume_submit_code",
+                &BrowserFlowBindingContext {
+                    inputs: BTreeMap::from([
+                        (
+                            "phone_number".to_string(),
+                            Value::String("13800138000".to_string()),
+                        ),
+                        ("sms_code".to_string(), Value::String("123456".to_string())),
+                    ]),
+                    runtime: BTreeMap::new(),
+                },
+            )
+            .expect("mobile sms resume flow should bind");
+        assert!(
+            resume_plan
+                .flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "resolve-expired-session-dialog")
+        );
+        assert!(
+            resume_plan
+                .flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "submit-login")
+        );
+        assert!(
+            resume_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "token")
+        );
+        assert!(
+            resume_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "browser_profile_headers")
+        );
+    }
+
+    #[test]
+    fn mobile_browser_flow_catalog_uses_state_aware_agreement_toggle() {
+        let raw = include_str!("../../../config/browser-flows/mobile-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("mobile browser flow catalog should parse and validate");
+
+        let operation = catalog
+            .operations
+            .iter()
+            .find(|operation| operation.id == "login.ensure_login_options_checked")
+            .expect("mobile agreement operation should exist");
+
+        assert!(operation.source.contains("checkFlag"));
+        assert!(operation.source.contains("changeCheckFlag"));
+        assert!(operation.source.contains("collectVueInstances"));
+        assert!(operation.source.contains(".code-sms-check-img-wrap"));
+        assert!(operation.source.contains("split(/[^a-z0-9_-]+/)"));
+        assert!(!operation.source.contains("is-checked|on"));
+    }
+
+    #[test]
+    fn mobile_browser_flow_catalog_accepts_index_as_logged_in_main_route() {
+        let raw = include_str!("../../../config/browser-flows/mobile-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("mobile browser flow catalog should parse and validate");
+
+        let main_page = catalog
+            .pages
+            .iter()
+            .find(|page| page.id == "main")
+            .expect("mobile main page should exist");
+        assert!(
+            main_page
+                .url_patterns
+                .iter()
+                .any(|pattern| pattern == "https://yun.139.com/w/#/index")
+        );
+        assert!(
+            main_page
+                .url_patterns
+                .iter()
+                .any(|pattern| pattern == "https://yun.139.com/w/#/index*")
+        );
+
+        let capture_flow = catalog
+            .flows
+            .iter()
+            .find(|flow| flow.id == "mobile_capture_current_session_from_logged_in_page")
+            .expect("mobile logged-in capture flow should exist");
+        let open_main_page_step = capture_flow
+            .steps
+            .iter()
+            .find(|step| step.id() == "open-main-page")
+            .expect("mobile capture flow should open the main page");
+        let serialized_step =
+            serde_json::to_string(open_main_page_step).expect("step should serialize");
+        assert!(serialized_step.contains("https://yun.139.com/w/#/index"));
+    }
+
+    #[test]
+    fn mobile_browser_flow_catalog_binds_upload_probe_flows() {
+        let raw = include_str!("../../../config/browser-flows/mobile-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("mobile browser flow catalog should parse and validate");
+
+        let prepare_plan = catalog
+            .bind_flow(
+                "mobile_prepare_upload_probe",
+                &BrowserFlowBindingContext::default(),
+            )
+            .expect("mobile prepare upload probe flow should bind");
+        assert_eq!(
+            prepare_plan.flow.prerequisite_flow_id.as_deref(),
+            Some("mobile_capture_current_session")
+        );
+        assert!(
+            prepare_plan
+                .flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "install-upload-hooks")
+        );
+        assert!(
+            prepare_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_surface_after")
+        );
+        assert!(
+            prepare_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_probe_recent_events")
+        );
+
+        let attach_plan = catalog
+            .bind_flow(
+                "mobile_probe_upload_attach",
+                &BrowserFlowBindingContext {
+                    inputs: BTreeMap::from([(
+                        "local_file".to_string(),
+                        Value::String("/tmp/mobile-upload-probe.txt".to_string()),
+                    )]),
+                    runtime: BTreeMap::new(),
+                },
+            )
+            .expect("mobile upload attach probe flow should bind");
+        assert_eq!(
+            attach_plan.flow.prerequisite_flow_id.as_deref(),
+            Some("mobile_prepare_upload_probe")
+        );
+        assert!(
+            attach_plan
+                .flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "attach-local-file")
+        );
+        assert!(
+            attach_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_probe_last_candidate_event")
+        );
+        assert_eq!(
+            attach_plan.input_value("local_file"),
+            Some(&Value::String("/tmp/mobile-upload-probe.txt".to_string()))
+        );
+
+        let capture_plan = catalog
+            .bind_flow(
+                "mobile_capture_upload_probe_state",
+                &BrowserFlowBindingContext::default(),
+            )
+            .expect("mobile capture upload probe state flow should bind");
+        assert!(
+            capture_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_probe_summary")
+        );
+        assert!(
+            capture_plan
+                .flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "upload_surface_latest")
+        );
+    }
+
+    #[test]
+    fn mobile_browser_flow_catalog_binds_personal_root_upload_flow() {
+        let raw = include_str!("../../../config/browser-flows/mobile-web.json");
+        let catalog = BrowserFlowCatalog::from_json_str(raw)
+            .expect("mobile browser flow catalog should parse and validate");
+
+        let plan = catalog
+            .bind_flow(
+                "mobile_personal_root_upload",
+                &BrowserFlowBindingContext {
+                    inputs: BTreeMap::from([(
+                        "local_file".to_string(),
+                        Value::String("/tmp/mobile-upload.txt".to_string()),
+                    )]),
+                    runtime: BTreeMap::new(),
+                },
+            )
+            .expect("mobile personal root upload flow should bind");
+
+        assert_eq!(
+            plan.flow.prerequisite_flow_id.as_deref(),
+            Some("mobile_capture_current_session")
+        );
+        assert!(
+            plan.flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "attach-local-file")
+        );
+        assert!(
+            plan.flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "wait-file-create-request")
+        );
+        assert!(
+            plan.flow
+                .outputs
+                .iter()
+                .any(|output| output.id == "uploaded_content_hash")
         );
     }
 
@@ -2651,7 +4003,7 @@ mod tests {
             .block_on(executor.execute(&plan))
             .expect("session execution should succeed");
 
-        assert_eq!(report.steps.len(), 2);
+        assert_eq!(report.steps.len(), 3);
         assert_eq!(
             report.steps[0].status,
             BrowserFlowExecutionStepStatus::Skipped
@@ -2668,7 +4020,189 @@ mod tests {
             report.steps[1].detail.get("skip_reason"),
             Some(&Value::String("missing_input".to_string()))
         );
+        assert_eq!(
+            report.steps[2].status,
+            BrowserFlowExecutionStepStatus::Skipped
+        );
+        assert_eq!(
+            report.steps[2].detail.get("skip_reason"),
+            Some(&Value::String("optional_captcha_not_found".to_string()))
+        );
         assert!(executor.session().actions().is_empty());
+    }
+
+    #[test]
+    fn session_executor_skips_optional_wait_for_request() {
+        let catalog = BrowserFlowCatalog::from_json_str(
+            r#"{
+              "schema_version": 1,
+              "provider": "example",
+              "surface": "example-web",
+              "base_url": "https://example.com",
+              "pages": [
+                { "id": "main", "title": "Main", "url_patterns": ["https://example.com/*"] }
+              ],
+              "elements": [
+                {
+                  "id": "main.page_root",
+                  "page": "main",
+                  "role": "component_root",
+                  "required": false,
+                  "selectors": [
+                    { "engine": "javascript", "value": "document.body", "visible": false }
+                  ]
+                }
+              ],
+              "requests": [
+                {
+                  "id": "optional_request",
+                  "method": "POST",
+                  "url_pattern": "https://example.com/api/optional",
+                  "success_codes": [200]
+                }
+              ],
+              "flows": [
+                {
+                  "id": "flow",
+                  "title": "Flow",
+                  "purpose": "Test optional wait_for_request",
+                  "start_page": "main",
+                  "steps": [
+                    {
+                      "kind": "wait_for_request",
+                      "id": "wait-optional",
+                      "request": "optional_request",
+                      "timeout_ms": 1000,
+                      "optional": true
+                    }
+                  ]
+                }
+              ]
+            }"#,
+        )
+        .expect("catalog should parse");
+        let plan = catalog
+            .bind_flow("flow", &BrowserFlowBindingContext::default())
+            .expect("flow should bind");
+        let session = RecordingBrowserFlowSession::default();
+        session.mark_wait_request_missing("optional_request");
+        let executor = BrowserFlowSessionExecutor::new(session);
+        let runtime = Runtime::new().expect("tokio runtime should build");
+        let report = runtime
+            .block_on(executor.execute(&plan))
+            .expect("optional wait_for_request should skip instead of failing");
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(
+            report.steps[0].status,
+            BrowserFlowExecutionStepStatus::Skipped
+        );
+        assert_eq!(
+            report.steps[0].detail.get("skip_reason"),
+            Some(&Value::String("optional_request_not_observed".to_string()))
+        );
+    }
+
+    #[test]
+    fn session_executor_fills_manual_captcha_value() {
+        let catalog = session_executor_catalog();
+        let plan = catalog
+            .bind_flow(
+                "optional_flow",
+                &BrowserFlowBindingContext {
+                    inputs: BTreeMap::from([(
+                        "captcha_code".to_string(),
+                        Value::String("a1b2".to_string()),
+                    )]),
+                    runtime: BTreeMap::new(),
+                },
+            )
+            .expect("flow binding should succeed");
+        let executor = BrowserFlowSessionExecutor::new(RecordingBrowserFlowSession::default());
+        executor
+            .session()
+            .mark_click_missing("form.optional_button");
+
+        let report = Runtime::new()
+            .expect("tokio runtime should build")
+            .block_on(executor.execute(&plan))
+            .expect("session execution should succeed");
+
+        assert_eq!(
+            report.steps[2].status,
+            BrowserFlowExecutionStepStatus::Succeeded
+        );
+        assert_eq!(
+            executor.session().actions(),
+            vec!["solve_visual_captcha:form.captcha_image:form.captcha_input:a1b2".to_string()]
+        );
+    }
+
+    #[test]
+    fn session_executor_consumes_transient_manual_captcha_after_first_use() {
+        let catalog = session_executor_catalog();
+        let plan = catalog
+            .bind_flow(
+                "double_captcha_flow",
+                &BrowserFlowBindingContext {
+                    inputs: BTreeMap::from([(
+                        "captcha_code".to_string(),
+                        Value::String("a1b2".to_string()),
+                    )]),
+                    runtime: BTreeMap::new(),
+                },
+            )
+            .expect("flow binding should succeed");
+        let executor = BrowserFlowSessionExecutor::new(RecordingBrowserFlowSession::default());
+
+        let report = Runtime::new()
+            .expect("tokio runtime should build")
+            .block_on(executor.execute(&plan))
+            .expect("session execution should succeed");
+
+        assert_eq!(report.steps.len(), 2);
+        assert_eq!(
+            report.steps[0].status,
+            BrowserFlowExecutionStepStatus::Succeeded
+        );
+        assert_eq!(
+            report.steps[1].status,
+            BrowserFlowExecutionStepStatus::Skipped
+        );
+        assert_eq!(
+            report.steps[1].detail.get("skip_reason"),
+            Some(&Value::String("optional_captcha_not_found".to_string()))
+        );
+        assert_eq!(
+            executor.session().actions(),
+            vec!["solve_visual_captcha:form.captcha_image:form.captcha_input:a1b2".to_string()]
+        );
+    }
+
+    #[test]
+    fn session_executor_runs_visual_layout_validation() {
+        let catalog = session_executor_catalog();
+        let plan = catalog
+            .bind_flow(
+                "visual_validation_flow",
+                &BrowserFlowBindingContext::default(),
+            )
+            .expect("flow binding should succeed");
+        let executor = BrowserFlowSessionExecutor::new(RecordingBrowserFlowSession::default());
+
+        let report = Runtime::new()
+            .expect("tokio runtime should build")
+            .block_on(executor.execute(&plan))
+            .expect("session execution should succeed");
+
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(
+            report.steps[0].status,
+            BrowserFlowExecutionStepStatus::Succeeded
+        );
+        assert_eq!(
+            executor.session().actions(),
+            vec!["validate_visual_layout:name_input=form.name_input|submit_button=form.submit_button".to_string()]
+        );
     }
 
     #[test]

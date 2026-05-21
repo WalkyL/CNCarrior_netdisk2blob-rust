@@ -26,21 +26,27 @@ axum = { version = "0.8", features = ["json", "multipart"] }
 base64 = "0.22"
 bytes = "1.10"
 cbc = "0.1"
+ecb = "0.1"
 futures-core = "0.3"
 futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
+libc = "0.2"
 md5 = { package = "md-5", version = "0.10" }
 percent-encoding = "2.3"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+rsa = { version = "0.9", features = ["pem"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha1 = "0.10"
 sha2 = "0.10"
 thiserror = "2.0"
+tempfile = "3"
 tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 tower-http = { version = "0.6", features = ["trace"] }
+tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

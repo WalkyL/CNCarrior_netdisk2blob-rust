@@ -1,0 +1,1053 @@
+{
+  "schema_version": 1,
+  "provider": "telecom",
+  "surface": "cloud.189.cn-web",
+  "description": "Config-driven browser flow descriptor for China Telecom Tianyi Cloud Drive login and current-session capture.",
+  "base_url": "https://cloud.189.cn",
+  "notes": [
+    "This catalog reuses the same browser-flow and CDP stack used by the Unicom auth broker.",
+    "Telecom login controls live inside the cross-origin iframe named udb_login, so frame-aware browser-flow execution is required.",
+    "Do not store live phone numbers, SMS codes, Browser-Id values, Cookie headers, or other secrets in this file."
+  ],
+  "presets": {},
+  "pages": [
+    {
+      "id": "login",
+      "title": "Telecom Web Login",
+      "url_patterns": [
+        "https://cloud.189.cn/web/login.html",
+        "https://cloud.189.cn/web/login.html?*"
+      ],
+      "notes": [
+        "The visible login UI is rendered inside the cross-origin iframe named udb_login."
+      ]
+    },
+    {
+      "id": "web_main",
+      "title": "Telecom Web Drive",
+      "url_patterns": [
+        "https://cloud.189.cn/web/main/file*"
+      ],
+      "notes": [
+        "Keep the current browser target on the logged-in file-list experience before running the personal-space capture flow."
+      ]
+    },
+    {
+      "id": "web_family_main",
+      "title": "Telecom Family Drive",
+      "url_patterns": [
+        "https://cloud.189.cn/web/family/file/folder/*"
+      ],
+      "notes": [
+        "Keep the current browser target on the family-share file-list page before running the family capture flow."
+      ]
+    }
+  ],
+  "elements": [
+    {
+      "id": "login.page_root",
+      "page": "login",
+      "role": "component_root",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "document.body",
+          "visible": false
+        }
+      ],
+      "notes": [
+        "Placeholder root for the top-level Telecom login page."
+      ]
+    },
+    {
+      "id": "login.account_login_tab",
+      "page": "login",
+      "role": "tab",
+      "required": false,
+      "frame": "name:udb_login",
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "document.querySelector('#j-jump-login') || document.querySelector('#tab-account') || document.querySelector('[data-type=\"account\"]') || Array.from(document.querySelectorAll('a,button,span,div,li,label')).find(el => { const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, '').trim(); return text === '账号登录' || text === '账号密码登录'; })",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "Some Telecom login layouts land on QR-code or alternate login modes first, so SMS controls do not exist until the account-login tab is activated."
+      ]
+    },
+    {
+      "id": "login.sms_login_tab",
+      "page": "login",
+      "role": "tab",
+      "required": false,
+      "frame": "name:udb_login",
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "document.querySelector('#j-jump-sms') || document.querySelector('#tab-sms') || document.querySelector('[data-type=\"sms\"]') || Array.from(document.querySelectorAll('a,button,span,div,li,label')).find(el => { const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, '').trim(); return text === '短信验证登录' || text === '短信登录' || text === '短信验证码登录'; })",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "When the page is already in SMS mode this control may disappear, so browser flows treat it as optional."
+      ]
+    },
+    {
+      "id": "login.phone_input",
+      "page": "login",
+      "role": "text_input",
+      "required": true,
+      "frame": "name:udb_login",
+      "selectors": [
+        {
+          "engine": "css",
+          "value": "#dynamicUserName",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.code_input",
+      "page": "login",
+      "role": "text_input",
+      "required": true,
+      "frame": "name:udb_login",
+      "selectors": [
+        {
+          "engine": "css",
+          "value": "#dynamicPassword",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.send_code_button",
+      "page": "login",
+      "role": "button",
+      "required": true,
+      "frame": "name:udb_login",
+      "selectors": [
+        {
+          "engine": "css",
+          "value": "#j-msg-verifyCode",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.agreement_checkbox",
+      "page": "login",
+      "role": "checkbox",
+      "required": true,
+      "frame": "name:udb_login",
+      "selectors": [
+        {
+          "engine": "css",
+          "value": "#j-agreement-box-sms",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.submit_button",
+      "page": "login",
+      "role": "button",
+      "required": true,
+      "frame": "name:udb_login",
+      "selectors": [
+        {
+          "engine": "css",
+          "value": "#j-dynamicLogin",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "web.page_root",
+      "page": "web_main",
+      "role": "component_root",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "document.body",
+          "visible": false
+        }
+      ],
+      "notes": [
+        "Placeholder root so the capture-only flows stay schema-valid without depending on fragile Telecom DOM selectors."
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "id": "telecom_list_files",
+      "method": "GET",
+      "url_pattern": "https://cloud.189.cn/api/open/file/listFiles.action*",
+      "required_headers": [
+        {
+          "name": "browser-id"
+        },
+        {
+          "name": "cookie"
+        }
+      ],
+      "required_fields": [],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "This request is the stable personal-root list probe already used by provider-telecom."
+      ]
+    },
+    {
+      "id": "telecom_family_list_files",
+      "method": "GET",
+      "url_pattern": "https://api.cloud.189.cn/open/family/file/listFiles.action*",
+      "required_headers": [
+        {
+          "name": "browser-id"
+        },
+        {
+          "name": "cookie"
+        },
+        {
+          "name": "accesstoken"
+        },
+        {
+          "name": "timestamp"
+        },
+        {
+          "name": "signature"
+        }
+      ],
+      "required_fields": [],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "This request is emitted by the Telecom family-share page and carries the signed headers required for provider-telecom family listing."
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "id": "login.ensure_sms_agreement_checked",
+      "page": "login",
+      "frame": "name:udb_login",
+      "kind": "javascript",
+      "source": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const findAgreementIcon = () => document.querySelector('#j-agreement-box-sms') || document.querySelector('#j-agreement-box'); const findAutoGroup = () => document.querySelector('#j-auto-group-sms') || document.querySelector('#j-auto-group'); const isIconChecked = (node) => node instanceof Element && (node.classList.contains('checkbox-icon2') || String(node.getAttribute('data-index') || '') === '1'); const ensureIconChecked = (node, label) => { if (!(node instanceof Element)) { throw new Error(label + ' control not available'); } if (isIconChecked(node)) { return { found: true, changed: false, checked: true, class_name: node.className || null, data_index: node.getAttribute('data-index') || null }; } node.click(); if (!isIconChecked(node)) { throw new Error(label + ' control did not become checked'); } return { found: true, changed: true, checked: true, class_name: node.className || null, data_index: node.getAttribute('data-index') || null }; }; const ensureThirtyDayAutoLogin = (group) => { if (!(group instanceof Element)) { throw new Error('30-day auto login group not available'); } const icon = group.querySelector('#j-auto-login-sms, #j-auto-login') || group.querySelector('.icon'); const iconState = ensureIconChecked(icon, '30-day auto login'); const timeText = group.querySelector('.login-time-text'); const option = group.querySelector('.login-option-list .option[data-time=\"3\"]') || Array.from(group.querySelectorAll('.login-option-list .option')).find((candidate) => normalize(candidate?.innerText || candidate?.textContent || '') === '30天内自动登录'); if (!(option instanceof Element)) { throw new Error('30-day auto login option not available'); } const selectedBefore = option.classList.contains('active') && normalize(timeText?.innerText || timeText?.textContent || '') === '30天内自动登录'; if (!selectedBefore) { option.click(); } const selected = option.classList.contains('active') && normalize(timeText?.innerText || timeText?.textContent || '') === '30天内自动登录'; if (!selected) { throw new Error('30-day auto login option did not become active'); } return { found: true, changed: iconState.changed || !selectedBefore, checked: true, selected: true, current_text: normalize(timeText?.innerText || timeText?.textContent || ''), option_class_name: option.className || null }; }; const agreement = ensureIconChecked(findAgreementIcon(), 'sms agreement'); const autoLogin = ensureThirtyDayAutoLogin(findAutoGroup()); return { agreement, auto_login: autoLogin }; })()",
+      "notes": [
+        "This operation is idempotent: if the Telecom SMS agreement is already checked, it leaves the page unchanged.",
+        "Telecom uses icon-based controls instead of native checkbox inputs, so this operation checks for the real checkbox-icon2 state on #j-agreement-box-sms and #j-auto-login-sms.",
+        "It also ensures the SMS-side auto-login duration is explicitly set to the 30-day option (data-time=3) rather than relying on a generic text/checkbox heuristic."
+      ]
+    },
+    {
+      "id": "login.prepare_send_code_feedback_capture",
+      "page": "login",
+      "frame": "name:udb_login",
+      "kind": "javascript",
+      "source": "(() => { const KEY = '__ccbgTelecomSendCodeState'; const BUTTON_SELECTOR = '#j-msg-verifyCode'; const SELECTORS = ['.toast', '.toast-msg', '.toast-message', '.van-toast', '.dialog-toast', '.message', '.msg', '.msg-tips', '.error', '.error-msg', '.warn', '.warning', '.notice', '.tip', '.form-error', '[role=\"alert\"]', '[role=\"status\"]']; const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : { width: 0, height: 0 }; if (rect.width <= 0 || rect.height <= 0) { return false; } const style = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(node) : null; return !style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'); }; const describeButton = () => { const button = document.querySelector(BUTTON_SELECTOR); if (!(button instanceof Element)) { return null; } const rect = button.getBoundingClientRect(); return { tag: button.tagName || null, class_name: button.className || null, text: normalize(button.innerText || button.textContent || ''), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }; }; const looksRelevant = (text, node) => { if (!text || text.length > 120) { return false; } if (/(验证码|短信|频繁|稍后|失败|错误|异常|重新|安全|验证|滑块|登录)/.test(text)) { return true; } const cls = String(node?.className || '').toLowerCase(); const role = String(node?.getAttribute?.('role') || '').toLowerCase(); return /message|toast|notice|alert|error|warn|tip|dialog/.test(cls) || role === 'alert' || role === 'status'; }; const previous = window[KEY]; if (previous?.observer && typeof previous.observer.disconnect === 'function') { previous.observer.disconnect(); } if (previous?.poller) { window.clearInterval(previous.poller); } const state = { installed_at_unix_ms: Date.now(), before_text: normalize(document.querySelector(BUTTON_SELECTOR)?.innerText || document.querySelector(BUTTON_SELECTOR)?.textContent || ''), before_candidate: describeButton(), messages: [], last_message: '', last_source: '', last_seen_at_unix_ms: 0, observer: null, poller: null }; window[KEY] = state; const capture = (rawText, source, node) => { const text = normalize(rawText); if (!looksRelevant(text, node)) { return false; } const now = Date.now(); const last = state.messages[state.messages.length - 1]; if (last && last.text === text && now - last.seen_at_unix_ms < 1200) { state.last_seen_at_unix_ms = now; return false; } const entry = { text, source, seen_at_unix_ms: now }; state.messages.push(entry); if (state.messages.length > 12) { state.messages = state.messages.slice(-12); } state.last_message = text; state.last_source = source; state.last_seen_at_unix_ms = now; return true; }; const inspectNode = (node, source) => { if (!(node instanceof Element) || !isVisible(node)) { return false; } return capture(node.innerText || node.textContent || '', source, node); }; const scan = (root, source) => { const scope = root instanceof Element || root instanceof Document ? root : document; for (const selector of SELECTORS) { const nodes = scope.querySelectorAll ? Array.from(scope.querySelectorAll(selector)) : []; for (const node of nodes) { inspectNode(node, `${source}:${selector}`); } } }; if (document.body) { scan(document, 'install'); const observer = new MutationObserver((records) => { for (const record of records) { if (record.target instanceof Element) { inspectNode(record.target, 'mutation-target'); } for (const node of Array.from(record.addedNodes || [])) { if (node instanceof Element) { inspectNode(node, 'mutation-added'); scan(node, 'mutation-scan'); } } } }); observer.observe(document.body, { childList: true, subtree: true, characterData: true }); state.observer = observer; state.poller = window.setInterval(() => { if (Date.now() - state.installed_at_unix_ms > 15000) { if (state.observer && typeof state.observer.disconnect === 'function') { state.observer.disconnect(); } if (state.poller) { window.clearInterval(state.poller); state.poller = null; } return; } scan(document, 'poll'); }, 250); } return { installed: true, before_text: state.before_text, selector_count: SELECTORS.length }; })()",
+      "notes": [
+        "Install a short-lived DOM observer before clicking the SMS send-code control so transient feedback can be captured into window.__ccbgTelecomSendCodeState.",
+        "This helps the assistant detect rate limiting or secondary verification prompts even when the page only flashes the message briefly."
+      ]
+    },
+    {
+      "id": "web.reload_current_page",
+      "page": "web_main",
+      "kind": "javascript",
+      "source": "(() => { location.reload(); return true; })()",
+      "notes": [
+        "Reloading the logged-in page reliably replays listFiles.action without asking the operator to open DevTools."
+      ]
+    },
+    {
+      "id": "web.install_upload_probe_hooks",
+      "page": "web_main",
+      "kind": "javascript",
+      "source": "(function () {\n  var KEY = '__ccbgTelecomUploadProbe';\n  var MAX_EVENTS = 128;\n  function getState() {\n    var existing = window[KEY];\n    if (existing && typeof existing === 'object') {\n      if (!Array.isArray(existing.events)) {\n        existing.events = [];\n      }\n      if (!Array.isArray(existing.surface_snapshots)) {\n        existing.surface_snapshots = [];\n      }\n      if (!isFinite(Number(existing.event_seq || 0))) {\n        existing.event_seq = 0;\n      }\n      return existing;\n    }\n    var created = {\n      installed_at_unix_ms: Date.now(),\n      event_seq: 0,\n      events: [],\n      surface_snapshots: [],\n      installed: false,\n      fetch_wrapped: false,\n      xhr_wrapped: false\n    };\n    window[KEY] = created;\n    return created;\n  }\n  var state = getState();\n  function normalize(value) {\n    return String(value || '').replace(/\\s+/g, ' ').trim();\n  }\n  function safeStringify(value) {\n    try {\n      return JSON.stringify(value);\n    } catch (error) {\n      return String(value || '');\n    }\n  }\n  function summarizeHeaders(headersLike) {\n    try {\n      if (!headersLike) {\n        return { names: [], content_type: null };\n      }\n      var entries = [];\n      if (typeof Headers !== 'undefined' && headersLike instanceof Headers) {\n        headersLike.forEach(function (value, key) {\n          entries.push([key, value]);\n        });\n      } else if (typeof headersLike === 'string') {\n        headersLike.split(/\\r?\\n/).forEach(function (line) {\n          var pivot = line.indexOf(':');\n          if (pivot <= 0) {\n            return;\n          }\n          entries.push([line.slice(0, pivot), line.slice(pivot + 1)]);\n        });\n      } else if (Array.isArray(headersLike)) {\n        headersLike.forEach(function (entry) {\n          if (Array.isArray(entry) && entry.length >= 2) {\n            entries.push([entry[0], entry[1]]);\n          }\n        });\n      } else if (typeof headersLike === 'object') {\n        Object.keys(headersLike).forEach(function (key) {\n          entries.push([key, headersLike[key]]);\n        });\n      }\n      var names = entries\n        .map(function (pair) { return String(pair[0] || '').toLowerCase(); })\n        .filter(Boolean)\n        .slice(0, 32);\n      var contentTypeEntry = null;\n      for (var i = 0; i < entries.length; i += 1) {\n        if (String(entries[i][0] || '').toLowerCase() === 'content-type') {\n          contentTypeEntry = entries[i];\n          break;\n        }\n      }\n      return {\n        names: names,\n        content_type: contentTypeEntry ? (String(contentTypeEntry[1] || '').trim() || null) : null\n      };\n    } catch (error) {\n      return { names: [], content_type: null };\n    }\n  }\n  function tryParseJson(value) {\n    if (typeof value !== 'string') {\n      return null;\n    }\n    try {\n      return JSON.parse(value);\n    } catch (error) {\n      return null;\n    }\n  }\n  function summarizeBody(body) {\n    if (body === null || body === undefined) {\n      return { kind: 'empty' };\n    }\n    if (typeof FormData !== 'undefined' && body instanceof FormData) {\n      var fieldNames = [];\n      var fileFields = [];\n      var fileCount = 0;\n      body.forEach(function (value, key) {\n        fieldNames.push(String(key));\n        if (typeof File !== 'undefined' && value instanceof File) {\n          fileCount += 1;\n          fileFields.push({ field: String(key), size_bytes: Number(value.size || 0), mime_type: String(value.type || '') || null });\n        } else if (typeof Blob !== 'undefined' && value instanceof Blob) {\n          fileCount += 1;\n          fileFields.push({ field: String(key), size_bytes: Number(value.size || 0), mime_type: String(value.type || '') || null });\n        }\n      });\n      return {\n        kind: 'form_data',\n        field_names: fieldNames.slice(0, 24),\n        file_count: fileCount,\n        file_fields: fileFields.slice(0, 12)\n      };\n    }\n    if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {\n      return { kind: 'url_search_params', field_names: Array.from(body.keys()).slice(0, 24) };\n    }\n    if (typeof File !== 'undefined' && body instanceof File) {\n      return { kind: 'file', size_bytes: Number(body.size || 0), mime_type: String(body.type || '') || null };\n    }\n    if (typeof Blob !== 'undefined' && body instanceof Blob) {\n      return { kind: 'blob', size_bytes: Number(body.size || 0), mime_type: String(body.type || '') || null };\n    }\n    if (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer) {\n      return { kind: 'array_buffer', size_bytes: Number(body.byteLength || 0) };\n    }\n    if (typeof body === 'string') {\n      var parsed = tryParseJson(body);\n      var jsonKeys = parsed && typeof parsed === 'object' && !Array.isArray(parsed)\n        ? Object.keys(parsed).slice(0, 24)\n        : [];\n      return {\n        kind: 'string',\n        length: body.length,\n        preview: body.slice(0, 320),\n        json_keys: jsonKeys,\n        parsed_json: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null\n      };\n    }\n    if (typeof body === 'object') {\n      return { kind: 'object', keys: Object.keys(body).slice(0, 24), parsed_json: body };\n    }\n    return { kind: typeof body };\n  }\n  function isTextualContentType(contentType) {\n    var value = String(contentType || '').toLowerCase();\n    if (!value) {\n      return true;\n    }\n    return value.indexOf('json') >= 0 ||\n      value.indexOf('text/') >= 0 ||\n      value.indexOf('javascript') >= 0 ||\n      value.indexOf('xml') >= 0 ||\n      value.indexOf('html') >= 0 ||\n      value.indexOf('x-www-form-urlencoded') >= 0;\n  }\n  function isUploadCandidate(url, method, headerSummary, bodySummary) {\n    var urlText = String(url || '');\n    var methodText = String(method || '').toUpperCase();\n    var names = Array.isArray(headerSummary && headerSummary.names) ? headerSummary.names.join(' ') : '';\n    var contentType = String((headerSummary && headerSummary.content_type) || '');\n    if (/(upload|getMultiUploadUrls|checkTransSecond|commitMultiUploadFile|put|multipart|create|save|commit|chunk|part|file|folder)/i.test(urlText) && !/listFiles\\.action/i.test(urlText)) {\n      return true;\n    }\n    if (methodText === 'PUT') {\n      return true;\n    }\n    if (/(multipart\\/form-data|octet-stream|content-range)/i.test(contentType + ' ' + names)) {\n      return true;\n    }\n    return Number((bodySummary && bodySummary.file_count) || 0) > 0 ||\n      (bodySummary && bodySummary.kind) === 'file' ||\n      (bodySummary && bodySummary.kind) === 'blob';\n  }\n  function updateEvent(eventId, patch) {\n    if (!eventId || !patch || typeof patch !== 'object') {\n      return;\n    }\n    var current = getState();\n    var events = Array.isArray(current.events) ? current.events : [];\n    for (var i = events.length - 1; i >= 0; i -= 1) {\n      if (events[i] && events[i].id === eventId) {\n        var merged = {};\n        Object.keys(events[i]).forEach(function (key) { merged[key] = events[i][key]; });\n        Object.keys(patch).forEach(function (key) { merged[key] = patch[key]; });\n        events[i] = merged;\n        current.events = events;\n        return;\n      }\n    }\n  }\n  function recordEvent(transport, method, url, headersLike, body) {\n    try {\n      var headerSummary = summarizeHeaders(headersLike);\n      var bodySummary = summarizeBody(body);\n      var current = getState();\n      current.event_seq = Number(current.event_seq || 0) + 1;\n      var entry = {\n        id: 'evt-' + Date.now() + '-' + String(current.event_seq),\n        transport: transport,\n        method: String(method || '').toUpperCase() || null,\n        url: String(url || '') || null,\n        captured_at_unix_ms: Date.now(),\n        header_names: headerSummary.names || [],\n        content_type: headerSummary.content_type || null,\n        body: bodySummary,\n        is_upload_candidate: isUploadCandidate(url, method, headerSummary, bodySummary)\n      };\n      current.events = Array.isArray(current.events) ? current.events : [];\n      current.events.push(entry);\n      if (current.events.length > MAX_EVENTS) {\n        current.events = current.events.slice(-MAX_EVENTS);\n      }\n      return { id: entry.id, is_upload_candidate: entry.is_upload_candidate };\n    } catch (error) {\n      return null;\n    }\n  }\n  function attachResponse(eventMeta, patch) {\n    if (!eventMeta || !eventMeta.id || !patch || typeof patch !== 'object') {\n      return;\n    }\n    updateEvent(eventMeta.id, patch);\n  }\n  if (!state.fetch_wrapped && typeof window.fetch === 'function') {\n    var originalFetch = window.fetch.bind(window);\n    window.fetch = function (input, init) {\n      var request = typeof Request !== 'undefined' && input instanceof Request ? input : null;\n      var method = (init && init.method) || (request && request.method) || 'GET';\n      var url = typeof input === 'string' ? input : ((request && request.url) || '');\n      var headers = (init && init.headers) || (request && request.headers) || null;\n      var body = init && Object.prototype.hasOwnProperty.call(init, 'body') ? init.body : (request && request._bodyInit) || null;\n      var eventMeta = recordEvent('fetch', method, url, headers, body);\n      var startedAtUnixMs = Date.now();\n      return originalFetch(input, init).then(function (response) {\n        var responseHeaderSummary = summarizeHeaders(response && response.headers ? response.headers : null);\n        var patch = {\n          response_status: Number((response && response.status) || 0),\n          response_ok: !!(response && response.ok),\n          response_url: String((response && response.url) || url || '') || null,\n          response_content_type: responseHeaderSummary.content_type || null,\n          response_header_names: responseHeaderSummary.names || [],\n          completed_at_unix_ms: Date.now(),\n          elapsed_ms: Math.max(0, Date.now() - startedAtUnixMs)\n        };\n        if (!(eventMeta && eventMeta.is_upload_candidate)) {\n          attachResponse(eventMeta, patch);\n          return response;\n        }\n        if (response && response.type === 'opaque') {\n          patch.response_body = { kind: 'omitted', reason: 'opaque' };\n          attachResponse(eventMeta, patch);\n          return response;\n        }\n        if (!isTextualContentType(patch.response_content_type)) {\n          patch.response_body = { kind: 'omitted', reason: 'non_textual' };\n          attachResponse(eventMeta, patch);\n          return response;\n        }\n        response.clone().text().then(function (text) {\n          patch.response_body = summarizeBody(text);\n          attachResponse(eventMeta, patch);\n        }).catch(function (error) {\n          patch.response_body = {\n            kind: 'unavailable',\n            message: normalize((error && error.message) || String(error || 'response read failed')) || 'response read failed'\n          };\n          attachResponse(eventMeta, patch);\n        });\n        return response;\n      }).catch(function (error) {\n        attachResponse(eventMeta, {\n          network_error: normalize((error && error.message) || String(error || 'fetch failed')) || 'fetch failed',\n          completed_at_unix_ms: Date.now(),\n          elapsed_ms: Math.max(0, Date.now() - startedAtUnixMs)\n        });\n        throw error;\n      });\n    };\n    state.fetch_wrapped = true;\n  }\n  if (!state.xhr_wrapped && typeof XMLHttpRequest !== 'undefined') {\n    var proto = XMLHttpRequest.prototype;\n    if (!proto.__ccbgTelecomUploadProbeWrapped) {\n      var originalOpen = proto.open;\n      var originalSend = proto.send;\n      var originalSetRequestHeader = proto.setRequestHeader;\n      proto.open = function (method, url) {\n        this.__ccbgProbeMethod = method;\n        this.__ccbgProbeUrl = url;\n        this.__ccbgProbeHeaders = [];\n        return originalOpen.apply(this, arguments);\n      };\n      proto.setRequestHeader = function (name, value) {\n        try {\n          var list = Array.isArray(this.__ccbgProbeHeaders) ? this.__ccbgProbeHeaders : [];\n          list.push([name, value]);\n          this.__ccbgProbeHeaders = list;\n        } catch (error) {}\n        return originalSetRequestHeader.apply(this, arguments);\n      };\n      proto.send = function (body) {\n        var self = this;\n        var eventMeta = recordEvent('xhr', this.__ccbgProbeMethod || 'GET', this.__ccbgProbeUrl || '', this.__ccbgProbeHeaders || [], body);\n        var startedAtUnixMs = Date.now();\n        this.addEventListener('loadend', function () {\n          var responseHeaderSummary = summarizeHeaders(typeof self.getAllResponseHeaders === 'function' ? self.getAllResponseHeaders() : null);\n          var patch = {\n            response_status: Number(self.status || 0),\n            response_ok: Number(self.status || 0) >= 200 && Number(self.status || 0) < 300,\n            response_url: String(self.responseURL || self.__ccbgProbeUrl || '') || null,\n            response_content_type: responseHeaderSummary.content_type || null,\n            response_header_names: responseHeaderSummary.names || [],\n            completed_at_unix_ms: Date.now(),\n            elapsed_ms: Math.max(0, Date.now() - startedAtUnixMs)\n          };\n          if (!(eventMeta && eventMeta.is_upload_candidate)) {\n            attachResponse(eventMeta, patch);\n            return;\n          }\n          var responseType = String(self.responseType || '').toLowerCase();\n          if (responseType && responseType !== 'text' && responseType !== 'json') {\n            patch.response_body = { kind: 'omitted', reason: 'xhr_response_type:' + responseType };\n            attachResponse(eventMeta, patch);\n            return;\n          }\n          if (!isTextualContentType(patch.response_content_type)) {\n            patch.response_body = { kind: 'omitted', reason: 'non_textual' };\n            attachResponse(eventMeta, patch);\n            return;\n          }\n          try {\n            var responseValue = responseType === 'json' ? safeStringify(self.response) : String(self.responseText || '');\n            patch.response_body = summarizeBody(responseValue);\n          } catch (error) {\n            patch.response_body = {\n              kind: 'unavailable',\n              message: normalize((error && error.message) || String(error || 'xhr response read failed')) || 'xhr response read failed'\n            };\n          }\n          attachResponse(eventMeta, patch);\n        }, { once: true });\n        return originalSend.apply(this, arguments);\n      };\n      proto.__ccbgTelecomUploadProbeWrapped = true;\n    }\n    state.xhr_wrapped = true;\n  }\n  state.installed = true;\n  return {\n    installed: true,\n    fetch_wrapped: !!state.fetch_wrapped,\n    xhr_wrapped: !!state.xhr_wrapped,\n    event_count: Array.isArray(state.events) ? state.events.length : 0\n  };\n})()",
+      "notes": [
+        "Install in-page fetch/XHR hooks on the logged-in Telecom page so later manual write-path experiments can be read back as structured request facts.",
+        "This remains probe-only. It does not claim formal Telecom write support."
+      ]
+    },
+    {
+      "id": "web.snapshot_upload_surface",
+      "page": "web_main",
+      "kind": "javascript",
+      "source": "(() => { const KEY = '__ccbgTelecomUploadProbe'; const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const domPath = (node) => { if (!(node instanceof Element)) { return null; } const parts = []; let current = node; while (current && current instanceof Element && parts.length < 5) { let part = current.tagName.toLowerCase(); if (current.id) { part += `#${current.id}`; parts.unshift(part); break; } const cls = String(current.className || '').trim().split(/\\s+/).filter(Boolean).slice(0, 2).join('.'); if (cls) { part += `.${cls}`; } parts.unshift(part); current = current.parentElement; } return parts.join(' > ') || null; }; const state = (window[KEY] && typeof window[KEY] === 'object') ? window[KEY] : { installed_at_unix_ms: Date.now(), events: [], surface_snapshots: [] }; window[KEY] = state; const uploadControls = Array.from(document.querySelectorAll('button,a,span,div,label,li')).filter(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); const cls = `${node.className || ''}`.toLowerCase(); const title = normalize(node.getAttribute?.('title') || ''); const aria = normalize(node.getAttribute?.('aria-label') || ''); return /上传|添加|新建|文件|文件夹/.test(text) || /upload|file|folder|create|add/.test(`${text} ${title} ${aria}`.toLowerCase()) || /(upload|uploader|file-upload|upload-btn|file-btn|toolbar)/.test(cls); }).slice(0, 16).map(node => { const rect = node.getBoundingClientRect(); return { tag: node.tagName || null, text: normalize(node.innerText || node.textContent || '') || null, class_name: String(node.className || '') || null, dom_path: domPath(node), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }; }); const fileInputs = Array.from(document.querySelectorAll(\"input[type='file']\")).filter(node => node instanceof HTMLInputElement).slice(0, 12).map(node => { const rect = node.getBoundingClientRect(); return { visible: isVisible(node), disabled: !!node.disabled, multiple: !!node.multiple, accept: String(node.accept || '') || null, dom_path: domPath(node), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, selected_file_count: node.files ? node.files.length : 0, selected_total_size_bytes: node.files ? Array.from(node.files).reduce((sum, file) => sum + Number(file?.size || 0), 0) : 0 }; }); const snapshot = { captured_at_unix_ms: Date.now(), url: location.href, title: document.title || null, upload_controls: uploadControls, file_inputs: fileInputs }; state.surface_snapshots = Array.isArray(state.surface_snapshots) ? state.surface_snapshots : []; state.surface_snapshots.push(snapshot); if (state.surface_snapshots.length > 8) { state.surface_snapshots = state.surface_snapshots.slice(-8); } return snapshot; })()",
+      "notes": [
+        "Capture visible controls and mounted file inputs on the current Telecom page so write-path discovery does not depend on copying brittle DOM facts by hand."
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "telecom_sms_login_request_code",
+      "title": "Telecom SMS Login Request Code",
+      "purpose": "Open the Telecom login page, switch into SMS mode inside the iframe, fill the phone number, and request SMS delivery without requiring the verification code up front.",
+      "start_page": "login",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive Telecom login."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "navigate",
+          "id": "open-login",
+          "url": "https://cloud.189.cn/web/login.html",
+          "wait_for_page": "login"
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-account",
+          "element": "login.account_login_tab",
+          "optional": true
+        },
+        {
+          "kind": "wait",
+          "id": "wait-account-mode",
+          "duration_ms": 500
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms",
+          "element": "login.sms_login_tab",
+          "optional": true
+        },
+        {
+          "kind": "wait",
+          "id": "wait-sms-mode",
+          "duration_ms": 500
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup",
+            "blur"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-agreement-checked",
+          "operation": "login.ensure_sms_agreement_checked"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "prepare-send-code-feedback-capture",
+          "operation": "login.prepare_send_code_feedback_capture"
+        },
+        {
+          "kind": "click",
+          "id": "send-code",
+          "element": "login.send_code_button"
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-send-code",
+          "duration_ms": 3000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "send_code_text_before",
+          "kind": "dom_text",
+          "frame": "name:udb_login",
+          "source": "(() => { const state = window.__ccbgTelecomSendCodeState || null; const value = typeof state?.before_text === 'string' ? state.before_text.trim() : ''; return value || null; })()",
+          "redact": false,
+          "description": "Visible send-code control text before the click."
+        },
+        {
+          "id": "send_code_text_after",
+          "kind": "dom_text",
+          "frame": "name:udb_login",
+          "source": "(() => { const el = document.querySelector('#j-msg-verifyCode'); const value = String(el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim(); return value || null; })()",
+          "redact": false,
+          "description": "Visible send-code control text after the click."
+        },
+        {
+          "id": "send_code_candidate_before",
+          "kind": "script_value",
+          "frame": "name:udb_login",
+          "source": "(() => window.__ccbgTelecomSendCodeState?.before_candidate || null)()",
+          "redact": false,
+          "description": "Structured description of the send-code control before the click."
+        },
+        {
+          "id": "send_code_candidate_after",
+          "kind": "script_value",
+          "frame": "name:udb_login",
+          "source": "(() => { const button = document.querySelector('#j-msg-verifyCode'); if (!(button instanceof Element)) { return null; } const rect = button.getBoundingClientRect(); return { tag: button.tagName || null, class_name: button.className || null, text: String(button.innerText || button.textContent || '').replace(/\\s+/g, ' ').trim(), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }; })()",
+          "redact": false,
+          "description": "Structured description of the send-code control after the click."
+        },
+        {
+          "id": "send_code_countdown_detected",
+          "kind": "script_value",
+          "frame": "name:udb_login",
+          "source": "(() => { const text = String(document.querySelector('#j-msg-verifyCode')?.innerText || document.querySelector('#j-msg-verifyCode')?.textContent || '').replace(/\\s+/g, ' ').trim(); return /\\d+\\s*(s|S|秒)/.test(text); })()",
+          "redact": false,
+          "description": "Whether the visible send-code control text appears to have changed into a countdown."
+        },
+        {
+          "id": "send_code_feedback_last_message",
+          "kind": "script_value",
+          "frame": "name:udb_login",
+          "source": "(() => { const state = window.__ccbgTelecomSendCodeState || null; const value = typeof state?.last_message === 'string' ? state.last_message.trim() : ''; return value || null; })()",
+          "redact": false,
+          "description": "Last transient toast or inline feedback captured after the send-code click."
+        },
+        {
+          "id": "send_code_feedback_messages",
+          "kind": "script_value",
+          "frame": "name:udb_login",
+          "source": "(() => { const state = window.__ccbgTelecomSendCodeState || null; if (!state || !Array.isArray(state.messages)) { return []; } return state.messages.map(entry => typeof entry?.text === 'string' ? entry.text.trim() : '').filter(Boolean).slice(-12); })()",
+          "redact": false,
+          "description": "Recent transient toast or inline feedback texts captured while the send-code flow was running."
+        },
+        {
+          "id": "send_code_rate_limited_detected",
+          "kind": "script_value",
+          "frame": "name:udb_login",
+          "source": "(() => { const state = window.__ccbgTelecomSendCodeState || null; const texts = Array.isArray(state?.messages) ? state.messages.map(entry => typeof entry?.text === 'string' ? entry.text.trim() : '').filter(Boolean) : []; const last = typeof state?.last_message === 'string' ? state.last_message.trim() : ''; if (last) { texts.push(last); } return texts.some(text => /(过于频繁|操作频繁|稍后再获取|稍后获取|请稍后|请稍候|频繁)/.test(text)); })()",
+          "redact": false,
+          "description": "Whether the page flashed a rate-limit style warning after the send-code click."
+        },
+        {
+          "id": "second_validation_visible",
+          "kind": "script_value",
+          "frame": "name:udb_login",
+          "source": "(() => { const nodes = [document.querySelector('#j-secondValid'), document.querySelector('#j-ecaptch')].filter(Boolean); return nodes.some(node => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); const style = window.getComputedStyle(node); return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'; }); })()",
+          "redact": false,
+          "description": "Whether the page showed a second validation layer such as a security dialog or slider after the send-code click."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved top-level Telecom URL after the send-code flow."
+        }
+      ],
+      "notes": [
+        "This flow intentionally stops right after SMS delivery is requested so the broker can ask the operator for the received code.",
+        "Use telecom_sms_login_resume_submit_code next on the same auth session and CDP browser target when the operator is ready to submit the received SMS code."
+      ]
+    },
+    {
+      "id": "telecom_sms_login_resume_submit_code",
+      "title": "Telecom SMS Login Resume Submit Code",
+      "purpose": "Resume the current Telecom SMS login page after the operator receives the verification code, submit it on the same live page, and capture the authenticated session outputs.",
+      "start_page": "login",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive Telecom login."
+        },
+        {
+          "id": "sms_code",
+          "label": "SMS Code",
+          "kind": "secret",
+          "required": true,
+          "secret": true,
+          "description": "Short-lived verification code typed by the operator after the page sends the SMS."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "wait-login-page",
+          "page": "login",
+          "timeout_ms": 10000
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms",
+          "element": "login.sms_login_tab",
+          "optional": true
+        },
+        {
+          "kind": "wait",
+          "id": "wait-sms-mode",
+          "duration_ms": 500
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup",
+            "blur"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-agreement-checked",
+          "operation": "login.ensure_sms_agreement_checked"
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-sms-code",
+          "element": "login.code_input",
+          "value_template": "{{inputs.sms_code}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "click",
+          "id": "submit-login",
+          "element": "login.submit_button"
+        },
+        {
+          "kind": "wait_for_page",
+          "id": "wait-file-list",
+          "page": "web_main",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-list-files-request",
+          "request": "telecom_list_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "telecom_list_files"
+      ],
+      "outputs": [
+        {
+          "id": "browser_id",
+          "kind": "request_header",
+          "source": "telecom_list_files:Browser-Id",
+          "redact": true,
+          "description": "Browser-Id captured from the real listFiles.action request headers."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "telecom_list_files:Cookie",
+          "redact": true,
+          "description": "Cookie header captured from the real listFiles.action request headers."
+        },
+        {
+          "id": "root_folder_id",
+          "kind": "request_field",
+          "source": "telecom_list_files:folderId",
+          "redact": false,
+          "description": "Folder ID captured from the real personal-root listFiles.action query string."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the Telecom page after the SMS login finishes."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "telecom_list_files",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real personal-space listFiles.action request."
+        }
+      ],
+      "notes": [
+        "Use this resume flow only after telecom_sms_login_request_code has already prepared the live page and the operator has the SMS code in hand.",
+        "This flow intentionally skips extra visual checks so Resume With SMS Code can submit immediately on the current live page."
+      ]
+    },
+    {
+      "id": "telecom_capture_current_session",
+      "title": "Telecom Capture Current Session",
+      "purpose": "Reload the current logged-in Telecom file-list page, wait for the live listFiles.action request, and capture Browser-Id plus Cookie from that real browser session.",
+      "start_page": "web_main",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-logged-in-web-page",
+          "page": "web_main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "reload-current-page",
+          "operation": "web.reload_current_page"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-list-files-request",
+          "request": "telecom_list_files",
+          "timeout_ms": 15000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "browser_id",
+          "kind": "request_header",
+          "source": "telecom_list_files:Browser-Id",
+          "redact": true,
+          "description": "Browser-Id captured from the real listFiles.action request headers."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "telecom_list_files:Cookie",
+          "redact": true,
+          "description": "Cookie header captured from the real listFiles.action request headers."
+        },
+        {
+          "id": "root_folder_id",
+          "kind": "request_field",
+          "source": "telecom_list_files:folderId",
+          "redact": false,
+          "description": "Folder ID captured from the real personal-root listFiles.action query string."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the Telecom page that was used for capture."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "telecom_list_files",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real personal-space listFiles.action request."
+        }
+      ],
+      "notes": [
+        "This flow is intentionally small. It replaces manual Network tab copying before any Telecom write-path automation exists."
+      ]
+    },
+    {
+      "id": "telecom_capture_current_session_from_logged_in_page",
+      "title": "Telecom Capture Current Session From Logged-In Page",
+      "purpose": "Reuse any already logged-in Telecom browser tab, navigate it into personal space, and capture the live personal listFiles.action request without re-running SMS login.",
+      "start_page": "web_main",
+      "steps": [
+        {
+          "kind": "navigate",
+          "id": "open-personal-space",
+          "url": "https://cloud.189.cn/web/main/file/folder/-11",
+          "wait_for_page": "web_main"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-list-files-request",
+          "request": "telecom_list_files",
+          "timeout_ms": 15000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "browser_id",
+          "kind": "request_header",
+          "source": "telecom_list_files:Browser-Id",
+          "redact": true,
+          "description": "Browser-Id captured from the real listFiles.action request headers."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "telecom_list_files:Cookie",
+          "redact": true,
+          "description": "Cookie header captured from the real listFiles.action request headers."
+        },
+        {
+          "id": "root_folder_id",
+          "kind": "request_field",
+          "source": "telecom_list_files:folderId",
+          "redact": false,
+          "description": "Folder ID captured from the real personal-root listFiles.action query string."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the Telecom personal page that was used for capture."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "telecom_list_files",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real personal-space listFiles.action request."
+        }
+      ],
+      "notes": [
+        "Use this flow only when the browser is already logged in but the current CDP tab is not yet on the personal-space file list.",
+        "This lets the admin UI recover personal-space credentials from a family tab or another authenticated Telecom page."
+      ]
+    },
+    {
+      "id": "telecom_capture_family_current_session",
+      "title": "Telecom Capture Family Session",
+      "purpose": "Reload the current logged-in Telecom family-share page, wait for the live family listFiles.action request, and capture Browser-Id, Cookie, AccessToken, plus Family ID from that real browser session.",
+      "start_page": "web_family_main",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-family-web-page",
+          "page": "web_family_main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "reload-current-family-page",
+          "operation": "web.reload_current_page"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-family-list-files-request",
+          "request": "telecom_family_list_files",
+          "timeout_ms": 15000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "browser_id",
+          "kind": "request_header",
+          "source": "telecom_family_list_files:Browser-Id",
+          "redact": true,
+          "description": "Browser-Id captured from the real family listFiles.action request headers."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "telecom_family_list_files:Cookie",
+          "redact": true,
+          "description": "Cookie header captured from the real family listFiles.action request headers."
+        },
+        {
+          "id": "token",
+          "kind": "request_header",
+          "source": "telecom_family_list_files:AccessToken",
+          "redact": true,
+          "description": "AccessToken captured from the real family listFiles.action request headers."
+        },
+        {
+          "id": "family_id",
+          "kind": "request_field",
+          "source": "telecom_family_list_files:familyId",
+          "redact": false,
+          "description": "Family ID captured from the real family listFiles.action query string."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the Telecom family page that was used for capture."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "telecom_family_list_files",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real family-space listFiles.action request."
+        }
+      ],
+      "notes": [
+        "Open https://cloud.189.cn/web/family/file/folder/home first when you want to capture the Telecom family-share session details."
+      ]
+    },
+    {
+      "id": "telecom_capture_family_current_session_from_logged_in_page",
+      "title": "Telecom Capture Family Session From Logged-In Page",
+      "purpose": "Reuse any already logged-in Telecom browser tab, navigate it into family space, and capture the live family listFiles.action request without re-running SMS login.",
+      "start_page": "web_family_main",
+      "steps": [
+        {
+          "kind": "navigate",
+          "id": "open-family-space",
+          "url": "https://cloud.189.cn/web/family/file/folder/home",
+          "wait_for_page": "web_family_main"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-family-list-files-request",
+          "request": "telecom_family_list_files",
+          "timeout_ms": 15000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "browser_id",
+          "kind": "request_header",
+          "source": "telecom_family_list_files:Browser-Id",
+          "redact": true,
+          "description": "Browser-Id captured from the real family listFiles.action request headers."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "telecom_family_list_files:Cookie",
+          "redact": true,
+          "description": "Cookie header captured from the real family listFiles.action request headers."
+        },
+        {
+          "id": "token",
+          "kind": "request_header",
+          "source": "telecom_family_list_files:AccessToken",
+          "redact": true,
+          "description": "AccessToken captured from the real family listFiles.action request headers."
+        },
+        {
+          "id": "family_id",
+          "kind": "request_field",
+          "source": "telecom_family_list_files:familyId",
+          "redact": false,
+          "description": "Family ID captured from the real family listFiles.action query string."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the Telecom family page that was used for capture."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "telecom_family_list_files",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real family-space listFiles.action request."
+        }
+      ],
+      "notes": [
+        "Use this flow only when the browser is already logged in but the current CDP tab is not yet on the family-space file list.",
+        "This lets the admin UI recover family-space credentials from a personal tab or another authenticated Telecom page."
+      ]
+    },
+    {
+      "id": "telecom_prepare_upload_probe",
+      "title": "Telecom Prepare Upload Probe",
+      "purpose": "Stay on the logged-in Telecom personal file-list page, install in-page upload request hooks, and snapshot the visible write-related controls so later manual or automated write-path discovery has structured evidence to work from.",
+      "start_page": "web_main",
+      "prerequisite_flow_id": "telecom_capture_current_session",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-logged-in-web-page",
+          "page": "web_main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "install-upload-hooks",
+          "operation": "web.install_upload_probe_hooks"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "snapshot-upload-surface",
+          "operation": "web.snapshot_upload_surface"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "upload_probe_summary",
+          "kind": "script_value",
+          "source": "(function () { var state = window.__ccbgTelecomUploadProbe || null; var events = state && Array.isArray(state.events) ? state.events : []; var candidates = events.filter(function (event) { return !!(event && event.is_upload_candidate); }); var surfaceSnapshots = state && Array.isArray(state.surface_snapshots) ? state.surface_snapshots : []; return { installed: !!(state && state.installed), fetch_wrapped: !!(state && state.fetch_wrapped), xhr_wrapped: !!(state && state.xhr_wrapped), event_count: events.length, upload_candidate_count: candidates.length, surface_snapshot_count: surfaceSnapshots.length, first_candidate_url: candidates.length && candidates[0] ? (candidates[0].url || null) : null, last_candidate_url: candidates.length && candidates[candidates.length - 1] ? (candidates[candidates.length - 1].url || null) : null }; })()",
+          "redact": false,
+          "description": "High-level state of the Telecom upload probe stored on the live CDP page."
+        },
+        {
+          "id": "upload_surface_latest",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgTelecomUploadProbe || null; return Array.isArray(state?.surface_snapshots) ? (state.surface_snapshots[state.surface_snapshots.length - 1] || null) : null; })()",
+          "redact": false,
+          "description": "Most recent visible Telecom write-surface snapshot after probe hook installation."
+        },
+        {
+          "id": "upload_probe_recent_events",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgTelecomUploadProbe || null; return Array.isArray(state?.events) ? state.events.slice(-48) : []; })()",
+          "redact": false,
+          "description": "Recent fetch/XHR events captured by the Telecom write-path probe hooks on the current page, including more of the multipart init tail and response facts."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the Telecom page used for write-path probing."
+        }
+      ],
+      "notes": [
+        "This flow is probe-only. It prepares the live CDP page for later manual upload/create/delete experiments without claiming native Telecom write support."
+      ]
+    },
+    {
+      "id": "telecom_capture_upload_probe_state",
+      "title": "Telecom Capture Upload Probe State",
+      "purpose": "Read back the Telecom write-path probe state that was left behind on the current logged-in personal file-list page after the operator manually opened a write surface or attempted a real write action in the same live CDP tab.",
+      "start_page": "web_main",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-logged-in-web-page",
+          "page": "web_main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "snapshot-current-upload-surface",
+          "operation": "web.snapshot_upload_surface"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "upload_probe_summary",
+          "kind": "script_value",
+          "source": "(function () { var state = window.__ccbgTelecomUploadProbe || null; var events = state && Array.isArray(state.events) ? state.events : []; var candidates = events.filter(function (event) { return !!(event && event.is_upload_candidate); }); var surfaceSnapshots = state && Array.isArray(state.surface_snapshots) ? state.surface_snapshots : []; return { installed: !!(state && state.installed), fetch_wrapped: !!(state && state.fetch_wrapped), xhr_wrapped: !!(state && state.xhr_wrapped), event_count: events.length, upload_candidate_count: candidates.length, surface_snapshot_count: surfaceSnapshots.length, first_candidate_url: candidates.length && candidates[0] ? (candidates[0].url || null) : null, last_candidate_url: candidates.length && candidates[candidates.length - 1] ? (candidates[candidates.length - 1].url || null) : null }; })()",
+          "redact": false,
+          "description": "Current write-path probe state stored on the live Telecom CDP page."
+        },
+        {
+          "id": "upload_surface_latest",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgTelecomUploadProbe || null; return Array.isArray(state?.surface_snapshots) ? (state.surface_snapshots[state.surface_snapshots.length - 1] || null) : null; })()",
+          "redact": false,
+          "description": "Most recent write-surface snapshot stored on the live Telecom CDP page."
+        },
+        {
+          "id": "upload_probe_recent_events",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgTelecomUploadProbe || null; return Array.isArray(state?.events) ? state.events.slice(-48) : []; })()",
+          "redact": false,
+          "description": "Recent fetch/XHR events captured by the Telecom write-path probe hooks on the current page, including more of the multipart init tail and response facts."
+        },
+        {
+          "id": "upload_probe_last_candidate_event",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgTelecomUploadProbe || null; const events = Array.isArray(state?.events) ? state.events.filter(event => event?.is_upload_candidate) : []; return events.length ? events[events.length - 1] : null; })()",
+          "redact": false,
+          "description": "Most recent upload-like or write-like request observed on the current Telecom page."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the Telecom page used to read back the write-path probe state."
+        }
+      ],
+      "notes": [
+        "Run this after manual Telecom write experiments on the same CDP tab if hook installation alone did not capture enough detail."
+      ]
+    }
+  ]
+}

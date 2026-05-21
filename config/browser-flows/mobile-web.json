@@ -1,0 +1,1415 @@
+{
+  "schema_version": 1,
+  "provider": "mobile",
+  "surface": "yun.139.com-web",
+  "description": "Config-driven browser flow descriptor for China Mobile cloud-drive SMS login guidance and current-session capture from the live headed browser.",
+  "base_url": "https://yun.139.com",
+  "notes": [
+    "This catalog reuses the same browser-flow and CDP stack used by the Unicom and Telecom auth assistants.",
+    "Do not store live Authorization headers, cookies, phone numbers, SMS codes, or other secrets in this file."
+  ],
+  "presets": {},
+  "pages": [
+    {
+      "id": "site_any",
+      "title": "China Mobile Site",
+      "url_patterns": [
+        "https://yun.139.com*"
+      ],
+      "notes": [
+        "Use this broad matcher when the current CDP tab is somewhere inside the China Mobile site but not yet on a stable in-app route."
+      ]
+    },
+    {
+      "id": "main",
+      "title": "China Mobile Web Drive",
+      "url_patterns": [
+        "https://yun.139.com/w/#/index",
+        "https://yun.139.com/w/#/index*",
+        "https://yun.139.com/w/#/main",
+        "https://yun.139.com/w/#/main*"
+      ],
+      "notes": [
+        "Keep the current browser target on the logged-in main file-list page before running the capture flow. Current headed sessions commonly resolve to #/index even when older flows referenced #/main."
+      ]
+    },
+    {
+      "id": "logged_in_any",
+      "title": "China Mobile In-App Route",
+      "url_patterns": [
+        "https://yun.139.com/w/*"
+      ],
+      "notes": [
+        "This broader matcher is only safe together with the login-form guard operation below. It lets the gateway jump an already authenticated in-app tab back into the stable file-list route."
+      ]
+    }
+  ],
+  "elements": [
+    {
+      "id": "login.page_root",
+      "page": "site_any",
+      "role": "component_root",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "document.body",
+          "visible": false
+        }
+      ],
+      "notes": [
+        "Placeholder root so login and capture flows stay schema-valid without depending on a single brittle wrapper selector."
+      ]
+    },
+    {
+      "id": "login.sms_login_tab",
+      "page": "site_any",
+      "role": "tab",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, '').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const texts = new Set(['短信登录', '短信验证码登录']); return Array.from(document.querySelectorAll('button,a,span,div,li,label')).find(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); return texts.has(text); }) || null; })()",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "The Mobile login page exposes multiple login methods. This selector only matches the exact SMS login tab label so the assistant does not click unrelated helper copy such as '香港号码请使用短信登录'."
+      ]
+    },
+    {
+      "id": "login.phone_input",
+      "page": "site_any",
+      "role": "text_input",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, '').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; return Array.from(document.querySelectorAll('input')).find(node => { if (!isVisible(node)) { return false; } const placeholder = normalize(node.placeholder || ''); const identity = `${node.id || ''} ${node.name || ''} ${node.autocomplete || ''}`.toLowerCase(); return placeholder.includes('手机号') || /phone|mobile|tel/.test(identity); }) || null; })()",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.code_input",
+      "page": "site_any",
+      "role": "text_input",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, '').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; return Array.from(document.querySelectorAll('input')).find(node => { if (!isVisible(node)) { return false; } const placeholder = normalize(node.placeholder || ''); const identity = `${node.id || ''} ${node.name || ''}`.toLowerCase(); if (placeholder.includes('验证码') && !placeholder.includes('滑块') && !placeholder.includes('图片') && !placeholder.includes('图形')) { return true; } return /code|otp|verify/.test(identity) && !placeholder.includes('密码'); }) || null; })()",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.send_code_button",
+      "page": "site_any",
+      "role": "button",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const matchesText = (text) => text === '获取验证码' || text === '发送验证码' || /\\d+\\s*(s|S|秒).*(重新获取|获取)/.test(text) || /请在\\d+秒后重新获取/.test(text); const candidates = Array.from(document.querySelectorAll('button,a,span,div')).filter(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); return matchesText(text); }); const scored = candidates.map(node => { const text = normalize(node.innerText || node.textContent || ''); const cls = `${node.className || ''}`.toLowerCase(); let score = 0; if (node.tagName === 'BUTTON') { score += 50; } if (node.tagName === 'SPAN') { score += 40; } if (/getcode|code|button|btn/.test(cls)) { score += 20; } if (/default_getcodetext/.test(cls)) { score += 40; } if (text === '获取验证码' || text === '发送验证码') { score += 10; } score -= (node.querySelectorAll ? node.querySelectorAll('button,a,span,div').length : 0); return { node, score }; }).sort((a, b) => b.score - a.score); return scored[0]?.node || null; })()",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.submit_button",
+      "page": "site_any",
+      "role": "button",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, '').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; return Array.from(document.querySelectorAll('button,a,span,div')).find(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); return text === '登录' || text === '登录/注册' || text === '登录注册'; }) || null; })()",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "main.page_root",
+      "page": "main",
+      "role": "component_root",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "document.body",
+          "visible": false
+        }
+      ],
+      "notes": [
+        "Placeholder root so capture-only flows stay schema-valid without depending on volatile Mobile DOM selectors."
+      ]
+    },
+    {
+      "id": "main.upload_trigger",
+      "page": "main",
+      "role": "button",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const looksRelevant = (node) => { const text = normalize(node.innerText || node.textContent || ''); const title = normalize(node.getAttribute?.('title') || ''); const aria = normalize(node.getAttribute?.('aria-label') || ''); const cls = `${node.className || ''}`.toLowerCase(); return /上传|上传文件|上传到云盘|添加文件|添加上传/.test(text) || /upload/.test(`${text} ${title} ${aria}`.toLowerCase()) || /(upload|uploader|file-upload|upload-btn)/.test(cls); }; const score = (node) => { const text = normalize(node.innerText || node.textContent || ''); let value = 0; if (node.tagName === 'BUTTON') { value += 40; } if (/^上传$/.test(text)) { value += 60; } if (/上传文件|上传到云盘/.test(text)) { value += 45; } if (/添加文件|添加上传/.test(text)) { value += 20; } const rect = node.getBoundingClientRect(); value += Math.max(0, 20 - Math.abs(rect.y - 110) / 20); return value; }; const candidates = Array.from(document.querySelectorAll('button,a,span,div,label')).filter(node => isVisible(node) && looksRelevant(node)).map(node => ({ node, score: score(node) })).sort((a, b) => b.score - a.score); return candidates[0]?.node || null; })()",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "Best-effort upload entry candidate on the logged-in Mobile main page. This is intentionally fuzzy so probe flows still have a chance after minor page revisions."
+      ]
+    },
+    {
+      "id": "main.upload_file_input",
+      "page": "main",
+      "role": "file_input",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "(() => { const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const inputs = Array.from(document.querySelectorAll(\"input[type='file']\")).filter(node => node instanceof HTMLInputElement && !node.disabled); const score = (node) => { let value = 0; if (isVisible(node)) { value += 60; } if (node.multiple) { value += 10; } if ((node.accept || '').includes('*')) { value += 5; } if ((node.accept || '').includes('image')) { value -= 3; } if (node.closest('label,button,.upload,.uploader,.upload-box,.upload-btn')) { value += 15; } return value; }; const candidates = inputs.map(node => ({ node, score: score(node) })).sort((a, b) => b.score - a.score); return candidates[0]?.node || null; })()",
+          "visible": false
+        }
+      ],
+      "notes": [
+        "Best-effort file input candidate used by upload probe flows. It may be hidden until the upload surface is opened."
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "id": "mobile_personal_list_files",
+      "method": "POST",
+      "url_pattern": "https://personal-kd-njs.yun.139.com/hcy/file/list*",
+      "required_headers": [
+        {
+          "name": "authorization"
+        }
+      ],
+      "required_fields": [
+        "parentFileId"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed on 2026-05-17 from the logged-in China Mobile main page after reload."
+      ]
+    },
+    {
+      "id": "mobile_personal_disk_info",
+      "method": "POST",
+      "url_pattern": "https://user-njs.yun.139.com/user/disk/getPersonalDiskInfo*",
+      "required_fields": [
+        "userDomainId"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "This request exposes the userDomainId needed for quota discovery."
+      ]
+    },
+    {
+      "id": "mobile_quota_detail",
+      "method": "POST",
+      "url_pattern": "https://user-njs.yun.139.com/user/disk/quota/detail*",
+      "required_fields": [
+        "userDomainId"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Reloading the logged-in main page consistently replays this request and it carries userDomainId in the request body."
+      ]
+    },
+    {
+      "id": "mobile_query_user_benefits",
+      "method": "POST",
+      "url_pattern": "https://yun.139.com/orchestration/group-rebuild/member/v1.0/queryUserBenefits*",
+      "required_fields": [
+        "commonAccountInfo.userDomainId"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed on reload; serves as a fallback source for userDomainId via nested commonAccountInfo.userDomainId."
+      ]
+    },
+    {
+      "id": "mobile_query_available_benefit",
+      "method": "POST",
+      "url_pattern": "https://yun.139.com/orchestration/group-rebuild/member/v1.0/queryAvailableBenefit*",
+      "required_fields": [
+        "commonAccountInfo.userDomainId"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed on reload; carries the same commonAccountInfo.userDomainId fallback."
+      ]
+    },
+    {
+      "id": "mobile_query_user_group_remind",
+      "method": "POST",
+      "url_pattern": "https://yun.139.com/orchestration/group-rebuild/remind/v1.0/queryUserGroupRemind*",
+      "required_fields": [
+        "commonAccountInfo.userDomainId"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed on reload; carries the same commonAccountInfo.userDomainId fallback."
+      ]
+    },
+    {
+      "id": "mobile_file_create",
+      "method": "POST",
+      "url_pattern": "https://personal-kd-njs.yun.139.com/hcy/file/create*",
+      "required_headers": [
+        {
+          "name": "authorization"
+        }
+      ],
+      "required_fields": [
+        "type",
+        "name",
+        "size",
+        "contentHashAlgorithm"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed during a real China Mobile web upload on 2026-05-20. This appears to be the first business request in the upload path before the page reports upload_result and refreshes the file list."
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "id": "login.wait_for_sms_form_ready",
+      "page": "site_any",
+      "kind": "javascript",
+      "source": "(() => new Promise((resolve, reject) => { const deadline = Date.now() + 15000; const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const findPhone = () => Array.from(document.querySelectorAll('input')).find(node => { if (!isVisible(node)) { return false; } const placeholder = normalize(node.placeholder || ''); const identity = `${node.id || ''} ${node.name || ''} ${node.autocomplete || ''}`.toLowerCase(); return placeholder.includes('手机号') || /phone|mobile|tel/.test(identity); }) || null; const findCode = () => Array.from(document.querySelectorAll('input')).find(node => { if (!isVisible(node)) { return false; } const placeholder = normalize(node.placeholder || ''); const identity = `${node.id || ''} ${node.name || ''}`.toLowerCase(); if (placeholder.includes('验证码') && !placeholder.includes('滑块') && !placeholder.includes('图片') && !placeholder.includes('图形')) { return true; } return /code|otp|verify/.test(identity) && !placeholder.includes('密码'); }) || null; const findSubmit = () => Array.from(document.querySelectorAll('button,a,span,div')).find(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || '').replace(/\\s+/g, ''); return text === '登录' || text === '登录/注册' || text === '登录注册'; }) || null; const tick = () => { const phone = findPhone(); const code = findCode(); const submit = findSubmit(); if (phone && code && submit) { resolve({ ready: true, url: location.href, phone_placeholder: phone.placeholder || '', code_placeholder: code.placeholder || '' }); return; } if (Date.now() >= deadline) { reject(new Error(`mobile sms login form not ready on current page; url=${location.href}`)); return; } window.setTimeout(tick, 250); }; tick(); }))()",
+      "notes": [
+        "The China Mobile login UI is an SPA, so the assistant waits for the SMS login controls to render before trying to type into them."
+      ]
+    },
+    {
+      "id": "login.ensure_login_options_checked",
+      "page": "site_any",
+      "kind": "javascript",
+      "source": "(() => new Promise((resolve, reject) => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const checkboxLikeState = (node) => { if (!(node instanceof Element)) { return false; } if (node instanceof HTMLInputElement && node.type === 'checkbox') { return node.checked; } const nested = node.querySelector('input[type=\"checkbox\"]'); if (nested instanceof HTMLInputElement) { return nested.checked; } const aria = String(node.getAttribute('aria-checked') || '').trim().toLowerCase(); if (aria === 'true') { return true; } const tokens = `${node.className || ''} ${node.parentElement?.className || ''}`.toLowerCase().split(/[^a-z0-9_-]+/).filter(Boolean); return tokens.some(token => ['checked', 'selected', 'active', 'is-checked', 'is-selected', 'is-active', 'check-active', 'check-true', 'checked-true'].includes(token)); }; const clickTargets = (node) => { if (!(node instanceof Element)) { return false; } const targets = [node, node.closest('label'), node.querySelector('.code-sms-check-img-wrap'), node.querySelector('input[type=\"checkbox\"]'), node.querySelector('img')].filter(candidate => candidate instanceof Element); let clicked = false; for (const target of targets) { if (!(target instanceof Element)) { continue; } try { target.click(); clicked = true; } catch {} try { ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(type => target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, composed: true }))); clicked = true; } catch {} } return clicked; }; const findByText = (regex) => Array.from(document.querySelectorAll('label,div,span,li,p')).find(node => isVisible(node) && regex.test(normalize(node.innerText || node.textContent || ''))) || null; const collectVueInstances = (node) => { const seen = new Set(); const values = []; const push = (candidate) => { if (candidate && typeof candidate === 'object' && !seen.has(candidate)) { seen.add(candidate); values.push(candidate); } }; const visit = (element) => { if (!(element instanceof Element)) { return; } if (element.__vue__) { push(element.__vue__); } for (let current = element.parentElement; current; current = current.parentElement) { if (current.__vue__) { push(current.__vue__); } } const descendants = element.querySelectorAll ? Array.from(element.querySelectorAll('*')).slice(0, 64) : []; descendants.forEach(child => { if (child instanceof Element && child.__vue__) { push(child.__vue__); } }); }; visit(node); return values; }; const agreementRegion = () => Array.from(document.querySelectorAll('.code-sms-check-img-wrap')).find(node => isVisible(node)) || Array.from(document.querySelectorAll('.default_box_tips,.bottom-tip-text,.default_box_check_tip')).find(node => isVisible(node)) || findByText(/我已阅读并同意|协议|隐私政策/) || null; const agreementState = (region) => { const vm = collectVueInstances(region).find(candidate => typeof candidate?.checkFlag === 'boolean'); return { vm, checked: !!vm?.checkFlag || checkboxLikeState(region) || checkboxLikeState(region?.parentElement || null) }; }; const ensureAgreementChecked = () => { const region = agreementRegion(); if (!(region instanceof Element)) { throw new Error('mobile agreement control not found on current Mobile login page'); } const before = agreementState(region); if (before.checked) { return { found: true, changed: false, via: before.vm ? 'vue' : 'dom', verify: () => agreementState(region).checked }; } if (before.vm) { if (typeof before.vm.changeCheckFlag === 'function') { before.vm.changeCheckFlag.call(before.vm); } else { before.vm.checkFlag = true; } if (Object.prototype.hasOwnProperty.call(before.vm, 'agreeProtocolVisible')) { before.vm.agreeProtocolVisible = false; } if (Object.prototype.hasOwnProperty.call(before.vm, 'isShowTips')) { before.vm.isShowTips = false; } if (typeof before.vm.$forceUpdate === 'function') { try { before.vm.$forceUpdate(); } catch {} } return { found: true, changed: true, via: 'vue', verify: () => agreementState(region).checked }; } clickTargets(region); return { found: true, changed: true, via: 'dom', verify: () => agreementState(region).checked }; }; const ensureOptionalChecked = (regex) => { const node = findByText(regex); if (!(node instanceof Element)) { return { found: false, changed: false, verify: () => false }; } if (checkboxLikeState(node) || checkboxLikeState(node.parentElement || null)) { return { found: true, changed: false, verify: () => true }; } clickTargets(node); return { found: true, changed: true, verify: () => checkboxLikeState(node) || checkboxLikeState(node.parentElement || null) }; }; let agreement; let autoLogin; try { agreement = ensureAgreementChecked(); autoLogin = ensureOptionalChecked(/下次自动登录|自动登录|30天/); } catch (error) { reject(error); return; } window.setTimeout(() => { try { if (!agreement.verify()) { throw new Error('mobile agreement did not become checked on current Mobile login page'); } if (autoLogin.found && !autoLogin.verify()) { throw new Error('mobile auto login did not become checked on current Mobile login page'); } resolve({ agreement: { found: true, changed: agreement.changed, checked: true, via: agreement.via }, auto_login: { found: autoLogin.found, changed: autoLogin.changed, checked: autoLogin.found ? autoLogin.verify() : false } }); } catch (error) { reject(error); } }, 120); }))()",
+      "notes": [
+        "The Mobile login page can render custom checkbox widgets. This operation checks the agreement toggle and, when present, the next-time auto-login toggle without blindly clicking them twice."
+      ]
+    },
+    {
+      "id": "login.prepare_send_code_feedback_capture",
+      "page": "site_any",
+      "kind": "javascript",
+      "source": "(() => { const KEY = '__ccbgMobileSendCodeState'; const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const findButton = () => Array.from(document.querySelectorAll('button,a,span,div')).find(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); return text === '获取验证码' || text === '发送验证码' || /\\d+\\s*(s|S|秒).*(重新获取|获取)/.test(text) || /请在\\d+秒后重新获取/.test(text); }) || null; const describeButton = () => { const button = findButton(); if (!(button instanceof Element)) { return null; } const rect = button.getBoundingClientRect(); return { tag: button.tagName || null, class_name: button.className || null, text: normalize(button.innerText || button.textContent || ''), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }; }; const looksRelevant = (text, node) => { if (!text || text.length > 120) { return false; } if (/(验证码|短信|重新获取|重新发送|发送|登录|频繁|稍后|点击一次|滑块|校验|安全)/.test(text)) { return true; } const cls = String(node?.className || '').toLowerCase(); const role = String(node?.getAttribute?.('role') || '').toLowerCase(); return /message|toast|notice|alert|error|warn|tip|dialog/.test(cls) || role === 'alert' || role === 'status'; }; const previous = window[KEY]; if (previous?.observer && typeof previous.observer.disconnect === 'function') { previous.observer.disconnect(); } if (previous?.poller) { window.clearInterval(previous.poller); } const state = { installed_at_unix_ms: Date.now(), before_text: normalize(findButton()?.innerText || findButton()?.textContent || ''), before_candidate: describeButton(), messages: [], last_message: '', last_source: '', last_seen_at_unix_ms: 0, observer: null, poller: null }; window[KEY] = state; const capture = (rawText, source, node) => { const text = normalize(rawText); if (!looksRelevant(text, node)) { return false; } const now = Date.now(); const last = state.messages[state.messages.length - 1]; if (last && last.text === text && now - last.seen_at_unix_ms < 1200) { state.last_seen_at_unix_ms = now; return false; } const entry = { text, source, seen_at_unix_ms: now }; state.messages.push(entry); if (state.messages.length > 12) { state.messages = state.messages.slice(-12); } state.last_message = text; state.last_source = source; state.last_seen_at_unix_ms = now; return true; }; const inspectNode = (node, source) => { if (!(node instanceof Element) || !isVisible(node)) { return false; } return capture(node.innerText || node.textContent || '', source, node); }; const scan = (root, source) => { const scope = root instanceof Element || root instanceof Document ? root : document; const selectors = ['.toast', '.toast-msg', '.toast-message', '.van-toast', '.message', '.msg', '.msg-tips', '.error', '.error-msg', '.warn', '.warning', '.notice', '.tip', '.form-error', '[role=\"alert\"]', '[role=\"status\"]']; for (const selector of selectors) { const nodes = scope.querySelectorAll ? Array.from(scope.querySelectorAll(selector)) : []; for (const node of nodes) { inspectNode(node, `${source}:${selector}`); } } }; if (document.body) { scan(document, 'install'); const observer = new MutationObserver((records) => { for (const record of records) { if (record.target instanceof Element) { inspectNode(record.target, 'mutation-target'); } for (const node of Array.from(record.addedNodes || [])) { if (node instanceof Element) { inspectNode(node, 'mutation-added'); scan(node, 'mutation-scan'); } } } }); observer.observe(document.body, { childList: true, subtree: true, characterData: true }); state.observer = observer; state.poller = window.setInterval(() => { if (Date.now() - state.installed_at_unix_ms > 15000) { if (state.observer && typeof state.observer.disconnect === 'function') { state.observer.disconnect(); } if (state.poller) { window.clearInterval(state.poller); state.poller = null; } return; } scan(document, 'poll'); }, 250); } return { installed: true, before_text: state.before_text, before_candidate: state.before_candidate }; })()",
+      "notes": [
+        "Capture the transient send-code feedback so the guided assistant can detect rate limiting or countdown state instead of silently hanging."
+      ]
+    },
+    {
+      "id": "site.resolve_expired_session_dialog",
+      "page": "site_any",
+      "kind": "javascript",
+      "source": "(() => new Promise((resolve) => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const visibleText = (node) => normalize(node?.innerText || node?.textContent || ''); const expiredPatterns = [/登录已失效/, /当前登录已失效/, /登录失效/, /会话已失效/, /会话失效/, /登录超时/, /请重新登(?:录|陆)/, /重新登(?:录|陆)/]; const matchesExpiredText = (text) => expiredPatterns.some(pattern => pattern.test(text)); const dialogSelectors = ['[role=\"dialog\"]', '[aria-modal=\"true\"]', '.dialog', '.dialog-box', '.dialog-wrap', '.modal', '.modal-dialog', '.popup', '.popup-wrap', '.pop', '.pop-wrap', '.mask', '.overlay', '.van-dialog', '.van-popup', '.yd-dialog', '.ant-modal', '.el-dialog', '.confirm-inline', '.confirm-inner-inline', '.confirm-body', '.confirm-footer', '.confirm-handle']; const findDialog = () => { const selectorNodes = Array.from(document.querySelectorAll(dialogSelectors.join(','))); const overlayNodes = Array.from(document.querySelectorAll('div,section,aside')).filter(node => { if (!isVisible(node)) { return false; } const text = visibleText(node); if (!matchesExpiredText(text)) { return false; } const rect = node.getBoundingClientRect(); const style = window.getComputedStyle(node); const cls = `${node.className || ''}`.toLowerCase(); return rect.width >= Math.min(window.innerWidth * 0.25, 200) && rect.height >= 30 && (style.position === 'fixed' || style.position === 'sticky' || /(dialog|modal|popup|overlay|mask|toast|pop|confirm)/.test(cls) || node.querySelector('button, .handle-enter, .button-primary')); }); return selectorNodes.concat(overlayNodes).find(node => isVisible(node) && matchesExpiredText(visibleText(node))) || null; }; const findAction = (dialog) => { if (!(dialog instanceof Element)) { return null; } const candidates = Array.from(dialog.querySelectorAll('button,a,span,div')).filter(node => isVisible(node)); const preferred = [/重新登(?:录|陆)/, /^登(?:录|陆)$/, /^确定$/, /^继续$/, /^去登(?:录|陆)$/]; for (const pattern of preferred) { const match = candidates.find(node => pattern.test(visibleText(node).replace(/\\s+/g, ''))); if (match) { return match; } } return candidates.find(node => /(重新登(?:录|陆)|登(?:录|陆)|确定|继续)/.test(visibleText(node).replace(/\\s+/g, ''))) || null; }; const dialog = findDialog(); if (!(dialog instanceof Element)) { resolve({ found: false, clicked: false, url: location.href }); return; } const text = visibleText(dialog).slice(0, 120); const action = findAction(dialog); if (!(action instanceof Element)) { resolve({ found: true, clicked: false, text, url: location.href }); return; } action.click(); window.setTimeout(() => resolve({ found: true, clicked: true, text, action_text: visibleText(action), url: location.href }), 400); }))()",
+      "notes": [
+        "Some expired Mobile sessions stay on /w/ and show a modal such as '当前登录已失效，请重新登录'. Guided SMS flows should click back into login instead of assuming the page will redirect itself."
+      ]
+    },
+    {
+      "id": "site.assert_not_login_form",
+      "page": "logged_in_any",
+      "kind": "javascript",
+      "source": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const visibleText = (node) => normalize(node?.innerText || node?.textContent || ''); const hasPhone = Array.from(document.querySelectorAll('input')).some(node => isVisible(node) && normalize(node.placeholder || '').includes('手机号')); const hasCode = Array.from(document.querySelectorAll('input')).some(node => { if (!isVisible(node)) { return false; } const placeholder = normalize(node.placeholder || ''); return placeholder.includes('验证码') && !placeholder.includes('图形') && !placeholder.includes('图片') && !placeholder.includes('滑块'); }); const hasSubmit = Array.from(document.querySelectorAll('button,a,span,div')).some(node => { if (!isVisible(node)) { return false; } const text = visibleText(node).replace(/\\s+/g, ''); return text === '登录' || text === '登录/注册' || text === '登录注册'; }); const expiredPatterns = [/登录已失效/, /当前登录已失效/, /登录失效/, /会话已失效/, /会话失效/, /登录超时/, /请重新登(?:录|陆)/, /重新登(?:录|陆)/, /点击登(?:录|陆)/]; const matchesExpiredText = (text) => expiredPatterns.some(pattern => pattern.test(text)); const expiredSelectors = ['[role=\"dialog\"]', '[aria-modal=\"true\"]', '.dialog', '.dialog-box', '.dialog-wrap', '.modal', '.modal-dialog', '.popup', '.popup-wrap', '.pop', '.pop-wrap', '.mask', '.overlay', '.van-dialog', '.van-popup', '.yd-dialog', '.ant-modal', '.el-dialog', '.confirm-inline', '.confirm-inner-inline', '.confirm-body', '.confirm-footer', '.confirm-handle']; const selectorNodes = Array.from(document.querySelectorAll(expiredSelectors.join(','))); const overlayNodes = Array.from(document.querySelectorAll('div,section,aside')).filter(node => { if (!isVisible(node)) { return false; } const text = visibleText(node); if (!matchesExpiredText(text)) { return false; } const rect = node.getBoundingClientRect(); const style = window.getComputedStyle(node); const cls = `${node.className || ''}`.toLowerCase(); return rect.width >= Math.min(window.innerWidth * 0.25, 200) && rect.height >= 30 && (style.position === 'fixed' || style.position === 'sticky' || /(dialog|modal|popup|overlay|mask|toast|pop|confirm)/.test(cls) || node.querySelector('button, .handle-enter, .button-primary')); }); const expiredNode = selectorNodes.concat(overlayNodes).find(node => isVisible(node) && matchesExpiredText(visibleText(node))); if (expiredNode) { const dialogText = visibleText(expiredNode).slice(0, 120); throw new Error(`mobile session expired dialog is visible on the current page; text=${dialogText}`); } if (hasPhone && hasCode && hasSubmit) { throw new Error('mobile login form is still visible on the current page'); } return { login_form_visible: false, session_expired_dialog_visible: false, url: location.href }; })()",
+      "notes": [
+        "Guard the broad in-app fallback capture flow so a logged-out page under /w/ or a visible session-expired dialog does not get treated as an authenticated session."
+      ]
+    },
+    {
+      "id": "main.reload_current_page",
+      "page": "main",
+      "kind": "javascript",
+      "source": "(() => { location.reload(); return true; })()",
+      "notes": [
+        "Reloading the logged-in page reliably replays the file/list request. Personal disk info is opportunistic because some logged-in sessions do not emit it on every refresh."
+      ]
+    },
+    {
+      "id": "main.install_upload_probe_hooks",
+      "page": "main",
+      "kind": "javascript",
+      "source": "(() => { const KEY = '__ccbgMobileUploadProbe'; const MAX_EVENTS = 24; const getState = () => { const existing = window[KEY]; if (existing && typeof existing === 'object') { return existing; } const created = { installed_at_unix_ms: Date.now(), events: [], surface_snapshots: [], installed: false, fetch_wrapped: false, xhr_wrapped: false }; window[KEY] = created; return created; }; const state = getState(); const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const summarizeHeaders = (headersLike) => { try { if (!headersLike) { return { names: [], content_type: null }; } const entries = []; if (typeof Headers !== 'undefined' && headersLike instanceof Headers) { headersLike.forEach((value, key) => entries.push([key, value])); } else if (Array.isArray(headersLike)) { for (const entry of headersLike) { if (Array.isArray(entry) && entry.length >= 2) { entries.push([entry[0], entry[1]]); } } } else if (typeof headersLike === 'object') { for (const [key, value] of Object.entries(headersLike)) { entries.push([key, value]); } } const names = entries.map(([key]) => String(key || '').toLowerCase()).filter(Boolean).slice(0, 24); const contentTypeEntry = entries.find(([key]) => String(key || '').toLowerCase() === 'content-type'); return { names, content_type: contentTypeEntry ? String(contentTypeEntry[1] || '') : null }; } catch { return { names: [], content_type: null }; } }; const tryParseJson = (value) => { if (typeof value !== 'string') { return null; } try { return JSON.parse(value); } catch { return null; } }; const summarizeBody = (body) => { if (body === null || body === undefined) { return { kind: 'empty' }; } if (typeof FormData !== 'undefined' && body instanceof FormData) { const field_names = []; const file_fields = []; let file_count = 0; for (const [key, value] of body.entries()) { field_names.push(String(key)); if (typeof File !== 'undefined' && value instanceof File) { file_count += 1; file_fields.push({ field: String(key), size_bytes: Number(value.size || 0), mime_type: String(value.type || '') || null }); } else if (typeof Blob !== 'undefined' && value instanceof Blob) { file_count += 1; file_fields.push({ field: String(key), size_bytes: Number(value.size || 0), mime_type: String(value.type || '') || null }); } } return { kind: 'form_data', field_names: field_names.slice(0, 24), file_count, file_fields: file_fields.slice(0, 12) }; } if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) { return { kind: 'url_search_params', field_names: Array.from(body.keys()).slice(0, 24) }; } if (typeof File !== 'undefined' && body instanceof File) { return { kind: 'file', size_bytes: Number(body.size || 0), mime_type: String(body.type || '') || null }; } if (typeof Blob !== 'undefined' && body instanceof Blob) { return { kind: 'blob', size_bytes: Number(body.size || 0), mime_type: String(body.type || '') || null }; } if (typeof ArrayBuffer !== 'undefined' && body instanceof ArrayBuffer) { return { kind: 'array_buffer', size_bytes: Number(body.byteLength || 0) }; } if (typeof body === 'string') { const parsed = tryParseJson(body); const json_keys = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? Object.keys(parsed).slice(0, 24) : []; return { kind: 'string', length: body.length, preview: body.slice(0, 160), json_keys, parsed_json: parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null }; } if (typeof body === 'object') { return { kind: 'object', keys: Object.keys(body).slice(0, 24), parsed_json: body }; } return { kind: typeof body }; }; const isCreateMetadataCandidate = (urlText, bodySummary) => { const parsed = bodySummary?.parsed_json; if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) { return false; } const typeValue = String(parsed.type || '').toLowerCase(); const nameValue = String(parsed.name || ''); const hashAlgo = String(parsed.contentHashAlgorithm || '').toUpperCase(); const sizeValue = Number(parsed.size || 0); return /\\/hcy\\/file\\/create(?:$|\\?)/i.test(urlText) && typeValue === 'file' && !!nameValue && Number.isFinite(sizeValue) && sizeValue > 0 && /SHA(1|256|512)|MD5/.test(hashAlgo); }; const isUploadCandidate = (url, method, headerSummary, bodySummary) => { const urlText = String(url || ''); const methodText = String(method || '').toUpperCase(); const names = Array.isArray(headerSummary?.names) ? headerSummary.names.join(' ') : ''; const contentType = String(headerSummary?.content_type || ''); if (/(upload|uploader|upfile|putfile|addfile|createfile|multipart|complete|chunk|part)/i.test(urlText)) { return true; } if (isCreateMetadataCandidate(urlText, bodySummary)) { return true; } if (methodText === 'PUT') { return true; } if (/(multipart\\/form-data|octet-stream|content-range)/i.test(`${contentType} ${names}`)) { return true; } return Number(bodySummary?.file_count || 0) > 0 || bodySummary?.kind === 'file' || bodySummary?.kind === 'blob'; }; const recordEvent = (transport, method, url, headersLike, body) => { try { const header_summary = summarizeHeaders(headersLike); const body_summary = summarizeBody(body); const entry = { transport, method: String(method || '').toUpperCase() || null, url: String(url || '') || null, captured_at_unix_ms: Date.now(), header_names: header_summary.names || [], content_type: header_summary.content_type || null, body: body_summary, is_upload_candidate: isUploadCandidate(url, method, header_summary, body_summary) }; const current = getState(); current.events = Array.isArray(current.events) ? current.events : []; current.events.push(entry); if (current.events.length > MAX_EVENTS) { current.events = current.events.slice(-MAX_EVENTS); } } catch {} }; if (!state.fetch_wrapped && typeof window.fetch === 'function') { const originalFetch = window.fetch.bind(window); window.fetch = function(input, init) { const request = typeof Request !== 'undefined' && input instanceof Request ? input : null; const method = init?.method || request?.method || 'GET'; const url = typeof input === 'string' ? input : (request?.url || ''); const headers = init?.headers || request?.headers || null; const body = init?.body ?? request?._bodyInit ?? null; recordEvent('fetch', method, url, headers, body); return originalFetch(input, init); }; state.fetch_wrapped = true; } if (!state.xhr_wrapped && typeof XMLHttpRequest !== 'undefined') { const proto = XMLHttpRequest.prototype; if (!proto.__ccbgMobileUploadProbeWrapped) { const originalOpen = proto.open; const originalSend = proto.send; const originalSetRequestHeader = proto.setRequestHeader; proto.open = function(method, url) { this.__ccbgProbeMethod = method; this.__ccbgProbeUrl = url; this.__ccbgProbeHeaders = []; return originalOpen.apply(this, arguments); }; proto.setRequestHeader = function(name, value) { try { const list = Array.isArray(this.__ccbgProbeHeaders) ? this.__ccbgProbeHeaders : []; list.push([name, value]); this.__ccbgProbeHeaders = list; } catch {} return originalSetRequestHeader.apply(this, arguments); }; proto.send = function(body) { recordEvent('xhr', this.__ccbgProbeMethod || 'GET', this.__ccbgProbeUrl || '', this.__ccbgProbeHeaders || [], body); return originalSend.apply(this, arguments); }; proto.__ccbgMobileUploadProbeWrapped = true; } state.xhr_wrapped = true; } state.installed = true; return { installed: true, fetch_wrapped: !!state.fetch_wrapped, xhr_wrapped: !!state.xhr_wrapped, event_count: Array.isArray(state.events) ? state.events.length : 0 }; })()",
+      "notes": [
+        "Install lightweight fetch/XHR hooks so later manual or automated upload attempts can be inspected without guessing the native China Mobile upload contract."
+      ]
+    },
+    {
+      "id": "main.snapshot_upload_surface",
+      "page": "main",
+      "kind": "javascript",
+      "source": "(() => { const KEY = '__ccbgMobileUploadProbe'; const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const domPath = (node) => { if (!(node instanceof Element)) { return null; } const parts = []; let current = node; while (current && current instanceof Element && parts.length < 5) { let part = current.tagName.toLowerCase(); if (current.id) { part += `#${current.id}`; parts.unshift(part); break; } const cls = String(current.className || '').trim().split(/\\s+/).filter(Boolean).slice(0, 2).join('.'); if (cls) { part += `.${cls}`; } parts.unshift(part); current = current.parentElement; } return parts.join(' > ') || null; }; const state = (window[KEY] && typeof window[KEY] === 'object') ? window[KEY] : { installed_at_unix_ms: Date.now(), events: [], surface_snapshots: [] }; window[KEY] = state; const uploadControls = Array.from(document.querySelectorAll('button,a,span,div,label')).filter(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); const cls = `${node.className || ''}`.toLowerCase(); const title = normalize(node.getAttribute?.('title') || ''); const aria = normalize(node.getAttribute?.('aria-label') || ''); return /上传|上传文件|上传到云盘|添加文件|添加上传/.test(text) || /upload/.test(`${text} ${title} ${aria}`.toLowerCase()) || /(upload|uploader|file-upload|upload-btn)/.test(cls); }).slice(0, 12).map(node => { const rect = node.getBoundingClientRect(); return { tag: node.tagName || null, text: normalize(node.innerText || node.textContent || '') || null, class_name: String(node.className || '') || null, dom_path: domPath(node), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }; }); const fileInputs = Array.from(document.querySelectorAll(\"input[type='file']\")).filter(node => node instanceof HTMLInputElement).slice(0, 12).map(node => { const rect = node.getBoundingClientRect(); return { visible: isVisible(node), disabled: !!node.disabled, multiple: !!node.multiple, accept: String(node.accept || '') || null, dom_path: domPath(node), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, selected_file_count: node.files ? node.files.length : 0, selected_total_size_bytes: node.files ? Array.from(node.files).reduce((sum, file) => sum + Number(file?.size || 0), 0) : 0 }; }); const snapshot = { captured_at_unix_ms: Date.now(), url: location.href, title: document.title || null, upload_controls: uploadControls, file_inputs: fileInputs }; state.surface_snapshots = Array.isArray(state.surface_snapshots) ? state.surface_snapshots : []; state.surface_snapshots.push(snapshot); if (state.surface_snapshots.length > 8) { state.surface_snapshots = state.surface_snapshots.slice(-8); } return snapshot; })()",
+      "notes": [
+        "Capture the currently visible upload entry candidates and any mounted file inputs before or after opening the Mobile upload surface."
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "mobile_sms_login_request_code_validate",
+      "title": "Mobile SMS Login Request Code Validate",
+      "purpose": "Open the China Mobile login entry on the current CDP tab, switch into SMS login when needed, request the verification code, and capture the post-click validation facts.",
+      "start_page": "site_any",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive Mobile login."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "navigate",
+          "id": "open-mobile-login-entry",
+          "url": "https://yun.139.com/",
+          "wait_for_page": "site_any"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "resolve-expired-session-dialog",
+          "operation": "site.resolve_expired_session_dialog"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "wait-for-login-form",
+          "operation": "login.wait_for_sms_form_ready"
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms-login",
+          "element": "login.sms_login_tab",
+          "optional": true
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "wait-for-sms-form-after-tab-switch",
+          "operation": "login.wait_for_sms_form_ready"
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup",
+            "blur"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-login-options-checked",
+          "operation": "login.ensure_login_options_checked"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "prepare-send-code-feedback-capture",
+          "operation": "login.prepare_send_code_feedback_capture"
+        },
+        {
+          "kind": "click",
+          "id": "send-code",
+          "element": "login.send_code_button"
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-send-code",
+          "duration_ms": 3000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "send_code_text_before",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileSendCodeState || null; const value = typeof state?.before_text === 'string' ? state.before_text.trim() : ''; return value || null; })()",
+          "redact": false,
+          "description": "Visible send-code control text before the click."
+        },
+        {
+          "id": "send_code_candidate_before",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileSendCodeState || null; return state?.before_candidate || null; })()",
+          "redact": false,
+          "description": "Structured description of the send-code control before the click."
+        },
+        {
+          "id": "send_code_text_after",
+          "kind": "script_value",
+          "source": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const button = Array.from(document.querySelectorAll('button,a,span,div')).find(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); return text === '获取验证码' || text === '发送验证码' || /\\d+\\s*(s|S|秒).*(重新获取|获取)/.test(text) || /请在\\d+秒后重新获取/.test(text); }) || null; const value = button ? normalize(button.innerText || button.textContent || '') : ''; return value || null; })()",
+          "redact": false,
+          "description": "Visible send-code control text after the click."
+        },
+        {
+          "id": "send_code_countdown_detected",
+          "kind": "script_value",
+          "source": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = node.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) { return false; } const style = window.getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'; }; const button = Array.from(document.querySelectorAll('button,a,span,div')).find(node => { if (!isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); return text === '获取验证码' || text === '发送验证码' || /\\d+\\s*(s|S|秒).*(重新获取|获取)/.test(text) || /请在\\d+秒后重新获取/.test(text); }) || null; const text = button ? normalize(button.innerText || button.textContent || '') : ''; return /\\d+\\s*(s|S|秒)/.test(text); })()",
+          "redact": false,
+          "description": "Whether the visible send-code control text appears to have changed into a countdown."
+        },
+        {
+          "id": "send_code_feedback_last_message",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileSendCodeState || null; const value = typeof state?.last_message === 'string' ? state.last_message.trim() : ''; return value || null; })()",
+          "redact": false,
+          "description": "Last transient toast or inline feedback captured after the send-code click."
+        },
+        {
+          "id": "send_code_feedback_messages",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileSendCodeState || null; if (!state || !Array.isArray(state.messages)) { return []; } return state.messages.map(entry => typeof entry?.text === 'string' ? entry.text.trim() : '').filter(Boolean).slice(-12); })()",
+          "redact": false,
+          "description": "Recent transient toast or inline feedback texts captured while the send-code flow was running."
+        },
+        {
+          "id": "send_code_rate_limited_detected",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileSendCodeState || null; const texts = Array.isArray(state?.messages) ? state.messages.map(entry => typeof entry?.text === 'string' ? entry.text.trim() : '').filter(Boolean) : []; const last = typeof state?.last_message === 'string' ? state.last_message.trim() : ''; if (last) { texts.push(last); } return texts.some(text => /(最大限制|重新获取|稍后|频繁|点击一次即可|不要重复点击)/.test(text)); })()",
+          "redact": false,
+          "description": "Whether the page flashed a rate-limit style warning after the send-code click."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL after the Mobile send-code flow finishes."
+        }
+      ],
+      "notes": [
+        "This flow defines Mobile login validation through catalog outputs rather than provider-specific Rust code."
+      ]
+    },
+    {
+      "id": "mobile_sms_login_resume_submit_code",
+      "title": "Mobile SMS Login Resume Submit Code",
+      "purpose": "Resume the current China Mobile SMS login page after the operator receives the verification code, submit it, then capture the authenticated session outputs from the logged-in file list.",
+      "start_page": "site_any",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive Mobile login."
+        },
+        {
+          "id": "sms_code",
+          "label": "SMS Code",
+          "kind": "secret",
+          "required": true,
+          "secret": true,
+          "description": "Short-lived verification code typed by the operator after the page sends the SMS."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "wait-mobile-page",
+          "page": "site_any",
+          "timeout_ms": 10000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "resolve-expired-session-dialog",
+          "operation": "site.resolve_expired_session_dialog"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "wait-for-login-form",
+          "operation": "login.wait_for_sms_form_ready"
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms-login",
+          "element": "login.sms_login_tab",
+          "optional": true
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup",
+            "blur"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-login-options-checked",
+          "operation": "login.ensure_login_options_checked"
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-sms-code",
+          "element": "login.code_input",
+          "value_template": "{{inputs.sms_code}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup",
+            "blur"
+          ]
+        },
+        {
+          "kind": "click",
+          "id": "submit-login",
+          "element": "login.submit_button"
+        },
+        {
+          "kind": "wait_for_page",
+          "id": "wait-main-page",
+          "page": "main",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "reload-current-page",
+          "operation": "main.reload_current_page"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-list-files-request",
+          "request": "mobile_personal_list_files",
+          "timeout_ms": 15000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-personal-disk-info-request",
+          "request": "mobile_personal_disk_info",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-quota-detail-request",
+          "request": "mobile_quota_detail",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user-benefits-request",
+          "request": "mobile_query_user_benefits",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-available-benefit-request",
+          "request": "mobile_query_available_benefit",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user-group-remind-request",
+          "request": "mobile_query_user_group_remind",
+          "timeout_ms": 3000,
+          "optional": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "token",
+          "kind": "request_header",
+          "source": "mobile_personal_list_files:authorization",
+          "redact": true,
+          "description": "Authorization header captured from the real file/list request."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "mobile_personal_list_files:cookie",
+          "required_for_prerequisite": false,
+          "redact": true,
+          "description": "Cookie header captured from the real file/list request when the browser sends it."
+        },
+        {
+          "id": "root_folder_id",
+          "kind": "request_field",
+          "source": "mobile_personal_list_files:parentFileId",
+          "redact": false,
+          "description": "Parent folder id captured from the live file/list request body."
+        },
+        {
+          "id": "user_domain_id",
+          "kind": "request_field",
+          "source": "mobile_personal_disk_info:userDomainId",
+          "fallback_sources": [
+            "mobile_quota_detail:userDomainId",
+            "mobile_query_user_benefits:commonAccountInfo.userDomainId",
+            "mobile_query_available_benefit:commonAccountInfo.userDomainId",
+            "mobile_query_user_group_remind:commonAccountInfo.userDomainId"
+          ],
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "User domain id captured from the logged-in Mobile request body, preferring personal disk info and falling back to other stable reload requests."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the China Mobile page used for capture."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "mobile_personal_list_files",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer",
+            "Caller",
+            "CMS-DEVICE",
+            "Inner-HCY-Router-HTTPS",
+            "X-Hcy-Caller",
+            "X-Inner-Ntwk",
+            "X-M4C-Caller",
+            "X-M4C-Src",
+            "X-SvcType",
+            "X-Yun-Api-Version",
+            "X-Yun-App-Channel",
+            "X-Yun-Channel-Source",
+            "X-Yun-Client-Info",
+            "X-Yun-Module-Type",
+            "X-Yun-Svc-Type",
+            "X-Huawei-ChannelSrc",
+            "X-DeviceInfo",
+            "X-Requested-With",
+            "X-Client-Id",
+            "Mcloud-Channel",
+            "Mcloud-Client",
+            "Mcloud-Route",
+            "Mcloud-Version",
+            "Mcloud-Sign",
+            "Mcloud-Skey"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real file/list request so provider-mobile can replay the same session persona."
+        }
+      ],
+      "notes": [
+        "This flow finishes on the same output contract used by capture-only flows so the provider credential form and health checks can stay generic."
+      ]
+    },
+    {
+      "id": "mobile_capture_current_session",
+      "title": "Mobile Capture Current Session",
+      "purpose": "Reload the current logged-in China Mobile main page, wait for the live file/list request, then capture the session details required by provider-mobile. Personal disk info remains opportunistic because some logged-in sessions do not replay it on every refresh.",
+      "start_page": "main",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-main-page",
+          "page": "main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "guard-against-expired-or-login-page",
+          "operation": "site.assert_not_login_form"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "reload-current-page",
+          "operation": "main.reload_current_page"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-list-files-request",
+          "request": "mobile_personal_list_files",
+          "timeout_ms": 15000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-personal-disk-info-request",
+          "request": "mobile_personal_disk_info",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-quota-detail-request",
+          "request": "mobile_quota_detail",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user-benefits-request",
+          "request": "mobile_query_user_benefits",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-available-benefit-request",
+          "request": "mobile_query_available_benefit",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user-group-remind-request",
+          "request": "mobile_query_user_group_remind",
+          "timeout_ms": 3000,
+          "optional": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "token",
+          "kind": "request_header",
+          "source": "mobile_personal_list_files:authorization",
+          "redact": true,
+          "description": "Authorization header captured from the real file/list request."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "mobile_personal_list_files:cookie",
+          "required_for_prerequisite": false,
+          "redact": true,
+          "description": "Cookie header captured from the real file/list request when the browser sends it."
+        },
+        {
+          "id": "root_folder_id",
+          "kind": "request_field",
+          "source": "mobile_personal_list_files:parentFileId",
+          "redact": false,
+          "description": "Parent folder id captured from the live file/list request body."
+        },
+        {
+          "id": "user_domain_id",
+          "kind": "request_field",
+          "source": "mobile_personal_disk_info:userDomainId",
+          "fallback_sources": [
+            "mobile_quota_detail:userDomainId",
+            "mobile_query_user_benefits:commonAccountInfo.userDomainId",
+            "mobile_query_available_benefit:commonAccountInfo.userDomainId",
+            "mobile_query_user_group_remind:commonAccountInfo.userDomainId"
+          ],
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "User domain id captured from the logged-in Mobile request body, preferring personal disk info and falling back to other stable reload requests."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the China Mobile page used for capture."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "mobile_personal_list_files",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer",
+            "Caller",
+            "CMS-DEVICE",
+            "Inner-HCY-Router-HTTPS",
+            "X-Hcy-Caller",
+            "X-Inner-Ntwk",
+            "X-M4C-Caller",
+            "X-M4C-Src",
+            "X-SvcType",
+            "X-Yun-Api-Version",
+            "X-Yun-App-Channel",
+            "X-Yun-Channel-Source",
+            "X-Yun-Client-Info",
+            "X-Yun-Module-Type",
+            "X-Yun-Svc-Type",
+            "X-Huawei-ChannelSrc",
+            "X-DeviceInfo",
+            "X-Requested-With",
+            "X-Client-Id",
+            "Mcloud-Channel",
+            "Mcloud-Client",
+            "Mcloud-Route",
+            "Mcloud-Version",
+            "Mcloud-Sign",
+            "Mcloud-Skey"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real file/list request so provider-mobile can replay the same session persona."
+        }
+      ],
+      "notes": [
+        "This flow reloads the logged-in page and captures the live request bundle used by provider-mobile."
+      ]
+    },
+    {
+      "id": "mobile_capture_current_session_from_logged_in_page",
+      "title": "Mobile Capture Current Session From Logged-In Page",
+      "purpose": "Reuse any already authenticated China Mobile in-app tab, verify that it is not still showing the login form, navigate it into the main file list, reload once, and capture the live session details.",
+      "start_page": "logged_in_any",
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "guard-against-login-form",
+          "operation": "site.assert_not_login_form"
+        },
+        {
+          "kind": "navigate",
+          "id": "open-main-page",
+          "url": "https://yun.139.com/w/#/index",
+          "wait_for_page": "main"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "reload-current-page",
+          "operation": "main.reload_current_page"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-list-files-request",
+          "request": "mobile_personal_list_files",
+          "timeout_ms": 15000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-personal-disk-info-request",
+          "request": "mobile_personal_disk_info",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-quota-detail-request",
+          "request": "mobile_quota_detail",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user-benefits-request",
+          "request": "mobile_query_user_benefits",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-available-benefit-request",
+          "request": "mobile_query_available_benefit",
+          "timeout_ms": 3000,
+          "optional": true
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user-group-remind-request",
+          "request": "mobile_query_user_group_remind",
+          "timeout_ms": 3000,
+          "optional": true
+        }
+      ],
+      "outputs": [
+        {
+          "id": "token",
+          "kind": "request_header",
+          "source": "mobile_personal_list_files:authorization",
+          "redact": true,
+          "description": "Authorization header captured from the real file/list request."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "mobile_personal_list_files:cookie",
+          "required_for_prerequisite": false,
+          "redact": true,
+          "description": "Cookie header captured from the real file/list request when the browser sends it."
+        },
+        {
+          "id": "root_folder_id",
+          "kind": "request_field",
+          "source": "mobile_personal_list_files:parentFileId",
+          "redact": false,
+          "description": "Parent folder id captured from the live file/list request body."
+        },
+        {
+          "id": "user_domain_id",
+          "kind": "request_field",
+          "source": "mobile_personal_disk_info:userDomainId",
+          "fallback_sources": [
+            "mobile_quota_detail:userDomainId",
+            "mobile_query_user_benefits:commonAccountInfo.userDomainId",
+            "mobile_query_available_benefit:commonAccountInfo.userDomainId",
+            "mobile_query_user_group_remind:commonAccountInfo.userDomainId"
+          ],
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "User domain id captured from the logged-in Mobile request body, preferring personal disk info and falling back to other stable reload requests."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the China Mobile page used for capture."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "mobile_personal_list_files",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer",
+            "Caller",
+            "CMS-DEVICE",
+            "Inner-HCY-Router-HTTPS",
+            "X-Hcy-Caller",
+            "X-Inner-Ntwk",
+            "X-M4C-Caller",
+            "X-M4C-Src",
+            "X-SvcType",
+            "X-Yun-Api-Version",
+            "X-Yun-App-Channel",
+            "X-Yun-Channel-Source",
+            "X-Yun-Client-Info",
+            "X-Yun-Module-Type",
+            "X-Yun-Svc-Type",
+            "X-Huawei-ChannelSrc",
+            "X-DeviceInfo",
+            "X-Requested-With",
+            "X-Client-Id",
+            "Mcloud-Channel",
+            "Mcloud-Client",
+            "Mcloud-Route",
+            "Mcloud-Version",
+            "Mcloud-Sign",
+            "Mcloud-Skey"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real file/list request so provider-mobile can replay the same session persona."
+        }
+      ],
+      "notes": [
+        "The initial login-form guard keeps the broad /w/* matcher from accepting a logged-out Mobile page as if it were a valid authenticated session."
+      ]
+    },
+    {
+      "id": "mobile_prepare_upload_probe",
+      "title": "Mobile Prepare Upload Probe",
+      "purpose": "Stay on the logged-in China Mobile main page, install in-page upload request hooks, snapshot the visible upload controls, and optionally open the upload surface so later manual or automated probes have evidence to work from.",
+      "start_page": "main",
+      "prerequisite_flow_id": "mobile_capture_current_session",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-main-page",
+          "page": "main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "guard-against-expired-or-login-page",
+          "operation": "site.assert_not_login_form"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "install-upload-hooks",
+          "operation": "main.install_upload_probe_hooks"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "snapshot-before-open",
+          "operation": "main.snapshot_upload_surface"
+        },
+        {
+          "kind": "click",
+          "id": "open-upload-surface",
+          "element": "main.upload_trigger",
+          "optional": true
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-open-upload-surface",
+          "duration_ms": 1200
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "snapshot-after-open",
+          "operation": "main.snapshot_upload_surface"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "upload_surface_before",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; return Array.isArray(state?.surface_snapshots) ? (state.surface_snapshots[0] || null) : null; })()",
+          "redact": false,
+          "description": "Initial upload-surface snapshot before the probe tries to open any uploader controls."
+        },
+        {
+          "id": "upload_surface_after",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; return Array.isArray(state?.surface_snapshots) ? (state.surface_snapshots[state.surface_snapshots.length - 1] || null) : null; })()",
+          "redact": false,
+          "description": "Latest upload-surface snapshot after the probe optionally clicked an upload entry."
+        },
+        {
+          "id": "upload_probe_summary",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; const events = Array.isArray(state?.events) ? state.events : []; return { installed: !!state?.installed, fetch_wrapped: !!state?.fetch_wrapped, xhr_wrapped: !!state?.xhr_wrapped, event_count: events.length, upload_candidate_count: events.filter(event => event?.is_upload_candidate).length }; })()",
+          "redact": false,
+          "description": "High-level status of the in-page upload probe hooks."
+        },
+        {
+          "id": "upload_probe_recent_events",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; return Array.isArray(state?.events) ? state.events.slice(-8) : []; })()",
+          "redact": false,
+          "description": "Recent fetch/XHR calls observed after upload probe hooks were installed, including upload-like candidates."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the China Mobile page used for upload probing."
+        }
+      ],
+      "notes": [
+        "This flow does not claim write support. Its job is to make later manual or automated upload experiments observable."
+      ]
+    },
+    {
+      "id": "mobile_probe_upload_attach",
+      "title": "Mobile Probe Upload Attach",
+      "purpose": "After the upload probe hooks are installed, attach a local file to the best-effort China Mobile file input and observe whether the live page emits an upload-like request.",
+      "start_page": "main",
+      "prerequisite_flow_id": "mobile_prepare_upload_probe",
+      "inputs": [
+        {
+          "id": "local_file",
+          "label": "Local File",
+          "kind": "file",
+          "required": true,
+          "description": "Absolute path of a small disposable file used only for upload contract discovery."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-main-page",
+          "page": "main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "guard-against-expired-or-login-page",
+          "operation": "site.assert_not_login_form"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "install-upload-hooks",
+          "operation": "main.install_upload_probe_hooks"
+        },
+        {
+          "kind": "click",
+          "id": "open-upload-surface",
+          "element": "main.upload_trigger",
+          "optional": true
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-open-upload-surface",
+          "duration_ms": 800
+        },
+        {
+          "kind": "set_files",
+          "id": "attach-local-file",
+          "element": "main.upload_file_input",
+          "input_ref": "local_file"
+        },
+        {
+          "kind": "dispatch_events",
+          "id": "trigger-file-events",
+          "element": "main.upload_file_input",
+          "events": [
+            "input",
+            "change"
+          ]
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-attach",
+          "duration_ms": 4000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "snapshot-after-attach",
+          "operation": "main.snapshot_upload_surface"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "upload_surface_after_attach",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; return Array.isArray(state?.surface_snapshots) ? (state.surface_snapshots[state.surface_snapshots.length - 1] || null) : null; })()",
+          "redact": false,
+          "description": "Latest upload-surface snapshot after the probe attached a local file."
+        },
+        {
+          "id": "upload_probe_recent_events",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; return Array.isArray(state?.events) ? state.events.slice(-12) : []; })()",
+          "redact": false,
+          "description": "Recent fetch/XHR calls observed while the probe attempted to attach a file to the Mobile uploader."
+        },
+        {
+          "id": "upload_probe_last_candidate_event",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; const events = Array.isArray(state?.events) ? state.events.filter(event => event?.is_upload_candidate) : []; return events.length ? events[events.length - 1] : null; })()",
+          "redact": false,
+          "description": "Last upload-like network event captured during the probe, if the page actually started an uploader request."
+        },
+        {
+          "id": "upload_probe_has_candidate_request",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; const events = Array.isArray(state?.events) ? state.events : []; return events.some(event => event?.is_upload_candidate); })()",
+          "redact": false,
+          "description": "Whether the probe observed at least one upload-like request after attaching the local file."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the China Mobile page used for upload attach probing."
+        }
+      ],
+      "notes": [
+        "Use a small disposable file for this flow. The current goal is discovery of the real upload contract, not production data transfer."
+      ]
+    },
+    {
+      "id": "mobile_personal_root_upload",
+      "title": "Mobile Personal Root Upload",
+      "purpose": "Reuse the logged-in China Mobile personal file-list tab, attach a local file to the first-party uploader, wait for the business upload metadata request, then wait for the file list refresh that follows a completed upload.",
+      "start_page": "main",
+      "prerequisite_flow_id": "mobile_capture_current_session",
+      "inputs": [
+        {
+          "id": "local_file",
+          "label": "Local File",
+          "kind": "file",
+          "required": true,
+          "description": "Absolute path of the local file to upload through the live China Mobile web page."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-main-page",
+          "page": "main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "guard-against-expired-or-login-page",
+          "operation": "site.assert_not_login_form"
+        },
+        {
+          "kind": "click",
+          "id": "open-upload-surface",
+          "element": "main.upload_trigger",
+          "optional": true
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-open-upload-surface",
+          "duration_ms": 800
+        },
+        {
+          "kind": "set_files",
+          "id": "attach-local-file",
+          "element": "main.upload_file_input",
+          "input_ref": "local_file"
+        },
+        {
+          "kind": "dispatch_events",
+          "id": "trigger-file-events",
+          "element": "main.upload_file_input",
+          "events": [
+            "input",
+            "change"
+          ]
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-file-create-request",
+          "request": "mobile_file_create",
+          "timeout_ms": 120000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-list-refresh-request",
+          "request": "mobile_personal_list_files",
+          "timeout_ms": 120000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "uploaded_file_name",
+          "kind": "request_field",
+          "source": "mobile_file_create:name",
+          "redact": false,
+          "description": "File name emitted by the China Mobile page when it begins the upload."
+        },
+        {
+          "id": "uploaded_content_hash",
+          "kind": "request_field",
+          "source": "mobile_file_create:contentHash",
+          "redact": false,
+          "description": "Client-computed file hash emitted by the China Mobile page during upload creation."
+        },
+        {
+          "id": "uploaded_parent_file_id",
+          "kind": "request_field",
+          "source": "mobile_file_create:parentFileId",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Target parent file id used by the China Mobile page for this upload."
+        }
+      ],
+      "notes": [
+        "This initial write flow targets the personal root file list only.",
+        "The page computes contentHash and multipart planning itself; gatewayd only attaches the file and waits for the first business upload request plus the subsequent list refresh."
+      ]
+    },
+    {
+      "id": "mobile_capture_upload_probe_state",
+      "title": "Mobile Capture Upload Probe State",
+      "purpose": "Read back the upload probe state that was left behind on the current China Mobile main page after the operator manually opened an uploader or attempted a real upload in the same live CDP tab.",
+      "start_page": "main",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-main-page",
+          "page": "main",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "guard-against-expired-or-login-page",
+          "operation": "site.assert_not_login_form"
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "snapshot-current-surface",
+          "operation": "main.snapshot_upload_surface"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "upload_probe_summary",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; const events = Array.isArray(state?.events) ? state.events : []; return { installed: !!state?.installed, fetch_wrapped: !!state?.fetch_wrapped, xhr_wrapped: !!state?.xhr_wrapped, event_count: events.length, upload_candidate_count: events.filter(event => event?.is_upload_candidate).length, surface_snapshot_count: Array.isArray(state?.surface_snapshots) ? state.surface_snapshots.length : 0 }; })()",
+          "redact": false,
+          "description": "Current state of the Mobile upload probe stored on the live CDP page."
+        },
+        {
+          "id": "upload_surface_latest",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; return Array.isArray(state?.surface_snapshots) ? (state.surface_snapshots[state.surface_snapshots.length - 1] || null) : null; })()",
+          "redact": false,
+          "description": "Most recent upload-surface snapshot stored on the live CDP page."
+        },
+        {
+          "id": "upload_probe_recent_events",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; return Array.isArray(state?.events) ? state.events.slice(-12) : []; })()",
+          "redact": false,
+          "description": "Recent fetch/XHR events captured by the upload probe hooks on the current live CDP page."
+        },
+        {
+          "id": "upload_probe_last_candidate_event",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgMobileUploadProbe || null; const events = Array.isArray(state?.events) ? state.events.filter(event => event?.is_upload_candidate) : []; return events.length ? events[events.length - 1] : null; })()",
+          "redact": false,
+          "description": "Most recent upload-like request observed on the current live CDP page."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the China Mobile page used to read back the upload probe state."
+        }
+      ],
+      "notes": [
+        "Run this after manual upload experiments on the same CDP tab if the automatic attach probe did not capture enough detail."
+      ]
+    }
+  ]
+}

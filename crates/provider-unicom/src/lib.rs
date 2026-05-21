@@ -1,20 +1,21 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use aes::Aes128;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use blob_core::{
-    BackendCapabilities, BlobBackend, BlobError, ContainerInfo, CopyObjectRequest, HealthStatus,
-    ListObjectsRequest, MoveObjectRequest, ObjectInfo, ObjectPayload, OutboundIpFamily,
-    PutObjectRequest, PutObjectResult, RenameObjectRequest, ServiceHealth, StorageCapacity,
-    StorageScopeHealth, StorageScopeKind, TokenSource,
+    BackendCapabilities, BlobBackend, BlobError, BrowserRequestProfile, ContainerInfo,
+    CopyObjectRequest, HealthStatus, ListObjectsRequest, MoveObjectRequest, ObjectBody, ObjectInfo,
+    ObjectPayload, OutboundIpFamily, PutObjectRequest, PutObjectResult, RenameObjectRequest,
+    ServiceHealth, StorageCapacity, StorageScopeHealth, StorageScopeKind, TokenSource,
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit, block_padding::Pkcs7};
+use futures_util::StreamExt;
 use md5::{Digest, Md5};
 use reqwest::{
     Method, Response, StatusCode,
@@ -67,6 +68,7 @@ pub struct UnicomConfig {
     pub outbound_ip_family: OutboundIpFamily,
     pub cookie_header: Option<String>,
     pub user_agent: String,
+    pub browser_profile: Option<BrowserRequestProfile>,
     pub request_timeout_secs: u64,
     pub request_origin: Option<String>,
     pub request_referer: Option<String>,
@@ -81,6 +83,7 @@ pub struct UnicomConfig {
     pub family_id: Option<String>,
     pub family_space_type: String,
     pub family_root_directory_id: String,
+    pub root_prefix: Option<String>,
     pub upload_url: String,
     pub upload_chunk_size_bytes: u64,
     pub native_capability_catalog_path: Option<String>,
@@ -228,6 +231,24 @@ struct UploadChunkResponse {
 }
 
 #[derive(Debug)]
+struct TimedUploadChunkResponse {
+    response: UploadChunkResponse,
+    first_response_latency_ms: u64,
+}
+
+#[derive(Debug)]
+struct CompletedUpload {
+    last_response: UploadChunkResponse,
+    first_response_latency_ms: Option<u64>,
+}
+
+#[derive(Debug)]
+struct TimedObjectBody {
+    body: ObjectBody,
+    first_response_latency_ms: u64,
+}
+
+#[derive(Debug)]
 enum UploadChunkError {
     Retryable(String),
     Fatal(BlobError),
@@ -290,6 +311,36 @@ impl UnicomBlobAdapter {
         Duration::from_secs(self.config.request_timeout_secs.max(1))
     }
 
+    fn normalized_root_prefix(&self) -> Option<String> {
+        self.config
+            .root_prefix
+            .as_deref()
+            .map(normalize_object_key)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn managed_container_root(&self, container: &str) -> Result<Option<String>, BlobError> {
+        let Some(prefix) = self.normalized_root_prefix() else {
+            return Ok(None);
+        };
+        let container = normalize_object_key(container);
+        if container.is_empty() {
+            return Err(BlobError::NotFound("container is empty".to_string()));
+        }
+        Ok(Some(join_relative_key(&prefix, &container)))
+    }
+
+    fn provider_object_key(&self, container: &str, key: &str) -> Result<String, BlobError> {
+        let key = normalize_object_key(key);
+        if key.is_empty() {
+            return Err(BlobError::NotFound("object key is empty".to_string()));
+        }
+        Ok(match self.managed_container_root(container)? {
+            Some(prefix) => join_relative_key(&prefix, &key),
+            None => key,
+        })
+    }
+
     fn trimmed_base_url(&self) -> &str {
         self.config.base_url.trim_end_matches('/')
     }
@@ -302,15 +353,11 @@ impl UnicomBlobAdapter {
         let mut request = self
             .client
             .request(method, url)
-            .header(USER_AGENT, self.config.user_agent.as_str())
+            .header(USER_AGENT, self.effective_user_agent())
             .timeout(self.timeout());
 
-        if let Some(origin) = self
-            .config
-            .request_origin
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        if let Some(origin) =
+            self.configured_header_value(self.config.request_origin.as_deref(), "origin")
         {
             request = request.header(
                 ORIGIN,
@@ -320,12 +367,8 @@ impl UnicomBlobAdapter {
             );
         }
 
-        if let Some(referer) = self
-            .config
-            .request_referer
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        if let Some(referer) =
+            self.configured_header_value(self.config.request_referer.as_deref(), "referer")
         {
             request = request.header(
                 REFERER,
@@ -352,6 +395,8 @@ impl UnicomBlobAdapter {
             );
         }
 
+        request = self.apply_browser_profile_headers(request)?;
+
         Ok(request)
     }
 
@@ -360,9 +405,11 @@ impl UnicomBlobAdapter {
         request: reqwest::RequestBuilder,
         token: &str,
     ) -> reqwest::RequestBuilder {
-        request
-            .header("accesstoken", token)
-            .header(ACCEPT, "application/json, text/plain, */*")
+        request.header("accesstoken", token).header(
+            ACCEPT,
+            self.profile_header("accept")
+                .unwrap_or("application/json, text/plain, */*"),
+        )
     }
 
     fn request_with_api_user_headers(
@@ -390,6 +437,70 @@ impl UnicomBlobAdapter {
         }
 
         request
+    }
+
+    fn effective_user_agent(&self) -> &str {
+        self.config
+            .browser_profile
+            .as_ref()
+            .and_then(BrowserRequestProfile::effective_user_agent)
+            .unwrap_or(self.config.user_agent.as_str())
+    }
+
+    fn profile_header(&self, header_name: &str) -> Option<&str> {
+        self.config
+            .browser_profile
+            .as_ref()
+            .and_then(|profile| profile.header(header_name))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    fn configured_header_value<'a>(
+        &'a self,
+        configured: Option<&'a str>,
+        fallback_header_name: &str,
+    ) -> Option<&'a str> {
+        configured
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.profile_header(fallback_header_name))
+    }
+
+    fn apply_browser_profile_headers(
+        &self,
+        mut request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::RequestBuilder, BlobError> {
+        let Some(profile) = self.config.browser_profile.as_ref() else {
+            return Ok(request);
+        };
+        for (name, value) in profile.forwarded_headers(&[
+            "accept",
+            "access-token",
+            "accesstoken",
+            "app-version",
+            "client-id",
+            "content-type",
+            "cookie",
+            "origin",
+            "referer",
+            "user-agent",
+            "x-yp-access-token",
+            "x-yp-client-id",
+        ]) {
+            let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                BlobError::Configuration(format!(
+                    "invalid forwarded China Unicom browser profile header name {name}: {error}"
+                ))
+            })?;
+            let header_value = HeaderValue::from_str(value.as_str()).map_err(|error| {
+                BlobError::Configuration(format!(
+                    "invalid forwarded China Unicom browser profile header {name}: {error}"
+                ))
+            })?;
+            request = request.header(header_name, header_value);
+        }
+        Ok(request)
     }
 
     fn dispatcher_channel(&self, style: AuthProbeStyle) -> String {
@@ -828,7 +939,7 @@ impl UnicomBlobAdapter {
         {
             push_once(
                 notes,
-                "remediation=fill China Unicom Access Token in Admin Web -> Provider Credentials -> China Unicom",
+                "remediation=fill China Unicom Access Token in Admin Web -> Unicom",
             );
         } else if message.contains("HTTP 401") || message.contains("RSP_CODE=9999") {
             push_once(
@@ -878,6 +989,37 @@ impl UnicomBlobAdapter {
         Err(BlobError::NotFound(format!(
             "entry not found under {parent_directory_id}: {child_name}"
         )))
+    }
+
+    async fn resolve_directory_path_if_exists_for_scope(
+        &self,
+        scope: &UnicomScopeRoute,
+        path: &str,
+    ) -> Result<Option<String>, BlobError> {
+        let normalized = normalize_object_key(path);
+        if normalized.is_empty() {
+            return Ok(Some(scope.root_directory_id.clone()));
+        }
+
+        let mut parent_directory_id = scope.root_directory_id.clone();
+        for segment in normalized.split('/') {
+            let directory = match self
+                .find_child_entry(
+                    scope,
+                    &parent_directory_id,
+                    segment,
+                    QueryAllFilesEntryKind::Directory,
+                )
+                .await
+            {
+                Ok(entry) => entry,
+                Err(BlobError::NotFound(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            parent_directory_id = directory.id;
+        }
+
+        Ok(Some(parent_directory_id))
     }
 
     async fn resolve_object_entry(
@@ -1217,19 +1359,23 @@ impl UnicomBlobAdapter {
     fn upload_file_info_ciphertext(
         &self,
         token: &str,
+        scope: &UnicomScopeRoute,
         file_name: &str,
         file_size: u64,
         parent_directory_id: &str,
+        batch_no: &str,
     ) -> Result<String, BlobError> {
         let file_type = content_type_from_name(file_name)
             .and_then(classify_unicom_file_type)
             .unwrap_or("5");
         aes_cbc_encrypt_base64(
             &serde_json::to_string(&json!({
+                "spaceType": scope.space_type.as_str(),
                 "fileName": file_name,
                 "fileSize": file_size,
                 "fileType": file_type,
                 "directoryId": parent_directory_id,
+                "batchNo": batch_no,
             }))
             .map_err(|error| {
                 BlobError::Upstream(format!("failed to encode Unicom upload fileInfo: {error}"))
@@ -1251,14 +1397,13 @@ impl UnicomBlobAdapter {
         part_index: u64,
         chunk: Bytes,
         file_info_ciphertext: &str,
-    ) -> Result<UploadChunkResponse, BlobError> {
+    ) -> Result<TimedUploadChunkResponse, BlobError> {
         let url = self.upload_url().to_string();
         let action = format!("upload2C {file_name} part {part_index}/{total_parts}");
         let part_size = chunk.len() as u64;
-        let chunk_bytes = chunk.to_vec();
 
         for attempt in 1..=DEFAULT_UNICOM_UPLOAD_CHUNK_MAX_ATTEMPTS {
-            let file_part = Part::bytes(chunk_bytes.clone())
+            let file_part = Part::stream_with_length(chunk.clone(), part_size)
                 .file_name(file_name.to_string())
                 .mime_str(content_type)
                 .map_err(|error| {
@@ -1285,6 +1430,7 @@ impl UnicomBlobAdapter {
             }
             .part(DEFAULT_UNICOM_UPLOAD_FILE_FIELD_NAME, file_part);
 
+            let request_started_at = Instant::now();
             let response = match self
                 .request(Method::POST, &url)?
                 .multipart(form)
@@ -1303,8 +1449,14 @@ impl UnicomBlobAdapter {
                 }
             };
 
+            let first_response_latency_ms = elapsed_millis(request_started_at);
             match parse_upload_chunk_response(response, &action).await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    return Ok(TimedUploadChunkResponse {
+                        response: result,
+                        first_response_latency_ms,
+                    })
+                }
                 Err(UploadChunkError::Fatal(error)) => return Err(error),
                 Err(UploadChunkError::Retryable(message)) => {
                     if attempt == DEFAULT_UNICOM_UPLOAD_CHUNK_MAX_ATTEMPTS {
@@ -1322,19 +1474,126 @@ impl UnicomBlobAdapter {
         )))
     }
 
+    async fn upload_known_size_body(
+        &self,
+        token: &str,
+        scope: &UnicomScopeRoute,
+        file_name: &str,
+        size: u64,
+        content_type: &str,
+        parent_directory_id: &str,
+        chunk_size: u64,
+        body: ObjectBody,
+    ) -> Result<CompletedUpload, BlobError> {
+        let total_parts = std::cmp::max(1, size.div_ceil(chunk_size));
+        let unique_id = resumable_unique_id(size, file_name);
+        let batch_no = upload_batch_no(file_name, size, parent_directory_id, &scope.space_type);
+        let file_info_ciphertext = self.upload_file_info_ciphertext(
+            token,
+            scope,
+            file_name,
+            size,
+            parent_directory_id,
+            &batch_no,
+        )?;
+        let mut stream = body.into_stream();
+        let mut pending = BytesMut::with_capacity(chunk_size as usize);
+        let mut uploaded_bytes = 0u64;
+        let mut part_index = 1u64;
+        let mut last_response = UploadChunkResponse::default();
+        let mut first_response_latency_ms = None;
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            uploaded_bytes = uploaded_bytes.saturating_add(chunk.len() as u64);
+            if uploaded_bytes > size {
+                return Err(BlobError::BodyStream(format!(
+                    "object body size mismatch for {file_name}: declared {size} bytes, received more than declared size"
+                )));
+            }
+            pending.extend_from_slice(&chunk);
+
+            while pending.len() as u64 >= chunk_size {
+                let part = pending.split_to(chunk_size as usize).freeze();
+                let timed_response = self
+                    .upload_chunk(
+                        token,
+                        scope,
+                        file_name,
+                        size,
+                        content_type,
+                        parent_directory_id,
+                        &unique_id,
+                        total_parts,
+                        part_index,
+                        part,
+                        &file_info_ciphertext,
+                    )
+                    .await?;
+                if first_response_latency_ms.is_none() {
+                    first_response_latency_ms = Some(timed_response.first_response_latency_ms);
+                }
+                last_response = timed_response.response;
+                part_index += 1;
+            }
+        }
+
+        if uploaded_bytes != size {
+            return Err(BlobError::BodyStream(format!(
+                "object body size mismatch for {file_name}: declared {size} bytes, received {uploaded_bytes}"
+            )));
+        }
+
+        if !pending.is_empty() || size == 0 {
+            let timed_response = self
+                .upload_chunk(
+                    token,
+                    scope,
+                    file_name,
+                    size,
+                    content_type,
+                    parent_directory_id,
+                    &unique_id,
+                    total_parts,
+                    part_index,
+                    pending.freeze(),
+                    &file_info_ciphertext,
+                )
+                .await?;
+            if first_response_latency_ms.is_none() {
+                first_response_latency_ms = Some(timed_response.first_response_latency_ms);
+            }
+            last_response = timed_response.response;
+            part_index += 1;
+        }
+
+        let uploaded_parts = part_index.saturating_sub(1);
+        if uploaded_parts != total_parts {
+            return Err(BlobError::BodyStream(format!(
+                "object body part mismatch for {file_name}: declared {total_parts} parts, uploaded {uploaded_parts}"
+            )));
+        }
+
+        Ok(CompletedUpload {
+            last_response,
+            first_response_latency_ms,
+        })
+    }
+
     fn download_request(&self, method: Method, url: &str) -> reqwest::RequestBuilder {
         self.client
             .request(method, url)
-            .header(USER_AGENT, self.config.user_agent.as_str())
-            .timeout(self.timeout())
+            .header(USER_AGENT, self.effective_user_agent())
     }
 
-    async fn get_bytes(&self, url: &str, action: &str) -> Result<Vec<u8>, BlobError> {
+    async fn get_stream(&self, url: &str, action: &str) -> Result<TimedObjectBody, BlobError> {
+        let request_started_at = Instant::now();
         let response = self
             .download_request(Method::GET, url)
             .send()
             .await
             .map_err(|error| BlobError::Upstream(format!("{action} request failed: {error}")))?;
+        let first_response_latency_ms = elapsed_millis(request_started_at);
 
         if response.status() == StatusCode::NOT_FOUND {
             return Err(BlobError::NotFound(action.to_string()));
@@ -1344,18 +1603,28 @@ impl UnicomBlobAdapter {
             return Err(response_to_error(response, action).await);
         }
 
-        response
-            .bytes()
-            .await
-            .map(|body| body.to_vec())
-            .map_err(|error| {
-                BlobError::Upstream(format!("{action} returned invalid bytes: {error}"))
-            })
+        let action = action.to_string();
+        Ok(TimedObjectBody {
+            body: ObjectBody::from_stream(futures_util::stream::try_unfold(
+                response,
+                move |mut response| {
+                    let action = action.clone();
+                    async move {
+                        let chunk = response.chunk().await.map_err(|error| {
+                            BlobError::Upstream(format!("{action} returned invalid bytes: {error}"))
+                        })?;
+                        Ok(chunk.map(|chunk| (chunk, response)))
+                    }
+                },
+            )),
+            first_response_latency_ms,
+        })
     }
 
     async fn list_objects_in_root(
         &self,
         scope: &UnicomScopeRoute,
+        container: &str,
         request: &ListObjectsRequest,
     ) -> Result<Vec<ObjectInfo>, BlobError> {
         if matches!(request.limit, Some(0)) {
@@ -1364,7 +1633,17 @@ impl UnicomBlobAdapter {
 
         let normalized_prefix = request.prefix.as_deref().map(normalize_object_key);
         let mut objects = BTreeMap::new();
-        let mut stack = vec![(scope.root_directory_id.clone(), String::new())];
+        let start_directory_id = match self.managed_container_root(container)? {
+            Some(provider_root) => match self
+                .resolve_directory_path_if_exists_for_scope(scope, &provider_root)
+                .await?
+            {
+                Some(directory_id) => directory_id,
+                None => return Ok(Vec::new()),
+            },
+            None => scope.root_directory_id.clone(),
+        };
+        let mut stack = vec![(start_directory_id, String::new())];
 
         while let Some((folder_id, folder_prefix)) = stack.pop() {
             let mut page_num = 0;
@@ -1437,6 +1716,8 @@ impl BlobBackend for UnicomBlobAdapter {
             write: true,
             delete: true,
             multipart_upload: false,
+            streaming_get: true,
+            streaming_put: true,
         }
     }
 
@@ -1460,12 +1741,21 @@ impl BlobBackend for UnicomBlobAdapter {
                 )?)
             ),
             format!(
+                "request_header_client_id={}",
+                self.config.request_header_client_id.trim()
+            ),
+            format!(
                 "dispatcher_client_id={}",
                 self.config.dispatcher_client_id.trim()
             ),
             format!("root_container={UNICOM_ROOT_CONTAINER}"),
             format!("list_operation={QUERY_ALL_FILES_OPERATION}"),
             format!("download_operations={}", DOWNLOAD_URL_OPERATIONS.join(",")),
+            format!(
+                "managed_root={}",
+                self.normalized_root_prefix()
+                    .unwrap_or_else(|| "<provider-root>".to_string())
+            ),
             format!("upload_url={}", self.upload_url()),
             format!(
                 "upload_chunk_size_bytes={}",
@@ -1651,7 +1941,7 @@ impl BlobBackend for UnicomBlobAdapter {
         };
 
         let scope = self.scope_route_for_container(container).await?;
-        self.list_objects_in_root(&scope, &request).await
+        self.list_objects_in_root(&scope, container, &request).await
     }
 
     async fn head_container(&self, name: &str) -> Result<ContainerInfo, BlobError> {
@@ -1673,22 +1963,25 @@ impl BlobBackend for UnicomBlobAdapter {
 
     async fn head_object(&self, container: &str, key: &str) -> Result<ObjectInfo, BlobError> {
         let scope = self.scope_route_for_container(container).await?;
-        let (entry, normalized_key) = self.resolve_object_entry(&scope, key).await?;
-        Ok(entry.into_object_info(normalized_key))
+        let provider_key = self.provider_object_key(container, key)?;
+        let (entry, _) = self.resolve_object_entry(&scope, &provider_key).await?;
+        Ok(entry.into_object_info(normalize_object_key(key)))
     }
 
     async fn get_object(&self, container: &str, key: &str) -> Result<ObjectPayload, BlobError> {
         let scope = self.scope_route_for_container(container).await?;
-        let (entry, normalized_key) = self.resolve_object_entry(&scope, key).await?;
+        let provider_key = self.provider_object_key(container, key)?;
+        let (entry, _) = self.resolve_object_entry(&scope, &provider_key).await?;
         let download_url = self.download_url_for_entry(&scope, &entry).await?;
-        let info = entry.into_object_info(normalized_key);
-        let body = self
-            .get_bytes(&download_url, &format!("download object {container}/{key}"))
+        let info = entry.into_object_info(normalize_object_key(key));
+        let downloaded = self
+            .get_stream(&download_url, &format!("download object {container}/{key}"))
             .await?;
 
         Ok(ObjectPayload {
             info,
-            body: body.into(),
+            body: downloaded.body,
+            first_response_latency_ms: Some(downloaded.first_response_latency_ms),
         })
     }
 
@@ -1696,70 +1989,73 @@ impl BlobBackend for UnicomBlobAdapter {
         let scope = self.scope_route_for_container(&request.container).await?;
         let token = self.config.token_source.load()?;
         let chunk_size = self.upload_chunk_size_bytes()?;
-        let (parent_path, file_name, normalized_key) =
-            Self::upload_file_name_and_parent(&request.key)?;
+        let provider_key = self.provider_object_key(&request.container, &request.key)?;
+        let (parent_path, file_name, _) = Self::upload_file_name_and_parent(&provider_key)?;
         let content_type = request
             .content_type
             .clone()
             .or_else(|| content_type_from_name(&file_name).map(str::to_string))
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let body = request.body.collect().await?;
-        let size = request.size.unwrap_or(body.len() as u64);
-        if request.size.is_some() && body.len() as u64 != size {
-            return Err(BlobError::BodyStream(format!(
-                "object body size mismatch for {normalized_key}: declared {size} bytes, received {}",
-                body.len()
-            )));
-        }
 
         let parent_directory_id = match parent_path.as_deref() {
             Some(path) => self.ensure_directory_path_for_scope(&scope, path).await?,
             None => scope.root_directory_id.clone(),
         };
-        let total_parts = std::cmp::max(1, size.div_ceil(chunk_size));
-        let unique_id = resumable_unique_id(size, &file_name);
-        let file_info_ciphertext =
-            self.upload_file_info_ciphertext(&token, &file_name, size, &parent_directory_id)?;
-        let mut last_response = UploadChunkResponse::default();
+        let upload = if let Some(size) = request.size {
+            self.upload_known_size_body(
+                &token,
+                &scope,
+                &file_name,
+                size,
+                &content_type,
+                &parent_directory_id,
+                chunk_size,
+                request.body,
+            )
+            .await?
+        } else {
+            let body = request.body.collect().await?;
+            self.upload_known_size_body(
+                &token,
+                &scope,
+                &file_name,
+                body.len() as u64,
+                &content_type,
+                &parent_directory_id,
+                chunk_size,
+                body.into(),
+            )
+            .await?
+        };
 
-        for (index, chunk) in body.chunks(chunk_size as usize).enumerate() {
-            last_response = self
-                .upload_chunk(
-                    &token,
-                    &scope,
-                    &file_name,
-                    size,
-                    &content_type,
-                    &parent_directory_id,
-                    &unique_id,
-                    total_parts,
-                    index as u64 + 1,
-                    Bytes::copy_from_slice(chunk),
-                    &file_info_ciphertext,
-                )
-                .await?;
-        }
-
+        let CompletedUpload {
+            last_response,
+            first_response_latency_ms,
+        } = upload;
         Ok(PutObjectResult {
             etag: last_response
                 .etag
                 .or(last_response.fid)
                 .or(last_response.wc_file_id)
                 .or(last_response.file_version),
+            first_response_latency_ms,
         })
     }
 
     async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
         let scope = self.scope_route_for_container(container).await?;
-        let (entry, _) = self.resolve_object_entry(&scope, key).await?;
+        let provider_key = self.provider_object_key(container, key)?;
+        let (entry, _) = self.resolve_object_entry(&scope, &provider_key).await?;
         self.delete_file_entry(&scope, &entry).await
     }
 
     async fn rename_object(&self, request: RenameObjectRequest) -> Result<(), BlobError> {
         let scope = self.scope_route_for_container(&request.container).await?;
-        let (entry, normalized_key) = self.resolve_object_entry(&scope, &request.key).await?;
+        let provider_key = self.provider_object_key(&request.container, &request.key)?;
+        let (entry, normalized_key) = self.resolve_object_entry(&scope, &provider_key).await?;
+        let provider_new_key = self.provider_object_key(&request.container, &request.new_key)?;
         let (_, new_name, normalized_new_key) =
-            Self::upload_file_name_and_parent(&request.new_key)?;
+            Self::upload_file_name_and_parent(&provider_new_key)?;
         let source_parent = normalized_key.rsplit_once('/').map(|(parent, _)| parent);
         let destination_parent = normalized_new_key
             .rsplit_once('/')
@@ -1781,10 +2077,17 @@ impl BlobBackend for UnicomBlobAdapter {
             .scope_route_for_container(&request.destination_container)
             .await?;
         let (entry, _) = self
-            .resolve_object_entry(&source_scope, &request.source_key)
+            .resolve_object_entry(
+                &source_scope,
+                &self.provider_object_key(&request.source_container, &request.source_key)?,
+            )
             .await?;
+        let provider_destination_key = self.provider_object_key(
+            &request.destination_container,
+            &request.destination_key,
+        )?;
         let (target_parent_path, _, _) =
-            Self::upload_file_name_and_parent(&request.destination_key)?;
+            Self::upload_file_name_and_parent(&provider_destination_key)?;
         let target_directory_id = match target_parent_path.as_deref() {
             Some(path) => {
                 self.ensure_directory_path_for_scope(&destination_scope, path)
@@ -1809,10 +2112,17 @@ impl BlobBackend for UnicomBlobAdapter {
             .scope_route_for_container(&request.destination_container)
             .await?;
         let (entry, _) = self
-            .resolve_object_entry(&source_scope, &request.source_key)
+            .resolve_object_entry(
+                &source_scope,
+                &self.provider_object_key(&request.source_container, &request.source_key)?,
+            )
             .await?;
+        let provider_destination_key = self.provider_object_key(
+            &request.destination_container,
+            &request.destination_key,
+        )?;
         let (target_parent_path, _, _) =
-            Self::upload_file_name_and_parent(&request.destination_key)?;
+            Self::upload_file_name_and_parent(&provider_destination_key)?;
         let target_directory_id = match target_parent_path.as_deref() {
             Some(path) => {
                 self.ensure_directory_path_for_scope(&destination_scope, path)
@@ -2016,6 +2326,21 @@ fn upload_chunk_retry_delay(attempt: u32) -> Duration {
     Duration::from_millis(DEFAULT_UNICOM_UPLOAD_CHUNK_RETRY_DELAY_MS * attempt as u64)
 }
 
+fn upload_batch_no(
+    file_name: &str,
+    file_size: u64,
+    parent_directory_id: &str,
+    space_type: &str,
+) -> String {
+    let mut hasher = Md5::new();
+    hasher.update(file_name.as_bytes());
+    hasher.update(file_size.to_string().as_bytes());
+    hasher.update(parent_directory_id.as_bytes());
+    hasher.update(space_type.as_bytes());
+    hasher.update(current_unix_millis().to_string().as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
 fn trim_objects_to_limit(objects: &mut BTreeMap<String, ObjectInfo>, limit: usize) {
     while objects.len() > limit {
         let Some(last_key) = objects.keys().next_back().cloned() else {
@@ -2098,6 +2423,10 @@ fn normalize_object_key(value: &str) -> String {
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn elapsed_millis(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn join_relative_key(prefix: &str, name: &str) -> String {
@@ -2738,9 +3067,15 @@ mod tests {
     };
     use blob_core::{
         BlobBackend, CopyObjectRequest, HealthStatus, ListObjectsRequest, MoveObjectRequest,
-        OutboundIpFamily, PutObjectRequest, RenameObjectRequest, StorageScopeKind, TokenSource,
+        ObjectBody, OutboundIpFamily, PutObjectRequest, RenameObjectRequest, StorageScopeKind,
+        TokenSource,
     };
     use bytes::Bytes;
+    use futures_util::stream;
+    use tokio::{
+        sync::mpsc,
+        time::{Duration, sleep, timeout},
+    };
 
     use super::{
         APP_QUERY_USER_OPERATION, DEFAULT_UNICOM_UPLOAD_CHUNK_SIZE_BYTES,
@@ -2922,6 +3257,24 @@ mod tests {
                 .lock()
                 .expect("mock dispatcher requests")
                 .clone()
+        }
+
+        async fn wait_for_upload_requests(&self, min_count: usize, wait_for: Duration) {
+            timeout(wait_for, async {
+                loop {
+                    let count = self
+                        .requests()
+                        .into_iter()
+                        .filter(|request| request["kind"] == "upload")
+                        .count();
+                    if count >= min_count {
+                        return;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("expected upload requests before timeout");
         }
     }
 
@@ -3450,6 +3803,7 @@ mod tests {
             outbound_ip_family: OutboundIpFamily::Auto,
             cookie_header: None,
             user_agent: "carrier-cloud-blob-gateway/test".to_string(),
+            browser_profile: None,
             request_timeout_secs: 10,
             request_origin: Some("https://pan.wo.cn".to_string()),
             request_referer: Some("https://pan.wo.cn/".to_string()),
@@ -3466,6 +3820,7 @@ mod tests {
             family_id: None,
             family_space_type: "1".to_string(),
             family_root_directory_id: "0".to_string(),
+            root_prefix: None,
             upload_url: format!("{base_url}/openapi/client/upload2C"),
             upload_chunk_size_bytes: DEFAULT_UNICOM_UPLOAD_CHUNK_SIZE_BYTES,
             native_capability_catalog_path: None,
@@ -3480,6 +3835,18 @@ mod tests {
     ) -> UnicomBlobAdapter {
         UnicomBlobAdapter::new(UnicomConfig {
             upload_chunk_size_bytes,
+            ..mock_unicom_adapter(base_url, token).config
+        })
+        .expect("unicom test adapter should build")
+    }
+
+    fn mock_unicom_adapter_with_root_prefix(
+        base_url: &str,
+        token: &str,
+        root_prefix: &str,
+    ) -> UnicomBlobAdapter {
+        UnicomBlobAdapter::new(UnicomConfig {
+            root_prefix: Some(root_prefix.to_string()),
             ..mock_unicom_adapter(base_url, token).config
         })
         .expect("unicom test adapter should build")
@@ -4207,10 +4574,75 @@ mod tests {
             aes_cbc_decrypt_base64(file_info, token).expect("decrypt upload fileInfo");
         let decrypted_file_info: Value =
             serde_json::from_str(&decrypted_file_info).expect("parse upload fileInfo JSON");
+        assert_eq!(decrypted_file_info["spaceType"], "0");
         assert_eq!(decrypted_file_info["fileName"], "hello.txt");
         assert_eq!(decrypted_file_info["fileSize"], body.len() as u64);
         assert_eq!(decrypted_file_info["fileType"], "4");
         assert_eq!(decrypted_file_info["directoryId"], "created-dir-2");
+        assert!(
+            decrypted_file_info["batchNo"]
+                .as_str()
+                .is_some_and(|value| value.len() == 32)
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_root_maps_user_keys_under_single_provider_folder() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter =
+            mock_unicom_adapter_with_root_prefix(&server.base_url, token, "ccbg-managed");
+
+        let body = Bytes::from_static(b"managed root");
+        adapter
+            .put_object(PutObjectRequest {
+                container: UNICOM_ROOT_CONTAINER.to_string(),
+                key: "notes/status.txt".to_string(),
+                body: body.clone().into(),
+                size: Some(body.len() as u64),
+                content_type: Some("text/plain".to_string()),
+            })
+            .await
+            .expect("managed-root upload should succeed");
+
+        let listed = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(UNICOM_ROOT_CONTAINER.to_string()),
+                prefix: None,
+                limit: None,
+            })
+            .await
+            .expect("managed-root list should succeed");
+        assert!(
+            listed
+                .iter()
+                .any(|object| object.key == "notes/status.txt" && object.size == body.len() as u64)
+        );
+        assert!(!listed.iter().any(|object| object.key.contains("ccbg-managed")));
+
+        let uploaded = adapter
+            .get_object(UNICOM_ROOT_CONTAINER, "notes/status.txt")
+            .await
+            .expect("managed-root get should resolve user key");
+        assert_eq!(
+            uploaded
+                .body
+                .collect()
+                .await
+                .expect("managed-root body should collect")
+                .as_ref(),
+            body.as_ref()
+        );
+
+        let create_requests = server
+            .requests()
+            .into_iter()
+            .filter(|request| request["__operation"] == CREATE_DIRECTORY_OPERATION)
+            .collect::<Vec<_>>();
+        assert_eq!(create_requests.len(), 3);
+        assert_eq!(create_requests[0]["directoryName"], "ccbg-managed");
+        assert_eq!(create_requests[1]["directoryName"], UNICOM_ROOT_CONTAINER);
+        assert_eq!(create_requests[2]["directoryName"], "notes");
     }
 
     #[tokio::test]
@@ -4245,6 +4677,60 @@ mod tests {
                 .as_ref(),
             body.as_ref()
         );
+    }
+
+    #[tokio::test]
+    async fn put_object_streams_known_size_body_before_later_chunks_arrive() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter_with_chunk_size(&server.base_url, token, 4);
+        let (sender, receiver) = mpsc::channel(4);
+
+        sender
+            .send(Ok(Bytes::from_static(b"hell")))
+            .await
+            .expect("first chunk should enqueue");
+
+        let upload_task = tokio::spawn(async move {
+            adapter
+                .put_object(PutObjectRequest {
+                    container: UNICOM_ROOT_CONTAINER.to_string(),
+                    key: "uploads/streamed/chunked.txt".to_string(),
+                    body: ObjectBody::from_stream(stream::unfold(receiver, |mut receiver| async move {
+                        receiver.recv().await.map(|item| (item, receiver))
+                    })),
+                    size: Some(8),
+                    content_type: Some("text/plain".to_string()),
+                })
+                .await
+        });
+
+        server
+            .wait_for_upload_requests(1, Duration::from_secs(2))
+            .await;
+
+        sender
+            .send(Ok(Bytes::from_static(b"o123")))
+            .await
+            .expect("second chunk should enqueue");
+        drop(sender);
+
+        let result = upload_task
+            .await
+            .expect("upload task should join")
+            .expect("streaming upload should succeed");
+        assert_eq!(result.etag.as_deref(), Some("created-file-1"));
+
+        let uploaded = server
+            .requests()
+            .into_iter()
+            .filter(|request| request["kind"] == "upload")
+            .collect::<Vec<_>>();
+        assert_eq!(uploaded.len(), 2);
+        assert_eq!(uploaded[0]["partIndex"], 1);
+        assert_eq!(uploaded[0]["fileBytes"], 4);
+        assert_eq!(uploaded[1]["partIndex"], 2);
+        assert_eq!(uploaded[1]["fileBytes"], 4);
     }
 
     #[tokio::test]

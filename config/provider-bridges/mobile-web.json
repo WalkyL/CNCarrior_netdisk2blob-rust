@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "provider": "mobile",
+  "surface": "yun.139.com-web",
+  "label": "China Mobile Browser Bridge",
+  "description": "Bridge metadata for China Mobile browser-assisted auth and capture. Page/layout drift should first be handled here and in browser-flow catalogs, not by rewriting gateway Rust logic.",
+  "flow_aliases": {
+    "sms_request_code": "mobile_sms_login_request_code_validate",
+    "sms_resume_submit_code": "mobile_sms_login_resume_submit_code",
+    "capture_session": "mobile_capture_current_session",
+    "capture_session_from_logged_in_page": "mobile_capture_current_session_from_logged_in_page",
+    "prepare_upload_probe": "mobile_prepare_upload_probe",
+    "capture_upload_probe_state": "mobile_capture_upload_probe_state"
+  },
+  "runtime_credential_mappings": [
+    {
+      "runtime_key": "token",
+      "credential_key": "token"
+    },
+    {
+      "runtime_key": "cookie_header",
+      "credential_key": "cookie_header"
+    },
+    {
+      "runtime_key": "root_folder_id",
+      "credential_key": "root_folder_id"
+    },
+    {
+      "runtime_key": "user_domain_id",
+      "credential_key": "user_domain_id"
+    }
+  ],
+  "browser_profile": {
+    "source_url_runtime_key": "current_url",
+    "headers_runtime_key": "browser_profile_headers"
+  },
+  "logged_in_probes": [
+    {
+      "id": "main",
+      "flow_alias": "capture_session",
+      "notes": [
+        "Prefer the stable main file-list page when it is already open in CDP."
+      ]
+    },
+    {
+      "id": "logged_in_any",
+      "flow_alias": "capture_session_from_logged_in_page",
+      "target_selector": "url:https://yun.139.com/w/*",
+      "notes": [
+        "Fallback bridge probe for any authenticated in-app route under /w/."
+      ]
+    }
+  ],
+  "notes": [
+    "This catalog exists so provider page revisions mainly touch JSON catalogs instead of gateway Rust code.",
+    "Use browser-flow outputs as the stable runtime contract feeding provider credentials."
+  ]
+}
