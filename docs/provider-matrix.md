@@ -5,8 +5,8 @@
 | Provider | 产品 | 角色 | 默认入口 | 认证方式 | 当前状态 |
 | --- | --- | --- | --- | --- | --- |
 | `unicom` | 中国联通云盘 | 主写候选 / 同步候选 | `https://panservice.mail.wo.cn` | 手工 token / cookie 注入 | 已打通桌面站 `QueryAllFiles` 认证、对象列举、真实下载、`upload2C` 上传，以及 native `CreateDirectory` / `DeleteFile` / `RenameFileOrDirectory` / `CopyFile` / `MoveFile`；已探测 personal scope，并可通过 `familyId` 或 `QueryFamilyGroups` 自动发现 family scope，当前映射成 `root` / `family` 两个容器；浏览器流程配置仍覆盖短信登录、上传上下文与页面动作事实采集 |
-| `telecom` | 天翼云盘 | 主写候选 / 同步候选 | `https://cloud.189.cn` | 手工 `Browser ID` / cookie 注入，可选 token 兼容备用 | 已打通 `listFiles.action`、对象列举与真实下载；已探测 personal scope，并通过 `getUserInfoForPortal.action` 拉取容量；当前只读，写入待补 |
-| `mobile` | 中国移动云盘 | 主写候选 / 同步候选 | `https://yun.139.com` | 手工 token / cookie 注入 | 已建立适配骨架，待确认实际网页接口 |
+| `telecom` | 天翼云盘 | 主写候选 / 同步候选 | `https://cloud.189.cn` | 手工 `Browser ID` / cookie 注入，可选 token 兼容备用 | 已打通 `listFiles.action`、对象列举、真实下载，以及受控根目录下的 multipart 原生上传；已探测 personal scope，并通过 `getUserInfoForPortal.action` 拉取容量；对象级 `delete/rename/copy/move` 仍待补 |
+| `mobile` | 中国移动云盘 | 主写候选 / 同步候选 | `https://yun.139.com` | 手工 token / cookie 注入 | 已打通 `file/list`、`file/create`、`file/complete`、`file/getDownloadUrl`，支持 `root_prefix/<bucket>/<key>` 托管目录映射下的对象列举、真实上传与真实下载；family 视图与对象动作仍待补 |
 | `onedrive` | Microsoft OneDrive | 默认异步备份同步目标 / 可选 fallback | Microsoft Graph / OneDrive API | 内置 Web PKCE / Device Code / 手工 token 兜底 | 已支持 `root_prefix/<bucket>/<key>` 映射、真实 Graph 读写删、对象级 rename/copy/move、session 文件落盘与自动 refresh token 续期；对象动作执行层已做成可插拔结构，默认通过 Graph PATCH / async copy 监控完成，并可作为异步备份/可选 fallback 目标承接网关复制语义 |
 
 ## 接入策略

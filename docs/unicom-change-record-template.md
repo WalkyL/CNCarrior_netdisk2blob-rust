@@ -63,7 +63,7 @@
 
 ### 3.2 联通凭证来源
 
-- [ ] `Provider Credentials` 页面直接注入
+- [ ] `Unicom` 标签页直接注入
 - [ ] `CCBG_UNICOM_TOKEN_FILE`
 - [ ] `CCBG_UNICOM_COOKIE_HEADER_FILE`
 - [ ] 其他:
@@ -109,7 +109,7 @@ CCBG_OBJECT_ACTION_HISTORY_LIMIT=
 
 本次在 Admin Web 中执行的动作:
 
-- [ ] 更新 `China Unicom` Provider Credentials
+- [ ] 更新 `Unicom` 标签页中的 China Unicom 配置
 - [ ] 点击 `Test Now`
 - [ ] 验证 `root` 读取
 - [ ] 验证 `family` 读取

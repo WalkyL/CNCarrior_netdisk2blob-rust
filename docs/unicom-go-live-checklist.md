@@ -69,7 +69,7 @@
 - [ ] 联通 `Access Token` 已确认是新鲜的，不是历史缓存值
 - [ ] 如需要，`Cookie Header` 已同步更新
 - [ ] `Origin=https://pan.wo.cn` 与 `Referer=https://pan.wo.cn/` 已保持正确
-- [ ] `Provider Credentials -> China Unicom` 卡片里的值与预期一致
+- [ ] `Unicom` 卡片里的值与预期一致
 - [ ] 如用文件注入，`CCBG_UNICOM_TOKEN_FILE` 路径已确认
 - [ ] 如用 cookie 文件注入，`CCBG_UNICOM_COOKIE_HEADER_FILE` 路径已确认
 - [ ] 如当前依赖手工 `Family ID`，已确认该值来自当前可用会话

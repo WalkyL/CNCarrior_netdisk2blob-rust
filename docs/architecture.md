@@ -11,6 +11,9 @@
 7. 一期完整宿主优先覆盖 PVE LXC `x86/x64`、Docker `x86/x64`、Podman `x86/x64` 和 OpenWRT `arm64`。
 8. STM32 在一期按客户端兼容处理，而不是网关宿主。
 9. 源码一期按公开 GitHub 仓库交付，仓库必须具备基础许可证、CI 和容器构建入口。
+10. 所有正式 provider 都必须最终达到流式读与流式写；若上游要求预哈希或预分片，只允许使用有界磁盘 spool，不允许整对象内存缓冲。
+11. provider 页面改版时，优先改 catalog / probe / flow / action executor 等可插拔层，不能因为页面细节变化就重写整个 Rust 数据面。
+12. 对象动作执行器、客户端 bucket 派生策略、桶级加密写入策略都必须保持可插拔，不能写死为某一家云盘或某一种动作流程。
 
 ## 系统分层
 
@@ -33,6 +36,11 @@
 - 负责无头浏览器、网页会话抓取、短信验证码等待、手机号输入和必要的 LLM 辅助分析
 - 通过受控 API 把“需要手机号 / 短信码 / 验证码”的提示推送到 Admin Web，而不是在后台静默卡住
 - 应优先消费 `config/browser-flows/*.json` 这类 provider-specific 流程配置，而不是把 selector 和页面动作写死在执行器代码里
+- `gatewayd` / Admin Web / auth session 与 provider-specific flow id、surface、runtime 映射之间的绑定，应优先消费 `config/provider-bridges/*.json`，而不是在 Rust 或内联 JS 里再复制一份条件分支
+- CDP / 浏览器流程的职责仅限于取证、抓取登录态、验证页面事实、采集真实请求形状与必要运行时参数；它不是正式数据面的长期依赖
+- 任何进入正式交付范围的读写、分片、提交、删除、复制、重命名能力，都必须回落到 `gatewayd` / provider crate 内独立执行，不能要求某个 CDP 页面一直开着
+- 页面改版时，首选修 catalog / flow / capability / probe，不应把整个 provider crate 或 gateway 数据面当作页面脚本重写
+- 如果某条能力只有“浏览器页面保持在线时才能完成”，它仍然只算 probe / discovery，不算 provider 已完成
 - 对小内存设备建议只跑 `gateway-lite`，把这层放到另一台设备
 
 ### Admin UX
@@ -74,11 +82,17 @@
 
 - 分别封装联通、电信、移动云盘网页接口访问逻辑
 - 管理 token 来源、请求头拼装、错误归类
-- 联通当前已支持目录遍历、文件下载、上传、对象删除，以及对象级 rename/copy/move，并把 personal/family scope 映射成 `root` / `family` 容器；电信当前已支持目录遍历与文件下载
+- 联通当前已支持目录遍历、文件下载、上传、对象删除，以及对象级 rename/copy/move，并把 personal/family scope 映射成 `root` / `family` 容器；电信当前已支持目录遍历、流式下载，以及受控根目录下的 multipart 上传；移动当前已支持 native `file/list`、`file/create`、`file/complete`、`file/getDownloadUrl` 驱动下的对象列举、真实上传与真实下载
 - 后续继续扩展写入、分片上传、断点续传
+- provider 正式写路径必须使用程序内稳定实现，不得把“CDP 页面里点击上传”当成最终交付能力本身
+- provider 正式读写路径最终都必须流式化；若上游需要显式内容哈希或预分片，可使用有界 spool，但不能把整对象先收进内存
+- 对于任何支持真实写入的 provider，网关写入的真实对象都必须收口到 provider 内一个受控根目录下，再在其下展开 bucket/key 语义；不能把几千个散碎对象直接撒到云盘根目录
 - 对于来自真实浏览器/CDP 的页面元素、流程和请求形状，优先沉淀到浏览器流程配置层，而不是把页面细节直接硬编码到 provider crate
+- 对于 provider-specific 的 surface 名称、flow alias、logged-in probe、runtime→credential 映射，优先沉淀到 `config/provider-bridges/*.json`，让控制面和 auth session 逻辑复用同一套绑定
 - 对于已经稳定下来的 native dispatcher 动作，优先把操作名、默认字段和值约束沉淀到 `config/provider-capabilities/*.json`，让 provider crate 只保留执行器、鉴权、加密和错误归类
+- 对象动作、客户端 bucket 派生、桶级加密写入等策略也应遵循同样的可插拔边界，优先通过 catalog / executor / policy 扩展，而不是把某种流程写死在 `gatewayd`
 - 对于账号发现、作用域发现、下载/上传/写路径确认这类“后续要自动探测”的目标，优先沉淀到 `config/provider-probes/*.json`，让控制面和 sidecar 后续直接消费同一份探测清单
+- provider 真实 I/O 表现必须进入网关可观测面：至少沉淀首次响应时间、最近读/写延迟、滚动吞吐与最近一次大流量传输均速，供后续读写路由策略消费
 
 ### `gatewayd`
 
@@ -86,6 +100,7 @@
 - 根据配置选择具体 provider，并将 REST 请求转换为 `BlobBackend` 调用
 - 通过 `policy-engine` 校验唯一主写与 sync target 拓扑
 - 在对象写入和删除成功后向 `replication-engine` 写入复制任务
+- 负责汇总 provider 级 I/O 观测结果，并通过 `GET /api/status` / `GET /metrics` 暴露给控制面与后续路由策略
 - 已内嵌最小控制面，提供 Admin HTML 首页、`GET /api/status`、`GET /api/auth/onedrive/status`、`GET /api/auth/onedrive/web/start`、`POST /api/auth/onedrive/device/start`、`GET /api/auth/onedrive/device/{flow_id}` 和 `GET /auth/onedrive/callback`
 - 已支持 `POST /api/object-actions`，并已在 Admin Web 暴露对象动作面板，可把对象级 `rename/copy/move` 动作直接下发给当前主 provider，并在成功后补齐对应的异步复制元数据：`rename=put(new)+delete(old)`、`copy=put(dest)`、`move=put(dest)+delete(src)`
 - Admin Web 对象动作面板现在会展示 before/after 对象检查结果，并把最近共享执行历史持久化到 control-plane 文件；`POST /api/object-actions/history/clear` 用于清空这份服务端共享历史
@@ -104,7 +119,8 @@
 - 已支持 `POST /api/browser-flows/session-run`，可用控制面默认 CDP 配置或请求级覆盖配置直接执行一条浏览器 flow
 - 当 flow 缺少必填人工输入时，`session-run` 现在会先落一条 `auth_session_id` 会话、自动创建 prompts，并返回 `awaiting_input`，而不是立即失败
 - 已支持 `GET /api/browser-flows/session/{session_id}` 轮询这条人工认证会话的状态、prompts、last_error 和最近 execution report
-- 已支持在 flow 成功执行后把 `script_value` / `url` 类型的 browser-flow outputs 回填到该 auth session 的 `runtime`，供后续复用同一 `auth_session_id` 的 flow 直接消费登录态
+- 已支持在 flow 成功执行后把 `script_value` / `dom_text` / `url` 类型的 browser-flow outputs 回填到该 auth session 的 `runtime`，供后续复用同一 `auth_session_id` 的 flow 直接消费登录态
+- `POST /api/browser-flows/session-run` 的返回值当前也会直接带回这次会话最新的 `runtime`，方便控制面或 auth-broker 读取页面事实，而不用再写 provider-specific API
 - 已支持按 `prerequisite_flow_id` 递归执行浏览器 flow 前置链，便于把“当前会话抓取 -> uploader 准备 -> 实际上传”这类页面内依赖收口到同一条 auth session
 - 输出健康检查、日志、后续指标和审计信息
 
@@ -153,6 +169,12 @@
 - 当前联通桌面站样例已覆盖短信登录和个人空间上传
 - 这层是为了隔离网页改版风险，供 `auth-capture` sidecar / CDP 执行层消费
 - schema 当前由 `blob-core::BrowserFlowCatalog` 定义
+
+### `config/provider-bridges`
+
+- 存放 provider 与控制面 / auth session 之间的桥接元数据，例如 `surface`、flow alias、runtime→credential 映射、browser profile runtime key、logged-in probe 绑定
+- 这层是为了让页面 flow id 或控制面字段改动优先落在 JSON，而不是重写 `gatewayd` 的 Rust / 内联 JS
+- schema 当前由 `blob-core::ProviderBridgeCatalog` 定义
 
 ### 后续扩展模块
 
@@ -250,6 +272,7 @@ Agent -> Skill -> mcp-server / gatewayd
 3. 生成针对每个 sync target 的复制任务写入本地队列，并把当时的 `source provider` 一起写入 job
 4. 后台异步复制到目标集合
 5. 更新每个 target 的复制状态
+6. provider 侧真实对象必须落在该 provider 的单一受控根目录下，再在其下映射 bucket/key；不能直接散落到用户云盘根目录
 
 ### 读取
 

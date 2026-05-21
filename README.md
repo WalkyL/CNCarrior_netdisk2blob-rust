@@ -4,9 +4,15 @@
 
 项目目标是把中国联通、中国电信、中国移动云盘与 OneDrive 接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商或 `stub` provider 作为唯一写入主云盘，其他被选中的后端可作为异步同步目标，OneDrive 默认仍作为异步备份同步对象，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。源码一期按公开 GitHub 仓库形式发布。
 
-当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、对象级 rename/copy/move、session 持久化与异步复制，但在本项目中仍仅作为异步备份同步对象与可选 fallback 目标，不作为主写后端；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载、上传、对象删除，并把 personal/family scope 映射成 `root`/`family` 两个容器；电信 provider 已打通真实目录列举和下载，写路径待补；移动 provider 仍是接口确认骨架。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置、运行态监控摘要、聚合监控摘要面板、自动刷新控制，以及带 `operator/ticket/notes`、时间范围筛选的对象动作共享审计历史。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
+当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、对象级 rename/copy/move、session 持久化与异步复制，但在本项目中仍仅作为异步备份同步对象与可选 fallback 目标，不作为主写后端；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载、上传、对象删除，并把 personal/family scope 映射成 `root`/`family` 两个容器；电信 provider 已打通真实目录列举、流式下载、受控根目录下的 multipart 上传与有界 spool 写路径，但对象级 delete/rename/copy/move 仍待补；移动 provider 已打通真实对象列举、上传与下载，family 视图与对象动作仍待补。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置、运行态监控摘要、聚合监控摘要面板、自动刷新控制，以及带 `operator/ticket/notes`、时间范围筛选的对象动作共享审计历史。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
-针对网页端经常改版的运营商流程，仓库现在额外引入了“浏览器流程配置”层，用 `config/browser-flows/*.json` 记录页面元素、JS 入口点和关键请求形状，尽量把 DOM 变动隔离成配置改动而不是 Rust 逻辑改动。对已经证明稳定、但仍然可能有静态字段微调的 provider-native 能力，则额外放进 `config/provider-capabilities/*.json`，把 dispatcher 操作名和默认请求体固定项沉淀成可替换组件。对“每个云盘后续还要自动探测哪些账号、作用域、读写路径事实”，则额外放进 `config/provider-probes/*.json`。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程，并为 native `CreateDirectory` / `DeleteFile` 和后续自动探测项维护独立 catalog。
+针对网页端经常改版的运营商流程，仓库现在额外引入了三层可替换事实配置: `config/provider-bridges/*.json` 负责 `gatewayd` / Admin Web / auth session 与 provider-specific surface、flow alias、runtime→credential 映射之间的绑定；`config/browser-flows/*.json` 负责页面元素、JS 入口点和关键请求形状；`config/provider-capabilities/*.json` 负责已经证明稳定的 native 请求模板。对“每个云盘后续还要自动探测哪些账号、作用域、读写路径事实”，则额外放进 `config/provider-probes/*.json`。这几层的目的都是把页面和控制面漂移优先收敛成 JSON 改动，而不是重写 Rust 数据面。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程，并为 native `CreateDirectory` / `DeleteFile` 和后续自动探测项维护独立 catalog。
+
+当前项目还明确采用以下硬约束：
+
+- 所有正式 provider 最终都必须支持流式读与流式写；若上游要求显式内容哈希或预分片，只允许使用有界磁盘 spool，不允许整对象内存缓冲。
+- provider 页面改版时，优先修改 `browser-flow` / `provider-capabilities` / `provider-probes` 等可替换事实层，不能因为页面细节变化就重写整个 Rust 数据面程序。
+- 对象动作执行器、客户端 bucket 派生策略、桶级加密写入策略必须保持可插拔，不能写死成某一家云盘的专有流程。
 
 浏览器执行层当前统一收口到标准 CDP，而不是绑定某个浏览器品牌。`browser-cdp` crate 负责连接可配置的 CDP endpoint、选择 page target、执行基础页面动作，`gatewayd` 则提供 catalog 查询、dry-run 和最小真实 session 执行入口，便于后续把 auth-capture 编排继续外挂出来。
 
@@ -29,6 +35,7 @@
 carrier-cloud-blob-gateway/
 ├── config/
 │   ├── browser-flows/   # provider 网页流程描述，供 CDP/auth-capture 执行层复用
+│   ├── provider-bridges/ # gateway/auth UI 与 browser-flow 之间的 provider-specific 绑定
 │   ├── provider-capabilities/ # provider-native 能力描述，供稳定请求执行层复用
 │   ├── provider-probes/ # 每个 provider 的自动探测项描述
 │   └── example.env
@@ -109,6 +116,7 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 
 软路由场景建议同时把 `CCBG_DATA_PLANE_MAX_IN_FLIGHT` 控制在 `2~4`，让数据面在并发超限时直接返回 `503`，而不是在小内存宿主上继续堆积请求。
 如果客户端有突发请求峰值，还可以再打开 `CCBG_DATA_PLANE_MAX_REQUESTS_PER_SECOND`，做一个更保守的每秒请求阀门。
+如果控制面需要被非本机访问，再额外配置 `CCBG_CONTROL_API_KEY`；这和 S3 数据面的 `CCBG_S3_ACCESS_KEY_ID/SECRET` 是两套独立认证。
 
 规划中的同步拓扑:
 
@@ -178,6 +186,13 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `GET http://127.0.0.1:61083/healthz` -> 返回扩展健康摘要，包含 `runtime`、`monitoring` 和当前 alerts
 - `GET http://127.0.0.1:61083/readyz` -> 返回 `200` / `503`，用于宿主探针判断 primary provider 是否可服务
 - `GET http://127.0.0.1:61083/metrics` -> 返回 Prometheus 文本格式指标，覆盖 uptime、open alerts、provider health、replication job 计数和对象动作汇总
+
+当前已落地的控制面认证:
+
+- `CCBG_CONTROL_API_KEY` 可独立保护 Admin Web、`/api/*`、`/healthz`、`/readyz`、`/metrics`
+- 脚本访问可用 `x-api-key: <key>` 或 `Authorization: Bearer <key>`
+- 浏览器访问可首次打开 `http://host:61081/?api_key=<key>`，服务端会落一个 `HttpOnly` cookie，后续 Admin Web 刷新与 API 调用可继续复用
+- S3 数据面仍然单独使用 `CCBG_S3_ACCESS_KEY_ID` + `CCBG_S3_SECRET_ACCESS_KEY` 的 SigV4，不复用控制面 API key
 
 当前已落地的复制人工干预能力:
 

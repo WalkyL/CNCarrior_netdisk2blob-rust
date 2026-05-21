@@ -37,8 +37,8 @@
 
 1. 先给服务配置一个独立的 `CCBG_CREDENTIALS_DIR`。
 2. 再通过 Admin Web 把各 provider 的 token / cookie / OneDrive OAuth 必要字段写入各自 JSON 文件。
-3. 如果后续启用 auth capture sidecar，需要在 Admin Web 的 `Auth Capture / LLM` 卡片里先填好 `Broker URL`，以及 CDP 入口配置，例如 `CDP Endpoint URL`、可选 `CDP Target Selector`、可选 `CDP Target Timeout`，再按需填写 `LLM Endpoint` / `LLM Model ID` / `LLM API Key`。
-3. 只有在没有浏览器或不方便打开管理页时，再退回 `*_TOKEN_FILE`。
+3. 如果后续启用 auth capture / CDP，需要在 Admin Web 的 `Browser / CDP` 和 `LLM Assist` 页里先填好多组 CDP / LLM 入口。
+4. 只有在没有浏览器或不方便打开管理页时，再退回 `*_TOKEN_FILE`。
 
 ## 你需要准备什么
 
@@ -46,8 +46,14 @@
 
 - 你的云盘账号已经能在浏览器里正常打开
 - 一台能运行本项目的 Linux 主机
-- Chrome、Edge 或其他带开发者工具的浏览器
+- 一台带 Chrome、Edge 或其他现代浏览器的电脑
 - 一个只给自己看的 token 文件目录
+
+如果你的宿主是软路由，还要额外记住一件事:
+
+- 软路由只跑 `carrier-cloud-blob-gateway`
+- 浏览器 / CDP 只跑在管理员电脑或另一台带浏览器的 LAN 机器上
+- Admin 页面里填写的 CDP 地址，必须是浏览器宿主机的局域网地址，不是软路由自己的 `127.0.0.1`
 
 推荐先创建一个专用目录:
 
@@ -87,13 +93,8 @@ CCBG_CREDENTIALS_DIR=$HOME/.config/ccbg/credentials
 ### 第 2 步: 打开 Admin Web
 
 1. 在浏览器访问 `http://127.0.0.1:61081/`
-2. 找到页面中的 `Provider Credentials`
-3. 你会看到:
-
-- `China Unicom`
-- `China Telecom`
-- `China Mobile`
-- `Microsoft OneDrive`
+2. 找到顶部的运营商独立标签页，例如 `Unicom`、`Telecom`、`Mobile` 或 `OneDrive OAuth`
+3. 你会看到与运营商一一对应的独立标签页和表单。
 
 ### 第 3 步: 按 provider 粘贴认证字段
 
@@ -222,6 +223,225 @@ chmod 600 $HOME/.config/ccbg/credentials/example.token
 
 则把 `foo=1; bar=2` 作为 cookie 内容保存。
 
+## 软路由 + 管理员电脑的 CDP 认证模型
+
+这一段是给下面这种场景准备的:
+
+- `carrier-cloud-blob-gateway` 跑在软路由上
+- 软路由没有资源跑 Chrome / Edge
+- 管理员平时在自己的管理电脑上打开 Admin 页面
+- 浏览器自动化要借用管理员电脑，或者另一台专门的浏览器主机
+
+先记住最重要的结论:
+
+- 软路由不跑浏览器
+- 浏览器验证动作通过 CDP 在“浏览器宿主机”上执行
+- 浏览器宿主机可以是管理员电脑，也可以是另一台 LAN 机器
+- 网关只需要能通过 LAN 访问到这个 CDP 地址
+- 你在 Admin 页面里填的必须是 `http://<浏览器宿主机局域网IP>:9222`
+- 不要填 `http://127.0.0.1:9222`
+- 当前如果网关直接调用这些 CDP / LLM 入口，`Auth Broker URL` 可以留空
+
+### 什么时候可以用管理员电脑当浏览器宿主机
+
+适合:
+
+- 你平时就是在这台电脑上打开 Admin 页面
+- 这台电脑上有 Chrome / Edge
+- 这台电脑和软路由在同一个局域网
+
+不适合:
+
+- 管理电脑经常关机
+- 管理电脑和软路由不在同一个 LAN
+- 你想让浏览器验证长期跑在一台固定工作站上
+
+### 场景 A: 软路由跑网关, 管理员电脑就是 CDP 宿主机
+
+下面用一个具体例子:
+
+- 软路由 / 网关: `192.168.1.43`
+- 管理员电脑 / CDP 宿主机: `192.168.1.36`
+- Admin 页面: `http://192.168.1.43:61081`
+- 你要填入的 CDP 地址: `http://192.168.1.36:9222`
+
+Step by step:
+
+1. 先确认软路由上的网关已经起来，并且你能从管理电脑打开:
+
+```text
+http://192.168.1.43:61081
+```
+
+2. 在管理员电脑上准备 CDP。
+
+Linux / macOS:
+
+```bash
+cd /path/to/carrier-cloud-blob-gateway
+./scripts/setup-cdp-browser-host.sh 192.168.1.36
+```
+
+Windows PowerShell:
+
+```powershell
+cd C:\path\to\carrier-cloud-blob-gateway
+.\scripts\setup-cdp-browser-host.ps1 -HostIp 192.168.1.36
+```
+
+这两个脚本都会按同一个幂等流程做事:
+
+- 先探测 `127.0.0.1:9222`
+- 只有在本机 CDP 还没起来时才启动专用浏览器 profile
+- 重建一个从 `192.168.1.36:9222` 到 `127.0.0.1:9222` 的 LAN 桥接
+- 最后同时验证本机地址和 LAN 地址
+
+3. 在管理员电脑上手工验证:
+
+```bash
+curl http://127.0.0.1:9222/json/version
+curl http://192.168.1.36:9222/json/version
+```
+
+如果第二条不通，说明局域网桥接或防火墙还没打通。
+
+4. 打开 `http://192.168.1.43:61081`，进入 `Browser / CDP`。
+
+5. 点击 `Add CDP Endpoint`，填写:
+
+- `Label`: `admin-pc`
+- `CDP Endpoint URL`: `http://192.168.1.36:9222`
+- `Enabled`: 打开
+- `Target Selector`: 留空
+- `Target Timeout`: 先留默认
+
+6. `Auth Broker URL` 先留空。
+
+当前这套模型里，网关会直接调用你填入的 CDP 地址，不需要额外 broker。
+
+7. 点击 `Save Browser / CDP Settings`。
+
+8. 点击 `Probe Preferred`。
+
+如果页面里看到 `same host as admin`，并且 probe 成功，说明页面已经识别到“你当前打开 Admin 的电脑”和“CDP 宿主机”是同一台 LAN 机器。
+
+9. 如果后续要让模型辅助识别验证码或网页提示，再去 `LLM Assist` 里配置一组或多组 LLM endpoint。
+
+10. 之后开始联通云盘或电信云盘的认证时:
+
+- 网关会去调用 `http://192.168.1.36:9222`
+- 浏览器动作会在你的管理员电脑上发生
+- 如果需要手机号、短信码、验证码，输入框会出现在 `Pending Verification Inputs`
+- 你在 Admin 页面填完以后，流程再继续
+
+### 场景 B: 软路由跑网关, 另一台浏览器工作站做 CDP 宿主机
+
+下面用另一个例子:
+
+- 软路由 / 网关: `192.168.1.43`
+- 管理员电脑: `192.168.1.36`
+- 专门的浏览器工作站: `192.168.1.50`
+- 你要填入的 CDP 地址: `http://192.168.1.50:9222`
+
+Step by step:
+
+1. 在 `192.168.1.50` 上执行同样的 CDP 启动脚本。
+
+Linux / macOS:
+
+```bash
+cd /path/to/carrier-cloud-blob-gateway
+./scripts/setup-cdp-browser-host.sh 192.168.1.50
+```
+
+Windows PowerShell:
+
+```powershell
+cd C:\path\to\carrier-cloud-blob-gateway
+.\scripts\setup-cdp-browser-host.ps1 -HostIp 192.168.1.50
+```
+
+2. 在这台浏览器工作站上确认:
+
+```bash
+curl http://127.0.0.1:9222/json/version
+curl http://192.168.1.50:9222/json/version
+```
+
+3. 在管理员电脑上打开:
+
+```text
+http://192.168.1.43:61081
+```
+
+4. 在 `Browser / CDP` 里新增 endpoint:
+
+- `Label`: `browser-station`
+- `CDP Endpoint URL`: `http://192.168.1.50:9222`
+- `Enabled`: 打开
+- `Target Selector`: 留空
+
+5. 保存后点击 `Probe Preferred` 或 `Probe All`。
+
+这时不会出现 `same host as admin`，因为 Admin 页面在 `192.168.1.36` 打开，而真正的 CDP 宿主机是 `192.168.1.50`。这是正常的。
+
+6. 认证开始以后:
+
+- 你在 `192.168.1.36` 上看 Admin 页面
+- 实际浏览器标签页和点击动作发生在 `192.168.1.50`
+- 人工补验证码、短信码时，仍然回到 Admin 页的 `Pending Verification Inputs`
+
+### 多个 CDP endpoint 应该怎么填
+
+推荐做法:
+
+1. 把管理员电脑放第一优先级
+2. 再把专门工作站放第二优先级
+3. 两个都能通时，优先尝试管理员电脑
+4. 管理员电脑关机或 CDP 异常时，再回退到工作站
+
+例如:
+
+- `http://192.168.1.36:9222`
+- `http://192.168.1.50:9222`
+
+这样能和当前 Admin 页里的 `Probe Preferred`、`Probe All`、优先级排序、同机偏好逻辑配合起来。
+
+### LLM 和 CDP 各自负责什么
+
+CDP 负责:
+
+- 打开网页
+- 找页面元素
+- 点击
+- 输入
+- 读取页面状态
+
+LLM 负责可选的辅助判断，例如:
+
+- 页面提示词理解
+- 非稳定验证码/挑战提示的辅助解释
+- 较模糊的目标页判断
+
+所以大多数情况下:
+
+- 先把 CDP 配通
+- 再决定是否真的需要打开 `LLM Assist`
+
+### Auth Broker 在当前模型里要不要填
+
+如果你的网关就是直接调这些 CDP / LLM 地址:
+
+- `Auth Broker URL` 留空
+
+只有在下面这种结构里才需要填:
+
+- 网关不直接碰 CDP
+- 另有一台独立服务，专门负责编排 CDP、人工输入和 LLM
+- 网关只把认证任务转发给那台 broker
+
+在你现在这个“软路由 + 管理员电脑 / 浏览器工作站”的模型里，通常先不要填。
+
 ## 中国联通云盘
 
 ### 当前代码支持到什么程度
@@ -319,7 +539,7 @@ CCBG_UNICOM_AUTH_PROBE_OPERATION=QueryAllFiles
 CCBG_UNICOM_AUTH_PROBE_BODY_JSON={"spaceType":"0","parentDirectoryId":"0","pageNum":0,"pageSize":50,"sortRule":0}
 ```
 
-如果你更想走网页方式，也可以不写 `CCBG_UNICOM_TOKEN_FILE`，而是在 `Provider Credentials -> China Unicom` 卡片里把 token 和 cookie 直接粘进去。保存后会写入 `CCBG_CREDENTIALS_DIR/unicom.json`，并立即热生效。
+如果你更想走网页方式，也可以不写 `CCBG_UNICOM_TOKEN_FILE`，而是在 `Unicom` 卡片里把 token 和 cookie 直接粘进去。保存后会写入 `CCBG_CREDENTIALS_DIR/unicom.json`，并立即热生效。
 
 如果你同时有联通家庭云，并且希望控制面把家庭空间发现并暴露成 `family` bucket，可以额外填写:
 
@@ -370,7 +590,7 @@ curl -s http://127.0.0.1:61080/__ccbg/providers
 
 - `missing environment variable: CCBG_UNICOM_TOKEN`
 
-说明你还没有把联通 token 真正保存进去。最简单的修复方法就是打开 `Provider Credentials -> China Unicom`，把 `Access Token` 粘进去后点击 `Save Credentials`。
+说明你还没有把联通 token 真正保存进去。最简单的修复方法就是打开 `Unicom`，把 `Access Token` 粘进去后点击 `Save Credentials`。
 
 如果页面提示:
 
@@ -383,19 +603,20 @@ curl -s http://127.0.0.1:61080/__ccbg/providers
 2. 刷到能看到文件列表
 3. 重新抓一条 `QueryAllFiles` 请求
 4. 复制新的 `accesstoken`
-5. 再次保存到 `China Unicom` 卡片
+5. 再次保存到 `Unicom` 标签页
 
 ## 中国电信天翼云盘
 
 ### 当前代码支持到什么程度
 
-当前 `provider-telecom` 已经打通到天翼云盘网页版真实文件列表和下载直链流程:
+当前 `provider-telecom` 已经打通到天翼云盘网页版真实文件列表、下载直链和 personal 空间原生上传流程:
 
 - 已支持 `Browser ID`、`Cookie Header`、可选 `Access Token`
 - 已支持 health 真实请求 `listFiles.action`
 - 已支持把天翼云盘根目录映射成单个 S3 bucket: `root`
-- 已支持 `ListBuckets` / `ListObjectsV2` / `head_object` / `get_object`
-- 当前仍然是只读 provider，还没有完成写入、删除和上传
+- 已支持 `ListBuckets` / `ListObjectsV2` / `head_object` / `get_object` / `put_object`
+- 已支持在受控根目录下按 multipart 链路真实上传对象；若上游要求预分片和显式哈希，网关会先把请求体落到有界 spool，再回放上传
+- 当前原生 `delete` / `rename` / `copy` / `move` 仍未完成
 
 ### 电信云盘 Step by Step
 
@@ -456,7 +677,7 @@ CCBG_TELECOM_TOKEN_FILE=$HOME/.config/ccbg/credentials/telecom.token
 
 如果你没有拿到 `AccessToken`，也可以先不配 `CCBG_TELECOM_TOKEN_FILE`。当前版本主流程以 `Browser ID + Cookie` 为主，`Access Token` 主要作为“上游未来收紧时的兼容备用”。
 
-15. 如果你更想走网页方式，也可以直接打开 `Provider Credentials -> China Telecom`，把:
+15. 如果你更想走网页方式，也可以直接打开 `Telecom`，把:
 
 - `Browser ID`
 - `Cookie Header`
@@ -493,8 +714,8 @@ curl -s http://127.0.0.1:61080/__ccbg/providers
 
 同样注意:
 
-- 当前版本已经完成真实读取链路验证
-- 当前还不代表“写入、删除、上传”已经完成
+- 当前版本已经完成真实读取和上传链路验证
+- 当前还不代表 `delete` / `rename` / `copy` / `move` 已经完成
 
 如果页面提示:
 
@@ -562,7 +783,7 @@ CCBG_MOBILE_TOKEN_FILE=$HOME/.config/ccbg/credentials/mobile.token
 CCBG_MOBILE_COOKIE_HEADER=
 ```
 
-如果你更想走网页方式，也可以直接打开 `Provider Credentials -> China Mobile`，把 token / cookie 粘进去。保存后会写入 `CCBG_CREDENTIALS_DIR/mobile.json`，并立即热生效。
+如果你更想走网页方式，也可以直接打开 `Mobile`，把 token / cookie 粘进去。保存后会写入 `CCBG_CREDENTIALS_DIR/mobile.json`，并立即热生效。
 
 14. 如果后续真实 provider 需要 cookie，再补:
 
@@ -621,7 +842,7 @@ CCBG_ONEDRIVE_SESSION_FILE=$HOME/.config/ccbg/credentials/onedrive-session.json
 CCBG_ONEDRIVE_ROOT_PREFIX=carrier-cloud-blob-gateway
 ```
 
-如果你不想手改环境变量，也可以在 `Provider Credentials -> Microsoft OneDrive` 卡片里填写 `Client ID`、`Tenant`、`Drive ID`、`Redirect URL`。这些字段会写入 `CCBG_CREDENTIALS_DIR/onedrive.json`，新授权流程会立即读取它们。
+如果你不想手改环境变量，也可以在 `OneDrive OAuth` 卡片里填写 `Client ID`、`Tenant`、`Drive ID`、`Redirect URL`。这些字段会写入 `CCBG_CREDENTIALS_DIR/onedrive.json`，新授权流程会立即读取它们。
 
 2. 创建 session 文件目录:
 

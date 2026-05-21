@@ -229,6 +229,12 @@
 - `provider_health`
 - `replication_state`
 
+如果配置了 `CCBG_CONTROL_API_KEY`，这个接口以及其他 Admin Web / 控制面接口都需要以下任一认证方式:
+
+- `x-api-key: <key>`
+- `Authorization: Bearer <key>`
+- 浏览器先访问 `/?api_key=<key>` 获得 `HttpOnly` cookie，再继续调用页面里的 `/api/*`
+
 `replication_state` 当前除了 `persisted.recent_jobs` 和 `target_statuses`，还会额外返回:
 
 - `latest_failed_jobs`: 只包含“每个 target + bucket + key 当前最新状态仍为 failed”的对象级失败视图

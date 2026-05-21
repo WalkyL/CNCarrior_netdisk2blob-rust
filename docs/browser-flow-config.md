@@ -14,9 +14,32 @@
 
 这样做的结果是:
 
+- 页面与控制面之间的 provider-specific 绑定，优先改 `config/provider-bridges/*.json`
 - 页面小改版时，优先改 `config/browser-flows/*.json`
 - provider crate 继续只负责稳定的对象存储语义和上游协议
 - 后续 `auth-capture` sidecar / CDP 执行层可以共享同一套流程描述
+
+## 这层明确不负责什么
+
+这里需要刻意收紧边界，避免后续实现走偏:
+
+- `browser-flow` / CDP 负责抓取事实，不负责承载正式对象能力。
+- 它适合做:
+  - 登录态抓取
+  - 页面结构校验
+  - 真实请求/字段/响应契约采样
+  - provider 尚未 native 化前的人工探针
+- 它不适合做:
+  - 依赖某个已打开网页长期存活的正式上传/下载实现
+  - 把真实业务写入长期绑在某个浏览器 tab 上
+  - 以“浏览器里能点通”为由跳过 provider crate 内的稳定实现
+
+必须遵守的原则:
+
+1. 如果浏览器页被关闭、刷新、跳转后能力就消失，这条能力仍然只能算 `probe/discovery`，不能算 provider 已完成。
+2. `set_files` 这类步骤只用于探测页面上传契约、验证 selector、观察真实请求，不应被当成长期生产写路径的最终形态。
+3. 一旦某个上传/删除/重命名/复制/移动契约已经明确，正式能力应迁回 `gatewayd` / provider crate 内执行。
+4. 文档、测试、控制面文案都要把“页面探针”和“正式能力”区分开，不能混写成一个概念。
 
 ## 当前结构
 
@@ -24,10 +47,13 @@
 
 - Rust 类型: [crates/blob-core/src/browser_flow.rs](/home/walky/workspaces/carrier-cloud-blob-gateway/crates/blob-core/src/browser_flow.rs:1)
 - 联通样例: [config/browser-flows/unicom-web.json](/home/walky/workspaces/carrier-cloud-blob-gateway/config/browser-flows/unicom-web.json:1)
+- provider bridge 类型: [crates/blob-core/src/provider_bridge.rs](/home/walky/workspaces/carrier-cloud-blob-gateway/crates/blob-core/src/provider_bridge.rs:1)
+- 移动 bridge 样例: [config/provider-bridges/mobile-web.json](/home/walky/workspaces/carrier-cloud-blob-gateway/config/provider-bridges/mobile-web.json:1)
 
 并且现在已经有了最小的“目录级 loader + 查询接口”基础:
 
 - `blob-core::BrowserFlowCatalogCollection` 可以从 `config/browser-flows/` 目录批量加载 catalog，并按 `provider/surface` 查找
+- `blob-core::ProviderBridgeCatalogCollection` 可以从 `config/provider-bridges/` 目录批量加载 bridge catalog，并按 `provider` 查找
 - `blob-core::BrowserFlowCatalog::bind_flow(...)` / `BrowserFlowCatalogCollection::bind_flow(...)` 可以把 `flows[].inputs`、`runtime.*` 和 `preset_refs` 绑定成一份已解析模板的执行计划
 - `blob-core::DryRunBrowserFlowExecutor` 可以把绑定后的执行计划展开成逐步的 `Planned` 报告，方便在接入真实 CDP 执行层之前先验证 catalog、输入绑定和预期请求
 - `blob-core::BrowserFlowSession` / `BrowserFlowSessionExecutor` 已经定义了真实执行时需要的通用浏览器动作边界，例如 `navigate`、`click`、`set_input`、`set_files`、`wait_for_request`、`wait_for_page`
@@ -50,7 +76,8 @@
   - 底层 transport 统一走 `browser-cdp` crate，不绑定某个具体浏览器品牌
   - 如果缺少必填 `inputs.*`，当前会返回 `status=awaiting_input` 并自动创建对应的 auth-capture prompts；待提示项回答后，可带同一个 `auth_session_id` 重试
   - `GET /api/browser-flows/session/{session_id}` 可轮询当前会话的 `pending/awaiting_input/answered/resumed/completed/failed` 状态、关联 prompts、最近 report 和 last_error
-  - 当 flow 成功完成后，`gatewayd` 当前会把 `flows[].outputs` 里的 `script_value` / `url` 输出写回同一条 auth session 的 `runtime`，供后续复用同一个 `auth_session_id` 的 flow 继续绑定 `{{runtime.*}}`
+  - 当 flow 成功完成后，`gatewayd` 当前会把 `flows[].outputs` 里的 `script_value` / `dom_text` / `url` 输出写回同一条 auth session 的 `runtime`，供后续复用同一个 `auth_session_id` 的 flow 继续绑定 `{{runtime.*}}`
+  - `POST /api/browser-flows/session-run` 的返回值当前也会直接带回这次会话最新的 `runtime`，方便控制面或 auth-broker 读取“点击前文本 / 点击后文本 / 是否进入倒计时”这类可插拔校验结果，而不用再写 provider-specific API
   - 当 flow 声明了 `prerequisite_flow_id`，`gatewayd` 会在同一条 `auth_session_id` 和同一个 CDP page session 内递归执行 prerequisite chain，再执行主 flow
   - 当前这一步还没有实现完整的 `response_field` / `request_field` 抓取；先覆盖登录后页面内可直接读取的 token / URL / store state
 
@@ -66,6 +93,13 @@
 - `operations`: 页面内 JS/Vue 入口点
 - `flows`: 组合后的业务流程
 
+`flows[].inputs[]` 目前除了 `id / label / kind / required / secret / description` 之外，还支持:
+
+- `transient: true`
+  - 适合图形验证码这类短时输入
+  - `gatewayd` 不会把这类值长期保留在 auth session 里反复复用
+  - `solve_visual_captcha` 在单次执行里也只会消费一次这类手工值，避免后续 captcha step 误填上一个 challenge
+
 `flows` 当前支持的步骤类型包括:
 
 - `navigate`
@@ -77,6 +111,25 @@
 - `wait_for_request`
 - `wait_for_page`
 - `wait`
+
+## `provider-bridge` 负责什么
+
+`browser-flow` 负责页面动作本身，但它不应该承担控制面字段命名和 provider-specific UI 分支。
+
+这部分现在单独抽到 `config/provider-bridges/*.json`，主要描述:
+
+- `surface`
+- `flow_aliases`
+- `runtime_credential_mappings`
+- `browser_profile`
+- `logged_in_probes`
+
+这层的边界是:
+
+- 如果页面 flow id 改了，但动作语义没变，优先改 `provider-bridges`
+- 如果 selector、JS 入口点、页面 URL pattern 变了，优先改 `browser-flows`
+- 如果稳定 native 请求模板的静态字段变了，优先改 `provider-capabilities`
+- 只有当上游正式对象协议或 provider-native 语义变化时，才应该回到 Rust provider / gateway 执行器改代码
 
 ## 联通样例现在覆盖了什么
 
@@ -146,6 +199,9 @@
 4. 关键网络请求要把“真正决定成功”的字段写清楚。
 5. 如果页面流程必须先调用某个 JS/Vue 方法，不要把它降级成纯 selector 点击说明。
 6. 对登录态、client id、family id 这类可从页面上下文直接读取的值，优先记录成 `outputs[].kind=script_value`，避免在 provider 代码里二次猜测。
+7. 如果要做“点击前后页面是否发生了预期变化”的校验，优先把它做成独立 browser flow，并用 `prerequisite_flow_id` 抓取前态、主 flow 抓取后态，再把结果记录到 `outputs[].kind=dom_text` 或 `script_value`。
+8. 不同运营商的校验逻辑不要写死在 Rust 里。联通可以看 `.change-code`，电信/移动可以看别的按钮、提示条、倒计时或错误提示，只要各自定义自己的 flow outputs 即可。
+9. 图形验证码、一次性 challenge 这类值不要当成可长期复用输入；在 `flows[].inputs[]` 里显式标 `transient: true`。
 
 ## 与 provider 代码的边界
 
@@ -157,6 +213,12 @@
 - `provider-unicom` 负责“怎么在服务里表达联通对象读写能力”
 - `provider-capabilities` 负责“哪些已经稳定的 native 请求可以配置化复用”
 - `provider-probes` 负责“后续自动探测应该逐项确认哪些事实”
+
+再强调一次:
+
+- 浏览器流程是取证层，不是最终能力层。
+- provider crate 才是正式读写语义的长期落点。
+- 如果某个实现只能在 CDP 活页存在时工作，它最多只能帮助我们拿到契约，不能作为完成态保留。
 
 当后续联通写路径真正落进 Rust provider 时，优先复用这层产出的稳定事实:
 
