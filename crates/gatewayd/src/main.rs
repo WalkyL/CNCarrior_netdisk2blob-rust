@@ -12137,28 +12137,28 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
             <div class="provider-note">浏览器应当运行在管理电脑或其他具备浏览器能力的局域网主机上，而不是软路由本机。尽量保持这些浏览器主机稳定、端口固定、地址可预测，便于后续登录流程复用。</div>
             <div class="cdp-chip-grid">
               <span class="cdp-chip"><strong>Active list</strong><span id="auth-capture-cdp-current-endpoint">0 endpoints</span></span>
-              <span class="cdp-chip"><strong>Primary</strong><span id="auth-capture-cdp-current-selector">not set</span></span>
-              <span class="cdp-chip"><strong>Timeout</strong><span id="auth-capture-cdp-current-timeout">default</span></span>
+              <span class="cdp-chip"><strong>首选</strong><span id="auth-capture-cdp-current-selector">未设置</span></span>
+              <span class="cdp-chip"><strong>超时</strong><span id="auth-capture-cdp-current-timeout">默认</span></span>
             </div>
             <div class="cdp-note-block">
-              <strong>Recommended input</strong>
-              <div class="provider-note">Start with base URLs such as <span class="mono">http://192.168.1.36:9222</span> or <span class="mono">http://browser-host-b:9222</span>. If your admin computer is the browser host, enter that machine's LAN IP here. The gateway can derive target discovery from there and fail over when one host is down.</div>
+              <strong>推荐填写方式</strong>
+              <div class="provider-note">建议先填基础地址，例如 <span class="mono">http://192.168.1.36:9222</span> 或 <span class="mono">http://browser-host-b:9222</span>。如果你的管理电脑本身就是浏览器主机，就在这里填写那台机器的局域网 IP。</div>
             </div>
             <div class="cdp-note-block">
-              <strong>LAN reminder</strong>
-              <div class="provider-note">If a browser only listens on <span class="mono">127.0.0.1:9222</span>, bridge it on that browser host first. The gateway must be able to reach <span class="mono">http://&lt;browser-host-lan-ip&gt;:9222</span>. Do not enter <span class="mono">localhost</span> or <span class="mono">127.0.0.1</span> here unless the gateway and browser are truly on the same machine.</div>
+              <strong>局域网提醒</strong>
+              <div class="provider-note">如果浏览器只监听在 <span class="mono">127.0.0.1:9222</span>，请先在浏览器主机上把它桥接到局域网地址。除非网关和浏览器真的在同一台机器上，否则这里不要填写 <span class="mono">localhost</span> 或 <span class="mono">127.0.0.1</span>。</div>
             </div>
             <div class="cdp-note-block">
-              <strong>Advanced selector</strong>
-              <div class="provider-note">Optional only. In most carrier flows you can leave it empty. Use <span class="mono">title:pan.wo.cn</span> or <span class="mono">url:https://pan.wo.cn/*</span> only when one endpoint should stay pinned to a particular target.</div>
+              <strong>高级选择器</strong>
+              <div class="provider-note">这是可选项，大多数运营商流程都可以留空。只有你明确要把某个端点钉死到特定网页时，才需要填类似 <span class="mono">title:pan.wo.cn</span> 或 <span class="mono">url:https://pan.wo.cn/*</span>。</div>
             </div>
             <div class="cdp-note-block">
-              <strong>Setup scripts</strong>
-              <div class="provider-note">Use <span class="mono">scripts/setup-cdp-browser-host.sh</span> on Linux/macOS browser hosts or <span class="mono">scripts/setup-cdp-browser-host.ps1</span> on Windows browser hosts. They follow the same idempotent pattern as <span class="mono">llm-router</span>: probe loopback, launch a dedicated browser profile only if needed, rebuild the LAN bridge, then verify both addresses.</div>
+              <strong>准备脚本</strong>
+              <div class="provider-note">Linux / macOS 浏览器主机用 <span class="mono">scripts/setup-cdp-browser-host.sh</span>，Windows 浏览器主机用 <span class="mono">scripts/setup-cdp-browser-host.ps1</span>。它们会自动探测本机回环地址、按需启动独立浏览器配置、重建局域网桥接并验证连通性。</div>
             </div>
             <div class="cdp-script-card">
-              <strong>Generated Launch Scripts</strong>
-              <div class="provider-note">Generate an idempotent CDP browser launch script for the selected browser host. This follows the same operator model as <span class="mono">llm-router</span>, but is scoped to this gateway's Browser / CDP page.</div>
+              <strong>生成启动脚本</strong>
+              <div class="provider-note">可以为选中的浏览器主机生成一份可重复执行的 CDP 启动脚本。它遵循和 <span class="mono">llm-router</span> 类似的运维方式，但只服务于本项目的“浏览器 / CDP”页面。</div>
               <div id="auth-capture-browser-help-feedback" class="flash"></div>
               <div id="auth-capture-browser-help-panel"></div>
             </div>
@@ -12167,26 +12167,26 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       </div>
     </section>
     <section class="card" style="margin-top: 16px;">
-      <h2>Pending Verification Inputs</h2>
-      <p>If carrier login needs a phone number, SMS code, password, or captcha, the auth-broker should push a prompt here instead of hanging in the background.</p>
+      <h2>待处理的人机输入</h2>
+      <p>如果运营商登录流程需要手机号、短信验证码、密码或验证码图片，认证代理应当把提示推到这里，而不是在后台卡住不提示。</p>
       <div id="auth-capture-prompts-feedback" class="flash"></div>
       <div id="auth-capture-prompts" class="provider-grid"></div>
     </section>
     </div>
     <div id="admin-tab-llm" class="admin-tab-panel">
     <section class="card" style="margin-top: 16px;">
-      <h2>LLM Assist</h2>
-      <p>Configure one or more LLM endpoints for auth assistance. Endpoints are tried in priority order, so you can keep a preferred local model first and a fallback model behind it.</p>
-      <div class="provider-note">Screenshot-based page verification, before/after image comparison, and carrier page element cross-checking require a multimodal model that accepts image input. Text-only models can still help with prompt interpretation, but they cannot inspect screenshots.</div>
-      <label><input id="auth-capture-llm-enabled" type="checkbox" /> Allow LLM-assisted auth analysis</label>
-      <div class="provider-note">Only enable this when the broker really needs model help for captcha or prompt interpretation. Otherwise keep browser automation deterministic.</div>
-      <div class="provider-note">If you want the broker to verify that a carrier page changed from <span class="mono">发送验证码</span> to a countdown after clicking, put a vision-capable multimodal model first in the priority list below.</div>
+      <h2>LLM 辅助</h2>
+      <p>在这里配置一个或多个 LLM 端点，用于认证辅助。端点会按优先级依次尝试，因此你可以把本地优先模型放前面，再把兜底模型放后面。</p>
+      <div class="provider-note">如果你要做页面截图校验、点击前后对比或页面元素交叉检查，必须使用支持图像输入的多模态模型。纯文本模型可以理解提示语，但看不了截图。</div>
+      <label><input id="auth-capture-llm-enabled" type="checkbox" /> 允许使用 LLM 辅助认证分析</label>
+      <div class="provider-note">只有当认证代理真的需要模型来识别验证码或理解复杂提示时，才建议启用。否则尽量保持浏览器自动化流程可预测、可复现。</div>
+      <div class="provider-note">如果你希望代理判断运营商页面是否从“发送验证码”变成了倒计时，请把支持视觉的多模态模型放在下面优先级列表的最前面。</div>
       <div class="actions" style="margin-top: 12px;">
-        <button id="auth-capture-add-llm-endpoint" class="secondary" type="button">Add LLM Endpoint</button>
-        <button id="save-auth-capture-llm" type="button">Save LLM Settings</button>
+        <button id="auth-capture-add-llm-endpoint" class="secondary" type="button">新增 LLM 端点</button>
+        <button id="save-auth-capture-llm" type="button">保存 LLM 设置</button>
       </div>
       <div id="auth-capture-llm-endpoints-list" class="browser-endpoints-list"></div>
-      <div id="auth-capture-llm-summary" class="hint">Loading LLM assist policy…</div>
+      <div id="auth-capture-llm-summary" class="hint">正在加载 LLM 辅助策略…</div>
     </section>
     </div>
     <div id="admin-tab-onedrive" class="admin-tab-panel app-hidden">
@@ -12199,71 +12199,71 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     </div>
     <div id="admin-tab-unicom" class="admin-tab-panel">
     <section class="card" style="margin-top: 16px;">
-      <h2>China Unicom Login Assistant</h2>
-      <p>Run the broker-style browser login flow here. This assistant can capture a session from an already logged-in CDP browser page, or drive the SMS login flow and then inject the captured access token back into the Unicom credential form below.</p>
+      <h2>中国联通登录助手</h2>
+      <p>在这里运行类似认证代理的浏览器登录流程。它既可以从已经登录的 CDP 浏览器页面直接抓会话，也可以驱动短信登录流程，再把抓到的访问令牌回填到下面的联通凭据表单。</p>
       <div id="unicom-auth-assistant-feedback" class="flash"></div>
       <div id="unicom-auth-assistant-panel"></div>
     </section>
     <section class="card" style="margin-top: 16px;">
-      <h2>China Unicom</h2>
-      <p>Paste the auth material for China Unicom here. The shortest path is to save only <span class="mono">Access Token</span> first, then use <span class="mono">Provider Health -> Test Now</span> to verify.</p>
+      <h2>中国联通</h2>
+      <p>在这里填写中国联通的认证材料。最短路径通常是先只保存 <span class="mono">Access Token</span>，再到“提供方健康度”里点“立即测试”做验证。</p>
       <div id="provider-credentials-feedback-unicom" class="flash"></div>
       <div id="provider-credentials-card-unicom"></div>
     </section>
     </div>
     <div id="admin-tab-telecom" class="admin-tab-panel">
     <section class="card" style="margin-top: 16px;">
-      <h2>China Telecom Login Assistant</h2>
-      <p>Run the broker-style browser login flow here. This assistant can drive Telecom SMS login inside the live <span class="mono">cloud.189.cn</span> page, then inject the captured session values back into the Telecom credential form below.</p>
+      <h2>中国电信登录助手</h2>
+      <p>在这里运行类似认证代理的浏览器登录流程。它可以直接在实时 <span class="mono">cloud.189.cn</span> 页面里驱动电信短信登录，再把抓到的会话值回填到下面的电信凭据表单。</p>
       <div id="telecom-auth-assistant-feedback" class="flash"></div>
       <div id="telecom-auth-assistant-panel"></div>
     </section>
     <section class="card" style="margin-top: 16px;">
-      <h2>China Telecom</h2>
-      <p>Paste the auth material for China Telecom here. In most cases <span class="mono">Browser ID</span> plus <span class="mono">Cookie Header</span> is enough; the token can stay empty unless you know you need it.</p>
+      <h2>中国电信</h2>
+      <p>在这里填写中国电信的认证材料。大多数情况下 <span class="mono">Browser ID</span> 加 <span class="mono">Cookie Header</span> 就够了；除非你明确知道需要，否则令牌字段可以先留空。</p>
       <div id="provider-credentials-feedback-telecom" class="flash"></div>
       <div id="provider-credentials-card-telecom"></div>
     </section>
     </div>
     <div id="admin-tab-mobile" class="admin-tab-panel">
     <section class="card" style="margin-top: 16px;">
-      <h2>China Mobile Login Assistant</h2>
-      <p>Run the broker-style browser login flow here. This assistant can drive the China Mobile SMS login page when the current CDP tab is logged out, or skip straight into capture when that tab is already authenticated.</p>
+      <h2>中国移动登录助手</h2>
+      <p>在这里运行类似认证代理的浏览器登录流程。当前 CDP 标签页未登录时，它会驱动移动短信登录；如果该标签页已经登录，它会直接进入会话抓取。</p>
       <div id="mobile-auth-assistant-feedback" class="flash"></div>
       <div id="mobile-auth-assistant-panel"></div>
     </section>
     <section class="card" style="margin-top: 16px;">
-      <h2>China Mobile</h2>
-      <p>Paste the auth material for China Mobile here. The shortest path is to use the assistant above: if the current CDP tab is already logged in, it captures the live session directly; if it is logged out, it guides the SMS login flow and then captures the session for you.</p>
+      <h2>中国移动</h2>
+      <p>在这里填写中国移动的认证材料。最省事的方式通常是直接用上面的助手：如果当前 CDP 标签页已经登录，它会直接抓实时会话；如果未登录，它会先引导短信登录，再替你完成抓取。</p>
       <div id="provider-credentials-feedback-mobile" class="flash"></div>
       <div id="provider-credentials-card-mobile"></div>
     </section>
     </div>
     <div id="admin-tab-diagnostics" class="admin-tab-panel">
     <section class="card" style="margin-top: 16px;">
-      <h2>Diagnostics</h2>
-      <p>Raw status payloads and live provider credential JSON stay here for debugging, but the main tabs above should remain readable without JSON.</p>
+      <h2>诊断</h2>
+      <p>这里保留原始状态负载和各提供方凭据 JSON，方便排障。但正常日常操作不应依赖这些 JSON，前面的主标签页应当足够可读。</p>
       <div class="provider-grid">
         <div class="provider-card">
-          <h3>China Unicom JSON</h3>
-          <pre id="provider-credential-output-unicom">Loading…</pre>
+          <h3>中国联通 JSON</h3>
+          <pre id="provider-credential-output-unicom">正在加载…</pre>
         </div>
         <div class="provider-card">
-          <h3>China Telecom JSON</h3>
-          <pre id="provider-credential-output-telecom">Loading…</pre>
+          <h3>中国电信 JSON</h3>
+          <pre id="provider-credential-output-telecom">正在加载…</pre>
         </div>
         <div class="provider-card">
-          <h3>China Mobile JSON</h3>
-          <pre id="provider-credential-output-mobile">Loading…</pre>
+          <h3>中国移动 JSON</h3>
+          <pre id="provider-credential-output-mobile">正在加载…</pre>
         </div>
         <div class="provider-card app-hidden">
           <h3>Microsoft OneDrive JSON</h3>
-          <pre id="provider-credential-output-onedrive">Loading…</pre>
+          <pre id="provider-credential-output-onedrive">正在加载…</pre>
         </div>
       </div>
       <details>
-        <summary>Gateway status JSON</summary>
-        <pre id="gateway-status">Loading…</pre>
+        <summary>网关状态 JSON</summary>
+        <pre id="gateway-status">正在加载…</pre>
       </details>
     </section>
     </div>
