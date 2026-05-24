@@ -4898,6 +4898,42 @@ struct ObjectPlacementRecordsPayload {
 }
 
 #[derive(Debug, Serialize)]
+struct ObjectReconcilePreviewSummaryPayload {
+    total_rows: usize,
+    no_change_count: usize,
+    needs_changes_count: usize,
+    skipped_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ObjectReconcilePreviewRowPayload {
+    bucket: String,
+    key: String,
+    home_provider: String,
+    home_label: String,
+    application_id: Option<String>,
+    logical_content_type: Option<String>,
+    encrypted: bool,
+    current_sync_targets: Vec<String>,
+    desired_sync_targets: Vec<String>,
+    add_sync_targets: Vec<String>,
+    remove_sync_targets: Vec<String>,
+    status: &'static str,
+    status_label: &'static str,
+    note: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ObjectReconcilePreviewPayload {
+    provider_filter: Option<String>,
+    bucket_filter: Option<String>,
+    prefix_filter: Option<String>,
+    limit: usize,
+    rows: Vec<ObjectReconcilePreviewRowPayload>,
+    summary: ObjectReconcilePreviewSummaryPayload,
+}
+
+#[derive(Debug, Serialize)]
 struct DeleteStaleObjectPlacementPayload {
     provider: String,
     label: String,
@@ -4963,6 +4999,14 @@ struct ObjectPlacementProvidersQuery {
 
 #[derive(Debug, Deserialize)]
 struct ObjectPlacementRecordsQuery {
+    provider: Option<String>,
+    bucket: Option<String>,
+    prefix: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ObjectReconcilePreviewQuery {
     provider: Option<String>,
     bucket: Option<String>,
     prefix: Option<String>,
@@ -5537,6 +5581,10 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         .route(
             "/api/object-placement/records",
             get(list_object_placement_records),
+        )
+        .route(
+            "/api/object-reconcile/preview",
+            get(preview_object_reconcile),
         )
         .route(
             "/api/object-placement/delete-stale",
@@ -10882,6 +10930,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     .object-browser-shell > p {{ margin: 6px 0 0; }}
     .object-browser-controls {{ display:grid; grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.25fr) 120px auto; gap: 10px; margin-top: 12px; align-items:end; }}
     .object-placement-record-controls {{ display:grid; grid-template-columns: 140px minmax(150px, 0.9fr) minmax(220px, 1.3fr) 120px auto; gap: 10px; margin-top: 12px; align-items:end; }}
+    .object-reconcile-controls {{ display:grid; grid-template-columns: 140px minmax(150px, 0.9fr) minmax(220px, 1.3fr) 120px auto; gap: 10px; margin-top: 12px; align-items:end; }}
     .object-browser-actions {{ display:flex; flex-wrap:wrap; gap: 8px; align-items:center; }}
     .object-browser-results {{ margin-top: 10px; }}
     .object-browser-key {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }}
@@ -10895,6 +10944,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     .object-placement-controls label {{ min-width: 110px; }}
     .object-placement-summary-note {{ margin-top: 8px; }}
     .object-placement-record-note {{ min-width: 240px; white-space: normal; }}
+    .object-reconcile-note {{ min-width: 260px; white-space: normal; }}
     .object-placement-samples {{ display:flex; flex-direction:column; gap: 4px; min-width: 0; }}
     .object-placement-sample {{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }}
     .object-placement-reasons {{ display:flex; flex-direction:column; gap: 4px; min-width: 0; }}
@@ -11234,6 +11284,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     @media (max-width: 640px) {{
       .object-browser-controls {{ grid-template-columns: 1fr; }}
       .object-placement-record-controls {{ grid-template-columns: 1fr; }}
+      .object-reconcile-controls {{ grid-template-columns: 1fr; }}
       .object-placement-controls {{ flex-direction: column; align-items: stretch; }}
       .object-browser-action-cell {{ width:auto; white-space:normal; }}
       .top-status-main,
@@ -11611,6 +11662,46 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
           </div>
         </div>
         <div id="object-placement-records-results" class="table-wrap object-browser-results"></div>
+      </div>
+      <div class="object-browser-shell">
+        <h3>历史对象策略收敛预览</h3>
+        <p>内容策略的变化默认只影响新写入和后续覆盖写。历史对象不会自动补副本、删旧副本、迁移归属、加密重写或解密重写。这里先做安全预览：列出“如果你之后显式执行收敛，这些历史对象会增加哪些副本、移除哪些副本”。如果缺少应用 ID 或逻辑内容类型等关键上下文，这里会明确标注“暂不能安全预览”。</p>
+        <div class="object-reconcile-controls">
+          <div>
+            <label>云盘</label>
+            <select id="object-reconcile-provider">
+              <option value="all" selected>全部</option>
+              <option value="unicom">中国联通</option>
+              <option value="telecom">中国电信</option>
+              <option value="mobile">中国移动</option>
+            </select>
+          </div>
+          <div>
+            <label><span class="field-label">桶<span class="field-help" tabindex="0" role="note" data-tooltip="逻辑桶维度筛选。这里只看历史 placement 元数据，不是当前实时读来源。" aria-label="逻辑桶维度筛选。这里只看历史 placement 元数据，不是当前实时读来源。">?</span></span></label>
+            <select id="object-reconcile-bucket">
+              <option value="" selected>全部 bucket</option>
+            </select>
+          </div>
+          <div>
+            <label>对象前缀过滤</label>
+            <input id="object-reconcile-prefix" type="text" placeholder="sessions/ or shared/" />
+          </div>
+          <div>
+            <label>最多显示</label>
+            <select id="object-reconcile-limit">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </div>
+          <div class="object-browser-actions">
+            <button id="reload-object-reconcile-preview" class="secondary" type="button">刷新收敛预览</button>
+          </div>
+        </div>
+        <div id="object-reconcile-feedback" class="flash"></div>
+        <div id="object-reconcile-summary" class="hint object-placement-summary-note">加载后可查看：哪些历史对象已经符合当前副本策略，哪些如果显式收敛会增删副本，哪些因为缺少上下文暂时不能安全预览。</div>
+        <div id="object-reconcile-results" class="table-wrap object-browser-results"></div>
       </div>
       <div class="object-browser-shell">
         <h3>浏览桶和对象 Key（当前读来源）</h3>
@@ -13341,6 +13432,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         renderLimitProbeResult(providerLimitProbeLatestResult);
         renderObjectBrowserBucketOptions();
         renderObjectPlacementRecordBucketOptions();
+        renderObjectReconcileBucketOptions();
         renderObjectBrowserResults(objectBrowserState.objects_payload);
       }} else {{
         renderTopStatusStrip();
@@ -13350,6 +13442,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         renderLimitProbeResult(providerLimitProbeLatestResult);
         renderObjectBrowserBucketOptions();
         renderObjectPlacementRecordBucketOptions();
+        renderObjectReconcileBucketOptions();
         renderObjectBrowserResults(objectBrowserState.objects_payload);
       }}
       resetLimitProbeLog();
@@ -13485,6 +13578,11 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       objects_payload: null,
     }};
     let objectPlacementState = {{
+      loading: false,
+      loaded: false,
+      payload: null,
+    }};
+    let objectReconcileState = {{
       loading: false,
       loaded: false,
       payload: null,
@@ -15140,6 +15238,14 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       node.textContent = message || '';
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }}
+    function setObjectReconcileFeedback(message, tone) {{
+      const node = document.getElementById('object-reconcile-feedback');
+      if (!node) {{
+        return;
+      }}
+      node.textContent = message || '';
+      node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
+    }}
     function setObjectActionFeedback(message, tone) {{
       const node = document.getElementById('object-action-feedback');
       node.textContent = message || '';
@@ -15252,6 +15358,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         }}
         if (!objectPlacementRecordsState.loaded && !objectPlacementRecordsState.loading) {{
           void loadObjectPlacementRecords();
+        }}
+        if (!objectReconcileState.loaded && !objectReconcileState.loading) {{
+          void loadObjectReconcilePreview();
         }}
         if (!objectBrowserState.buckets_loaded && !objectBrowserState.loading_buckets) {{
           void loadObjectBrowserBuckets();
@@ -18016,8 +18125,132 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         limit: objectPlacementRecordLimit(),
       }};
     }}
+    function objectReconcileFilters() {{
+      const provider = String(document.getElementById('object-reconcile-provider')?.value || 'all').trim() || 'all';
+      const bucket = document.getElementById('object-reconcile-bucket')?.value.trim() || '';
+      const prefix = document.getElementById('object-reconcile-prefix')?.value.trim() || '';
+      const numeric = Number(document.getElementById('object-reconcile-limit')?.value || '{DEFAULT_OBJECT_PLACEMENT_RECORD_LIMIT}');
+      return {{
+        provider,
+        bucket,
+        prefix,
+        limit: Number.isFinite(numeric) && numeric > 0 ? numeric : {DEFAULT_OBJECT_PLACEMENT_RECORD_LIMIT},
+      }};
+    }}
     function objectPlacementRecordId(provider, bucket, key) {{
       return JSON.stringify([String(provider || '').trim(), String(bucket || '').trim(), String(key || '').trim()]);
+    }}
+    function renderObjectReconcilePreview(payload = null) {{
+      objectReconcileState.payload = payload;
+      const summaryNode = document.getElementById('object-reconcile-summary');
+      const container = document.getElementById('object-reconcile-results');
+      if (!summaryNode || !container) {{
+        return;
+      }}
+      if (!payload) {{
+        container.innerHTML = '';
+        summaryNode.textContent = '加载后可查看：哪些历史对象已经符合当前副本策略，哪些如果显式收敛会增删副本，哪些因为缺少上下文暂时不能安全预览。';
+        return;
+      }}
+      const rows = payload.rows || [];
+      const summary = payload.summary || {{}};
+      const parts = [
+        `显示 ${{summary.total_rows || rows.length}} 条历史对象`,
+        `已符合=${{summary.no_change_count || 0}}`,
+        `需要显式收敛=${{summary.needs_changes_count || 0}}`,
+        `暂不能预览=${{summary.skipped_count || 0}}`,
+      ];
+      if (payload.provider_filter) {{
+        parts.push(`云盘=${{providerLabel(payload.provider_filter)}}`);
+      }}
+      if (payload.bucket_filter) {{
+        parts.push(`bucket=${{bucketDisplayName(payload.bucket_filter)}}`);
+      }}
+      if (payload.prefix_filter) {{
+        parts.push(`前缀=${{payload.prefix_filter}}`);
+      }}
+      parts.push(`最多显示=${{payload.limit || rows.length}}`);
+      summaryNode.textContent = `${{parts.join(' · ')}}。`;
+      if (!rows.length) {{
+        container.innerHTML = `
+          <table>
+            <tbody>
+              <tr><td>当前筛选条件下没有可预览的历史对象。</td></tr>
+            </tbody>
+          </table>
+        `;
+        return;
+      }}
+      const providerList = values => (Array.isArray(values) && values.length ? values.map(providerLabel).join(', ') : '无');
+      container.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>归属云盘</th>
+              <th>Bucket</th>
+              <th>对象 Key</th>
+              <th>应用 ID</th>
+              <th>当前副本目标</th>
+              <th>期望副本目标</th>
+              <th>变化</th>
+              <th>状态</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${{rows.map(row => `
+              <tr>
+                <td><strong>${{escapeHtml(row.home_label || providerLabel(row.home_provider))}}</strong><br><span class="mono">${{escapeHtml(row.home_provider || '')}}</span></td>
+                <td>${{escapeHtml(bucketDisplayName(row.bucket))}}</td>
+                <td class="object-browser-key">${{escapeHtml(row.key)}}</td>
+                <td>${{escapeHtml(row.application_id || '无')}}</td>
+                <td>${{escapeHtml(providerList(row.current_sync_targets))}}</td>
+                <td>${{escapeHtml(providerList(row.desired_sync_targets))}}</td>
+                <td class="object-reconcile-note">${{escapeHtml(`新增：${{providerList(row.add_sync_targets)}}；移除：${{providerList(row.remove_sync_targets)}}`)}}</td>
+                <td><span class="pill ${{row.status === 'no_change' ? 'complete' : row.status === 'needs_changes' ? 'pending' : 'blocked'}}">${{escapeHtml(row.status_label || row.status || '未知')}}</span></td>
+                <td class="object-reconcile-note">${{escapeHtml(row.note || '')}}</td>
+              </tr>
+            `).join('')}}
+          </tbody>
+        </table>
+      `;
+    }}
+    async function loadObjectReconcilePreview(force = false) {{
+      if (objectReconcileState.loading) {{
+        return;
+      }}
+      if (!force && objectReconcileState.loaded && objectReconcileState.payload) {{
+        renderObjectReconcilePreview(objectReconcileState.payload);
+        return;
+      }}
+      const filters = objectReconcileFilters();
+      setObjectReconcileFeedback('正在加载历史对象策略收敛预览…', 'warn');
+      objectReconcileState.loading = true;
+      try {{
+        const query = new URLSearchParams();
+        if (filters.provider && filters.provider !== 'all') {{
+          query.set('provider', filters.provider);
+        }}
+        if (filters.bucket) {{
+          query.set('bucket', filters.bucket);
+        }}
+        if (filters.prefix) {{
+          query.set('prefix', filters.prefix);
+        }}
+        query.set('limit', String(filters.limit));
+        const payload = await fetchJson(`/api/object-reconcile/preview?${{query.toString()}}`);
+        objectReconcileState.loaded = true;
+        renderObjectReconcilePreview(payload);
+        setObjectReconcileFeedback('历史对象策略收敛预览已加载。', 'ok');
+      }} catch (error) {{
+        objectReconcileState.loaded = false;
+        objectReconcileState.payload = null;
+        renderObjectReconcilePreview(null);
+        document.getElementById('object-reconcile-summary').textContent = error.message;
+        setObjectReconcileFeedback(error.message, 'warn');
+      }} finally {{
+        objectReconcileState.loading = false;
+      }}
     }}
     function objectPlacementRecordSelectableRows(payload = objectPlacementRecordsState.payload) {{
       return (payload?.rows || []).filter(row => row.delete_allowed);
@@ -18466,6 +18699,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         renderObjectBrowserBucketOptions();
         renderObjectActionBucketOptions();
         renderObjectPlacementRecordBucketOptions();
+        renderObjectReconcileBucketOptions();
         renderObjectBrowserResults(null);
         renderContentPoliciesEditor();
         setObjectBrowserFeedback(tr('object.browser.feedback.buckets_loaded', {{}}, 'Buckets loaded.'), 'ok');
@@ -18478,6 +18712,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         renderObjectBrowserBucketOptions();
         renderObjectActionBucketOptions();
         renderObjectPlacementRecordBucketOptions();
+        renderObjectReconcileBucketOptions();
         renderContentPoliciesEditor();
         document.getElementById('object-browser-results').innerHTML = '';
         document.getElementById('object-browser-summary').textContent = error.message;
@@ -18497,6 +18732,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         renderObjectBrowserBucketOptions();
         renderObjectActionBucketOptions();
         renderObjectPlacementRecordBucketOptions();
+        renderObjectReconcileBucketOptions();
         renderContentPoliciesEditor();
         setContentPoliciesFeedback(
           `Loaded ${{objectBrowserState.buckets.length}} live bucket choice${{objectBrowserState.buckets.length === 1 ? '' : 's'}} for content policies.`,
@@ -23124,6 +23360,20 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
       select.innerHTML = optionMarkup.join('');
       select.value = options.some(option => option.value === preferred) ? preferred : '';
     }}
+    function renderObjectReconcileBucketOptions() {{
+      const select = document.getElementById('object-reconcile-bucket');
+      if (!select) {{
+        return;
+      }}
+      const preferred = String(select.value || '').trim();
+      const options = contentPolicyKnownBucketOptions();
+      const optionMarkup = [
+        `<option value="">全部 bucket</option>`,
+        ...options.map(option => `<option value="${{escapeHtmlAttr(option.value)}}">${{escapeHtml(option.label)}}</option>`),
+      ];
+      select.innerHTML = optionMarkup.join('');
+      select.value = options.some(option => option.value === preferred) ? preferred : '';
+    }}
     function splitContentPolicyKnownValues(values, options) {{
       const normalizedValues = normalizePolicyValueList(values);
       const knownIds = new Set((options || []).map(option => option.value));
@@ -25938,25 +26188,45 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     document.getElementById('reload-object-placement-records').addEventListener('click', () => {{
       loadObjectPlacementRecords(true);
     }});
+    document.getElementById('reload-object-reconcile-preview').addEventListener('click', () => {{
+      loadObjectReconcilePreview(true);
+    }});
     document.getElementById('object-placement-records-provider').addEventListener('change', () => {{
       objectPlacementRecordsState.loaded = false;
       loadObjectPlacementRecords(true);
+    }});
+    document.getElementById('object-reconcile-provider').addEventListener('change', () => {{
+      objectReconcileState.loaded = false;
+      loadObjectReconcilePreview(true);
     }});
     document.getElementById('object-placement-records-bucket').addEventListener('change', () => {{
       objectPlacementRecordsState.loaded = false;
       loadObjectPlacementRecords(true);
     }});
+    document.getElementById('object-reconcile-bucket').addEventListener('change', () => {{
+      objectReconcileState.loaded = false;
+      loadObjectReconcilePreview(true);
+    }});
     document.getElementById('object-placement-records-limit').addEventListener('change', () => {{
       objectPlacementRecordsState.loaded = false;
       loadObjectPlacementRecords(true);
     }});
+    document.getElementById('object-reconcile-limit').addEventListener('change', () => {{
+      objectReconcileState.loaded = false;
+      loadObjectReconcilePreview(true);
+    }});
     document.getElementById('delete-selected-object-placement-records').addEventListener('click', deleteSelectedObjectPlacementRecords);
-    ['object-placement-records-prefix'].forEach(id => {{
+    ['object-placement-records-prefix', 'object-reconcile-prefix'].forEach(id => {{
       document.getElementById(id).addEventListener('keydown', event => {{
         if (event.key === 'Enter') {{
           event.preventDefault();
-          objectPlacementRecordsState.loaded = false;
-          loadObjectPlacementRecords(true);
+          if (id === 'object-placement-records-prefix') {{
+            objectPlacementRecordsState.loaded = false;
+            loadObjectPlacementRecords(true);
+          }} else {{
+            objectReconcileState.loaded = false;
+            loadObjectReconcilePreview(true);
+          }}
         }}
       }});
     }});
@@ -27665,6 +27935,22 @@ async fn list_object_placement_records(
             bucket.as_deref(),
             prefix.as_deref(),
             limit,
+        )
+        .await?,
+    ))
+}
+
+async fn preview_object_reconcile(
+    State(state): State<AppState>,
+    Query(query): Query<ObjectReconcilePreviewQuery>,
+) -> Result<Json<ObjectReconcilePreviewPayload>, ApiError> {
+    Ok(Json(
+        object_reconcile_preview_payload(
+            &state,
+            query.provider.as_deref(),
+            query.bucket.as_deref(),
+            query.prefix.as_deref(),
+            query.limit.unwrap_or(DEFAULT_OBJECT_PLACEMENT_RECORD_LIMIT),
         )
         .await?,
     ))
@@ -29979,6 +30265,31 @@ impl PutEncryptionPlan {
     }
 }
 
+fn build_plaintext_logical_record(
+    bucket: &str,
+    key: &str,
+    plaintext_size: u64,
+    content_type: Option<String>,
+    application: &S3ApplicationIdentity,
+) -> LogicalObjectRecord {
+    LogicalObjectRecord {
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        application_id: Some(application.application_id.clone()),
+        encrypted: false,
+        encryption_profile_id: None,
+        algorithm: None,
+        key_id: None,
+        key_source_kind: None,
+        key_source_ref: None,
+        chunk_plaintext_bytes: None,
+        plaintext_size,
+        stored_size: plaintext_size,
+        logical_content_type: content_type,
+        updated_at_unix_ms: current_unix_ms(),
+    }
+}
+
 fn create_spooled_request_body_file(config: &AppConfig) -> Result<TokioFile, S3Error> {
     let file = match config.body_spool_dir.as_deref() {
         Some(path) => {
@@ -31383,6 +31694,318 @@ async fn object_placement_records_payload(
         limit,
         rows,
     })
+}
+
+async fn object_reconcile_preview_payload(
+    state: &AppState,
+    provider_filter: Option<&str>,
+    bucket_filter: Option<&str>,
+    prefix_filter: Option<&str>,
+    limit: usize,
+) -> Result<ObjectReconcilePreviewPayload, BlobError> {
+    if provider_filter.is_some_and(|provider| !admin_user_visible_provider_name(provider)) {
+        return Ok(ObjectReconcilePreviewPayload {
+            provider_filter: provider_filter.map(str::to_string),
+            bucket_filter: bucket_filter.map(str::to_string),
+            prefix_filter: prefix_filter.map(str::to_string),
+            limit,
+            rows: Vec::new(),
+            summary: ObjectReconcilePreviewSummaryPayload {
+                total_rows: 0,
+                no_change_count: 0,
+                needs_changes_count: 0,
+                skipped_count: 0,
+            },
+        });
+    }
+
+    let fetch_limit = limit
+        .saturating_mul(4)
+        .clamp(limit, MAX_OBJECT_PLACEMENT_RECORD_LIMIT);
+    let records = state
+        .metadata_store
+        .list_object_placements(provider_filter, bucket_filter, prefix_filter, fetch_limit)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+
+    let mut rows = Vec::with_capacity(limit);
+    let mut no_change_count = 0usize;
+    let mut needs_changes_count = 0usize;
+    let mut skipped_count = 0usize;
+
+    for record in records {
+        if !admin_user_visible_provider_name(&record.provider) {
+            continue;
+        }
+        let row = object_reconcile_preview_row_payload(state, &record)?;
+        match row.status {
+            "no_change" => no_change_count += 1,
+            "needs_changes" => needs_changes_count += 1,
+            _ => skipped_count += 1,
+        }
+        rows.push(row);
+        if rows.len() >= limit {
+            break;
+        }
+    }
+
+    Ok(ObjectReconcilePreviewPayload {
+        provider_filter: provider_filter.map(str::to_string),
+        bucket_filter: bucket_filter.map(str::to_string),
+        prefix_filter: prefix_filter.map(str::to_string),
+        limit,
+        summary: ObjectReconcilePreviewSummaryPayload {
+            total_rows: rows.len(),
+            no_change_count,
+            needs_changes_count,
+            skipped_count,
+        },
+        rows,
+    })
+}
+
+fn object_reconcile_preview_row_payload(
+    state: &AppState,
+    record: &ObjectPlacementRecord,
+) -> Result<ObjectReconcilePreviewRowPayload, BlobError> {
+    let current_plan = load_object_protection_plan(state, &record.bucket, &record.key)?;
+    let logical = load_logical_object_record(state, &record.bucket, &record.key)?;
+    let current_sync_targets = current_plan
+        .as_ref()
+        .map(|plan| plan.sync_targets.clone())
+        .unwrap_or_default();
+
+    let (desired_sync_targets, add_sync_targets, remove_sync_targets, status, status_label, note) =
+        desired_reconcile_preview_for_existing_object(
+            state,
+            record,
+            current_plan.as_ref(),
+            logical.as_ref(),
+        )?;
+
+    Ok(ObjectReconcilePreviewRowPayload {
+        bucket: record.bucket.clone(),
+        key: record.key.clone(),
+        home_provider: record.provider.clone(),
+        home_label: provider_display_name(&record.provider),
+        application_id: logical
+            .as_ref()
+            .and_then(|value| value.application_id.clone()),
+        logical_content_type: logical
+            .as_ref()
+            .and_then(|value| value.logical_content_type.clone()),
+        encrypted: logical.as_ref().is_some_and(|value| value.encrypted),
+        current_sync_targets: current_sync_targets
+            .iter()
+            .map(|provider| provider.as_str().to_string())
+            .collect(),
+        desired_sync_targets: desired_sync_targets
+            .iter()
+            .map(|provider| provider.as_str().to_string())
+            .collect(),
+        add_sync_targets: add_sync_targets
+            .iter()
+            .map(|provider| provider.as_str().to_string())
+            .collect(),
+        remove_sync_targets: remove_sync_targets
+            .iter()
+            .map(|provider| provider.as_str().to_string())
+            .collect(),
+        status,
+        status_label,
+        note,
+    })
+}
+
+fn desired_reconcile_preview_for_existing_object(
+    state: &AppState,
+    record: &ObjectPlacementRecord,
+    current_plan: Option<&PersistedObjectProtectionPlan>,
+    logical: Option<&LogicalObjectRecord>,
+) -> Result<
+    (
+        Vec<ProviderId>,
+        Vec<ProviderId>,
+        Vec<ProviderId>,
+        &'static str,
+        &'static str,
+        String,
+    ),
+    BlobError,
+> {
+    let current_targets = current_plan
+        .map(|plan| plan.sync_targets.clone())
+        .unwrap_or_default();
+    if let Some(note) = reconcile_preview_missing_context_note(state, record, logical) {
+        return Ok((
+            current_targets,
+            Vec::new(),
+            Vec::new(),
+            "skipped",
+            "上下文不足",
+            note,
+        ));
+    }
+
+    let logical_content_type = logical.and_then(|value| value.logical_content_type.as_deref());
+    let matching_policy = match matching_content_policy(
+        state,
+        logical.and_then(|value| value.application_id.as_deref()),
+        &record.bucket,
+        &record.key,
+        logical_content_type,
+    ) {
+        Some(policy) => policy,
+        None => {
+            let desired_topology = effective_topology_for_replication(
+                state,
+                ReplicationOperation::Put,
+                &record.bucket,
+                &record.key,
+            )?;
+            let add_targets = desired_topology
+                .sync_targets
+                .iter()
+                .copied()
+                .filter(|provider| !current_targets.contains(provider))
+                .collect::<Vec<_>>();
+            let remove_targets = current_targets
+                .iter()
+                .copied()
+                .filter(|provider| !desired_topology.sync_targets.contains(provider))
+                .collect::<Vec<_>>();
+            let (status, status_label, note) = reconcile_status_for_target_delta(
+                add_targets.len(),
+                remove_targets.len(),
+                "当前没有命中内容策略；历史对象若显式收敛，将对齐当前运行态副本目标。".to_string(),
+            );
+            return Ok((
+                desired_topology.sync_targets,
+                add_targets,
+                remove_targets,
+                status,
+                status_label,
+                note,
+            ));
+        }
+    };
+
+    let mut desired_topology = runtime_topology(state);
+    if !matching_policy.sync_targets.is_empty() {
+        desired_topology.sync_targets = matching_policy.sync_targets.clone();
+    }
+    if !matching_policy.fallback_read_order.is_empty() {
+        desired_topology.fallback_read_order = matching_policy.fallback_read_order.clone();
+    }
+    desired_topology = TopologyPolicy::from_input(TopologyInput {
+        primary_provider: desired_topology.primary_provider,
+        sync_targets: desired_topology.sync_targets,
+        fallback_read_order: desired_topology.fallback_read_order,
+        onedrive_enabled: desired_topology.onedrive_enabled,
+        replication_mode: desired_topology.replication_mode,
+    })
+    .map_err(|error| {
+        BlobError::Configuration(format!(
+            "content policy {} produced invalid reconcile topology for {}/{}: {error}",
+            matching_policy.id, record.bucket, record.key
+        ))
+    })?;
+    desired_topology.sync_targets = desired_topology
+        .sync_targets
+        .into_iter()
+        .filter(|provider| {
+            provider_allowed_for_replication(
+                state,
+                *provider,
+                ReplicationOperation::Put,
+                &record.bucket,
+                &record.key,
+            )
+            .unwrap_or(false)
+        })
+        .collect();
+    desired_topology.fallback_read_order = desired_topology
+        .fallback_read_order
+        .into_iter()
+        .filter(|provider| desired_topology.sync_targets.contains(provider))
+        .collect();
+
+    let add_targets = desired_topology
+        .sync_targets
+        .iter()
+        .copied()
+        .filter(|provider| !current_targets.contains(provider))
+        .collect::<Vec<_>>();
+    let remove_targets = current_targets
+        .iter()
+        .copied()
+        .filter(|provider| !desired_topology.sync_targets.contains(provider))
+        .collect::<Vec<_>>();
+    let (status, status_label, note) = reconcile_status_for_target_delta(
+        add_targets.len(),
+        remove_targets.len(),
+        format!(
+            "命中内容策略 {}。这个预览只比较历史对象当前副本目标与当前策略意图，不会自动执行迁移。",
+            matching_policy.id
+        ),
+    );
+    Ok((
+        desired_topology.sync_targets,
+        add_targets,
+        remove_targets,
+        status,
+        status_label,
+        note,
+    ))
+}
+
+fn reconcile_preview_missing_context_note(
+    state: &AppState,
+    record: &ObjectPlacementRecord,
+    logical: Option<&LogicalObjectRecord>,
+) -> Option<String> {
+    let application_id = logical.and_then(|value| value.application_id.as_deref());
+    let content_type = logical.and_then(|value| value.logical_content_type.as_deref());
+    for policy in current_content_policies(state) {
+        if !policy.enabled {
+            continue;
+        }
+        if !policy.buckets.is_empty() && !policy.buckets.iter().any(|value| value == &record.bucket)
+        {
+            continue;
+        }
+        if !policy.prefixes.is_empty()
+            && !policy
+                .prefixes
+                .iter()
+                .any(|prefix| record.key.starts_with(prefix))
+        {
+            continue;
+        }
+        if !policy.application_ids.is_empty() && application_id.is_none() {
+            return Some(format!(
+                "内容策略 {} 需要应用 ID 才能判断是否命中，但这个历史对象还没有持久化 application_id，暂不能安全预览。",
+                policy.id
+            ));
+        }
+        if !policy.content_types.is_empty() && content_type.is_none() {
+            return Some(format!(
+                "内容策略 {} 需要内容类型才能判断是否命中，但这个历史对象还没有可用的 logical content-type，暂不能安全预览。",
+                policy.id
+            ));
+        }
+    }
+    None
+}
+
+fn reconcile_status_for_target_delta(
+    add_count: usize,
+    remove_count: usize,
+    base_note: String,
+) -> (&'static str, &'static str, String) {
+    if add_count == 0 && remove_count == 0 {
+        return ("no_change", "无需变更", base_note);
+    }
+    ("needs_changes", "需要显式收敛", base_note)
 }
 
 async fn object_placement_record_payload(
@@ -36578,6 +37201,7 @@ fn build_put_encryption_plan(
     let logical_record = LogicalObjectRecord {
         bucket: bucket.to_string(),
         key: key.to_string(),
+        application_id: Some(application.application_id.clone()),
         encrypted: true,
         encryption_profile_id: Some(profile.id.clone()),
         algorithm: Some(metadata.algorithm.as_str().to_string()),
@@ -36627,6 +37251,13 @@ async fn execute_put_upload(
         .as_ref()
         .and_then(PutEncryptionPlan::policy_content_type)
         .or(content_type.clone());
+    let plaintext_logical_record = build_plaintext_logical_record(
+        &bucket,
+        &key,
+        plaintext_size,
+        content_type.clone(),
+        &application,
+    );
 
     let (home_provider, home_backend) =
         select_home_write_provider(state, &bucket, &key, stored_size)
@@ -36645,7 +37276,7 @@ async fn execute_put_upload(
         .map_err(map_backend_error_to_s3)?;
     let logical_persist_result = match encryption_plan.as_ref() {
         Some(plan) => persist_logical_object_record(state, &plan.logical_record),
-        None => delete_logical_object_record(state, &bucket, &key),
+        None => persist_logical_object_record(state, &plaintext_logical_record),
     };
     if let Err(error) = logical_persist_result {
         restore_previous_object_write_state(
@@ -43985,6 +44616,14 @@ mod tests {
         assert!(html.contains("id=\"object-placement-records-selection-summary\""));
         assert!(html.contains("id=\"delete-selected-object-placement-records\""));
         assert!(html.contains("id=\"object-placement-records-results\""));
+        assert!(html.contains("历史对象策略收敛预览"));
+        assert!(html.contains("id=\"object-reconcile-provider\""));
+        assert!(html.contains("id=\"object-reconcile-bucket\""));
+        assert!(html.contains("id=\"object-reconcile-prefix\""));
+        assert!(html.contains("id=\"object-reconcile-limit\""));
+        assert!(html.contains("id=\"reload-object-reconcile-preview\""));
+        assert!(html.contains("id=\"object-reconcile-summary\""));
+        assert!(html.contains("id=\"object-reconcile-results\""));
         assert!(html.contains("浏览桶和对象 Key（当前读来源）"));
         assert!(html.contains("id=\"object-browser-bucket\""));
         assert!(html.contains("id=\"object-browser-prefix\""));
@@ -43996,6 +44635,7 @@ mod tests {
         assert!(html.contains("function loadObjectBrowserBuckets("));
         assert!(html.contains("function loadObjectPlacementProviders("));
         assert!(html.contains("function loadObjectPlacementRecords("));
+        assert!(html.contains("function loadObjectReconcilePreview("));
         assert!(html.contains("function browseObjectBrowserObjects("));
         assert!(html.contains("function inspectObjectBrowserObject("));
         assert!(html.contains("function inspectObjectPlacementRecord("));
@@ -44005,6 +44645,7 @@ mod tests {
         assert!(html.contains("function visibleObjectPlacementProviders("));
         assert!(html.contains("/api/object-placement/providers"));
         assert!(html.contains("/api/object-placement/records"));
+        assert!(html.contains("/api/object-reconcile/preview"));
         assert!(html.contains("/api/object-placement/delete-stale"));
         assert!(html.contains("/api/object-placement/delete-stale-bulk"));
         assert!(html.contains("/api/object-browser/buckets"));
@@ -49989,5 +50630,108 @@ mod tests {
 
         assert_eq!(topology.sync_targets, vec![ProviderId::Telecom]);
         assert_eq!(topology.fallback_read_order, vec![ProviderId::Telecom]);
+    }
+
+    #[tokio::test]
+    async fn plaintext_put_persists_application_context_in_logical_metadata() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/plaintext-app-context.txt".to_string();
+        let body = Bytes::from_static(b"plain");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers_for_application(
+            &state.config,
+            "app-a-access",
+            "app-a-secret",
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        let _ = update_data_plane_applications(
+            State(state.clone()),
+            Json(DataPlaneApplicationsInput {
+                applications: vec![DataPlaneApplicationInput {
+                    id: "app-a".to_string(),
+                    label: Some("App A".to_string()),
+                    access_key_id: "app-a-access".to_string(),
+                    secret_access_key: Some("app-a-secret".to_string()),
+                    enabled: true,
+                    permissions: None,
+                }],
+            }),
+        )
+        .await
+        .expect("applications should save");
+
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect("put should succeed");
+
+        let logical = load_logical_object_record(&state, &bucket, &key)
+            .expect("logical metadata should load")
+            .expect("logical metadata should exist");
+        assert_eq!(logical.application_id.as_deref(), Some("app-a"));
+        assert!(!logical.encrypted);
+        assert_eq!(logical.logical_content_type.as_deref(), Some("text/plain"));
+    }
+
+    #[tokio::test]
+    async fn object_reconcile_preview_skips_when_policy_needs_missing_application_context() {
+        let state = test_state();
+        let _ = update_content_policies(
+            State(state.clone()),
+            Json(ContentPoliciesInput {
+                policies: vec![ContentPolicyRule {
+                    id: "app-scoped".to_string(),
+                    label: Some("App scoped".to_string()),
+                    enabled: true,
+                    application_ids: vec!["app-a".to_string()],
+                    buckets: vec!["root".to_string()],
+                    prefixes: vec!["videos/".to_string()],
+                    content_types: Vec::new(),
+                    encryption_profile_id: None,
+                    sync_targets: vec![ProviderId::Telecom],
+                    fallback_read_order: vec![ProviderId::Telecom],
+                }],
+            }),
+        )
+        .await
+        .expect("content policies should save");
+        state
+            .metadata_store
+            .upsert_object_placement("unicom", "root", "videos/legacy.mp4", 100)
+            .expect("placement should persist");
+        state
+            .metadata_store
+            .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
+                bucket: "root".to_string(),
+                key: "videos/legacy.mp4".to_string(),
+                sync_targets_csv: "mobile".to_string(),
+                fallback_read_order_csv: "mobile".to_string(),
+                updated_at_unix_ms: 100,
+            })
+            .expect("plan should persist");
+
+        let payload =
+            object_reconcile_preview_payload(&state, None, Some("root"), Some("videos/"), 50)
+                .await
+                .expect("preview should load");
+
+        assert_eq!(payload.rows.len(), 1);
+        let row = &payload.rows[0];
+        assert_eq!(row.status, "skipped");
+        assert!(row.note.contains("application_id"));
+        assert_eq!(payload.summary.skipped_count, 1);
     }
 }

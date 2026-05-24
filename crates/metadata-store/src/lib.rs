@@ -42,6 +42,7 @@ pub struct ObjectPlacementProviderSummaryRecord {
 pub struct LogicalObjectRecord {
     pub bucket: String,
     pub key: String,
+    pub application_id: Option<String>,
     pub encrypted: bool,
     pub encryption_profile_id: Option<String>,
     pub algorithm: Option<String>,
@@ -666,11 +667,12 @@ impl MetadataStore {
         connection
             .execute(
                 "INSERT INTO logical_objects (
-                    bucket, key, encrypted, encryption_profile_id, algorithm, key_id,
+                    bucket, key, application_id, encrypted, encryption_profile_id, algorithm, key_id,
                     key_source_kind, key_source_ref, chunk_plaintext_bytes, plaintext_size,
                     stored_size, logical_content_type, updated_at_unix_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                  ON CONFLICT(bucket, key) DO UPDATE SET
+                    application_id = excluded.application_id,
                     encrypted = excluded.encrypted,
                     encryption_profile_id = excluded.encryption_profile_id,
                     algorithm = excluded.algorithm,
@@ -685,6 +687,7 @@ impl MetadataStore {
                 params![
                     record.bucket.as_str(),
                     record.key.as_str(),
+                    record.application_id.as_deref(),
                     if record.encrypted { 1 } else { 0 },
                     record.encryption_profile_id.as_deref(),
                     record.algorithm.as_deref(),
@@ -780,7 +783,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         connection
             .query_row(
-                "SELECT bucket, key, encrypted, encryption_profile_id, algorithm, key_id,
+                "SELECT bucket, key, application_id, encrypted, encryption_profile_id, algorithm, key_id,
                         key_source_kind, key_source_ref, chunk_plaintext_bytes, plaintext_size,
                         stored_size, logical_content_type, updated_at_unix_ms
                  FROM logical_objects
@@ -799,7 +802,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         let mut statement = connection
             .prepare(
-                "SELECT bucket, key, encrypted, encryption_profile_id, algorithm, key_id,
+                "SELECT bucket, key, application_id, encrypted, encryption_profile_id, algorithm, key_id,
                         key_source_kind, key_source_ref, chunk_plaintext_bytes, plaintext_size,
                         stored_size, logical_content_type, updated_at_unix_ms
                  FROM logical_objects
@@ -934,6 +937,7 @@ impl MetadataStore {
                 CREATE TABLE IF NOT EXISTS logical_objects (
                     bucket TEXT NOT NULL,
                     key TEXT NOT NULL,
+                    application_id TEXT NULL,
                     encrypted INTEGER NOT NULL,
                     encryption_profile_id TEXT NULL,
                     algorithm TEXT NULL,
@@ -961,9 +965,15 @@ impl MetadataStore {
                     ON object_protection_plans(updated_at_unix_ms);",
             )
             .map_err(MetadataError::Sqlite)?;
-        ensure_replication_jobs_column(&connection, "source_provider", "TEXT NULL").and_then(|_| {
-            ensure_replication_jobs_column(&connection, "next_attempt_at_unix_ms", "INTEGER NULL")
-        })
+        ensure_replication_jobs_column(&connection, "source_provider", "TEXT NULL")
+            .and_then(|_| {
+                ensure_replication_jobs_column(
+                    &connection,
+                    "next_attempt_at_unix_ms",
+                    "INTEGER NULL",
+                )
+            })
+            .and_then(|_| ensure_logical_objects_column(&connection, "application_id", "TEXT NULL"))
     }
 }
 
@@ -984,17 +994,18 @@ fn row_to_logical_object_record(
     Ok(LogicalObjectRecord {
         bucket: row.get(0)?,
         key: row.get(1)?,
-        encrypted: row.get::<_, i64>(2)? != 0,
-        encryption_profile_id: row.get(3)?,
-        algorithm: row.get(4)?,
-        key_id: row.get(5)?,
-        key_source_kind: row.get(6)?,
-        key_source_ref: row.get(7)?,
-        chunk_plaintext_bytes: row.get::<_, Option<i64>>(8)?.map(|value| value as u64),
-        plaintext_size: row.get::<_, i64>(9)? as u64,
-        stored_size: row.get::<_, i64>(10)? as u64,
-        logical_content_type: row.get(11)?,
-        updated_at_unix_ms: row.get::<_, i64>(12)? as u64,
+        application_id: row.get(2)?,
+        encrypted: row.get::<_, i64>(3)? != 0,
+        encryption_profile_id: row.get(4)?,
+        algorithm: row.get(5)?,
+        key_id: row.get(6)?,
+        key_source_kind: row.get(7)?,
+        key_source_ref: row.get(8)?,
+        chunk_plaintext_bytes: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
+        plaintext_size: row.get::<_, i64>(10)? as u64,
+        stored_size: row.get::<_, i64>(11)? as u64,
+        logical_content_type: row.get(12)?,
+        updated_at_unix_ms: row.get::<_, i64>(13)? as u64,
     })
 }
 
@@ -1044,6 +1055,34 @@ fn ensure_replication_jobs_column(
     connection
         .execute(
             &format!("ALTER TABLE replication_jobs ADD COLUMN {column_name} {definition}"),
+            [],
+        )
+        .map_err(MetadataError::Sqlite)?;
+    Ok(())
+}
+
+fn ensure_logical_objects_column(
+    connection: &Connection,
+    column_name: &str,
+    definition: &str,
+) -> Result<(), MetadataError> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(logical_objects)")
+        .map_err(MetadataError::Sqlite)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(MetadataError::Sqlite)?;
+    let existing = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(MetadataError::Sqlite)?;
+
+    if existing.iter().any(|column| column == column_name) {
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            &format!("ALTER TABLE logical_objects ADD COLUMN {column_name} {definition}"),
             [],
         )
         .map_err(MetadataError::Sqlite)?;
@@ -1996,6 +2035,7 @@ mod tests {
         let record = LogicalObjectRecord {
             bucket: "root".to_string(),
             key: "encrypted/a.txt".to_string(),
+            application_id: Some("media-app".to_string()),
             encrypted: true,
             encryption_profile_id: Some("router-default".to_string()),
             algorithm: Some("chacha20_poly1305".to_string()),

@@ -294,6 +294,13 @@ POST /api/content-policies
 
 匹配维度包括应用、bucket、prefix、content-type。当前策略已用于覆盖新写入对象的复制目标；`fallback_read_order` 会随策略保存并参与策略拓扑校验，读路径按应用选择 fallback 的执行会在双写/强一致 fallback 切片中接入。如果没有匹配策略，则继续使用全局 topology。多目标策略下，后续双写/强一致 fallback 应以这些目标的最小文件体积和最小分片限制作为有效上限。
 
+重要语义:
+
+- 内容策略变化默认只影响后续新写入和覆盖写。
+- 历史对象不会因为策略变化而自动补副本、删旧副本、迁移 home provider、加密重写或解密重写。
+- 历史对象的这些变化必须通过 Admin 里的显式工具先预览、再执行，避免操作者在不知情的情况下丢数据或制造大规模搬迁。
+- 为了让历史对象能够安全预览和后续显式迁移，网关会从新写入开始把 `application_id` 持久化进逻辑对象元数据；更早的旧对象如果缺少这个上下文，Admin 只会提示“暂不能安全预览”，不会猜测策略结果。
+
 `replication_state` 当前除了 `persisted.recent_jobs` 和 `target_statuses`，还会额外返回:
 
 - `latest_failed_jobs`: 只包含“每个 target + bucket + key 当前最新状态仍为 failed”的对象级失败视图
