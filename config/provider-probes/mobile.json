@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "provider": "mobile",
+  "description": "Probe catalog for China Mobile Cloud Drive.",
+  "probe_items": [
+    {
+      "id": "capture_auth_session",
+      "status": "planned",
+      "category": "auth",
+      "transport": "browser_capture",
+      "goal": "Capture a reusable logged-in mobile cloud session including token and cookie context.",
+      "prerequisites": [
+        "logged_in_browser"
+      ],
+      "artifacts": [
+        "access_token",
+        "cookie_header",
+        "client_headers"
+      ],
+      "config_targets": [
+        "future mobile credential store"
+      ],
+      "notes": [
+        "Provider-mobile is still a discovery skeleton."
+      ]
+    },
+    {
+      "id": "root_listing_discovery",
+      "status": "planned",
+      "category": "native_read",
+      "transport": "browser_capture_or_manual",
+      "goal": "Identify the stable root listing endpoint and its pagination contract.",
+      "prerequisites": [
+        "capture_auth_session"
+      ],
+      "artifacts": [
+        "listing_endpoint",
+        "root_identifier",
+        "page_size"
+      ],
+      "config_targets": [
+        "future provider-mobile config"
+      ],
+      "notes": [
+        "This is the first blocking probe for mobile."
+      ]
+    },
+    {
+      "id": "capacity_probe_discovery",
+      "status": "planned",
+      "category": "metadata",
+      "transport": "browser_capture_or_manual",
+      "goal": "Identify the endpoint that exposes total and used capacity.",
+      "prerequisites": [
+        "capture_auth_session"
+      ],
+      "artifacts": [
+        "capacity_endpoint",
+        "response_shape"
+      ],
+      "config_targets": [],
+      "notes": []
+    },
+    {
+      "id": "download_probe_discovery",
+      "status": "planned",
+      "category": "native_read",
+      "transport": "browser_capture_or_manual",
+      "goal": "Identify how a listed file is converted into a real download URL or stream request.",
+      "prerequisites": [
+        "root_listing_discovery"
+      ],
+      "artifacts": [
+        "download_endpoint",
+        "required_headers",
+        "identifier_kind"
+      ],
+      "config_targets": [],
+      "notes": []
+    },
+    {
+      "id": "write_path_discovery",
+      "status": "planned",
+      "category": "native_write",
+      "transport": "browser_capture_or_manual",
+      "goal": "Discover stable create/delete/rename/copy/move/upload request paths for future native or hybrid writes.",
+      "prerequisites": [
+        "capture_auth_session"
+      ],
+      "artifacts": [
+        "write_endpoints",
+        "request_defaults",
+        "dynamic_fields"
+      ],
+      "config_targets": [
+        "future config/provider-capabilities/mobile-native.json"
+      ],
+      "notes": []
+    }
+  ]
+}

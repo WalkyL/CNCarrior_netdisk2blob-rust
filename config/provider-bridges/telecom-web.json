@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "provider": "telecom",
+  "surface": "cloud.189.cn-web",
+  "label": "China Telecom Browser Bridge",
+  "description": "Bridge metadata for China Telecom browser-assisted auth and capture.",
+  "flow_aliases": {
+    "sms_request_code": "telecom_sms_login_request_code",
+    "sms_resume_submit_code": "telecom_sms_login_resume_submit_code",
+    "capture_session": "telecom_capture_current_session",
+    "capture_session_from_logged_in_page": "telecom_capture_current_session_from_logged_in_page",
+    "capture_family_session": "telecom_capture_family_current_session",
+    "capture_family_session_from_logged_in_page": "telecom_capture_family_current_session_from_logged_in_page",
+    "prepare_upload_probe": "telecom_prepare_upload_probe",
+    "capture_upload_probe_state": "telecom_capture_upload_probe_state"
+  },
+  "runtime_credential_mappings": [
+    {
+      "runtime_key": "browser_id",
+      "credential_key": "browser_id"
+    },
+    {
+      "runtime_key": "cookie_header",
+      "credential_key": "cookie_header"
+    },
+    {
+      "runtime_key": "token",
+      "credential_key": "token"
+    },
+    {
+      "runtime_key": "family_id",
+      "credential_key": "family_id"
+    },
+    {
+      "runtime_key": "root_folder_id",
+      "credential_key": "root_folder_id"
+    }
+  ],
+  "browser_profile": {
+    "source_url_runtime_key": "current_url",
+    "headers_runtime_key": "browser_profile_headers"
+  },
+  "logged_in_probes": [
+    {
+      "id": "personal",
+      "flow_alias": "capture_session"
+    },
+    {
+      "id": "family",
+      "flow_alias": "capture_family_session"
+    }
+  ],
+  "notes": [
+    "Personal and family capture flow ids are resolved from this catalog so later flow swaps stay outside the Rust code path.",
+    "Telecom write-path discovery should also land here first so page revisions touch catalog JSON before Rust code."
+  ]
+}

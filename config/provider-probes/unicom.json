@@ -1,0 +1,312 @@
+{
+  "schema_version": 1,
+  "provider": "unicom",
+  "description": "Probe catalog for China Unicom Cloud Drive. These items define what should be captured or verified so future automation can discover a usable session and stable request paths without changing provider code.",
+  "probe_items": [
+    {
+      "id": "capture_current_session",
+      "status": "confirmed",
+      "category": "auth",
+      "transport": "browser_flow",
+      "goal": "Capture a reusable logged-in pan.wo.cn session and runtime context.",
+      "prerequisites": [
+        "logged_in_browser"
+      ],
+      "artifacts": [
+        "access_token",
+        "client_id",
+        "family_id",
+        "current_url"
+      ],
+      "config_targets": [
+        "runtime.access_token",
+        "runtime.client_id",
+        "runtime.family_id",
+        "runtime.current_url"
+      ],
+      "notes": [
+        "Implemented today by browser flow unicom_capture_current_session."
+      ]
+    },
+    {
+      "id": "personal_root_listing",
+      "status": "confirmed",
+      "category": "native_read",
+      "transport": "native_http",
+      "goal": "Verify QueryAllFiles on personal root and recover the working spaceType/root directory contract.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "space_type",
+        "parent_directory_id",
+        "root_entry_count"
+      ],
+      "config_targets": [
+        "CCBG_UNICOM_AUTH_PROBE_OPERATION",
+        "CCBG_UNICOM_AUTH_PROBE_BODY_JSON"
+      ],
+      "notes": [
+        "Current stable operation is POST /wohome/dispatcher with QueryAllFiles on parentDirectoryId=0."
+      ]
+    },
+    {
+      "id": "user_capacity_probe",
+      "status": "confirmed",
+      "category": "metadata",
+      "transport": "native_http",
+      "goal": "Verify AppQueryUser and extract available/used capacity plus user identifiers.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "user_id",
+        "real_user_id",
+        "capacity_total_bytes",
+        "capacity_free_bytes"
+      ],
+      "config_targets": [],
+      "notes": [
+        "Used by current health path."
+      ]
+    },
+    {
+      "id": "family_scope_discovery",
+      "status": "confirmed",
+      "category": "scope_discovery",
+      "transport": "native_http",
+      "goal": "Verify QueryFamilyGroups and discover a reusable familyId.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "family_id"
+      ],
+      "config_targets": [
+        "CCBG_UNICOM_FAMILY_ID"
+      ],
+      "notes": [
+        "Current health path already auto-discovers familyId when possible.",
+        "Provider health now degrades correctly when personal scope is reachable but family scope probing fails."
+      ]
+    },
+    {
+      "id": "family_root_listing",
+      "status": "confirmed",
+      "category": "scope_discovery",
+      "transport": "native_http",
+      "goal": "Verify the discovered family scope can be listed as a stable S3-visible family container.",
+      "prerequisites": [
+        "access_token",
+        "family_scope_discovery"
+      ],
+      "artifacts": [
+        "family_root_directory_id",
+        "family_space_type",
+        "family_container_name"
+      ],
+      "config_targets": [
+        "CCBG_UNICOM_FAMILY_ROOT_DIRECTORY_ID",
+        "CCBG_UNICOM_FAMILY_SPACE_TYPE"
+      ],
+      "notes": [
+        "Current provider maps the family scope to the family bucket and surfaces it through provider health plus gateway container listing."
+      ]
+    },
+    {
+      "id": "native_download",
+      "status": "confirmed",
+      "category": "native_read",
+      "transport": "native_http",
+      "goal": "Verify a file can be resolved to a real download URL and fetched.",
+      "prerequisites": [
+        "access_token",
+        "personal_root_listing"
+      ],
+      "artifacts": [
+        "download_operation",
+        "download_identifier_kind",
+        "download_url"
+      ],
+      "config_targets": [],
+      "notes": [
+        "Current provider tries GetDownloadUrl, then V2/V3 fallbacks."
+      ]
+    },
+    {
+      "id": "native_create_directory",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Record the stable CreateDirectory dispatcher operation and its static request defaults.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "dispatcher_operation",
+        "body_defaults",
+        "dynamic_fields"
+      ],
+      "config_targets": [
+        "config/provider-capabilities/unicom-native.json#create_directory"
+      ],
+      "notes": [
+        "Current static default is isCouldRepeat=1; dynamic fields are spaceType, parentDirectoryId, and directoryName."
+      ]
+    },
+    {
+      "id": "native_delete_file",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Record the stable DeleteFile dispatcher operation and its static request defaults.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "dispatcher_operation",
+        "body_defaults",
+        "dynamic_fields"
+      ],
+      "config_targets": [
+        "config/provider-capabilities/unicom-native.json#delete_file"
+      ],
+      "notes": [
+        "Current static defaults are vipLevel=0, dirList=[], fileList=[]."
+      ]
+    },
+    {
+      "id": "native_rename_file_or_directory",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Record the stable RenameFileOrDirectory dispatcher operation and its runtime field contract.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "dispatcher_operation",
+        "body_defaults",
+        "dynamic_fields",
+        "supported_boundary"
+      ],
+      "config_targets": [
+        "config/provider-capabilities/unicom-native.json#rename_file_or_directory"
+      ],
+      "notes": [
+        "Current provider supports rename within the same parent directory and intentionally rejects cross-parent rename semantics."
+      ]
+    },
+    {
+      "id": "native_copy_file",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Record the stable CopyFile dispatcher operation and its runtime field contract.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "dispatcher_operation",
+        "body_defaults",
+        "dynamic_fields",
+        "cross_container_support"
+      ],
+      "config_targets": [
+        "config/provider-capabilities/unicom-native.json#copy_file"
+      ],
+      "notes": [
+        "Current provider supports copy across personal and family containers after resolving the destination directory path."
+      ]
+    },
+    {
+      "id": "native_move_file",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Record the stable MoveFile dispatcher operation and its runtime field contract.",
+      "prerequisites": [
+        "access_token"
+      ],
+      "artifacts": [
+        "dispatcher_operation",
+        "body_defaults",
+        "dynamic_fields",
+        "cross_container_support",
+        "family_source_hint"
+      ],
+      "config_targets": [
+        "config/provider-capabilities/unicom-native.json#move_file"
+      ],
+      "notes": [
+        "Current provider supports move across personal and family containers and injects fromFamilyId when moving out of family scope."
+      ]
+    },
+    {
+      "id": "personal_root_upload_context",
+      "status": "confirmed",
+      "category": "upload",
+      "transport": "browser_flow",
+      "goal": "Prepare the page uploader so runtime batch_no, directory_id, and personal_space_type can be captured.",
+      "prerequisites": [
+        "logged_in_browser"
+      ],
+      "artifacts": [
+        "batch_no",
+        "directory_id",
+        "personal_space_type"
+      ],
+      "config_targets": [
+        "runtime.batch_no",
+        "runtime.directory_id",
+        "runtime.personal_space_type"
+      ],
+      "notes": [
+        "Implemented today by browser flow unicom_prepare_personal_root_upload."
+      ]
+    },
+    {
+      "id": "browser_upload",
+      "status": "confirmed",
+      "category": "upload",
+      "transport": "browser_flow",
+      "goal": "Verify upload2C end-to-end and capture the uploader response contract.",
+      "prerequisites": [
+        "personal_root_upload_context"
+      ],
+      "artifacts": [
+        "fid",
+        "file_version",
+        "wc_file_id"
+      ],
+      "config_targets": [],
+      "notes": [
+        "Observed browser upload facts are now reused by the native upload2C write path in provider-unicom.",
+        "Keep this probe to refresh upload2C request/response facts when the page uploader contract changes."
+      ]
+    },
+    {
+      "id": "gateway_object_actions_replication_semantics",
+      "status": "confirmed",
+      "category": "metadata",
+      "transport": "native_http",
+      "goal": "Verify that successful gateway object actions update replication metadata with the same semantics used by fallback gating.",
+      "prerequisites": [
+        "native_rename_file_or_directory",
+        "native_copy_file",
+        "native_move_file"
+      ],
+      "artifacts": [
+        "rename_replication_plan",
+        "copy_replication_plan",
+        "move_replication_plan"
+      ],
+      "config_targets": [
+        "docs/architecture.md#gatewayd"
+      ],
+      "notes": [
+        "Current gateway semantics are rename=put(new)+delete(old), copy=put(dest), move=put(dest)+delete(src)."
+      ]
+    }
+  ]
+}

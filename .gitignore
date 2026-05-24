@@ -1,0 +1,12 @@
+/target
+/tools/component-ast-map/target/
+/dist
+data/
+/.env
+/.env.local
+/.idea
+/.vscode
+*.log
+__pycache__/
+*.pyc
+secrets/

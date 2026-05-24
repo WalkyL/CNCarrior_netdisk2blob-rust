@@ -1,0 +1,313 @@
+{
+  "workspace_root": "carrier-cloud-blob-gateway",
+  "crates": [
+    {
+      "package_name": "blob-core",
+      "module_name": "blob_core",
+      "manifest_path": "crates/blob-core/Cargo.toml",
+      "src_dir": "crates/blob-core/src"
+    },
+    {
+      "package_name": "gatewayd",
+      "module_name": "gatewayd",
+      "manifest_path": "crates/gatewayd/Cargo.toml",
+      "src_dir": "crates/gatewayd/src"
+    },
+    {
+      "package_name": "metadata-store",
+      "module_name": "metadata_store",
+      "manifest_path": "crates/metadata-store/Cargo.toml",
+      "src_dir": "crates/metadata-store/src"
+    },
+    {
+      "package_name": "policy-engine",
+      "module_name": "policy_engine",
+      "manifest_path": "crates/policy-engine/Cargo.toml",
+      "src_dir": "crates/policy-engine/src"
+    },
+    {
+      "package_name": "provider-mobile",
+      "module_name": "provider_mobile",
+      "manifest_path": "crates/provider-mobile/Cargo.toml",
+      "src_dir": "crates/provider-mobile/src"
+    },
+    {
+      "package_name": "provider-onedrive",
+      "module_name": "provider_onedrive",
+      "manifest_path": "crates/provider-onedrive/Cargo.toml",
+      "src_dir": "crates/provider-onedrive/src"
+    },
+    {
+      "package_name": "provider-telecom",
+      "module_name": "provider_telecom",
+      "manifest_path": "crates/provider-telecom/Cargo.toml",
+      "src_dir": "crates/provider-telecom/src"
+    },
+    {
+      "package_name": "provider-unicom",
+      "module_name": "provider_unicom",
+      "manifest_path": "crates/provider-unicom/Cargo.toml",
+      "src_dir": "crates/provider-unicom/src"
+    },
+    {
+      "package_name": "replication-engine",
+      "module_name": "replication_engine",
+      "manifest_path": "crates/replication-engine/Cargo.toml",
+      "src_dir": "crates/replication-engine/src"
+    }
+  ],
+  "edges": [
+    {
+      "from": "gatewayd",
+      "to": "blob-core",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 34,
+      "ast_file_count": 1,
+      "example_paths": [
+        "blob_core::BlobBackend",
+        "blob_core::BlobError",
+        "blob_core::ListObjectsRequest",
+        "blob_core::ObjectInfo",
+        "blob_core::OutboundIpFamily",
+        "blob_core::PutObjectRequest",
+        "blob_core::StubBackend",
+        "blob_core::TokenSource"
+      ]
+    },
+    {
+      "from": "gatewayd",
+      "to": "metadata-store",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 10,
+      "ast_file_count": 1,
+      "example_paths": [
+        "metadata_store",
+        "metadata_store::MetadataRetentionPolicy",
+        "metadata_store::MetadataSnapshot",
+        "metadata_store::MetadataStore",
+        "metadata_store::MetadataStoreOptions",
+        "metadata_store::MetadataTargetStatus"
+      ]
+    },
+    {
+      "from": "gatewayd",
+      "to": "policy-engine",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 5,
+      "ast_file_count": 1,
+      "example_paths": [
+        "policy_engine::ProviderId",
+        "policy_engine::ReplicationMode",
+        "policy_engine::TopologyInput",
+        "policy_engine::TopologyPolicy",
+        "policy_engine::parse_provider_list"
+      ]
+    },
+    {
+      "from": "gatewayd",
+      "to": "provider-mobile",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 2,
+      "ast_file_count": 1,
+      "example_paths": [
+        "provider_mobile::MobileBlobAdapter",
+        "provider_mobile::MobileConfig"
+      ]
+    },
+    {
+      "from": "gatewayd",
+      "to": "provider-onedrive",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 7,
+      "ast_file_count": 1,
+      "example_paths": [
+        "provider_onedrive::DEFAULT_ONEDRIVE_AUTH_BASE_URL",
+        "provider_onedrive::DEFAULT_ONEDRIVE_SCOPES",
+        "provider_onedrive::OneDriveBlobAdapter",
+        "provider_onedrive::OneDriveConfig",
+        "provider_onedrive::OneDriveOAuthSession",
+        "provider_onedrive::decode_stored_oauth_session",
+        "provider_onedrive::persist_oauth_session"
+      ]
+    },
+    {
+      "from": "gatewayd",
+      "to": "provider-telecom",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 2,
+      "ast_file_count": 1,
+      "example_paths": [
+        "provider_telecom::TelecomBlobAdapter",
+        "provider_telecom::TelecomConfig"
+      ]
+    },
+    {
+      "from": "gatewayd",
+      "to": "provider-unicom",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 2,
+      "ast_file_count": 1,
+      "example_paths": [
+        "provider_unicom::UnicomBlobAdapter",
+        "provider_unicom::UnicomConfig"
+      ]
+    },
+    {
+      "from": "gatewayd",
+      "to": "replication-engine",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 12,
+      "ast_file_count": 1,
+      "example_paths": [
+        "replication_engine::ReplicationEngine",
+        "replication_engine::ReplicationJob",
+        "replication_engine::ReplicationOperation",
+        "replication_engine::ReplicationOperation::Put",
+        "replication_engine::ReplicationSnapshot",
+        "replication_engine::ReplicationStatus",
+        "replication_engine::ReplicationStatus::Completed",
+        "replication_engine::ReplicationStatus::Failed"
+      ]
+    },
+    {
+      "from": "metadata-store",
+      "to": "replication-engine",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 8,
+      "ast_file_count": 1,
+      "example_paths": [
+        "replication_engine::ReplicationJob",
+        "replication_engine::ReplicationObjectRef",
+        "replication_engine::ReplicationOperation",
+        "replication_engine::ReplicationStatus"
+      ]
+    },
+    {
+      "from": "provider-mobile",
+      "to": "blob-core",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 12,
+      "ast_file_count": 1,
+      "example_paths": [
+        "blob_core::BackendCapabilities",
+        "blob_core::BlobBackend",
+        "blob_core::BlobError",
+        "blob_core::ContainerInfo",
+        "blob_core::HealthStatus",
+        "blob_core::ListObjectsRequest",
+        "blob_core::ObjectInfo",
+        "blob_core::OutboundIpFamily"
+      ]
+    },
+    {
+      "from": "provider-onedrive",
+      "to": "blob-core",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 14,
+      "ast_file_count": 1,
+      "example_paths": [
+        "blob_core::BackendCapabilities",
+        "blob_core::BlobBackend",
+        "blob_core::BlobError",
+        "blob_core::ContainerInfo",
+        "blob_core::HealthStatus",
+        "blob_core::ListObjectsRequest",
+        "blob_core::ObjectInfo",
+        "blob_core::ObjectPayload"
+      ]
+    },
+    {
+      "from": "provider-telecom",
+      "to": "blob-core",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 18,
+      "ast_file_count": 1,
+      "example_paths": [
+        "blob_core::BackendCapabilities",
+        "blob_core::BlobBackend",
+        "blob_core::BlobError",
+        "blob_core::ContainerInfo",
+        "blob_core::HealthStatus",
+        "blob_core::ListObjectsRequest",
+        "blob_core::ObjectInfo",
+        "blob_core::ObjectPayload"
+      ]
+    },
+    {
+      "from": "provider-unicom",
+      "to": "blob-core",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 20,
+      "ast_file_count": 1,
+      "example_paths": [
+        "blob_core::BackendCapabilities",
+        "blob_core::BlobBackend",
+        "blob_core::BlobError",
+        "blob_core::ContainerInfo",
+        "blob_core::HealthStatus",
+        "blob_core::ListObjectsRequest",
+        "blob_core::ObjectInfo",
+        "blob_core::ObjectPayload"
+      ]
+    },
+    {
+      "from": "replication-engine",
+      "to": "policy-engine",
+      "declared": true,
+      "observed_in_ast": true,
+      "ast_node_count": 5,
+      "ast_file_count": 1,
+      "example_paths": [
+        "policy_engine::ProviderId",
+        "policy_engine::ReplicationMode",
+        "policy_engine::TopologyInput",
+        "policy_engine::TopologyPolicy"
+      ]
+    }
+  ],
+  "reverse_dependencies": {
+    "blob-core": [
+      "gatewayd",
+      "provider-mobile",
+      "provider-onedrive",
+      "provider-telecom",
+      "provider-unicom"
+    ],
+    "metadata-store": [
+      "gatewayd"
+    ],
+    "policy-engine": [
+      "gatewayd",
+      "replication-engine"
+    ],
+    "provider-mobile": [
+      "gatewayd"
+    ],
+    "provider-onedrive": [
+      "gatewayd"
+    ],
+    "provider-telecom": [
+      "gatewayd"
+    ],
+    "provider-unicom": [
+      "gatewayd"
+    ],
+    "replication-engine": [
+      "gatewayd",
+      "metadata-store"
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "object-crypto"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+aes-gcm = { workspace = true }
+blob-core = { path = "../blob-core" }
+bytes = { workspace = true }
+chacha20poly1305 = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

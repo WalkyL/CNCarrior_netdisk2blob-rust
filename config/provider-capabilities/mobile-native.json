@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "provider": "mobile",
+  "description": "Stable native capability catalog for China Mobile Cloud Drive. Keep mutable endpoint metadata and request defaults here so provider-mobile only owns execution, signing, path planning, and error handling.",
+  "capabilities": [
+    {
+      "id": "file_create",
+      "method": "POST",
+      "url": "https://personal-kd-njs.yun.139.com/hcy/file/create",
+      "signature_strategy": "mcloud_md5_v1",
+      "body_defaults": {
+        "fileRenameMode": "auto_rename",
+        "type": "file",
+        "contentHashAlgorithm": "SHA256"
+      },
+      "notes": [
+        "name, size, contentType, contentHash, partInfos, parentFileId, and commonAccountInfo are injected at runtime."
+      ]
+    },
+    {
+      "id": "file_list",
+      "method": "POST",
+      "url": "https://personal-kd-njs.yun.139.com/hcy/file/list",
+      "signature_strategy": "mcloud_md5_v1",
+      "body_defaults": {
+        "orderBy": "updated_at",
+        "orderDirection": "DESC",
+        "imageThumbnailStyleList": [
+          "Small",
+          "Large"
+        ]
+      },
+      "notes": [
+        "pageInfo and parentFileId are injected at runtime."
+      ]
+    },
+    {
+      "id": "file_complete",
+      "method": "POST",
+      "url": "https://personal-kd-njs.yun.139.com/hcy/file/complete",
+      "signature_strategy": "mcloud_md5_v1",
+      "body_defaults": {},
+      "notes": [
+        "fileId, uploadId, contentHash, and contentHashAlgorithm are injected at runtime after all parts have been uploaded."
+      ]
+    },
+    {
+      "id": "file_get_download_url",
+      "method": "POST",
+      "url": "https://personal-kd-njs.yun.139.com/hcy/file/getDownloadUrl",
+      "signature_strategy": "mcloud_md5_v1",
+      "body_defaults": {},
+      "notes": [
+        "fileId is injected at runtime and the response returns a short-lived signed object download URL."
+      ]
+    },
+    {
+      "id": "file_update",
+      "method": "POST",
+      "url": "https://personal-kd-njs.yun.139.com/hcy/file/update",
+      "signature_strategy": "mcloud_md5_v1",
+      "body_defaults": {
+        "description": ""
+      },
+      "notes": [
+        "fileId and name are injected at runtime for metadata-only object rename."
+      ]
+    },
+    {
+      "id": "file_batch_delete",
+      "method": "POST",
+      "url": "https://personal-kd-njs.yun.139.com/hcy/file/batchDelete",
+      "signature_strategy": "mcloud_md5_v1",
+      "body_defaults": {},
+      "notes": [
+        "fileIds is injected at runtime for logical delete without reading object bytes."
+      ]
+    },
+    {
+      "id": "file_batch_move",
+      "method": "POST",
+      "url": "https://personal-kd-njs.yun.139.com/hcy/file/batchMove",
+      "signature_strategy": "mcloud_md5_v1",
+      "body_defaults": {},
+      "notes": [
+        "fileIds and toParentFileId are injected at runtime for metadata-only object move."
+      ]
+    }
+  ]
+}

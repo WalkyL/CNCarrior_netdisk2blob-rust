@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "provider": "telecom",
+  "description": "Probe catalog for China Telecom Tianyi Cloud Drive.",
+  "probe_items": [
+    {
+      "id": "capture_browser_identity",
+      "status": "confirmed",
+      "category": "auth",
+      "transport": "manual_or_browser_capture",
+      "goal": "Capture Browser ID and cookie session required by current telecom provider requests.",
+      "prerequisites": [
+        "logged_in_browser"
+      ],
+      "artifacts": [
+        "browser_id",
+        "cookie_header"
+      ],
+      "config_targets": [
+        "CCBG_TELECOM_BROWSER_ID",
+        "CCBG_TELECOM_COOKIE_HEADER"
+      ],
+      "notes": [
+        "Current provider primarily depends on Browser ID plus cookies."
+      ]
+    },
+    {
+      "id": "personal_root_listing",
+      "status": "confirmed",
+      "category": "native_read",
+      "transport": "native_http",
+      "goal": "Verify listFiles.action can enumerate the configured root folder.",
+      "prerequisites": [
+        "browser_id",
+        "cookie_header"
+      ],
+      "artifacts": [
+        "root_folder_id",
+        "page_size",
+        "root_entry_count"
+      ],
+      "config_targets": [
+        "CCBG_TELECOM_ROOT_FOLDER_ID"
+      ],
+      "notes": [
+        "Current default root folder is -11."
+      ]
+    },
+    {
+      "id": "capacity_probe",
+      "status": "confirmed",
+      "category": "metadata",
+      "transport": "native_http",
+      "goal": "Verify getUserInfoForPortal.action and recover capacity metrics.",
+      "prerequisites": [
+        "browser_id",
+        "cookie_header"
+      ],
+      "artifacts": [
+        "capacity_total_bytes",
+        "capacity_used_bytes"
+      ],
+      "config_targets": [],
+      "notes": [
+        "Used by current telecom health path."
+      ]
+    },
+    {
+      "id": "native_download",
+      "status": "confirmed",
+      "category": "native_read",
+      "transport": "native_http",
+      "goal": "Verify a listed telecom file can be resolved and downloaded.",
+      "prerequisites": [
+        "personal_root_listing"
+      ],
+      "artifacts": [
+        "download_url",
+        "file_id"
+      ],
+      "config_targets": [],
+      "notes": [
+        "Download is already working in provider-telecom."
+      ]
+    },
+    {
+      "id": "write_path_discovery",
+      "status": "in_progress",
+      "category": "native_write",
+      "transport": "browser_capture_or_manual",
+      "goal": "Discover stable directory creation, delete, rename, copy, move, and upload paths for telecom.",
+      "prerequisites": [
+        "logged_in_browser"
+      ],
+      "artifacts": [
+        "dispatcher_or_http_endpoints",
+        "request_defaults",
+        "dynamic_fields"
+      ],
+      "config_targets": [
+        "config/browser-flows/telecom-web.json",
+        "config/provider-bridges/telecom-web.json",
+        "future config/provider-capabilities/telecom-native.json"
+      ],
+      "notes": [
+        "Telecom write path is not yet implemented in Rust provider.",
+        "Current step is configuration-first: browser-flow upload probe and request-shape capture must land before any Rust native write implementation.",
+        "As of 2026-05-21, a live personal-space upload capture on https://cloud.189.cn/web/main/file/folder/-11 confirmed a multipart upload chain built around getMultiUploadUrls, OSS-style PUT part uploads, checkTransSecond, and commitMultiUploadFile.",
+        "Observed object-store part uploads used 10 MiB chunks against bjoss.ctyunxs.cn with query parameters partNumber and uploadId.",
+        "Observed business requests carried Telecom-specific signing headers such as sessionkey, signature, x-request-date, x-request-id, encryptiontext, and pkid.",
+        "Observed object-store PUT requests carried authorization, content-md5, x-amz-date, x-amz-limit, and content-type.",
+        "The current upload probe should be re-run with a brand-new random filename because the captured sample showed 已秒传 / 覆盖上传 hints and may have skipped or compressed the earliest init branch.",
+        "Before formal native implementation, the stable request template must be written into future config/provider-capabilities/telecom-native.json so page drift remains a catalog update rather than a Rust rewrite."
+      ]
+    }
+  ]
+}

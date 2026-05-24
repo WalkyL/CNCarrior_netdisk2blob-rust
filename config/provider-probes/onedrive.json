@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "provider": "onedrive",
+  "description": "Probe catalog for Microsoft OneDrive.",
+  "probe_items": [
+    {
+      "id": "oauth_session_ready",
+      "status": "confirmed",
+      "category": "auth",
+      "transport": "oauth_or_manual_token",
+      "goal": "Verify a reusable OAuth or manual token session is available.",
+      "prerequisites": [],
+      "artifacts": [
+        "access_token",
+        "refresh_token",
+        "expires_at_unix"
+      ],
+      "config_targets": [
+        "onedrive session file or inline token"
+      ],
+      "notes": [
+        "Web PKCE, device code, and manual token are already supported."
+      ]
+    },
+    {
+      "id": "drive_root_mapping",
+      "status": "confirmed",
+      "category": "scope_discovery",
+      "transport": "native_http",
+      "goal": "Verify the configured root prefix and optional drive id can be resolved.",
+      "prerequisites": [
+        "oauth_session_ready"
+      ],
+      "artifacts": [
+        "drive_id",
+        "root_prefix"
+      ],
+      "config_targets": [
+        "ONEDRIVE_DRIVE_ID",
+        "ONEDRIVE_ROOT_PREFIX"
+      ],
+      "notes": [
+        "Current provider health reports degraded until the root prefix exists."
+      ]
+    },
+    {
+      "id": "container_listing",
+      "status": "confirmed",
+      "category": "native_read",
+      "transport": "native_http",
+      "goal": "Verify bucket-folder mapping under the configured root prefix.",
+      "prerequisites": [
+        "drive_root_mapping"
+      ],
+      "artifacts": [
+        "container_names"
+      ],
+      "config_targets": [],
+      "notes": []
+    },
+    {
+      "id": "object_read_write_delete",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Verify Graph minimal put/get/delete semantics under the mapped container path.",
+      "prerequisites": [
+        "drive_root_mapping"
+      ],
+      "artifacts": [
+        "etag",
+        "content_type",
+        "parent_folder_path"
+      ],
+      "config_targets": [],
+      "notes": [
+        "This provider already supports object lifecycle roundtrip."
+      ]
+    },
+    {
+      "id": "object_actions_rename_copy_move",
+      "status": "confirmed",
+      "category": "native_write",
+      "transport": "native_http",
+      "goal": "Verify Graph-backed rename/copy/move object actions under the mapped bucket-folder namespace.",
+      "prerequisites": [
+        "drive_root_mapping",
+        "object_read_write_delete"
+      ],
+      "artifacts": [
+        "rename_request_shape",
+        "copy_monitor_url",
+        "move_parent_reference",
+        "cross_container_destination_support"
+      ],
+      "config_targets": [
+        "docs/object-actions-api-reference.md",
+        "docs/object-actions-and-history.md"
+      ],
+      "notes": [
+        "Current provider executes rename and move via driveItem PATCH with name/parentReference updates, and executes copy via Graph async copy monitoring."
+      ]
+    },
+    {
+      "id": "gateway_object_actions_replication_semantics",
+      "status": "confirmed",
+      "category": "metadata",
+      "transport": "native_http",
+      "goal": "Verify successful OneDrive object actions update replication metadata with the same semantics used by fallback gating.",
+      "prerequisites": [
+        "object_actions_rename_copy_move"
+      ],
+      "artifacts": [
+        "rename_replication_plan",
+        "copy_replication_plan",
+        "move_replication_plan"
+      ],
+      "config_targets": [
+        "docs/architecture.md#gatewayd"
+      ],
+      "notes": [
+        "Current gateway semantics are rename=put(new)+delete(old), copy=put(dest), move=put(dest)+delete(src); OneDrive consumes these updates as an async backup or fallback target, not as a primary provider."
+      ]
+    }
+  ]
+}

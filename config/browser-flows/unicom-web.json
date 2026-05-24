@@ -1,0 +1,2121 @@
+{
+  "schema_version": 1,
+  "provider": "unicom",
+  "surface": "pan.wo.cn-web",
+  "description": "Config-driven browser flow descriptor for China Unicom Cloud Drive desktop web login, personal-space upload, directory creation, deletion, rename, copy, and move.",
+  "base_url": "https://pan.wo.cn",
+  "notes": [
+    "This file records selectors, JS entrypoints, and expected network requests without storing live credentials.",
+    "Placeholders such as {{inputs.sms_code}} and {{runtime.access_token}} are symbolic and must be resolved at runtime by the browser automation layer.",
+    "When pan.wo.cn changes its DOM, update this file first before changing Rust provider logic."
+  ],
+  "presets": {},
+  "pages": [
+    {
+      "id": "login",
+      "title": "Unicom Web Login",
+      "url_patterns": [
+        "https://pan.wo.cn/login",
+        "https://pan.wo.cn/login?*"
+      ],
+      "notes": [
+        "The successful login flow observed on 2026-05-11 used the SMS login tab rather than password login."
+      ]
+    },
+    {
+      "id": "file_list_all",
+      "title": "Unicom Personal File List",
+      "url_patterns": [
+        "https://pan.wo.cn/pan/file_list/all"
+      ],
+      "notes": [
+        "The page exposes the uploader file input under #global-uploader-btn after the Vue action entrypoint initializes upload params."
+      ]
+    },
+    {
+      "id": "delete_action_dialog",
+      "title": "Unicom Delete Action Dialog",
+      "url_patterns": [
+        "https://pan.wo.cn/pan/file_list/all"
+      ],
+      "notes": [
+        "The delete confirmation is driven by the action-dialog child component under the file list container."
+      ]
+    },
+    {
+      "id": "copy_move_action_dialog",
+      "title": "Unicom Copy Or Move Action Dialog",
+      "url_patterns": [
+        "https://pan.wo.cn/pan/file_list/all"
+      ],
+      "notes": [
+        "The copy and move flows reuse the action-dialog child component after the parent file-list component populates dialogType and dialogData from the current selection."
+      ]
+    }
+  ],
+  "elements": [
+    {
+      "id": "login.sms_login_tab",
+      "page": "login",
+      "role": "tab",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "Array.from(document.querySelectorAll('.el-tabs__item')).find(el => /短信登录/.test((el.innerText || '').trim()))",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "The DOM text matcher is more stable than the generated class list for this tab."
+      ]
+    },
+    {
+      "id": "login.phone_input",
+      "page": "login",
+      "role": "text_input",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "Array.from(document.querySelectorAll('input')).find(el => (el.placeholder || '').includes('手机号码'))",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.code_input",
+      "page": "login",
+      "role": "text_input",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('短信验证码') || (placeholder.includes('验证码') && !placeholder.includes('图形') && !placeholder.includes('图片')); })",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "Keep this selector specific to the SMS code field so the automation does not type the one-time password into the optional image captcha input."
+      ]
+    },
+    {
+      "id": "login.captcha_input",
+      "page": "login",
+      "role": "text_input",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('图形') || placeholder.includes('图片验证码') || placeholder.includes('图形验证码'); })",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "This optional field appears only when the login page adds an image captcha challenge."
+      ]
+    },
+    {
+      "id": "login.captcha_image",
+      "page": "login",
+      "role": "image",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "(() => { const captchaInput = Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('图形') || placeholder.includes('图片验证码') || placeholder.includes('图形验证码'); }); const roots = []; if (captchaInput) { const row = captchaInput.closest('.el-form-item, .form-item, .item, li, .identify-code, .img-code, .verify-code, .code-row') || captchaInput.parentElement; if (row) { roots.push(row); } } roots.push(document); for (const root of roots) { const candidates = Array.from(root.querySelectorAll('img, canvas')); const match = candidates.find(el => { const rect = el.getBoundingClientRect(); if (rect.width < 20 || rect.height < 12) { return false; } const haystack = [el.getAttribute('src') || '', el.getAttribute('alt') || '', el.getAttribute('class') || '', el.parentElement?.className || ''].join(' ').toLowerCase(); return /captcha|verify|check|code|yzm|identify/.test(haystack) || candidates.length === 1; }); if (match) { return match; } } return null; })()",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "The image element is also reused as the refresh trigger when the model answer is unusable."
+      ]
+    },
+    {
+      "id": "login.agreement_checkbox",
+      "page": "login",
+      "role": "checkbox",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "document.querySelector('label.el-checkbox') || document.querySelector('.el-checkbox__inner') || document.querySelector(\"input[type='checkbox']\")",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "login.send_code_button",
+      "page": "login",
+      "role": "button",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "Array.from(document.querySelectorAll('.change-code')).find(el => (el.innerText || '').trim() === '发送验证码' && getComputedStyle(el).display !== 'none')",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "Do not match broad container nodes such as .el-tabs__content; the live clickable trigger is the visible .change-code element beside the SMS code input."
+      ]
+    },
+    {
+      "id": "login.submit_button",
+      "page": "login",
+      "role": "button",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "Array.from(document.querySelectorAll('button')).find(el => (el.innerText || '').trim() === '登录' && (el.className || '').includes('submit'))",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "Constrain this selector to the submit button so the broker does not click large layout containers that also contain the text '登录'."
+      ]
+    },
+    {
+      "id": "file_list.actions_root",
+      "page": "file_list_all",
+      "role": "component_root",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "css",
+          "value": ".actions",
+          "visible": true
+        }
+      ]
+    },
+    {
+      "id": "file_list.global_uploader_input",
+      "page": "file_list_all",
+      "role": "file_input",
+      "required": true,
+      "selectors": [
+        {
+          "engine": "css",
+          "value": "#global-uploader-btn input[type='file']",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "The input exists only after the global uploader widget is mounted."
+      ]
+    },
+    {
+      "id": "file_list.new_directory_name_input",
+      "page": "file_list_all",
+      "role": "text_input",
+      "required": false,
+      "selectors": [
+        {
+          "engine": "javascript",
+          "value": "Array.from(document.querySelectorAll('input')).find(el => (el.placeholder || '').includes('文件夹'))",
+          "visible": true
+        }
+      ],
+      "notes": [
+        "The current implementation prefers the list component method createDir() over direct DOM dialog automation, but this selector is still recorded as a fallback anchor."
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "id": "api_user_app_login_by_mobile",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/api-user/dispatcher",
+      "required_headers": [
+        {
+          "name": "content-type",
+          "value_template": "application/json"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.command=AppLoginByMobile",
+        "header.channel=api-user"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed during successful SMS login on 2026-05-11.",
+        "Do not persist live phone number, SMS code, or returned token in this file."
+      ]
+    },
+    {
+      "id": "api_user_app_query_user",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/api-user/dispatcher",
+      "required_headers": [
+        {
+          "name": "content-type",
+          "value_template": "application/json"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        }
+      ],
+      "required_fields": [
+        "header.command=AppQueryUser",
+        "header.channel=api-user"
+      ],
+      "success_codes": [
+        200
+      ]
+    },
+    {
+      "id": "wohome_query_all_files",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.command=QueryAllFiles",
+        "header.channel=wohome",
+        "body.spaceType",
+        "body.parentDirectoryId"
+      ],
+      "success_codes": [
+        200
+      ]
+    },
+    {
+      "id": "wohome_query_all_files_capture",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.command=QueryAllFiles",
+        "header.channel=wohome",
+        "body.spaceType",
+        "body.parentDirectoryId"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Use this capture-only matcher when the gateway needs the live headed-browser request profile before runtime.access_token has been extracted."
+      ]
+    },
+    {
+      "id": "member_card_info",
+      "method": "GET",
+      "url_pattern": "https://panservice.mail.wo.cn/api/bff/member/info/call/card",
+      "required_headers": [
+        {
+          "name": "client-id",
+          "value_template": "1001000021"
+        },
+        {
+          "name": "x-yp-access-token",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "x-yp-client-id",
+          "value_template": "1001000021"
+        }
+      ],
+      "required_fields": [],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "This request is auxiliary and was seen after login and after upload, but it is not the upload commit primitive."
+      ]
+    },
+    {
+      "id": "upload2c",
+      "method": "POST",
+      "url_pattern": "https://bjupload.pan.wo.cn:32443/openapi/client/upload2C",
+      "required_headers": [
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "content-type",
+          "value_template": "multipart/form-data"
+        }
+      ],
+      "required_fields": [
+        "uniqueId",
+        "accessToken",
+        "fileName",
+        "fileSize",
+        "totalPart",
+        "partSize",
+        "partIndex",
+        "channel=wocloud",
+        "directoryId",
+        "fileInfo",
+        "file"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "The successful personal-root upload observed on 2026-05-11 returned fid, fileVersion, and wcFileId directly from upload2C.",
+        "fileInfo is not plain JSON on the wire; the runtime must apply the same encryption logic as the web client or delegate to the page uploader component."
+      ]
+    },
+    {
+      "id": "wohome_create_directory",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=CreateDirectory",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-11 by calling the file-list component createDir() method with a temporary probe directory.",
+        "The decrypted request body shape recovered from the page method is: isCouldRepeat=1, spaceType, parentDirectoryId, directoryName, plus familyId or psToken when required by the current space."
+      ]
+    },
+    {
+      "id": "wohome_delete_file",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=DeleteFile",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-11 by wiring the action-dialog deleteFile() method to a temporary probe directory.",
+        "The recovered request payload before encryption is: spaceType, vipLevel, dirList, fileList."
+      ]
+    },
+    {
+      "id": "wohome_rename_file_or_directory",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=RenameFileOrDirectory",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-12 by calling renameFileOrDirectory() against a temporary probe file in personal root.",
+        "The recovered request payload before encryption is: spaceType, type, fileType, id, name, plus familyId or psToken when required by the current space."
+      ]
+    },
+    {
+      "id": "wohome_copy_file",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=CopyFile",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-12 by selecting a temporary probe directory, opening the copy action-dialog, setting currentDir, and submitting through onSubmit().",
+        "The recovered request payload before encryption is: targetDirId, sourceType, targetType, dirList, fileList, plus optional familyId."
+      ]
+    },
+    {
+      "id": "wohome_move_file",
+      "method": "POST",
+      "url_pattern": "https://panservice.mail.wo.cn/wohome/dispatcher",
+      "required_headers": [
+        {
+          "name": "accesstoken",
+          "value_template": "{{runtime.access_token}}"
+        },
+        {
+          "name": "origin",
+          "value_template": "https://pan.wo.cn"
+        },
+        {
+          "name": "referer",
+          "value_template": "https://pan.wo.cn/"
+        }
+      ],
+      "required_fields": [
+        "header.key=MoveFile",
+        "header.channel=wohome",
+        "body.param",
+        "body.secret=true"
+      ],
+      "success_codes": [
+        200
+      ],
+      "notes": [
+        "Observed end-to-end on 2026-05-12 by selecting a temporary probe directory, opening the move action-dialog, allowing QueryDirectorys to settle, and then submitting through onSubmit().",
+        "The recovered request payload before encryption is: targetDirId, sourceType, targetType, dirList, fileList, plus optional familyId and fromFamilyId when the source space is family."
+      ]
+    }
+  ],
+  "operations": [
+    {
+      "id": "login.ensure_agreement_checked",
+      "page": "login",
+      "kind": "javascript",
+      "source": "(() => { const input = document.querySelector('input.el-checkbox__original[type=\"checkbox\"]') || document.querySelector('input[type=\"checkbox\"]'); const label = document.querySelector('label.el-checkbox'); const alreadyChecked = !!input?.checked || !!label?.classList?.contains('is-checked') || !!document.querySelector('.el-checkbox__input.is-checked'); if (alreadyChecked) { return { changed: false, checked: true }; } if (label) { label.click(); } else if (input) { input.checked = true; for (const eventName of ['input', 'change', 'click']) { input.dispatchEvent(new Event(eventName, { bubbles: true })); } } const checked = !!input?.checked || !!label?.classList?.contains('is-checked') || !!document.querySelector('.el-checkbox__input.is-checked'); if (!checked) { throw new Error('agreement checkbox did not become checked'); } return { changed: true, checked: true }; })()",
+      "notes": [
+        "This operation is idempotent: if the agreement is already checked, it leaves the page unchanged.",
+        "Use this instead of a blind checkbox click so resume flows do not accidentally toggle the agreement back off."
+      ]
+    },
+    {
+      "id": "login.prepare_send_code_feedback_capture",
+      "page": "login",
+      "kind": "javascript",
+      "source": "(() => { const KEY = '__ccbgUnicomSendCodeFeedback'; const SELECTORS = ['.el-message__content', '.el-message', '.el-notification__content', '.el-message-box__message', '.el-form-item__error', '[role=\"alert\"]', '[role=\"status\"]', '.toast', '.toast-message', '.toast-text', '.notice', '.alert']; const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : { width: 0, height: 0 }; if (rect.width <= 0 || rect.height <= 0) { return false; } const style = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(node) : null; return !style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'); }; const looksRelevant = (text, node) => { if (!text || text.length > 80) { return false; } if (/[\\r\\n]/.test(text) && text.length > 48) { return false; } if (/(验证码|短信|稍后|频繁|失败|异常|重新获取|发送)/.test(text)) { return true; } const cls = String(node?.className || '').toLowerCase(); const role = String(node?.getAttribute?.('role') || '').toLowerCase(); return /message|toast|notice|alert|error|warn|tip/.test(cls) || role === 'alert' || role === 'status'; }; const capture = (rawText, source) => { const text = normalize(rawText); const state = window[KEY]; if (!state || !looksRelevant(text, state.last_node || null)) { return false; } const now = Date.now(); const last = state.messages[state.messages.length - 1]; if (last && last.text === text && now - last.seen_at_unix_ms < 1200) { state.last_seen_at_unix_ms = now; return false; } const entry = { text, source, seen_at_unix_ms: now }; state.messages.push(entry); if (state.messages.length > 12) { state.messages = state.messages.slice(-12); } state.last_message = text; state.last_source = source; state.last_seen_at_unix_ms = now; return true; }; const inspectNode = (node, source) => { if (!(node instanceof Element) || !isVisible(node)) { return false; } const text = normalize(node.innerText || node.textContent || ''); const state = window[KEY]; if (state) { state.last_node = node; } return capture(text, source); }; const scan = (root, source) => { const scope = root instanceof Element || root instanceof Document ? root : document; for (const selector of SELECTORS) { const nodes = scope.querySelectorAll ? Array.from(scope.querySelectorAll(selector)) : []; for (const node of nodes) { inspectNode(node, `${source}:${selector}`); } } }; const previous = window[KEY]; if (previous?.observer && typeof previous.observer.disconnect === 'function') { previous.observer.disconnect(); } if (previous?.poller) { window.clearInterval(previous.poller); } const state = { installed_at_unix_ms: Date.now(), messages: [], last_message: '', last_source: '', last_seen_at_unix_ms: 0, observer: null, poller: null, last_node: null }; window[KEY] = state; if (!document.body) { return { installed: false, reason: 'document.body missing' }; } scan(document, 'install'); const observer = new MutationObserver((records) => { for (const record of records) { if (record.target instanceof Element) { inspectNode(record.target, 'mutation-target'); } for (const node of Array.from(record.addedNodes || [])) { if (node instanceof Element) { inspectNode(node, 'mutation-added'); scan(node, 'mutation-scan'); } } } }); observer.observe(document.body, { childList: true, subtree: true, characterData: true }); state.observer = observer; state.poller = window.setInterval(() => { const liveState = window[KEY]; if (!liveState) { return; } if (Date.now() - liveState.installed_at_unix_ms > 15000) { if (liveState.observer && typeof liveState.observer.disconnect === 'function') { liveState.observer.disconnect(); } if (liveState.poller) { window.clearInterval(liveState.poller); liveState.poller = null; } return; } scan(document, 'poll'); }, 250); return { installed: true, selector_count: SELECTORS.length }; })()",
+      "notes": [
+        "Install a short-lived DOM observer before clicking the SMS send-code control so transient toast/error feedback can be captured into window.__ccbgUnicomSendCodeFeedback.",
+        "This helps the assistant detect cases like rate limiting even when the page only flashes the message briefly."
+      ]
+    },
+    {
+      "id": "login.retry_send_code_only_if_captcha_present",
+      "page": "login",
+      "kind": "javascript",
+      "source": "(() => { const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim(); const isVisible = (node) => { if (!(node instanceof Element)) { return false; } const rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : { width: 0, height: 0 }; if (rect.width <= 0 || rect.height <= 0) { return false; } const style = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(node) : null; return !style || (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0'); }; const captchaInput = Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('图形') || placeholder.includes('图片验证码') || placeholder.includes('图形验证码'); }); const roots = []; if (captchaInput) { const row = captchaInput.closest('.el-form-item, .form-item, .item, li, .identify-code, .img-code, .verify-code, .code-row') || captchaInput.parentElement; if (row) { roots.push(row); } } roots.push(document); let captchaImage = null; for (const root of roots) { const candidates = Array.from(root.querySelectorAll ? root.querySelectorAll('img, canvas') : []); const match = candidates.find(el => { const rect = el.getBoundingClientRect(); if (rect.width < 20 || rect.height < 12) { return false; } const haystack = [el.getAttribute('src') || '', el.getAttribute('alt') || '', el.getAttribute('class') || '', el.parentElement?.className || ''].join(' ').toLowerCase(); return /captcha|verify|check|code|yzm|identify/.test(haystack) || candidates.length === 1; }); if (match) { captchaImage = match; break; } } const sendButton = Array.from(document.querySelectorAll('.change-code')).find(el => { const text = normalize(el.innerText || ''); return isVisible(el) && (text === '发送验证码' || /\\d+\\s*(s|S|秒)/.test(text)); }); const captchaChallengeVisible = !!captchaInput && isVisible(captchaInput) && !!captchaImage && isVisible(captchaImage); const captchaValue = normalize(captchaInput?.value || ''); if (!captchaChallengeVisible) { return { clicked: false, reason: 'captcha_not_present' }; } if (!captchaValue) { return { clicked: false, reason: 'captcha_value_missing' }; } if (!sendButton) { throw new Error('send code button not available for captcha retry'); } sendButton.click(); return { clicked: true, reason: 'captcha_present', captcha_length: captchaValue.length }; })()",
+      "notes": [
+        "Use this instead of an unconditional second send-code click.",
+        "The operation retries only when a post-click image captcha challenge is actually visible and the captcha input has already been filled."
+      ]
+    },
+    {
+      "id": "file_list.open_personal_uploader",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { const root = document.querySelector('.actions'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); if (!vm || typeof vm.goUpload !== 'function') { throw new Error('actions.goUpload not available'); } vm.goUpload(false); return { directoryId: vm.directoryId ?? null, spaceType: vm.spaceType ?? null, currentPath: location.href }; })()",
+      "notes": [
+        "This is the crucial page-level entrypoint that prepares uploader params before the file input receives a file.",
+        "Directly pushing a file into the input without calling goUpload(false) was observed to fail because params.fileInfo was missing."
+      ]
+    },
+    {
+      "id": "file_list.inspect_uploader_state",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { const root = document.querySelector('.uploader-container'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); if (!vm) { return null; } return { target: vm.options?.target ?? null, params: vm.params ?? null }; })()",
+      "notes": [
+        "Useful as a diagnostic hook after page revisions to confirm that fileInfo and upload target are still populated."
+      ]
+    },
+    {
+      "id": "file_list.create_directory_via_component",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { const vm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!vm || typeof vm.createDir !== 'function') { throw new Error('file-list createDir not available'); } vm.dirName = '{{inputs.directory_name}}'; return vm.createDir().then(() => ({ cloudType: vm.cloudType, parentDirectoryId: vm.lastRoute?.id ?? '0', requestedDirectoryName: vm.dirName })); })()",
+      "notes": [
+        "The recovered method body constructs { spaceType: cloudType, parentDirectoryId: lastRoute.id, directoryName: dirName } and conditionally adds familyId or psToken."
+      ]
+    },
+    {
+      "id": "file_list.delete_entry_via_action_dialog",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm) { throw new Error('file-list component not available'); } const dialogVm = (listVm.$children || []).find(child => child.$options?.name === 'action-dialog'); if (!dialogVm || typeof dialogVm.deleteFile !== 'function') { throw new Error('action-dialog deleteFile not available'); } const entryName = '{{inputs.entry_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); if (!entry) { throw new Error('entry not found for deletion: ' + entryName); } dialogVm.data = { cloudType: listVm.cloudType, dirIds: entry.type === 0 ? [entry.id] : [], fileIds: entry.type === 0 ? [] : [entry.id] }; return dialogVm.deleteFile().then(() => ({ deletedEntryId: entry.id, deletedEntryType: entry.type, cloudType: listVm.cloudType })); })()",
+      "notes": [
+        "The recovered action-dialog deleteFile() method posts { spaceType: data.cloudType, vipLevel, dirList, fileList } through the DeleteFile dispatcher operation."
+      ]
+    },
+    {
+      "id": "file_list.rename_entry_via_component",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm || typeof listVm.renameFileOrDirectory !== 'function') { throw new Error('file-list renameFileOrDirectory not available'); } const entryName = '{{inputs.entry_name}}'; const renamedBase = '{{inputs.new_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); if (!entry) { throw new Error('entry not found for rename: ' + entryName); } return Promise.resolve(listVm.renameFileOrDirectory(entry, renamedBase)).then(() => ({ renamedEntryId: entry.id, renamedEntryType: entry.type, requestedName: renamedBase, fileType: entry.fileType || null, cloudType: listVm.cloudType })); })()",
+      "notes": [
+        "Validated on 2026-05-12 against a temporary probe file in personal root.",
+        "For files, the page method receives a base name and preserves the original extension in the visible file list."
+      ]
+    },
+    {
+      "id": "file_list.copy_entry_via_action_dialog",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "new Promise((resolve, reject) => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm || typeof listVm.handleSelectionChange !== 'function' || typeof listVm.handleCopy !== 'function') { return reject(new Error('file-list copy hooks not available')); } const dialogVm = (listVm.$children || []).find(child => child.$options?.name === 'action-dialog'); if (!dialogVm || typeof dialogVm.onSubmit !== 'function') { return reject(new Error('action-dialog onSubmit not available')); } const entryName = '{{inputs.entry_name}}'; const targetDirName = '{{inputs.target_directory_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); const target = (listVm.tableData || []).find(item => item.type === 0 && (item.name || item.directoryName || item.fileName) === targetDirName); if (!entry) { return reject(new Error('entry not found for copy: ' + entryName)); } if (!target) { return reject(new Error('target directory not found for copy: ' + targetDirName)); } listVm.handleSelectionChange([entry]); listVm.handleCopy(); listVm.$nextTick(() => { dialogVm.currentDir = { id: target.id, currentId: target.id, directoryName: target.name || target.directoryName || target.fileName, spaceType: target.spaceType || listVm.cloudType, familyId: target.familyId || sessionStorage.getItem('familyId') || '' }; Promise.resolve(dialogVm.onSubmit()).then(() => resolve({ copiedEntryId: entry.id, copiedEntryType: entry.type, targetDirId: target.id, targetDirName: target.name || target.directoryName || target.fileName, cloudType: listVm.cloudType })).catch(reject); }); })",
+      "notes": [
+        "Validated on 2026-05-12 against temporary probe directories in personal root.",
+        "The parent component must derive dialogData from multipleSelection via handleSelectionChange() before handleCopy() so dirIds/fileIds stay aligned with the visible selection."
+      ]
+    },
+    {
+      "id": "file_list.move_entry_via_action_dialog",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "new Promise((resolve, reject) => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; if (!listVm || typeof listVm.handleSelectionChange !== 'function' || typeof listVm.handleMove !== 'function') { return reject(new Error('file-list move hooks not available')); } const dialogVm = (listVm.$children || []).find(child => child.$options?.name === 'action-dialog'); if (!dialogVm || typeof dialogVm.onSubmit !== 'function') { return reject(new Error('action-dialog onSubmit not available')); } const entryName = '{{inputs.entry_name}}'; const targetDirName = '{{inputs.target_directory_name}}'; const entry = (listVm.tableData || []).find(item => (item.name || item.directoryName || item.fileName) === entryName); const target = (listVm.tableData || []).find(item => item.type === 0 && (item.name || item.directoryName || item.fileName) === targetDirName); if (!entry) { return reject(new Error('entry not found for move: ' + entryName)); } if (!target) { return reject(new Error('target directory not found for move: ' + targetDirName)); } listVm.handleSelectionChange([entry]); listVm.handleMove(); listVm.$nextTick(() => { setTimeout(() => { dialogVm.type = 'move'; dialogVm.data = { familyId: listVm.dialogData?.familyId, spaceType: listVm.dialogData?.spaceType, fileIds: listVm.dialogData?.fileIds || [], dirIds: listVm.dialogData?.dirIds || [] }; dialogVm.currentDir = { id: target.id, currentId: target.id, directoryName: target.name || target.directoryName || target.fileName, spaceType: target.spaceType || listVm.cloudType, familyId: target.familyId || '' }; Promise.resolve(dialogVm.onSubmit()).then(() => resolve({ movedEntryId: entry.id, movedEntryType: entry.type, targetDirId: target.id, targetDirName: target.name || target.directoryName || target.fileName, cloudType: listVm.cloudType })).catch(reject); }, 1500); }); })",
+      "notes": [
+        "Validated on 2026-05-12 against temporary probe directories in personal root.",
+        "The extra delay mirrors the live page behavior where QueryDirectorys runs before the move dialog is ready to submit."
+      ]
+    },
+    {
+      "id": "web.reload_current_page",
+      "page": "file_list_all",
+      "kind": "javascript",
+      "source": "(() => { location.reload(); return true; })()",
+      "notes": [
+        "Reloading the logged-in page reliably replays QueryAllFiles so the gateway can capture the real headed-browser request profile."
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "unicom_sms_login_request_code",
+      "title": "Unicom SMS Login Request Code",
+      "purpose": "Open the desktop login page, fill the phone number, accept the agreement, and trigger SMS delivery without requiring the verification code up front.",
+      "start_page": "login",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive login."
+        },
+        {
+          "id": "image_captcha",
+          "label": "Image Captcha",
+          "kind": "text",
+          "transient": true,
+          "required": false,
+          "description": "Only needed when the login page shows a graphic captcha challenge."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "navigate",
+          "id": "open-login",
+          "url": "https://pan.wo.cn/login",
+          "wait_for_page": "login"
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms",
+          "element": "login.sms_login_tab"
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-agreement-checked",
+          "operation": "login.ensure_agreement_checked"
+        },
+        {
+          "kind": "validate_visual_layout",
+          "id": "validate-login-layout-before-send-code",
+          "targets": [
+            {
+              "element": "login.phone_input",
+              "role": "phone_input"
+            },
+            {
+              "element": "login.code_input",
+              "role": "sms_code_input"
+            },
+            {
+              "element": "login.captcha_input",
+              "role": "captcha_input",
+              "required": false
+            },
+            {
+              "element": "login.captcha_image",
+              "role": "captcha_image",
+              "required": false
+            },
+            {
+              "element": "login.send_code_button",
+              "role": "send_code_button"
+            },
+            {
+              "element": "login.agreement_checkbox",
+              "role": "agreement_checkbox"
+            }
+          ],
+          "instruction": "Confirm this is still the China Unicom SMS login form before requesting the SMS code. Reject the layout if required controls do not visually match their intended roles.",
+          "relationship_rules": [
+            "The phone_input should appear above the SMS verification area.",
+            "The sms_code_input and send_code_button should appear on the same row or immediately adjacent.",
+            "The agreement_checkbox should appear below the inputs and above the primary login action.",
+            "If captcha_input and captcha_image are both present, they should appear on the same row or directly adjacent."
+          ],
+          "optional": true
+        },
+        {
+          "kind": "solve_visual_captcha",
+          "id": "solve-image-captcha-before-send-code",
+          "image_element": "login.captcha_image",
+          "input_element": "login.captcha_input",
+          "input_id": "image_captcha",
+          "field_label": "Image Captcha",
+          "placeholder": "Type the image captcha shown on the login page",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ],
+          "llm_prompt_template": "Read the captcha image. Return strict JSON only. Use exactly this JSON shape: {\"captcha\":\"<CAPTCHA>\"}. Replace <CAPTCHA> with the observed captcha characters only. The captcha value must be exactly 4 ASCII alphanumeric characters. Field label: Image Captcha. Do not add markdown, code fences, explanations, or extra keys.",
+          "refresh_element": "login.captcha_image",
+          "expected_length": 4,
+          "optional": true,
+          "max_attempts": 2
+        },
+        {
+          "kind": "click",
+          "id": "send-code",
+          "element": "login.send_code_button"
+        },
+        {
+          "kind": "wait",
+          "id": "wait-before-post-click-captcha-check",
+          "duration_ms": 1200
+        },
+        {
+          "kind": "solve_visual_captcha",
+          "id": "solve-image-captcha-after-send-code",
+          "image_element": "login.captcha_image",
+          "input_element": "login.captcha_input",
+          "input_id": "image_captcha",
+          "field_label": "Image Captcha",
+          "placeholder": "Type the image captcha shown on the login page",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ],
+          "llm_prompt_template": "Read the captcha image. Return strict JSON only. Use exactly this JSON shape: {\"captcha\":\"<CAPTCHA>\"}. Replace <CAPTCHA> with the observed captcha characters only. The captcha value must be exactly 4 ASCII alphanumeric characters. Field label: Image Captcha. Do not add markdown, code fences, explanations, or extra keys.",
+          "refresh_element": "login.captcha_image",
+          "expected_length": 4,
+          "optional": true,
+          "max_attempts": 2
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "retry-send-code-after-captcha",
+          "operation": "login.retry_send_code_only_if_captcha_present"
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-send-code",
+          "duration_ms": 1500
+        }
+      ],
+      "notes": [
+        "This flow intentionally stops right after SMS delivery is requested so the broker can ask the operator for the received code.",
+        "Use unicom_sms_login_resume_submit_code next on the same auth session and CDP browser target when the operator is ready to submit the received SMS code."
+      ]
+    },
+    {
+      "id": "unicom_sms_login_capture_send_code_before",
+      "title": "Unicom SMS Login Capture Send Code Before State",
+      "purpose": "Capture the visible send-code control text and related DOM anchors before requesting the SMS code so later validation can compare whether the page actually changed.",
+      "start_page": "login",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive login."
+        },
+        {
+          "id": "image_captcha",
+          "label": "Image Captcha",
+          "kind": "text",
+          "transient": true,
+          "required": false,
+          "description": "Only needed when the login page shows a graphic captcha challenge."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "navigate",
+          "id": "open-login",
+          "url": "https://pan.wo.cn/login",
+          "wait_for_page": "login"
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms",
+          "element": "login.sms_login_tab"
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-agreement-checked",
+          "operation": "login.ensure_agreement_checked"
+        },
+        {
+          "kind": "validate_visual_layout",
+          "id": "validate-login-layout-before-capture",
+          "targets": [
+            {
+              "element": "login.phone_input",
+              "role": "phone_input"
+            },
+            {
+              "element": "login.code_input",
+              "role": "sms_code_input"
+            },
+            {
+              "element": "login.captcha_input",
+              "role": "captcha_input",
+              "required": false
+            },
+            {
+              "element": "login.captcha_image",
+              "role": "captcha_image",
+              "required": false
+            },
+            {
+              "element": "login.send_code_button",
+              "role": "send_code_button"
+            },
+            {
+              "element": "login.agreement_checkbox",
+              "role": "agreement_checkbox"
+            }
+          ],
+          "instruction": "Confirm this is still the China Unicom SMS login form before capturing the send-code state.",
+          "relationship_rules": [
+            "The phone_input should appear above the SMS verification area.",
+            "The sms_code_input and send_code_button should appear on the same row or immediately adjacent.",
+            "The agreement_checkbox should appear below the inputs and above the primary login action.",
+            "If captcha_input and captcha_image are both present, they should appear on the same row or directly adjacent."
+          ],
+          "optional": true
+        },
+        {
+          "kind": "solve_visual_captcha",
+          "id": "solve-image-captcha-before-capture",
+          "image_element": "login.captcha_image",
+          "input_element": "login.captcha_input",
+          "input_id": "image_captcha",
+          "field_label": "Image Captcha",
+          "placeholder": "Type the image captcha shown on the login page",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ],
+          "llm_prompt_template": "Read the captcha image. Return strict JSON only. Use exactly this JSON shape: {\"captcha\":\"<CAPTCHA>\"}. Replace <CAPTCHA> with the observed captcha characters only. The captcha value must be exactly 4 ASCII alphanumeric characters. Field label: Image Captcha. Do not add markdown, code fences, explanations, or extra keys.",
+          "refresh_element": "login.captcha_image",
+          "expected_length": 4,
+          "optional": true,
+          "max_attempts": 2
+        }
+      ],
+      "outputs": [
+        {
+          "id": "send_code_text_before",
+          "kind": "dom_text",
+          "source": "(() => { const smsInput = Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('短信验证码') || (placeholder.includes('验证码') && !placeholder.includes('图形') && !placeholder.includes('图片')); }); const roots = []; if (smsInput) { const row = smsInput.closest('.el-form-item, .form-item, .item, li, .identify-code, .img-code, .verify-code, .code-row') || smsInput.parentElement; if (row) { roots.push(row); } } roots.push(document); for (const root of roots) { const el = Array.from(root.querySelectorAll('.change-code')).find(node => { if (getComputedStyle(node).display === 'none') { return false; } const text = (node.innerText || '').trim(); return text === '发送验证码' || /\\d+\\s*(s|S|秒)/.test(text); }); if (el) { return (el.innerText || '').trim(); } } return null; })()",
+          "redact": false,
+          "description": "Visible send-code control text before the click."
+        },
+        {
+          "id": "send_code_candidate_before",
+          "kind": "script_value",
+          "source": "(() => { const smsInput = Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('短信验证码') || (placeholder.includes('验证码') && !placeholder.includes('图形') && !placeholder.includes('图片')); }); const roots = []; if (smsInput) { const row = smsInput.closest('.el-form-item, .form-item, .item, li, .identify-code, .img-code, .verify-code, .code-row') || smsInput.parentElement; if (row) { roots.push(row); } } roots.push(document); for (const root of roots) { const el = Array.from(root.querySelectorAll('.change-code')).find(node => { if (getComputedStyle(node).display === 'none') { return false; } const text = (node.innerText || '').trim(); return text === '发送验证码' || /\\d+\\s*(s|S|秒)/.test(text); }); if (el) { const rect = el.getBoundingClientRect(); return { tag: el.tagName, className: el.className || '', text: (el.innerText || '').trim(), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }; } } return null; })()",
+          "redact": false,
+          "description": "Structured description of the current send-code element before the click."
+        }
+      ],
+      "notes": [
+        "This is a reusable validation flow rather than a provider-hardcoded Rust branch.",
+        "Other carriers can define their own before/after validation flows with different selectors and output scripts."
+      ]
+    },
+    {
+      "id": "unicom_sms_login_request_code_validate",
+      "title": "Unicom SMS Login Request Code Validate",
+      "purpose": "Reuse the pre-capture login state, click the send-code control, and capture the post-click state so operators can compare whether the page entered countdown mode.",
+      "start_page": "login",
+      "prerequisite_flow_id": "unicom_sms_login_capture_send_code_before",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive login."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "wait-login-page",
+          "page": "login",
+          "timeout_ms": 10000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "prepare-send-code-feedback-capture",
+          "operation": "login.prepare_send_code_feedback_capture"
+        },
+        {
+          "kind": "click",
+          "id": "send-code",
+          "element": "login.send_code_button"
+        },
+        {
+          "kind": "wait",
+          "id": "wait-before-post-click-captcha-check",
+          "duration_ms": 1200
+        },
+        {
+          "kind": "solve_visual_captcha",
+          "id": "solve-image-captcha-after-send-code",
+          "image_element": "login.captcha_image",
+          "input_element": "login.captcha_input",
+          "input_id": "image_captcha",
+          "field_label": "Image Captcha",
+          "placeholder": "Type the image captcha shown on the login page",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ],
+          "llm_prompt_template": "Read the captcha image. Return strict JSON only. Use exactly this JSON shape: {\"captcha\":\"<CAPTCHA>\"}. Replace <CAPTCHA> with the observed captcha characters only. The captcha value must be exactly 4 ASCII alphanumeric characters. Field label: Image Captcha. Do not add markdown, code fences, explanations, or extra keys.",
+          "refresh_element": "login.captcha_image",
+          "expected_length": 4,
+          "optional": true,
+          "max_attempts": 2
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "retry-send-code-after-captcha",
+          "operation": "login.retry_send_code_only_if_captcha_present"
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-send-code",
+          "duration_ms": 3000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "send_code_text_after",
+          "kind": "dom_text",
+          "source": "(() => { const smsInput = Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('短信验证码') || (placeholder.includes('验证码') && !placeholder.includes('图形') && !placeholder.includes('图片')); }); const roots = []; if (smsInput) { const row = smsInput.closest('.el-form-item, .form-item, .item, li, .identify-code, .img-code, .verify-code, .code-row') || smsInput.parentElement; if (row) { roots.push(row); } } roots.push(document); for (const root of roots) { const el = Array.from(root.querySelectorAll('.change-code')).find(node => { if (getComputedStyle(node).display === 'none') { return false; } const text = (node.innerText || '').trim(); return text === '发送验证码' || /\\d+\\s*(s|S|秒)/.test(text); }); if (el) { return (el.innerText || '').trim(); } } return null; })()",
+          "redact": false,
+          "description": "Visible send-code control text after the click."
+        },
+        {
+          "id": "send_code_candidate_after",
+          "kind": "script_value",
+          "source": "(() => { const smsInput = Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('短信验证码') || (placeholder.includes('验证码') && !placeholder.includes('图形') && !placeholder.includes('图片')); }); const roots = []; if (smsInput) { const row = smsInput.closest('.el-form-item, .form-item, .item, li, .identify-code, .img-code, .verify-code, .code-row') || smsInput.parentElement; if (row) { roots.push(row); } } roots.push(document); for (const root of roots) { const el = Array.from(root.querySelectorAll('.change-code')).find(node => { if (getComputedStyle(node).display === 'none') { return false; } const text = (node.innerText || '').trim(); return text === '发送验证码' || /\\d+\\s*(s|S|秒)/.test(text); }); if (el) { const rect = el.getBoundingClientRect(); return { tag: el.tagName, className: el.className || '', text: (el.innerText || '').trim(), rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height } }; } } return null; })()",
+          "redact": false,
+          "description": "Structured description of the current send-code element after the click."
+        },
+        {
+          "id": "send_code_countdown_detected",
+          "kind": "script_value",
+          "source": "(() => { const smsInput = Array.from(document.querySelectorAll('input')).find(el => { const placeholder = String(el.placeholder || '').trim(); return placeholder.includes('短信验证码') || (placeholder.includes('验证码') && !placeholder.includes('图形') && !placeholder.includes('图片')); }); const roots = []; if (smsInput) { const row = smsInput.closest('.el-form-item, .form-item, .item, li, .identify-code, .img-code, .verify-code, .code-row') || smsInput.parentElement; if (row) { roots.push(row); } } roots.push(document); for (const root of roots) { const el = Array.from(root.querySelectorAll('.change-code')).find(node => { if (getComputedStyle(node).display === 'none') { return false; } const text = (node.innerText || '').trim(); return text === '发送验证码' || /\\d+\\s*(s|S|秒)/.test(text); }); if (el) { const text = (el.innerText || '').trim(); return /\\d+\\s*(s|S|秒)/.test(text); } } return false; })()",
+          "redact": false,
+          "description": "Whether the visible send-code control text appears to have changed into a countdown."
+        },
+        {
+          "id": "send_code_feedback_last_message",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgUnicomSendCodeFeedback || null; if (!state) { return null; } const value = typeof state.last_message === 'string' ? state.last_message.trim() : ''; return value || null; })()",
+          "redact": false,
+          "description": "Last transient toast or inline feedback captured after the send-code click."
+        },
+        {
+          "id": "send_code_feedback_messages",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgUnicomSendCodeFeedback || null; if (!state || !Array.isArray(state.messages)) { return []; } return state.messages.map(entry => typeof entry?.text === 'string' ? entry.text.trim() : '').filter(Boolean).slice(-12); })()",
+          "redact": false,
+          "description": "Recent transient toast or inline feedback texts captured while the send-code flow was running."
+        },
+        {
+          "id": "send_code_rate_limited_detected",
+          "kind": "script_value",
+          "source": "(() => { const state = window.__ccbgUnicomSendCodeFeedback || null; const texts = Array.isArray(state?.messages) ? state.messages.map(entry => typeof entry?.text === 'string' ? entry.text.trim() : '').filter(Boolean) : []; const last = typeof state?.last_message === 'string' ? state.last_message.trim() : ''; if (last) { texts.push(last); } return texts.some(text => /(过于频繁|操作频繁|稍后再获取|稍后获取|请稍后|请稍候|频繁)/.test(text)); })()",
+          "redact": false,
+          "description": "Whether the page flashed a rate-limit style warning after the send-code click."
+        }
+      ],
+      "notes": [
+        "This flow stays pluggable: the validation contract is defined by catalog outputs, not by provider-specific Rust code.",
+        "The admin or auth-broker can inspect runtime.send_code_text_before, runtime.send_code_text_after, runtime.send_code_countdown_detected, and runtime.send_code_feedback_last_message after session-run completes."
+      ]
+    },
+    {
+      "id": "unicom_sms_login_submit_code",
+      "title": "Unicom SMS Login Submit Code",
+      "purpose": "Resume the current desktop SMS login page after the operator receives the verification code, submit it, and capture the authenticated session outputs.",
+      "start_page": "login",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive login."
+        },
+        {
+          "id": "sms_code",
+          "label": "SMS Code",
+          "kind": "secret",
+          "required": true,
+          "secret": true,
+          "description": "Short-lived verification code typed by the operator after the page sends the SMS."
+        },
+        {
+          "id": "image_captcha",
+          "label": "Image Captcha",
+          "kind": "text",
+          "transient": true,
+          "required": false,
+          "description": "Only needed when the login page shows a graphic captcha challenge."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "wait-login-page",
+          "page": "login",
+          "timeout_ms": 10000
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms",
+          "element": "login.sms_login_tab",
+          "optional": true
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-agreement-checked",
+          "operation": "login.ensure_agreement_checked",
+          "optional": true
+        },
+        {
+          "kind": "validate_visual_layout",
+          "id": "validate-login-layout-before-submit",
+          "targets": [
+            {
+              "element": "login.phone_input",
+              "role": "phone_input"
+            },
+            {
+              "element": "login.code_input",
+              "role": "sms_code_input"
+            },
+            {
+              "element": "login.captcha_input",
+              "role": "captcha_input",
+              "required": false
+            },
+            {
+              "element": "login.captcha_image",
+              "role": "captcha_image",
+              "required": false
+            },
+            {
+              "element": "login.send_code_button",
+              "role": "send_code_button"
+            },
+            {
+              "element": "login.agreement_checkbox",
+              "role": "agreement_checkbox"
+            },
+            {
+              "element": "login.submit_button",
+              "role": "submit_button"
+            }
+          ],
+          "instruction": "Confirm this is still the China Unicom SMS login form before entering the SMS code and submitting.",
+          "relationship_rules": [
+            "The phone_input should appear above the SMS verification area.",
+            "The sms_code_input and send_code_button should appear on the same row or immediately adjacent.",
+            "The agreement_checkbox should appear above the submit_button.",
+            "If captcha_input and captcha_image are both present, they should appear on the same row or directly adjacent."
+          ],
+          "optional": true
+        },
+        {
+          "kind": "solve_visual_captcha",
+          "id": "solve-image-captcha-before-submit",
+          "image_element": "login.captcha_image",
+          "input_element": "login.captcha_input",
+          "input_id": "image_captcha",
+          "field_label": "Image Captcha",
+          "placeholder": "Type the image captcha shown on the login page",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ],
+          "llm_prompt_template": "Read the captcha image. Return strict JSON only. Use exactly this JSON shape: {\"captcha\":\"<CAPTCHA>\"}. Replace <CAPTCHA> with the observed captcha characters only. The captcha value must be exactly 4 ASCII alphanumeric characters. Field label: Image Captcha. Do not add markdown, code fences, explanations, or extra keys.",
+          "refresh_element": "login.captcha_image",
+          "expected_length": 4,
+          "optional": true,
+          "max_attempts": 2
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-sms-code",
+          "element": "login.code_input",
+          "value_template": "{{inputs.sms_code}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "click",
+          "id": "submit-login",
+          "element": "login.submit_button"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-app-login",
+          "request": "api_user_app_login_by_mobile",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user",
+          "request": "api_user_app_query_user",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_page",
+          "id": "wait-file-list",
+          "page": "file_list_all",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "api_user_app_login_by_mobile",
+        "api_user_app_query_user"
+      ],
+      "outputs": [
+        {
+          "id": "access_token",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.token ?? null; })()",
+          "redact": true,
+          "description": "Access token captured from the post-login Vuex user store for follow-up dispatcher requests."
+        },
+        {
+          "id": "family_id",
+          "kind": "script_value",
+          "source": "(() => sessionStorage.getItem('familyId') || null)()",
+          "redact": false,
+          "description": "Family space identifier exposed in sessionStorage after a successful login."
+        },
+        {
+          "id": "client_id",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.clientId ?? null; })()",
+          "redact": false,
+          "description": "Client identifier from the post-login Vuex user store."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL after the login flow reaches the file list page."
+        },
+        {
+          "id": "session_expires_at_unix_ms",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; const user = listVm?.$store?.state?.user || {}; const normalizeAbsolute = (value) => { if (value === null || value === undefined || value === '') { return null; } const raw = typeof value === 'string' ? value.trim() : value; if (raw === null || raw === undefined || raw === '') { return null; } if (typeof raw === 'number' && Number.isFinite(raw)) { if (raw > 1000000000000) { return Math.trunc(raw); } if (raw > 1000000000) { return Math.trunc(raw * 1000); } return null; } if (typeof raw === 'string') { if (/^\\d+$/.test(raw)) { return normalizeAbsolute(Number(raw)); } const parsed = Date.parse(raw); if (Number.isFinite(parsed)) { return Math.trunc(parsed); } } return null; }; for (const value of [user.sessionExpireTime, user.sessionExpiresAt, user.expireTime, user.expiresAt, user.tokenExpireTime, user.tokenExpiresAt]) { const normalized = normalizeAbsolute(value); if (normalized) { return normalized; } } for (const key of ['sessionExpireTime', 'sessionExpiresAt', 'expireTime', 'expiresAt', 'tokenExpireTime', 'tokenExpiresAt']) { const normalized = normalizeAbsolute(sessionStorage.getItem(key) || localStorage.getItem(key)); if (normalized) { return normalized; } } return null; })()",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Best-effort absolute browser-session expiry timestamp detected from the live page store or web storage."
+        },
+        {
+          "id": "session_timeout_ms",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; const user = listVm?.$store?.state?.user || {}; const normalizeDuration = (value) => { if (value === null || value === undefined || value === '') { return null; } const raw = typeof value === 'string' ? value.trim() : value; if (raw === null || raw === undefined || raw === '') { return null; } const number = typeof raw === 'number' ? raw : (/^\\d+$/.test(raw) ? Number(raw) : NaN); if (!Number.isFinite(number) || number <= 0) { return null; } if (number <= 86400) { return Math.trunc(number * 1000); } if (number <= 31536000000) { return Math.trunc(number); } return null; }; for (const value of [user.sessionTimeoutMs, user.timeoutMs, user.tokenTimeoutMs, user.sessionTimeout, user.timeout, user.expiresIn, user.expireIn]) { const normalized = normalizeDuration(value); if (normalized) { return normalized; } } for (const key of ['sessionTimeoutMs', 'timeoutMs', 'tokenTimeoutMs', 'sessionTimeout', 'timeout', 'expiresIn', 'expireIn']) { const normalized = normalizeDuration(sessionStorage.getItem(key) || localStorage.getItem(key)); if (normalized) { return normalized; } } return null; })()",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Best-effort browser-session timeout window detected from the live page store or web storage."
+        }
+      ],
+      "notes": [
+        "This split flow exists so the broker can request SMS delivery first, then wait for the operator to provide the code.",
+        "Run this flow on the same auth session and CDP browser target that requested the SMS code so it can continue on the live login page without triggering another send-code click."
+      ]
+    },
+    {
+      "id": "unicom_sms_login_resume_submit_code",
+      "title": "Unicom SMS Login Resume Submit Code",
+      "purpose": "Fast-path resume for the current desktop SMS login page after the operator already has the verification code and only needs to submit it on the same live page.",
+      "start_page": "login",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive login."
+        },
+        {
+          "id": "sms_code",
+          "label": "SMS Code",
+          "kind": "secret",
+          "required": true,
+          "secret": true,
+          "description": "Short-lived verification code typed by the operator after the page sends the SMS."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "wait-login-page",
+          "page": "login",
+          "timeout_ms": 10000
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms",
+          "element": "login.sms_login_tab",
+          "optional": true
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-agreement-checked",
+          "operation": "login.ensure_agreement_checked",
+          "optional": true
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-sms-code",
+          "element": "login.code_input",
+          "value_template": "{{inputs.sms_code}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "click",
+          "id": "submit-login",
+          "element": "login.submit_button"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-app-login",
+          "request": "api_user_app_login_by_mobile",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user",
+          "request": "api_user_app_query_user",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_page",
+          "id": "wait-file-list",
+          "page": "file_list_all",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "api_user_app_login_by_mobile",
+        "api_user_app_query_user"
+      ],
+      "outputs": [
+        {
+          "id": "access_token",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.token ?? null; })()",
+          "redact": true,
+          "description": "Access token captured from the post-login Vuex user store for follow-up dispatcher requests."
+        },
+        {
+          "id": "family_id",
+          "kind": "script_value",
+          "source": "(() => sessionStorage.getItem('familyId') || null)()",
+          "redact": false,
+          "description": "Family space identifier exposed in sessionStorage after a successful login."
+        },
+        {
+          "id": "client_id",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.clientId ?? null; })()",
+          "redact": false,
+          "description": "Client identifier from the post-login Vuex user store."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL after the login flow reaches the file list page."
+        },
+        {
+          "id": "session_expires_at_unix_ms",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; const user = listVm?.$store?.state?.user || {}; const normalizeAbsolute = (value) => { if (value === null || value === undefined || value === '') { return null; } const raw = typeof value === 'string' ? value.trim() : value; if (raw === null || raw === undefined || raw === '') { return null; } if (typeof raw === 'number' && Number.isFinite(raw)) { if (raw > 1000000000000) { return Math.trunc(raw); } if (raw > 1000000000) { return Math.trunc(raw * 1000); } return null; } if (typeof raw === 'string') { if (/^\\d+$/.test(raw)) { return normalizeAbsolute(Number(raw)); } const parsed = Date.parse(raw); if (Number.isFinite(parsed)) { return Math.trunc(parsed); } } return null; }; for (const value of [user.sessionExpireTime, user.sessionExpiresAt, user.expireTime, user.expiresAt, user.tokenExpireTime, user.tokenExpiresAt]) { const normalized = normalizeAbsolute(value); if (normalized) { return normalized; } } for (const key of ['sessionExpireTime', 'sessionExpiresAt', 'expireTime', 'expiresAt', 'tokenExpireTime', 'tokenExpiresAt']) { const normalized = normalizeAbsolute(sessionStorage.getItem(key) || localStorage.getItem(key)); if (normalized) { return normalized; } } return null; })()",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Best-effort absolute browser-session expiry timestamp detected from the live page store or web storage."
+        },
+        {
+          "id": "session_timeout_ms",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; const user = listVm?.$store?.state?.user || {}; const normalizeDuration = (value) => { if (value === null || value === undefined || value === '') { return null; } const raw = typeof value === 'string' ? value.trim() : value; if (raw === null || raw === undefined || raw === '') { return null; } const number = typeof raw === 'number' ? raw : (/^\\d+$/.test(raw) ? Number(raw) : NaN); if (!Number.isFinite(number) || number <= 0) { return null; } if (number <= 86400) { return Math.trunc(number * 1000); } if (number <= 31536000000) { return Math.trunc(number); } return null; }; for (const value of [user.sessionTimeoutMs, user.timeoutMs, user.tokenTimeoutMs, user.sessionTimeout, user.timeout, user.expiresIn, user.expireIn]) { const normalized = normalizeDuration(value); if (normalized) { return normalized; } } for (const key of ['sessionTimeoutMs', 'timeoutMs', 'tokenTimeoutMs', 'sessionTimeout', 'timeout', 'expiresIn', 'expireIn']) { const normalized = normalizeDuration(sessionStorage.getItem(key) || localStorage.getItem(key)); if (normalized) { return normalized; } } return null; })()",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Best-effort browser-session timeout window detected from the live page store or web storage."
+        }
+      ],
+      "notes": [
+        "Use this resume flow only after unicom_sms_login_request_code_validate has already prepared the live page and the operator has the SMS code in hand.",
+        "This flow intentionally skips visual-layout validation and captcha solving so Resume With SMS Code can submit immediately on the current page."
+      ]
+    },
+    {
+      "id": "unicom_sms_login",
+      "title": "Unicom SMS Login",
+      "purpose": "Drive the desktop web login page through SMS verification without hardcoding DOM logic in Rust.",
+      "start_page": "login",
+      "inputs": [
+        {
+          "id": "phone_number",
+          "label": "Phone Number",
+          "kind": "text",
+          "required": true,
+          "secret": true,
+          "description": "Mainland China mobile number used for the interactive login."
+        },
+        {
+          "id": "sms_code",
+          "label": "SMS Code",
+          "kind": "secret",
+          "required": true,
+          "secret": true,
+          "description": "Short-lived verification code typed by the operator after the page sends the SMS."
+        },
+        {
+          "id": "image_captcha",
+          "label": "Image Captcha",
+          "kind": "text",
+          "transient": true,
+          "required": false,
+          "description": "Only needed when the login page shows a graphic captcha challenge."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "navigate",
+          "id": "open-login",
+          "url": "https://pan.wo.cn/login",
+          "wait_for_page": "login"
+        },
+        {
+          "kind": "click",
+          "id": "switch-to-sms",
+          "element": "login.sms_login_tab"
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-phone",
+          "element": "login.phone_input",
+          "value_template": "{{inputs.phone_number}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "ensure-agreement-checked",
+          "operation": "login.ensure_agreement_checked"
+        },
+        {
+          "kind": "validate_visual_layout",
+          "id": "validate-login-layout-before-send-code",
+          "targets": [
+            {
+              "element": "login.phone_input",
+              "role": "phone_input"
+            },
+            {
+              "element": "login.code_input",
+              "role": "sms_code_input"
+            },
+            {
+              "element": "login.captcha_input",
+              "role": "captcha_input",
+              "required": false
+            },
+            {
+              "element": "login.captcha_image",
+              "role": "captcha_image",
+              "required": false
+            },
+            {
+              "element": "login.send_code_button",
+              "role": "send_code_button"
+            },
+            {
+              "element": "login.agreement_checkbox",
+              "role": "agreement_checkbox"
+            },
+            {
+              "element": "login.submit_button",
+              "role": "submit_button"
+            }
+          ],
+          "instruction": "Confirm this is still the China Unicom SMS login form before solving the captcha, requesting the SMS code, and submitting the login.",
+          "relationship_rules": [
+            "The phone_input should appear above the SMS verification area.",
+            "The sms_code_input and send_code_button should appear on the same row or immediately adjacent.",
+            "The agreement_checkbox should appear above the submit_button.",
+            "If captcha_input and captcha_image are both present, they should appear on the same row or directly adjacent."
+          ],
+          "optional": true
+        },
+        {
+          "kind": "solve_visual_captcha",
+          "id": "solve-image-captcha-before-send-code",
+          "image_element": "login.captcha_image",
+          "input_element": "login.captcha_input",
+          "input_id": "image_captcha",
+          "field_label": "Image Captcha",
+          "placeholder": "Type the image captcha shown on the login page",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ],
+          "llm_prompt_template": "Read the captcha image. Return strict JSON only. Use exactly this JSON shape: {\"captcha\":\"<CAPTCHA>\"}. Replace <CAPTCHA> with the observed captcha characters only. The captcha value must be exactly 4 ASCII alphanumeric characters. Field label: Image Captcha. Do not add markdown, code fences, explanations, or extra keys.",
+          "refresh_element": "login.captcha_image",
+          "expected_length": 4,
+          "optional": true,
+          "max_attempts": 2
+        },
+        {
+          "kind": "click",
+          "id": "send-code",
+          "element": "login.send_code_button"
+        },
+        {
+          "kind": "wait",
+          "id": "wait-before-post-click-captcha-check",
+          "duration_ms": 1200
+        },
+        {
+          "kind": "solve_visual_captcha",
+          "id": "solve-image-captcha-after-send-code",
+          "image_element": "login.captcha_image",
+          "input_element": "login.captcha_input",
+          "input_id": "image_captcha",
+          "field_label": "Image Captcha",
+          "placeholder": "Type the image captcha shown on the login page",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ],
+          "instruction": "Return only the captcha characters from the image. Do not add explanation.",
+          "refresh_element": "login.captcha_image",
+          "expected_length": 4,
+          "optional": true,
+          "max_attempts": 2
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "retry-send-code-after-captcha",
+          "operation": "login.retry_send_code_only_if_captcha_present"
+        },
+        {
+          "kind": "wait",
+          "id": "wait-after-send-code",
+          "duration_ms": 1500
+        },
+        {
+          "kind": "set_input",
+          "id": "fill-sms-code",
+          "element": "login.code_input",
+          "value_template": "{{inputs.sms_code}}",
+          "dispatch_events": [
+            "input",
+            "change",
+            "keyup"
+          ]
+        },
+        {
+          "kind": "click",
+          "id": "submit-login",
+          "element": "login.submit_button"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-app-login",
+          "request": "api_user_app_login_by_mobile",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-user",
+          "request": "api_user_app_query_user",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_page",
+          "id": "wait-file-list",
+          "page": "file_list_all",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "api_user_app_login_by_mobile",
+        "api_user_app_query_user"
+      ],
+      "outputs": [
+        {
+          "id": "access_token",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.token ?? null; })()",
+          "redact": true,
+          "description": "Access token captured from the post-login Vuex user store for follow-up dispatcher requests."
+        },
+        {
+          "id": "family_id",
+          "kind": "script_value",
+          "source": "(() => sessionStorage.getItem('familyId') || null)()",
+          "redact": false,
+          "description": "Family space identifier exposed in sessionStorage after a successful login."
+        },
+        {
+          "id": "client_id",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.clientId ?? null; })()",
+          "redact": false,
+          "description": "Client identifier from the post-login Vuex user store."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL after the login flow reaches the file list page."
+        },
+        {
+          "id": "session_expires_at_unix_ms",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; const user = listVm?.$store?.state?.user || {}; const normalizeAbsolute = (value) => { if (value === null || value === undefined || value === '') { return null; } const raw = typeof value === 'string' ? value.trim() : value; if (raw === null || raw === undefined || raw === '') { return null; } if (typeof raw === 'number' && Number.isFinite(raw)) { if (raw > 1000000000000) { return Math.trunc(raw); } if (raw > 1000000000) { return Math.trunc(raw * 1000); } return null; } if (typeof raw === 'string') { if (/^\\d+$/.test(raw)) { return normalizeAbsolute(Number(raw)); } const parsed = Date.parse(raw); if (Number.isFinite(parsed)) { return Math.trunc(parsed); } } return null; }; for (const value of [user.sessionExpireTime, user.sessionExpiresAt, user.expireTime, user.expiresAt, user.tokenExpireTime, user.tokenExpiresAt]) { const normalized = normalizeAbsolute(value); if (normalized) { return normalized; } } for (const key of ['sessionExpireTime', 'sessionExpiresAt', 'expireTime', 'expiresAt', 'tokenExpireTime', 'tokenExpiresAt']) { const normalized = normalizeAbsolute(sessionStorage.getItem(key) || localStorage.getItem(key)); if (normalized) { return normalized; } } return null; })()",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Best-effort absolute browser-session expiry timestamp detected from the live page store or web storage."
+        },
+        {
+          "id": "session_timeout_ms",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; const user = listVm?.$store?.state?.user || {}; const normalizeDuration = (value) => { if (value === null || value === undefined || value === '') { return null; } const raw = typeof value === 'string' ? value.trim() : value; if (raw === null || raw === undefined || raw === '') { return null; } const number = typeof raw === 'number' ? raw : (/^\\d+$/.test(raw) ? Number(raw) : NaN); if (!Number.isFinite(number) || number <= 0) { return null; } if (number <= 86400) { return Math.trunc(number * 1000); } if (number <= 31536000000) { return Math.trunc(number); } return null; }; for (const value of [user.sessionTimeoutMs, user.timeoutMs, user.tokenTimeoutMs, user.sessionTimeout, user.timeout, user.expiresIn, user.expireIn]) { const normalized = normalizeDuration(value); if (normalized) { return normalized; } } for (const key of ['sessionTimeoutMs', 'timeoutMs', 'tokenTimeoutMs', 'sessionTimeout', 'timeout', 'expiresIn', 'expireIn']) { const normalized = normalizeDuration(sessionStorage.getItem(key) || localStorage.getItem(key)); if (normalized) { return normalized; } } return null; })()",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Best-effort browser-session timeout window detected from the live page store or web storage."
+        }
+      ],
+      "notes": [
+        "The flow intentionally keeps the SMS code as a runtime input; it should come from the operator or a control-plane verification queue.",
+        "If the login page text or tab component changes, selectors in the login.* elements should be updated before touching the execution engine."
+      ]
+    },
+    {
+      "id": "unicom_prepare_personal_root_upload",
+      "title": "Unicom Prepare Personal Root Upload",
+      "purpose": "Open the page uploader and capture the personal-root upload context that the web client initializes before any file is attached.",
+      "start_page": "file_list_all",
+      "prerequisite_flow_id": "unicom_capture_current_session",
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "open-uploader",
+          "operation": "file_list.open_personal_uploader"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "batch_no",
+          "kind": "script_value",
+          "source": "(() => { const root = document.querySelector('.uploader-container'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); return vm?.params?.fileInfo?.batchNo ?? null; })()",
+          "redact": true,
+          "description": "Batch identifier generated by the uploader after personal-root upload preparation."
+        },
+        {
+          "id": "directory_id",
+          "kind": "script_value",
+          "source": "(() => { const root = document.querySelector('.uploader-container'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); return vm?.params?.fileInfo?.directoryId ?? null; })()",
+          "redact": false,
+          "description": "Prepared target directory id for the personal-root uploader context."
+        },
+        {
+          "id": "personal_space_type",
+          "kind": "script_value",
+          "source": "(() => { const root = document.querySelector('.uploader-container'); const vm = root && (root.__vue__ || root.__vueParentComponent?.proxy); return vm?.params?.fileInfo?.spaceType ?? null; })()",
+          "redact": false,
+          "description": "Prepared space type for the personal-root uploader context."
+        }
+      ],
+      "notes": [
+        "Validated on 2026-05-12 against the logged-in personal root page by calling goUpload(false) without attaching a file.",
+        "This preparatory flow exists so later upload flows can reuse the initialized uploader context through auth-session runtime values."
+      ]
+    },
+    {
+      "id": "unicom_capture_current_session",
+      "title": "Unicom Capture Current Session",
+      "purpose": "Capture the current authenticated personal file-list session from an already logged-in page without replaying the SMS login flow.",
+      "start_page": "file_list_all",
+      "steps": [
+        {
+          "kind": "wait_for_page",
+          "id": "confirm-file-list-page",
+          "page": "file_list_all",
+          "timeout_ms": 5000
+        },
+        {
+          "kind": "invoke_operation",
+          "id": "reload-current-page",
+          "operation": "web.reload_current_page"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-query-all-files-request",
+          "request": "wohome_query_all_files_capture",
+          "timeout_ms": 15000
+        }
+      ],
+      "outputs": [
+        {
+          "id": "access_token",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.token ?? null; })()",
+          "redact": true,
+          "description": "Access token captured from the current file-list Vuex user store."
+        },
+        {
+          "id": "family_id",
+          "kind": "script_value",
+          "source": "(() => sessionStorage.getItem('familyId') || null)()",
+          "redact": false,
+          "description": "Family space identifier exposed in sessionStorage for the current page session."
+        },
+        {
+          "id": "client_id",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; return listVm?.$store?.state?.user?.clientId ?? null; })()",
+          "redact": false,
+          "description": "Client identifier from the current file-list Vuex user store."
+        },
+        {
+          "id": "cookie_header",
+          "kind": "request_header",
+          "source": "wohome_query_all_files_capture:Cookie",
+          "required_for_prerequisite": false,
+          "redact": true,
+          "description": "Cookie header captured from the current headed-browser QueryAllFiles request when the upstream page still sends it."
+        },
+        {
+          "id": "browser_profile_headers",
+          "kind": "request_headers",
+          "source": "wohome_query_all_files_capture",
+          "required_for_prerequisite": false,
+          "header_names": [
+            "User-Agent",
+            "Accept",
+            "Accept-Language",
+            "Accept-Encoding",
+            "DNT",
+            "Priority",
+            "Sec-CH-UA",
+            "Sec-CH-UA-Mobile",
+            "Sec-CH-UA-Platform",
+            "Sec-Fetch-Dest",
+            "Sec-Fetch-Mode",
+            "Sec-Fetch-Site",
+            "Origin",
+            "Referer"
+          ],
+          "redact": false,
+          "description": "Selected browser-profile headers captured from the real headed-browser QueryAllFiles request."
+        },
+        {
+          "id": "current_url",
+          "kind": "url",
+          "source": "location.href",
+          "redact": false,
+          "description": "Resolved URL of the already logged-in page target."
+        },
+        {
+          "id": "session_expires_at_unix_ms",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; const user = listVm?.$store?.state?.user || {}; const normalizeAbsolute = (value) => { if (value === null || value === undefined || value === '') { return null; } const raw = typeof value === 'string' ? value.trim() : value; if (raw === null || raw === undefined || raw === '') { return null; } if (typeof raw === 'number' && Number.isFinite(raw)) { if (raw > 1000000000000) { return Math.trunc(raw); } if (raw > 1000000000) { return Math.trunc(raw * 1000); } return null; } if (typeof raw === 'string') { if (/^\\d+$/.test(raw)) { return normalizeAbsolute(Number(raw)); } const parsed = Date.parse(raw); if (Number.isFinite(parsed)) { return Math.trunc(parsed); } } return null; }; for (const value of [user.sessionExpireTime, user.sessionExpiresAt, user.expireTime, user.expiresAt, user.tokenExpireTime, user.tokenExpiresAt]) { const normalized = normalizeAbsolute(value); if (normalized) { return normalized; } } for (const key of ['sessionExpireTime', 'sessionExpiresAt', 'expireTime', 'expiresAt', 'tokenExpireTime', 'tokenExpiresAt']) { const normalized = normalizeAbsolute(sessionStorage.getItem(key) || localStorage.getItem(key)); if (normalized) { return normalized; } } return null; })()",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Best-effort absolute browser-session expiry timestamp detected from the live page store or web storage."
+        },
+        {
+          "id": "session_timeout_ms",
+          "kind": "script_value",
+          "source": "(() => { const listVm = document.querySelector('.file-list-container')?.__vue__ || document.querySelector('.file-list-container')?.__vueParentComponent?.proxy; const user = listVm?.$store?.state?.user || {}; const normalizeDuration = (value) => { if (value === null || value === undefined || value === '') { return null; } const raw = typeof value === 'string' ? value.trim() : value; if (raw === null || raw === undefined || raw === '') { return null; } const number = typeof raw === 'number' ? raw : (/^\\d+$/.test(raw) ? Number(raw) : NaN); if (!Number.isFinite(number) || number <= 0) { return null; } if (number <= 86400) { return Math.trunc(number * 1000); } if (number <= 31536000000) { return Math.trunc(number); } return null; }; for (const value of [user.sessionTimeoutMs, user.timeoutMs, user.tokenTimeoutMs, user.sessionTimeout, user.timeout, user.expiresIn, user.expireIn]) { const normalized = normalizeDuration(value); if (normalized) { return normalized; } } for (const key of ['sessionTimeoutMs', 'timeoutMs', 'tokenTimeoutMs', 'sessionTimeout', 'timeout', 'expiresIn', 'expireIn']) { const normalized = normalizeDuration(sessionStorage.getItem(key) || localStorage.getItem(key)); if (normalized) { return normalized; } } return null; })()",
+          "required_for_prerequisite": false,
+          "redact": false,
+          "description": "Best-effort browser-session timeout window detected from the live page store or web storage."
+        }
+      ],
+      "notes": [
+        "Use this flow when the CDP target is already logged in and sitting on the personal file list page.",
+        "This avoids forcing a fresh SMS login just to populate auth-session runtime values."
+      ]
+    },
+    {
+      "id": "unicom_personal_root_upload",
+      "title": "Unicom Personal Root Upload",
+      "purpose": "Attach a local file to the already-prepared personal-root uploader and watch the real upload2C request rather than synthesizing an incomplete multipart form in Rust.",
+      "start_page": "file_list_all",
+      "prerequisite_flow_id": "unicom_prepare_personal_root_upload",
+      "inputs": [
+        {
+          "id": "local_file",
+          "label": "Local File",
+          "kind": "file",
+          "required": true,
+          "description": "Absolute path of the file that should be attached to the hidden uploader input."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "set_files",
+          "id": "attach-local-file",
+          "element": "file_list.global_uploader_input",
+          "input_ref": "local_file"
+        },
+        {
+          "kind": "dispatch_events",
+          "id": "trigger-file-events",
+          "element": "file_list.global_uploader_input",
+          "events": [
+            "input",
+            "change"
+          ]
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-upload-request",
+          "request": "upload2c",
+          "timeout_ms": 60000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "upload2c",
+        "wohome_query_all_files",
+        "member_card_info"
+      ],
+      "outputs": [
+        {
+          "id": "upload_fid",
+          "kind": "response_field",
+          "source": "upload2c.response.data.fid",
+          "redact": false,
+          "description": "Primary file identifier returned by a successful upload2C response."
+        },
+        {
+          "id": "upload_wc_file_id",
+          "kind": "response_field",
+          "source": "upload2c.response.data.wcFileId",
+          "redact": false,
+          "description": "Secondary storage file identifier returned by upload2C."
+        }
+      ],
+      "notes": [
+        "When batch_no, directory_id, or personal_space_type are missing, gatewayd now auto-runs unicom_prepare_personal_root_upload on the same auth_session_id and CDP page session.",
+        "unicom_prepare_personal_root_upload in turn auto-runs unicom_capture_current_session when access_token and related session fields have not been captured yet.",
+        "This flow is intentionally scoped to personal root upload; family/private variants should be modelled as separate flows once their uploader contexts are captured end-to-end.",
+        "If upload2C form fields or the global uploader component change, update the request descriptor and JS operations here before rewriting provider code."
+      ]
+    },
+    {
+      "id": "unicom_create_directory",
+      "title": "Unicom Create Directory",
+      "purpose": "Create a directory in the current visible file list context by reusing the file-list Vue component rather than reconstructing an encrypted dispatcher payload manually.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "directory_name",
+          "label": "Directory Name",
+          "kind": "text",
+          "required": true,
+          "description": "Name of the directory to create in the current route context."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "create-directory",
+          "operation": "file_list.create_directory_via_component"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-create-directory",
+          "request": "wohome_create_directory",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-directory-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_create_directory",
+        "wohome_query_all_files"
+      ],
+      "notes": [
+        "Validated on 2026-05-11 with a temporary probe directory in personal root.",
+        "This flow currently records the component-driven path because it is more stable than guessing the new-directory dialog DOM."
+      ]
+    },
+    {
+      "id": "unicom_delete_entry",
+      "title": "Unicom Delete Entry",
+      "purpose": "Delete a visible file or directory by driving the action-dialog component with the selected row payload.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "entry_name",
+          "label": "Entry Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible file or directory name in the current list context."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "delete-entry",
+          "operation": "file_list.delete_entry_via_action_dialog"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-delete-file",
+          "request": "wohome_delete_file",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-post-delete-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_delete_file",
+        "wohome_query_all_files"
+      ],
+      "notes": [
+        "Validated on 2026-05-11 against a temporary probe directory created and deleted in personal root.",
+        "The component method can target both directories and files by splitting ids into dirIds and fileIds."
+      ]
+    },
+    {
+      "id": "unicom_rename_entry",
+      "title": "Unicom Rename Entry",
+      "purpose": "Rename a visible file or directory by reusing the file-list Vue component method that already knows how to encrypt the dispatcher payload.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "entry_name",
+          "label": "Entry Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible file or directory name in the current list context."
+        },
+        {
+          "id": "new_name",
+          "label": "New Name",
+          "kind": "text",
+          "required": true,
+          "description": "Requested new base name. For files, the page keeps the original extension."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "rename-entry",
+          "operation": "file_list.rename_entry_via_component"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-rename-entry",
+          "request": "wohome_rename_file_or_directory",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_rename_file_or_directory"
+      ],
+      "notes": [
+        "Validated on 2026-05-12 with a temporary probe file in personal root.",
+        "The current page implementation does not always issue an immediate QueryAllFiles refresh after rename, so the flow only waits for the dispatcher write."
+      ]
+    },
+    {
+      "id": "unicom_copy_entry",
+      "title": "Unicom Copy Entry",
+      "purpose": "Copy a visible file or directory into another visible directory by driving the file-list selection state and action-dialog submit path.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "entry_name",
+          "label": "Entry Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible file or directory name in the current list context."
+        },
+        {
+          "id": "target_directory_name",
+          "label": "Target Directory Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible directory name in the current list context that should receive the copied entry."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "copy-entry",
+          "operation": "file_list.copy_entry_via_action_dialog"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-copy-file",
+          "request": "wohome_copy_file",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-post-copy-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_copy_file",
+        "wohome_query_all_files"
+      ],
+      "notes": [
+        "Validated on 2026-05-12 with temporary probe directories in personal root.",
+        "The live page also queried QueryDirectorys and QueryFamilyGroups around the copy dialog, but CopyFile plus the root list refresh are the core write-path signals."
+      ]
+    },
+    {
+      "id": "unicom_move_entry",
+      "title": "Unicom Move Entry",
+      "purpose": "Move a visible file or directory into another visible directory by driving the file-list selection state and action-dialog submit path.",
+      "start_page": "file_list_all",
+      "inputs": [
+        {
+          "id": "entry_name",
+          "label": "Entry Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible file or directory name in the current list context."
+        },
+        {
+          "id": "target_directory_name",
+          "label": "Target Directory Name",
+          "kind": "text",
+          "required": true,
+          "description": "Visible directory name in the current list context that should receive the moved entry."
+        }
+      ],
+      "steps": [
+        {
+          "kind": "invoke_operation",
+          "id": "move-entry",
+          "operation": "file_list.move_entry_via_action_dialog"
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-move-file",
+          "request": "wohome_move_file",
+          "timeout_ms": 30000
+        },
+        {
+          "kind": "wait_for_request",
+          "id": "wait-post-move-list-refresh",
+          "request": "wohome_query_all_files",
+          "timeout_ms": 30000
+        }
+      ],
+      "expected_requests": [
+        "wohome_move_file",
+        "wohome_query_all_files"
+      ],
+      "notes": [
+        "Validated on 2026-05-12 with temporary probe directories in personal root.",
+        "The live page issues a QueryDirectorys preflight before MoveFile, so the operation intentionally waits for the dialog state to settle before submit."
+      ]
+    }
+  ]
+}
