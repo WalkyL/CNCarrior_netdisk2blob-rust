@@ -56,6 +56,15 @@ pub struct LogicalObjectRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectProtectionPlanRecord {
+    pub bucket: String,
+    pub key: String,
+    pub sync_targets_csv: String,
+    pub fallback_read_order_csv: String,
+    pub updated_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MetadataTargetStatus {
     pub target: String,
     pub queued_count: usize,
@@ -704,6 +713,65 @@ impl MetadataStore {
         Ok(())
     }
 
+    pub fn upsert_object_protection_plan(
+        &self,
+        record: &ObjectProtectionPlanRecord,
+    ) -> Result<(), MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        connection
+            .execute(
+                "INSERT INTO object_protection_plans (
+                    bucket, key, sync_targets_csv, fallback_read_order_csv, updated_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(bucket, key) DO UPDATE SET
+                    sync_targets_csv = excluded.sync_targets_csv,
+                    fallback_read_order_csv = excluded.fallback_read_order_csv,
+                    updated_at_unix_ms = excluded.updated_at_unix_ms",
+                params![
+                    record.bucket.as_str(),
+                    record.key.as_str(),
+                    record.sync_targets_csv.as_str(),
+                    record.fallback_read_order_csv.as_str(),
+                    record.updated_at_unix_ms as i64,
+                ],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        Ok(())
+    }
+
+    pub fn delete_object_protection_plan(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<(), MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        connection
+            .execute(
+                "DELETE FROM object_protection_plans WHERE bucket = ?1 AND key = ?2",
+                params![bucket, key],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        Ok(())
+    }
+
+    pub fn object_protection_plan(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<ObjectProtectionPlanRecord>, MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        connection
+            .query_row(
+                "SELECT bucket, key, sync_targets_csv, fallback_read_order_csv, updated_at_unix_ms
+                 FROM object_protection_plans
+                 WHERE bucket = ?1 AND key = ?2",
+                params![bucket, key],
+                row_to_object_protection_plan_record,
+            )
+            .optional()
+            .map_err(MetadataError::Sqlite)
+    }
+
     pub fn logical_object(
         &self,
         bucket: &str,
@@ -880,7 +948,17 @@ impl MetadataStore {
                     PRIMARY KEY(bucket, key)
                 );
                 CREATE INDEX IF NOT EXISTS idx_logical_objects_bucket_updated_at
-                    ON logical_objects(bucket, updated_at_unix_ms);",
+                    ON logical_objects(bucket, updated_at_unix_ms);
+                CREATE TABLE IF NOT EXISTS object_protection_plans (
+                    bucket TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    sync_targets_csv TEXT NOT NULL,
+                    fallback_read_order_csv TEXT NOT NULL,
+                    updated_at_unix_ms INTEGER NOT NULL,
+                    PRIMARY KEY(bucket, key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_object_protection_plans_updated_at
+                    ON object_protection_plans(updated_at_unix_ms);",
             )
             .map_err(MetadataError::Sqlite)?;
         ensure_replication_jobs_column(&connection, "source_provider", "TEXT NULL").and_then(|_| {
@@ -917,6 +995,18 @@ fn row_to_logical_object_record(
         stored_size: row.get::<_, i64>(10)? as u64,
         logical_content_type: row.get(11)?,
         updated_at_unix_ms: row.get::<_, i64>(12)? as u64,
+    })
+}
+
+fn row_to_object_protection_plan_record(
+    row: &rusqlite::Row<'_>,
+) -> Result<ObjectProtectionPlanRecord, rusqlite::Error> {
+    Ok(ObjectProtectionPlanRecord {
+        bucket: row.get(0)?,
+        key: row.get(1)?,
+        sync_targets_csv: row.get(2)?,
+        fallback_read_order_csv: row.get(3)?,
+        updated_at_unix_ms: row.get::<_, i64>(4)? as u64,
     })
 }
 
@@ -1262,7 +1352,7 @@ mod tests {
 
     use super::{
         LogicalObjectRecord, MetadataError, MetadataRetentionPolicy, MetadataStore,
-        MetadataStoreOptions, ObjectPlacementRecord,
+        MetadataStoreOptions, ObjectPlacementRecord, ObjectProtectionPlanRecord,
     };
 
     fn temp_db_path() -> std::path::PathBuf {
@@ -1569,6 +1659,42 @@ mod tests {
         assert_eq!(latest_by_bucket[0].job_id, 11);
         assert_eq!(latest_by_bucket[1].object.key, "notes/other.txt");
         assert_eq!(latest_by_bucket[1].job_id, 12);
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn object_protection_plan_round_trips() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let record = ObjectProtectionPlanRecord {
+            bucket: "root".to_string(),
+            key: "docs/plan.txt".to_string(),
+            sync_targets_csv: "onedrive,telecom".to_string(),
+            fallback_read_order_csv: "telecom".to_string(),
+            updated_at_unix_ms: 1_234,
+        };
+
+        store
+            .upsert_object_protection_plan(&record)
+            .expect("protection plan should persist");
+
+        let loaded = store
+            .object_protection_plan("root", "docs/plan.txt")
+            .expect("protection plan should load")
+            .expect("protection plan should exist");
+        assert_eq!(loaded, record);
+
+        store
+            .delete_object_protection_plan("root", "docs/plan.txt")
+            .expect("protection plan should delete");
+        assert!(
+            store
+                .object_protection_plan("root", "docs/plan.txt")
+                .expect("deleted protection plan lookup should succeed")
+                .is_none()
+        );
 
         fs::remove_file(db_path).ok();
     }

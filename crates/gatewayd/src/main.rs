@@ -59,7 +59,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use hmac::{Hmac, Mac};
 use metadata_store::{
     LogicalObjectRecord, MetadataRetentionPolicy, MetadataSnapshot, MetadataStore,
-    MetadataStoreOptions, MetadataTargetStatus, ObjectPlacementRecord,
+    MetadataStoreOptions, MetadataTargetStatus, ObjectPlacementRecord, ObjectProtectionPlanRecord,
 };
 use object_crypto::{
     AlgorithmPreference as CryptoAlgorithmPreference, EncryptRequest as CryptoEncryptRequest,
@@ -2824,7 +2824,13 @@ fn monitoring_summary_payload(
 
 fn object_action_audit_fields(input: &ObjectActionInput) -> ObjectActionAuditFields {
     match input {
-        ObjectActionInput::Rename {
+        ObjectActionInput::Delete {
+            operator,
+            ticket,
+            notes,
+            ..
+        }
+        | ObjectActionInput::Rename {
             operator,
             ticket,
             notes,
@@ -4982,14 +4988,43 @@ struct DeleteStaleObjectPlacementBulkInput {
     records: Vec<DeleteStaleObjectPlacementInput>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ObjectActionMode {
+    GatewayManaged,
+    ProviderDirect,
+}
+
+fn default_object_action_mode() -> ObjectActionMode {
+    ObjectActionMode::GatewayManaged
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 #[derive(Clone)]
 enum ObjectActionInput {
+    Delete {
+        bucket: String,
+        key: String,
+        #[serde(default = "default_object_action_mode")]
+        mode: ObjectActionMode,
+        #[serde(default)]
+        provider: Option<String>,
+        #[serde(default)]
+        operator: Option<String>,
+        #[serde(default)]
+        ticket: Option<String>,
+        #[serde(default)]
+        notes: Option<String>,
+    },
     Rename {
         bucket: String,
         key: String,
         new_key: String,
+        #[serde(default = "default_object_action_mode")]
+        mode: ObjectActionMode,
+        #[serde(default)]
+        provider: Option<String>,
         #[serde(default)]
         operator: Option<String>,
         #[serde(default)]
@@ -5002,6 +5037,12 @@ enum ObjectActionInput {
         source_key: String,
         destination_bucket: String,
         destination_key: String,
+        #[serde(default = "default_object_action_mode")]
+        mode: ObjectActionMode,
+        #[serde(default)]
+        source_provider: Option<String>,
+        #[serde(default)]
+        destination_provider: Option<String>,
         #[serde(default)]
         operator: Option<String>,
         #[serde(default)]
@@ -5014,6 +5055,12 @@ enum ObjectActionInput {
         source_key: String,
         destination_bucket: String,
         destination_key: String,
+        #[serde(default = "default_object_action_mode")]
+        mode: ObjectActionMode,
+        #[serde(default)]
+        source_provider: Option<String>,
+        #[serde(default)]
+        destination_provider: Option<String>,
         #[serde(default)]
         operator: Option<String>,
         #[serde(default)]
@@ -11636,7 +11683,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         <div class="grid" style="margin-top: 0;">
           <div>
             <label>Bucket</label>
-            <input id="object-action-rename-bucket" type="text" placeholder="family" />
+            <select id="object-action-rename-bucket">
+              <option value="">先加载桶列表</option>
+            </select>
           </div>
           <div>
             <label>Key</label>
@@ -11652,7 +11701,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         <div class="grid" style="margin-top: 0;">
           <div>
             <label>Source Bucket</label>
-            <input id="object-action-source-bucket" type="text" placeholder="family" />
+            <select id="object-action-source-bucket">
+              <option value="">先加载桶列表</option>
+            </select>
           </div>
           <div>
             <label>Source Key</label>
@@ -11660,7 +11711,9 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
           </div>
           <div>
             <label>Destination Bucket</label>
-            <input id="object-action-destination-bucket" type="text" placeholder="root" />
+            <select id="object-action-destination-bucket">
+              <option value="">先加载桶列表</option>
+            </select>
           </div>
           <div>
             <label>Destination Key</label>
@@ -18279,6 +18332,31 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         : buckets[0].name;
       select.value = nextValue;
     }}
+    function renderObjectActionBucketOptions() {{
+      const buckets = objectBrowserState.buckets || [];
+      [
+        'object-action-rename-bucket',
+        'object-action-source-bucket',
+        'object-action-destination-bucket',
+      ].forEach(id => {{
+        const select = document.getElementById(id);
+        if (!select) {{
+          return;
+        }}
+        const preferred = String(select.value || '').trim();
+        if (!buckets.length) {{
+          select.innerHTML = '<option value="">先加载桶列表</option>';
+          return;
+        }}
+        select.innerHTML = buckets.map(bucket => `
+          <option value="${{escapeHtmlAttr(bucket.name)}}">${{escapeHtml(bucketDisplayName(bucket.name))}}</option>
+        `).join('');
+        const nextValue = buckets.some(bucket => bucket.name === preferred)
+          ? preferred
+          : buckets[0].name;
+        select.value = nextValue;
+      }});
+    }}
     function renderObjectBrowserBucketSummary() {{
       const summaryNode = document.getElementById('object-browser-summary');
       if (!summaryNode) {{
@@ -18386,6 +18464,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         objectBrowserState.fallback_from = payload.fallback_from || null;
         objectBrowserState.buckets = payload.buckets || [];
         renderObjectBrowserBucketOptions();
+        renderObjectActionBucketOptions();
         renderObjectPlacementRecordBucketOptions();
         renderObjectBrowserResults(null);
         renderContentPoliciesEditor();
@@ -18397,6 +18476,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         objectBrowserState.buckets = [];
         objectBrowserState.objects_payload = null;
         renderObjectBrowserBucketOptions();
+        renderObjectActionBucketOptions();
         renderObjectPlacementRecordBucketOptions();
         renderContentPoliciesEditor();
         document.getElementById('object-browser-results').innerHTML = '';
@@ -18415,6 +18495,7 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
         objectBrowserState.fallback_from = payload.fallback_from || null;
         objectBrowserState.buckets = payload.buckets || [];
         renderObjectBrowserBucketOptions();
+        renderObjectActionBucketOptions();
         renderObjectPlacementRecordBucketOptions();
         renderContentPoliciesEditor();
         setContentPoliciesFeedback(
@@ -18454,6 +18535,27 @@ async fn admin_index(State(state): State<AppState>) -> Html<String> {
     async function inspectObjectBrowserObject(bucket, key) {{
       document.getElementById('object-status-bucket').value = bucket || '';
       document.getElementById('object-status-key').value = key || '';
+      const renameBucket = document.getElementById('object-action-rename-bucket');
+      const sourceBucket = document.getElementById('object-action-source-bucket');
+      const destinationBucket = document.getElementById('object-action-destination-bucket');
+      if (renameBucket && bucket) {{
+        renameBucket.value = bucket;
+      }}
+      if (sourceBucket && bucket) {{
+        sourceBucket.value = bucket;
+      }}
+      if (destinationBucket && bucket) {{
+        destinationBucket.value = bucket;
+      }}
+      const renameKey = document.getElementById('object-action-rename-key');
+      const sourceKey = document.getElementById('object-action-source-key');
+      if (renameKey && key) {{
+        renameKey.value = key;
+      }}
+      if (sourceKey && key) {{
+        sourceKey.value = key;
+      }}
+      renderObjectActionPreview();
       await inspectObjectStatus();
     }}
     function renderObjectActionEditor() {{
@@ -27697,6 +27799,25 @@ async fn run_object_action(
     let mut replication_jobs = Vec::new();
     let audit = object_action_audit_fields(&input_for_history);
     let action_result: Result<(), BlobError> = match input {
+        ObjectActionInput::Delete { bucket, key, .. } => {
+            let bucket = bucket.trim().to_string();
+            let key = key.trim().to_string();
+            let home_provider = persisted_or_primary_home_provider(&state, &bucket, &key)?;
+            let protection_plan = load_object_protection_plan(&state, &bucket, &key)?;
+            let backend = backend_for_provider(&state, home_provider)?;
+            backend.delete_object(&bucket, &key).await?;
+            delete_persisted_object_home_provider(&state, &bucket, &key)?;
+            delete_object_protection_plan(&state, &bucket, &key)?;
+            delete_logical_object_record(&state, &bucket, &key)?;
+            replication_jobs.extend(enqueue_replication_delete_for_object(
+                &state,
+                home_provider,
+                &bucket,
+                &key,
+                protection_plan.as_ref(),
+            )?);
+            Ok(())
+        }
         ObjectActionInput::Rename {
             bucket,
             key,
@@ -27714,6 +27835,9 @@ async fn run_object_action(
                 let source_object = backend.head_object(&bucket, &key).await?;
                 let previous_target_placement =
                     placed_home_provider_record(&state, &bucket, &new_key)?;
+                let previous_target_protection_plan =
+                    load_object_protection_plan(&state, &bucket, &new_key)?;
+                let source_protection_plan = load_object_protection_plan(&state, &bucket, &key)?;
                 persist_object_home_provider(&state, home_provider, &bucket, &new_key)?;
                 backend
                     .rename_object(RenameObjectRequest {
@@ -27738,9 +27862,37 @@ async fn run_object_action(
                                 );
                             }
                         }
+                        match previous_target_protection_plan {
+                            Some(previous) => {
+                                let _ = persist_object_protection_plan(
+                                    &state,
+                                    &bucket,
+                                    &new_key,
+                                    &previous.sync_targets,
+                                    &previous.fallback_read_order,
+                                    previous.updated_at_unix_ms,
+                                );
+                            }
+                            None => {
+                                let _ = delete_object_protection_plan(&state, &bucket, &new_key);
+                            }
+                        }
                         error
                     })?;
                 delete_persisted_object_home_provider(&state, &bucket, &key)?;
+                if let Some(ref plan) = source_protection_plan {
+                    persist_object_protection_plan(
+                        &state,
+                        &bucket,
+                        &new_key,
+                        &plan.sync_targets,
+                        &plan.fallback_read_order,
+                        current_unix_ms(),
+                    )?;
+                } else {
+                    delete_object_protection_plan(&state, &bucket, &new_key)?;
+                }
+                delete_object_protection_plan(&state, &bucket, &key)?;
                 replication_jobs.extend(
                     enqueue_replication_put_for_object(
                         &state,
@@ -27748,6 +27900,7 @@ async fn run_object_action(
                         &bucket,
                         &new_key,
                         &source_object,
+                        source_protection_plan.as_ref(),
                     )
                     .await?,
                 );
@@ -27756,6 +27909,7 @@ async fn run_object_action(
                     home_provider,
                     &bucket,
                     &key,
+                    source_protection_plan.as_ref(),
                 )?);
                 Ok(())
             }
@@ -27777,6 +27931,10 @@ async fn run_object_action(
             let source_object = backend.head_object(&source_bucket, &source_key).await?;
             let previous_target_placement =
                 placed_home_provider_record(&state, &destination_bucket, &destination_key)?;
+            let previous_target_protection_plan =
+                load_object_protection_plan(&state, &destination_bucket, &destination_key)?;
+            let source_protection_plan =
+                load_object_protection_plan(&state, &source_bucket, &source_key)?;
             ensure_provider_write_allowed_by_quota(
                 &state,
                 home_provider,
@@ -27818,8 +27976,39 @@ async fn run_object_action(
                             );
                         }
                     }
+                    match previous_target_protection_plan {
+                        Some(previous) => {
+                            let _ = persist_object_protection_plan(
+                                &state,
+                                &destination_bucket,
+                                &destination_key,
+                                &previous.sync_targets,
+                                &previous.fallback_read_order,
+                                previous.updated_at_unix_ms,
+                            );
+                        }
+                        None => {
+                            let _ = delete_object_protection_plan(
+                                &state,
+                                &destination_bucket,
+                                &destination_key,
+                            );
+                        }
+                    }
                     error
                 })?;
+            if let Some(ref plan) = source_protection_plan {
+                persist_object_protection_plan(
+                    &state,
+                    &destination_bucket,
+                    &destination_key,
+                    &plan.sync_targets,
+                    &plan.fallback_read_order,
+                    current_unix_ms(),
+                )?;
+            } else {
+                delete_object_protection_plan(&state, &destination_bucket, &destination_key)?;
+            }
             replication_jobs.extend(
                 enqueue_replication_put_for_object(
                     &state,
@@ -27827,6 +28016,7 @@ async fn run_object_action(
                     &destination_bucket,
                     &destination_key,
                     &source_object,
+                    source_protection_plan.as_ref(),
                 )
                 .await?,
             );
@@ -27852,6 +28042,10 @@ async fn run_object_action(
                 let source_object = backend.head_object(&source_bucket, &source_key).await?;
                 let previous_target_placement =
                     placed_home_provider_record(&state, &destination_bucket, &destination_key)?;
+                let previous_target_protection_plan =
+                    load_object_protection_plan(&state, &destination_bucket, &destination_key)?;
+                let source_protection_plan =
+                    load_object_protection_plan(&state, &source_bucket, &source_key)?;
                 if source_bucket != destination_bucket {
                     ensure_provider_write_allowed_by_quota(
                         &state,
@@ -27895,9 +28089,41 @@ async fn run_object_action(
                                 );
                             }
                         }
+                        match previous_target_protection_plan {
+                            Some(previous) => {
+                                let _ = persist_object_protection_plan(
+                                    &state,
+                                    &destination_bucket,
+                                    &destination_key,
+                                    &previous.sync_targets,
+                                    &previous.fallback_read_order,
+                                    previous.updated_at_unix_ms,
+                                );
+                            }
+                            None => {
+                                let _ = delete_object_protection_plan(
+                                    &state,
+                                    &destination_bucket,
+                                    &destination_key,
+                                );
+                            }
+                        }
                         error
                     })?;
                 delete_persisted_object_home_provider(&state, &source_bucket, &source_key)?;
+                if let Some(ref plan) = source_protection_plan {
+                    persist_object_protection_plan(
+                        &state,
+                        &destination_bucket,
+                        &destination_key,
+                        &plan.sync_targets,
+                        &plan.fallback_read_order,
+                        current_unix_ms(),
+                    )?;
+                } else {
+                    delete_object_protection_plan(&state, &destination_bucket, &destination_key)?;
+                }
+                delete_object_protection_plan(&state, &source_bucket, &source_key)?;
                 replication_jobs.extend(
                     enqueue_replication_put_for_object(
                         &state,
@@ -27905,6 +28131,7 @@ async fn run_object_action(
                         &destination_bucket,
                         &destination_key,
                         &source_object,
+                        source_protection_plan.as_ref(),
                     )
                     .await?,
                 );
@@ -27913,6 +28140,7 @@ async fn run_object_action(
                     home_provider,
                     &source_bucket,
                     &source_key,
+                    source_protection_plan.as_ref(),
                 )?);
                 Ok(())
             }
@@ -29734,6 +29962,13 @@ struct PutEncryptionPlan {
     logical_record: LogicalObjectRecord,
 }
 
+#[derive(Debug, Clone)]
+struct PersistedObjectProtectionPlan {
+    sync_targets: Vec<ProviderId>,
+    fallback_read_order: Vec<ProviderId>,
+    updated_at_unix_ms: u64,
+}
+
 impl PutEncryptionPlan {
     fn policy_content_type(&self) -> Option<String> {
         self.logical_record.logical_content_type.clone()
@@ -30045,6 +30280,99 @@ fn effective_topology_for_replication(
     Ok(topology)
 }
 
+fn csv_from_provider_ids(providers: &[ProviderId]) -> String {
+    providers
+        .iter()
+        .map(|provider| provider.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn parse_provider_csv(csv: &str) -> Result<Vec<ProviderId>, BlobError> {
+    parse_provider_list(csv).map_err(|error| BlobError::Configuration(error.to_string()))
+}
+
+fn sanitize_fallback_order_for_sync_targets(
+    sync_targets: &[ProviderId],
+    fallback_read_order: &[ProviderId],
+) -> Vec<ProviderId> {
+    fallback_read_order
+        .iter()
+        .copied()
+        .filter(|provider| sync_targets.contains(provider))
+        .collect()
+}
+
+fn load_object_protection_plan(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<PersistedObjectProtectionPlan>, BlobError> {
+    let Some(record) = state
+        .metadata_store
+        .object_protection_plan(bucket, key)
+        .map_err(|error| {
+            BlobError::Upstream(format!(
+                "failed to load object protection plan for {bucket}/{key}: {error}"
+            ))
+        })?
+    else {
+        return Ok(None);
+    };
+
+    let sync_targets = parse_provider_csv(&record.sync_targets_csv)?;
+    let fallback_read_order = sanitize_fallback_order_for_sync_targets(
+        &sync_targets,
+        &parse_provider_csv(&record.fallback_read_order_csv)?,
+    );
+    Ok(Some(PersistedObjectProtectionPlan {
+        sync_targets,
+        fallback_read_order,
+        updated_at_unix_ms: record.updated_at_unix_ms,
+    }))
+}
+
+fn persist_object_protection_plan(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    sync_targets: &[ProviderId],
+    fallback_read_order: &[ProviderId],
+    updated_at_unix_ms: u64,
+) -> Result<(), BlobError> {
+    let sanitized_fallback =
+        sanitize_fallback_order_for_sync_targets(sync_targets, fallback_read_order);
+    state
+        .metadata_store
+        .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            sync_targets_csv: csv_from_provider_ids(sync_targets),
+            fallback_read_order_csv: csv_from_provider_ids(&sanitized_fallback),
+            updated_at_unix_ms,
+        })
+        .map_err(|error| {
+            BlobError::Upstream(format!(
+                "failed to persist object protection plan for {bucket}/{key}: {error}"
+            ))
+        })
+}
+
+fn delete_object_protection_plan(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), BlobError> {
+    state
+        .metadata_store
+        .delete_object_protection_plan(bucket, key)
+        .map_err(|error| {
+            BlobError::Upstream(format!(
+                "failed to delete object protection plan for {bucket}/{key}: {error}"
+            ))
+        })
+}
+
 fn apply_content_policy_to_topology(
     state: &AppState,
     mut topology: TopologyPolicy,
@@ -30150,22 +30478,74 @@ async fn effective_topology_for_replication_put(
     Ok(topology)
 }
 
+async fn effective_object_protection_plan_for_put(
+    state: &AppState,
+    application: Option<&S3ApplicationIdentity>,
+    bucket: &str,
+    key: &str,
+    size: u64,
+    content_type: Option<&str>,
+) -> Result<TopologyPolicy, BlobError> {
+    let primary_provider = runtime_topology(state).primary_provider;
+    if let Some(persisted) = load_object_protection_plan(state, bucket, key)? {
+        return TopologyPolicy::from_input(TopologyInput {
+            primary_provider,
+            sync_targets: persisted.sync_targets,
+            fallback_read_order: persisted.fallback_read_order,
+            onedrive_enabled: runtime_topology(state).onedrive_enabled,
+            replication_mode: runtime_topology(state).replication_mode,
+        })
+        .map_err(|error| BlobError::Configuration(error.to_string()));
+    }
+
+    effective_topology_for_replication_put(state, application, bucket, key, size, content_type)
+        .await
+}
+
+fn topology_policy_from_persisted_protection_plan(
+    state: &AppState,
+    plan: &PersistedObjectProtectionPlan,
+) -> TopologyPolicy {
+    let runtime = runtime_topology(state);
+    TopologyPolicy {
+        primary_provider: runtime.primary_provider,
+        sync_targets: plan.sync_targets.clone(),
+        fallback_read_order: sanitize_fallback_order_for_sync_targets(
+            &plan.sync_targets,
+            &plan.fallback_read_order,
+        ),
+        onedrive_enabled: runtime.onedrive_enabled
+            || plan.sync_targets.contains(&ProviderId::Onedrive),
+        replication_mode: runtime.replication_mode,
+    }
+}
+
 async fn enqueue_replication_put_for_object(
     state: &AppState,
     source_provider: ProviderId,
     bucket: &str,
     key: &str,
     object: &blob_core::ObjectInfo,
+    protection_plan: Option<&PersistedObjectProtectionPlan>,
 ) -> Result<Vec<ReplicationJob>, BlobError> {
-    let effective_topology = effective_topology_for_replication_put(
-        state,
-        None,
-        bucket,
-        key,
-        object.size,
-        object.content_type.as_deref(),
-    )
-    .await?;
+    let effective_topology = match protection_plan {
+        Some(plan) => topology_policy_from_persisted_protection_plan(state, plan),
+        None => {
+            if let Some(persisted) = load_object_protection_plan(state, bucket, key)? {
+                topology_policy_from_persisted_protection_plan(state, &persisted)
+            } else {
+                effective_topology_for_replication_put(
+                    state,
+                    None,
+                    bucket,
+                    key,
+                    object.size,
+                    object.content_type.as_deref(),
+                )
+                .await?
+            }
+        }
+    };
     Ok(state.replication.enqueue_put(
         &effective_topology,
         Some(source_provider.as_str().to_string()),
@@ -30182,9 +30562,23 @@ fn enqueue_replication_delete_for_object(
     source_provider: ProviderId,
     bucket: &str,
     key: &str,
+    protection_plan: Option<&PersistedObjectProtectionPlan>,
 ) -> Result<Vec<ReplicationJob>, BlobError> {
-    let effective_topology =
-        effective_topology_for_replication(state, ReplicationOperation::Delete, bucket, key)?;
+    let effective_topology = match protection_plan {
+        Some(plan) => topology_policy_from_persisted_protection_plan(state, plan),
+        None => {
+            if let Some(persisted) = load_object_protection_plan(state, bucket, key)? {
+                topology_policy_from_persisted_protection_plan(state, &persisted)
+            } else {
+                effective_topology_for_replication(
+                    state,
+                    ReplicationOperation::Delete,
+                    bucket,
+                    key,
+                )?
+            }
+        }
+    };
     Ok(state.replication.enqueue_delete(
         &effective_topology,
         Some(source_provider.as_str().to_string()),
@@ -30219,6 +30613,7 @@ struct ObjectActionTargetRef {
 
 fn object_action_name(input: &ObjectActionInput) -> &'static str {
     match input {
+        ObjectActionInput::Delete { .. } => "delete",
         ObjectActionInput::Rename { .. } => "rename",
         ObjectActionInput::Copy { .. } => "copy",
         ObjectActionInput::Move { .. } => "move",
@@ -30227,6 +30622,7 @@ fn object_action_name(input: &ObjectActionInput) -> &'static str {
 
 fn object_action_description(input: &ObjectActionInput) -> String {
     match input {
+        ObjectActionInput::Delete { bucket, key, .. } => format!("delete {bucket}/{key}"),
         ObjectActionInput::Rename {
             bucket,
             key,
@@ -30260,6 +30656,10 @@ fn object_parent_path(key: &str) -> &str {
 
 fn object_action_warnings(input: &ObjectActionInput, primary_provider: ProviderId) -> Vec<String> {
     match input {
+        ObjectActionInput::Delete { .. } => vec![
+            "This removes the object from its home provider and queues deletion on sync targets."
+                .to_string(),
+        ],
         ObjectActionInput::Rename {
             bucket: _,
             key,
@@ -30344,6 +30744,11 @@ fn object_action_warnings(input: &ObjectActionInput, primary_provider: ProviderI
 
 fn object_action_targets(input: &ObjectActionInput) -> Vec<ObjectActionTargetRef> {
     let targets = match input {
+        ObjectActionInput::Delete { bucket, key, .. } => vec![ObjectActionTargetRef {
+            label: "deleted object".to_string(),
+            bucket: bucket.trim().to_string(),
+            key: key.trim().to_string(),
+        }],
         ObjectActionInput::Rename {
             bucket,
             key,
@@ -36315,7 +36720,7 @@ async fn execute_put_upload(
         Some(stored_size),
     );
 
-    let effective_topology = effective_topology_for_replication_put(
+    let effective_topology = effective_object_protection_plan_for_put(
         state,
         Some(&application),
         &bucket,
@@ -36324,6 +36729,15 @@ async fn execute_put_upload(
         policy_content_type.as_deref(),
     )
     .await
+    .map_err(map_backend_error_to_s3)?;
+    persist_object_protection_plan(
+        state,
+        &bucket,
+        &key,
+        &effective_topology.sync_targets,
+        &effective_topology.fallback_read_order,
+        current_unix_ms(),
+    )
     .map_err(map_backend_error_to_s3)?;
     let jobs = state.replication.enqueue_put(
         &effective_topology,
@@ -36723,6 +37137,8 @@ async fn delete_object(
     )?;
     let home_provider = persisted_or_primary_home_provider(&state, &bucket, &key)
         .map_err(map_backend_error_to_s3)?;
+    let protection_plan =
+        load_object_protection_plan(&state, &bucket, &key).map_err(map_backend_error_to_s3)?;
     let home_backend =
         backend_for_provider(&state, home_provider).map_err(map_backend_error_to_s3)?;
 
@@ -36733,17 +37149,17 @@ async fn delete_object(
 
     delete_persisted_object_home_provider(&state, &bucket, &key)
         .map_err(map_backend_error_to_s3)?;
+    delete_object_protection_plan(&state, &bucket, &key).map_err(map_backend_error_to_s3)?;
     delete_logical_object_record(&state, &bucket, &key).map_err(map_backend_error_to_s3)?;
 
-    let effective_topology =
-        effective_topology_for_replication(&state, ReplicationOperation::Delete, &bucket, &key)
-            .map_err(map_backend_error_to_s3)?;
-    let jobs = state.replication.enqueue_delete(
-        &effective_topology,
-        Some(home_provider.as_str().to_string()),
-        bucket.clone(),
-        key.clone(),
-    );
+    let jobs = enqueue_replication_delete_for_object(
+        &state,
+        home_provider,
+        &bucket,
+        &key,
+        protection_plan.as_ref(),
+    )
+    .map_err(map_backend_error_to_s3)?;
     if let Err(error) = state.metadata_store.enqueue_jobs(&jobs) {
         warn!(
             bucket = %bucket,
@@ -42492,6 +42908,8 @@ mod tests {
                 bucket: "family".to_string(),
                 key: "shared/note.txt".to_string(),
                 new_key: "shared/renamed.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
                 operator: None,
                 ticket: None,
                 notes: None,
@@ -42508,6 +42926,9 @@ mod tests {
                 source_key: "shared/renamed.txt".to_string(),
                 destination_bucket: "root".to_string(),
                 destination_key: "docs/copied.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                source_provider: None,
+                destination_provider: None,
                 operator: None,
                 ticket: None,
                 notes: None,
@@ -42524,6 +42945,9 @@ mod tests {
                 source_key: "docs/copied.txt".to_string(),
                 destination_bucket: "family".to_string(),
                 destination_key: "shared/moved.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                source_provider: None,
+                destination_provider: None,
                 operator: None,
                 ticket: None,
                 notes: None,
@@ -42611,6 +43035,8 @@ mod tests {
                 bucket: "family".to_string(),
                 key: "shared/note.txt".to_string(),
                 new_key: "shared/renamed.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
                 operator: Some("alice".to_string()),
                 ticket: Some("CHG-1".to_string()),
                 notes: Some("rename for test".to_string()),
@@ -42729,6 +43155,8 @@ mod tests {
                 bucket: "family".to_string(),
                 key: "shared/note.txt".to_string(),
                 new_key: "shared/renamed.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
                 operator: None,
                 ticket: None,
                 notes: None,
@@ -42744,6 +43172,9 @@ mod tests {
                 source_key: "shared/renamed.txt".to_string(),
                 destination_bucket: "root".to_string(),
                 destination_key: "docs/copied.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                source_provider: None,
+                destination_provider: None,
                 operator: None,
                 ticket: None,
                 notes: None,
@@ -42759,6 +43190,9 @@ mod tests {
                 source_key: "docs/copied.txt".to_string(),
                 destination_bucket: "family".to_string(),
                 destination_key: "shared/moved.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                source_provider: None,
+                destination_provider: None,
                 operator: None,
                 ticket: None,
                 notes: None,
@@ -42828,6 +43262,8 @@ mod tests {
                 bucket: "family".to_string(),
                 key: "shared/note.txt".to_string(),
                 new_key: "shared/note.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
                 operator: None,
                 ticket: None,
                 notes: None,
@@ -42844,6 +43280,9 @@ mod tests {
                 source_key: "shared/note.txt".to_string(),
                 destination_bucket: "family".to_string(),
                 destination_key: "shared/note.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                source_provider: None,
+                destination_provider: None,
                 operator: None,
                 ticket: None,
                 notes: None,
@@ -42861,6 +43300,276 @@ mod tests {
                 .expect("metadata snapshot should load")
                 .recent_jobs
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn overwrite_keeps_persisted_protection_plan_after_topology_changes() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/sticky-plan.txt".to_string();
+        let first_body = Bytes::from_static(b"first");
+        let second_body = Bytes::from_static(b"second-version");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+
+        let first_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &first_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            first_headers,
+            first_body.into(),
+        )
+        .await
+        .expect("initial put should succeed");
+
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology = TopologyPolicy::from_input(TopologyInput {
+                primary_provider: ProviderId::Stub,
+                sync_targets: vec![ProviderId::Telecom],
+                fallback_read_order: Vec::new(),
+                onedrive_enabled: true,
+                replication_mode: ReplicationMode::AsyncBackup,
+            })
+            .expect("updated topology should validate");
+        }
+
+        let second_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &second_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            second_headers,
+            second_body.clone().into(),
+        )
+        .await
+        .expect("overwrite put should succeed");
+
+        let plan = state
+            .metadata_store
+            .object_protection_plan(&bucket, &key)
+            .expect("protection plan should load")
+            .expect("protection plan should exist");
+        assert_eq!(plan.sync_targets_csv, "onedrive");
+        assert_eq!(plan.fallback_read_order_csv, "onedrive");
+
+        let onedrive_latest = state
+            .metadata_store
+            .latest_job_for_object("onedrive", &bucket, &key)
+            .expect("onedrive job lookup should succeed")
+            .expect("onedrive job should exist");
+        assert!(matches!(
+            onedrive_latest.operation,
+            ReplicationOperation::Put
+        ));
+
+        assert!(
+            state
+                .metadata_store
+                .latest_job_for_object("telecom", &bucket, &key)
+                .expect("telecom job lookup should succeed")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_uses_persisted_protection_plan_after_topology_changes() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/delete-by-stored-plan.txt".to_string();
+        let body = Bytes::from_static(b"delete me");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+
+        let put_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            put_headers,
+            body.into(),
+        )
+        .await
+        .expect("initial put should succeed");
+
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology = TopologyPolicy::from_input(TopologyInput {
+                primary_provider: ProviderId::Stub,
+                sync_targets: vec![ProviderId::Telecom],
+                fallback_read_order: Vec::new(),
+                onedrive_enabled: true,
+                replication_mode: ReplicationMode::AsyncBackup,
+            })
+            .expect("updated topology should validate");
+        }
+
+        let delete_headers = signed_headers(&state.config, &Method::DELETE, &uri, &[], &[]);
+        delete_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::DELETE,
+            OriginalUri(uri),
+            delete_headers,
+        )
+        .await
+        .expect("delete should succeed");
+
+        let onedrive_latest = state
+            .metadata_store
+            .latest_job_for_object("onedrive", &bucket, &key)
+            .expect("onedrive delete lookup should succeed")
+            .expect("onedrive delete job should exist");
+        assert!(matches!(
+            onedrive_latest.operation,
+            ReplicationOperation::Delete
+        ));
+
+        assert!(
+            state
+                .metadata_store
+                .latest_job_for_object("telecom", &bucket, &key)
+                .expect("telecom delete lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .object_protection_plan(&bucket, &key)
+                .expect("deleted protection plan lookup should succeed")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_uses_source_protection_plan_after_topology_changes() {
+        let state = test_state();
+        let source_bucket = "root".to_string();
+        let source_key = "docs/rename-source.txt".to_string();
+        let destination_key = "docs/rename-destination.txt".to_string();
+        let body = Bytes::from_static(b"rename me");
+        let uri: Uri = format!("/{source_bucket}/{source_key}")
+            .parse()
+            .expect("uri should parse");
+
+        let put_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((source_bucket.clone(), source_key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            put_headers,
+            body.into(),
+        )
+        .await
+        .expect("initial put should succeed");
+
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology = TopologyPolicy::from_input(TopologyInput {
+                primary_provider: ProviderId::Stub,
+                sync_targets: vec![ProviderId::Telecom],
+                fallback_read_order: Vec::new(),
+                onedrive_enabled: true,
+                replication_mode: ReplicationMode::AsyncBackup,
+            })
+            .expect("updated topology should validate");
+        }
+
+        run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Rename {
+                bucket: source_bucket.clone(),
+                key: source_key.clone(),
+                new_key: destination_key.clone(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect("rename should succeed");
+
+        let destination_plan = state
+            .metadata_store
+            .object_protection_plan(&source_bucket, &destination_key)
+            .expect("destination protection plan should load")
+            .expect("destination protection plan should exist");
+        assert_eq!(destination_plan.sync_targets_csv, "onedrive");
+        assert_eq!(destination_plan.fallback_read_order_csv, "onedrive");
+
+        let renamed_put = state
+            .metadata_store
+            .latest_job_for_object("onedrive", &source_bucket, &destination_key)
+            .expect("rename put lookup should succeed")
+            .expect("rename put job should exist");
+        assert!(matches!(renamed_put.operation, ReplicationOperation::Put));
+
+        let renamed_delete = state
+            .metadata_store
+            .latest_job_for_object("onedrive", &source_bucket, &source_key)
+            .expect("rename delete lookup should succeed")
+            .expect("rename delete job should exist");
+        assert!(matches!(
+            renamed_delete.operation,
+            ReplicationOperation::Delete
+        ));
+
+        assert!(
+            state
+                .metadata_store
+                .latest_job_for_object("telecom", &source_bucket, &destination_key)
+                .expect("telecom rename put lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .latest_job_for_object("telecom", &source_bucket, &source_key)
+                .expect("telecom rename delete lookup should succeed")
+                .is_none()
         );
     }
 
