@@ -30478,30 +30478,6 @@ async fn effective_topology_for_replication_put(
     Ok(topology)
 }
 
-async fn effective_object_protection_plan_for_put(
-    state: &AppState,
-    application: Option<&S3ApplicationIdentity>,
-    bucket: &str,
-    key: &str,
-    size: u64,
-    content_type: Option<&str>,
-) -> Result<TopologyPolicy, BlobError> {
-    let primary_provider = runtime_topology(state).primary_provider;
-    if let Some(persisted) = load_object_protection_plan(state, bucket, key)? {
-        return TopologyPolicy::from_input(TopologyInput {
-            primary_provider,
-            sync_targets: persisted.sync_targets,
-            fallback_read_order: persisted.fallback_read_order,
-            onedrive_enabled: runtime_topology(state).onedrive_enabled,
-            replication_mode: runtime_topology(state).replication_mode,
-        })
-        .map_err(|error| BlobError::Configuration(error.to_string()));
-    }
-
-    effective_topology_for_replication_put(state, application, bucket, key, size, content_type)
-        .await
-}
-
 fn topology_policy_from_persisted_protection_plan(
     state: &AppState,
     plan: &PersistedObjectProtectionPlan,
@@ -30518,6 +30494,22 @@ fn topology_policy_from_persisted_protection_plan(
             || plan.sync_targets.contains(&ProviderId::Onedrive),
         replication_mode: runtime.replication_mode,
     }
+}
+
+fn removed_sync_targets_for_desired_topology(
+    previous_plan: Option<&PersistedObjectProtectionPlan>,
+    desired_topology: &TopologyPolicy,
+) -> Vec<ProviderId> {
+    let Some(previous_plan) = previous_plan else {
+        return Vec::new();
+    };
+
+    previous_plan
+        .sync_targets
+        .iter()
+        .copied()
+        .filter(|provider| !desired_topology.sync_targets.contains(provider))
+        .collect()
 }
 
 async fn enqueue_replication_put_for_object(
@@ -36647,6 +36639,8 @@ async fn execute_put_upload(
         placed_home_provider_record(state, &bucket, &key).map_err(map_backend_error_to_s3)?;
     let previous_logical =
         load_logical_object_record(state, &bucket, &key).map_err(map_backend_error_to_s3)?;
+    let previous_protection_plan =
+        load_object_protection_plan(state, &bucket, &key).map_err(map_backend_error_to_s3)?;
     persist_object_home_provider(state, home_provider, &bucket, &key)
         .map_err(map_backend_error_to_s3)?;
     let logical_persist_result = match encryption_plan.as_ref() {
@@ -36720,7 +36714,7 @@ async fn execute_put_upload(
         Some(stored_size),
     );
 
-    let effective_topology = effective_object_protection_plan_for_put(
+    let effective_topology = effective_topology_for_replication_put(
         state,
         Some(&application),
         &bucket,
@@ -36739,15 +36733,34 @@ async fn execute_put_upload(
         current_unix_ms(),
     )
     .map_err(map_backend_error_to_s3)?;
-    let jobs = state.replication.enqueue_put(
+    let mut jobs = state.replication.enqueue_put(
         &effective_topology,
         Some(home_provider.as_str().to_string()),
         bucket.clone(),
         key.clone(),
         result.etag.clone(),
         stored_size,
-        stored_content_type,
+        stored_content_type.clone(),
     );
+    let removed_sync_targets = removed_sync_targets_for_desired_topology(
+        previous_protection_plan.as_ref(),
+        &effective_topology,
+    );
+    if !removed_sync_targets.is_empty() {
+        let delete_topology = TopologyPolicy {
+            primary_provider: effective_topology.primary_provider,
+            sync_targets: removed_sync_targets,
+            fallback_read_order: Vec::new(),
+            onedrive_enabled: effective_topology.onedrive_enabled,
+            replication_mode: effective_topology.replication_mode,
+        };
+        jobs.extend(state.replication.enqueue_delete(
+            &delete_topology,
+            Some(home_provider.as_str().to_string()),
+            bucket.clone(),
+            key.clone(),
+        ));
+    }
     if let Err(error) = state.metadata_store.enqueue_jobs(&jobs) {
         warn!(
             bucket = %bucket,
@@ -43304,7 +43317,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overwrite_keeps_persisted_protection_plan_after_topology_changes() {
+    async fn overwrite_converges_to_current_protection_plan_after_topology_changes() {
         let state = test_state();
         let bucket = "root".to_string();
         let key = "docs/sticky-plan.txt".to_string();
@@ -43370,26 +43383,28 @@ mod tests {
             .object_protection_plan(&bucket, &key)
             .expect("protection plan should load")
             .expect("protection plan should exist");
-        assert_eq!(plan.sync_targets_csv, "onedrive");
-        assert_eq!(plan.fallback_read_order_csv, "onedrive");
+        assert_eq!(plan.sync_targets_csv, "telecom");
+        assert_eq!(plan.fallback_read_order_csv, "");
+
+        let telecom_latest = state
+            .metadata_store
+            .latest_job_for_object("telecom", &bucket, &key)
+            .expect("telecom job lookup should succeed")
+            .expect("telecom job should exist");
+        assert!(matches!(
+            telecom_latest.operation,
+            ReplicationOperation::Put
+        ));
 
         let onedrive_latest = state
             .metadata_store
             .latest_job_for_object("onedrive", &bucket, &key)
             .expect("onedrive job lookup should succeed")
-            .expect("onedrive job should exist");
+            .expect("onedrive delete job should exist");
         assert!(matches!(
             onedrive_latest.operation,
-            ReplicationOperation::Put
+            ReplicationOperation::Delete
         ));
-
-        assert!(
-            state
-                .metadata_store
-                .latest_job_for_object("telecom", &bucket, &key)
-                .expect("telecom job lookup should succeed")
-                .is_none()
-        );
     }
 
     #[tokio::test]
