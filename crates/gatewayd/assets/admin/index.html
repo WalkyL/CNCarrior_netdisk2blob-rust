@@ -3764,17 +3764,52 @@ Copyright (c) 2026 walky
     const UI_EXACT_TEXT = {
       zh: {
         'Carrier Cloud Blob Gateway': '运营商云盘 Blob 网关',
+        'CCBG Admin': 'CCBG 管理后台',
         'Carrier Cloud Storage Gateway': '运营商云盘存储网关',
         'Carrier Cloud Drive Storage Gateway': '运营商云盘存储网关',
         'Carrier storage, browser automation, and backup control plane. Web and terminal entrypoints stay on the same LAN admin surface.': '把运营商云盘、浏览器自动化和备份控制面放到同一个局域网管理界面里。',
         'Keep carrier cloud drives, browser automation, desktop mounts, and live health on one LAN control surface.': '把运营商网盘封装成S3块存储和SMB文件共享',
+        'Project Showcase': '项目展示',
+        'Loading ecosystem showcase from Cloud': '正在从 Cloud 读取生态项目展示位',
         'Log Out': '退出登录',
+        'Started …': '启动时间 …',
+        'Uptime …': '运行时长 …',
+        'Carrier 0 / 3 ready': '运营商 0 / 3 就绪',
+        'S3 Endpoint …': 'S3 入口 …',
+        'Managed Root …': '托管根目录 …',
+        'Traffic: In 0 B / Out 0 B': '流量：入站 0 B / 出站 0 B',
+        'Waiting for status…': '正在等待状态…',
+        'Manual Steps': '人工步骤',
+        'No pending verification input.': '当前没有待处理验证输入。',
         'Carrier I/O - Start Delay': '运营商 I/O - 起始延迟',
         'Carrier I/O - Rolling / Large Transfer': '运营商 I/O - 持续 / 大文件传输',
         'Level': '级别',
         'Keyword': '关键词',
         'Limit': '条数',
         'Runtime logs': '运行日志',
+        'Compact signals for provider health, replication pressure, and action failures.': '用紧凑信号展示云盘健康、复制压力和文件动作失败。',
+        'Recent failures': '最近失败',
+        'Route, write-target, transfer, and failure-aging state without wasting vertical space.': '紧凑展示路由、写入目标、传输量和失败老化状态。',
+        'Runtime notes': '运行态备注',
+        'Fast operator-facing verdicts before diving into detailed provider health.': '先给操作人一个快速判断，再进入完整云盘健康详情。',
+        'Loading carrier access summary…': '正在加载运营商接入摘要…',
+        'Run on-demand checks here and keep the full per-scope health cards visible on a wide screen.': '在这里执行按需检查；宽屏下完整保留各作用域健康卡片。',
+        'Open risk items stay grouped in one strip instead of pushing the whole dashboard downward.': '活动风险项集中在一条区域里，避免把整个仪表盘向下挤。',
+        'Loading notify status…': '正在加载通知状态…',
+        'Loading alerts…': '正在加载告警…',
+        'Waiting for the first status refresh.': '正在等待第一次状态刷新。',
+        'Show the ready-to-copy client mount guidance without taking a full dashboard row.': '用紧凑区域展示可直接复制的客户端挂载说明。',
+        'OAuth readiness and session facts stay next to the routing dashboard instead of in a long scroll.': 'OAuth 就绪状态和会话事实放在路由信息旁边，避免变成长滚动。',
+        'Loading OneDrive OAuth prerequisites…': '正在加载 OneDrive OAuth 前置条件…',
+        'Live route placement and fallback state stay visible beside auth and mount helpers.': '实时路由归属和回退状态会和认证、挂载辅助信息并排展示。',
+        'Loading topology…': '正在加载拓扑…',
+        'Keep the fallback device-code flow nearby without forcing it to consume a whole wide panel.': '把兜底设备码流程放在附近，但不占用整行宽面板。',
+        'Start a device-code login only when browser PKCE is unavailable.': '仅在浏览器 PKCE 不可用时才启动设备码登录。',
+        'Pending copy/delete work, target state, and failed objects stay in one full-width operations console.': '待复制/删除任务、目标状态和失败对象集中放在一个全宽运维控制台里。',
+        'Target': '目标',
+        'Object': '对象',
+        'Start': '开始',
+        'End': '结束',
         'Guided Carrier Login': '运营商引导登录',
         'Guided Window Open': '引导窗口已打开',
         'Open Guided Window': '打开引导窗口',
@@ -3815,6 +3850,24 @@ Copyright (c) 2026 walky
         'Captured Outputs': '已抓取输出',
         'Validation Details': '校验详情',
         'Live Page Probe': '实时页面探测',
+        'Select an action and fill the fields to see risks before execution.': '先选择动作并填完字段，下面才会显示执行风险。',
+        'No object action has been run from the admin UI yet.': '还没有从管理界面执行过文件动作。',
+        'No before/after object inspection captured yet.': '还没有抓取文件动作前后的对象检查结果。',
+        'No latest failed objects.': '当前没有最近失败对象。',
+        'all': '全部',
+        'Scope': '范围',
+        'when OneDrive should only receive important objects.': '表示 OneDrive 只接收重要对象。',
+        'remains as a compatibility shortcut for older memory-oriented setups.': '仍作为旧版记忆型配置的兼容快捷方式保留。',
+        'Local SMB identities live here. Leave password blank on an existing row to keep the current password.': '本地 SMB 身份在这里管理。已有用户行的密码留空表示保持当前密码。',
+        'Add SMB User': '新增 SMB 用户',
+        'Each share binds to one saved application ID plus a bucket/prefix scope. That keeps gateway policies and encryption pluggable instead of hard-coding SMB behavior.': '每个共享绑定一个已保存应用 ID 以及 bucket/prefix 范围，让网关策略和加密保持可插拔，而不是把 SMB 行为写死。',
+        'Add SMB Share': '新增 SMB 共享',
+        'Raw SMB payload': '原始 SMB 负载',
+        'Microsoft OneDrive JSON': 'Microsoft OneDrive JSON 负载',
+        'Active list': '活动列表',
+        '0 endpoints': '0 个端点',
+        'OneDrive OAuth Setup': 'OneDrive OAuth 设置',
+        'Use the four-step flow here to register a Microsoft app, inject the values into this gateway, start browser OAuth, and verify that the session is ready.': '这里用四步完成微软应用注册、网关注入、浏览器 OAuth 启动和会话就绪验证。',
         'Only Fill Credential Form': '只填充凭据表单',
         'Save Captured Credentials': '保存抓取凭据',
         'Hook Installed:': '是否已挂钩：',
@@ -6552,12 +6605,12 @@ Copyright (c) 2026 walky
       if (!node) {
         return;
       }
-      node.textContent = message || '';
+      node.textContent = localizeUiMessage(message);
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }
     function setTopologyFeedback(message, tone) {
       const node = document.getElementById('topology-feedback');
-      node.textContent = message || '';
+      node.textContent = localizeUiMessage(message);
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }
     function setEncryptionProfilesFeedback(message, tone) {
@@ -6906,7 +6959,7 @@ Copyright (c) 2026 walky
       if (!node) {
         return;
       }
-      node.textContent = message || '';
+      node.textContent = localizeUiMessage(message);
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }
     function setObjectStatusFeedback(message, tone) {
@@ -6927,7 +6980,7 @@ Copyright (c) 2026 walky
       if (!node) {
         return;
       }
-      node.textContent = message || '';
+      node.textContent = localizeUiMessage(message);
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }
     function setObjectPlacementRecordsFeedback(message, tone) {
@@ -6935,7 +6988,7 @@ Copyright (c) 2026 walky
       if (!node) {
         return;
       }
-      node.textContent = message || '';
+      node.textContent = localizeUiMessage(message);
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }
     function setObjectReconcileFeedback(message, tone) {
@@ -6943,7 +6996,7 @@ Copyright (c) 2026 walky
       if (!node) {
         return;
       }
-      node.textContent = message || '';
+      node.textContent = localizeUiMessage(message);
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }
     function setObjectActionFeedback(message, tone) {
@@ -6958,7 +7011,7 @@ Copyright (c) 2026 walky
     }
     function setOnedriveSetupFeedback(message, tone) {
       const node = document.getElementById('onedrive-setup-feedback');
-      node.textContent = message || '';
+      node.textContent = localizeUiMessage(message);
       node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
     }
     function setUnicomAuthAssistantFeedback(message, tone) {

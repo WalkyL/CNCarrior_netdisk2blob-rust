@@ -626,11 +626,13 @@
 ## ADMIN-002: Admin 中文化补齐与英文残留清理
 
 **优先级:** P0
-**状态:** pending
+**状态:** completed
 **目标:** 补齐 Admin 中文文案，重点清理运营商探测窗口、Mobile 登录助手、Limit Probe、日志与诊断中的英文残留。
 **Coding 指导:** 优先复用现有 `tr(...)`、`UI_EXACT_TEXT`、`ui_language` 机制，不新增第二套本地化框架；把现有硬编码英文提示、按钮文案、空态说明、错误解释入口统一收口到可翻译字典，避免只改 DOM 初始文本却漏掉运行态 feedback。
 **验收方法:** 切换 Admin 到中文后，逐页检查 Dashboard、Providers、Browser/CDP、LLM、Object Browser、Monitoring、Logs；用 `rg` 审计 `index.html` 中和 Mobile/Probe/Log 相关的英文长句。
 **验收标准:** 中文模式下只保留专有名词、协议名和必要缩写；运营商探测窗口和 Mobile 助手不再出现整段英文操作提示；运行态 toast/feedback 与空态说明同样可中文显示。
+**实现备注:** 复用现有 `UI_EXACT_TEXT` 与 `localizeUiMessage()`，补齐首屏状态、Dashboard 摘要、日志/诊断、SMB 管理、OneDrive OAuth 引导、Mobile/Probe 相关静态提示的中文映射；同时让 topology、auth-capture browser probe、alerts、object placement/reconcile 和 OneDrive setup 的反馈横幅走本地化路径。未改 gateway 运行时逻辑，也未提前处理 Dashboard 布局、Mobile 凭据状态或日志 API 功能。
+**实际验证命令:** Admin HTML 内嵌脚本 `node --check`；`git diff --check`；`python3 scripts/license-check.py`；`cargo test -p gatewayd admin_web_contract_routes_are_injected_and_key_calls_use_helpers`；`cargo test -p gatewayd admin_page_exposes_object_actions_panel`。
 **依赖:** 现有 Admin HTML 拆分
 **不做事项:** 不做多语言文案重写工具链。
 **风险:** 运行态错误文案遗漏，导致页面初始中文但交互后回退英文。
