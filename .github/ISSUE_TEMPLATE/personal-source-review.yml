@@ -11,6 +11,7 @@ body:
     attributes:
       value: |
         This is not an open-source license request. Approval is discretionary and requires a separate written grant.
+        Canonical intake starts at https://register.agi2030.online/?product=carrier-cloud-blob-gateway&intent=personal-source-review. Use this GitHub issue only as a fallback triage path.
         Do not include secrets, provider tokens, cookies, refresh tokens, government IDs, or private account credentials in this issue.
   - type: input
     id: applicant_name

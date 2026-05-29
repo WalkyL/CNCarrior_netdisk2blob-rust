@@ -581,6 +581,20 @@
 **不做事项:** 不把私有核心产物发布到公开目录。
 **风险:** CDN 缓存导致版本混淆。
 
+## XREG-001: AGI2030 统一注册入口对齐
+
+**优先级:** P0
+**状态:** completed
+**目标:** 将 CCBG 的商业授权与个人源码审查公开入口收敛到 `register.agi2030.online`，避免 GitHub issue、项目站和注册中心形成并行申请入口。
+**Coding 指导:** 核心网关运行时、Admin 本地控制面、provider 授权和 OneDrive/Microsoft App 注册流程不依赖 AGI2030 注册中心；只调整公开站点和源码审查 intake 文档。GitHub issue 模板保留为 fallback triage，不再作为 canonical intake。
+**验收方法:** 审计 `public/cloudflare/index.html`、`public/cloudflare/README.md`、`docs/personal-source-review.md` 和 `.github/ISSUE_TEMPLATE/personal-source-review.yml` 中的授权/源码审查入口；确认 `register.agi2030.online` 未被写入 gatewayd 运行时鉴权链路。
+**验收标准:** 商业授权和个人源码审查的公开入口均指向 AGI2030 Identity Center；GitHub issue 只标记为兜底分流；Microsoft/OneDrive 应用注册文案不被误改。
+**实现备注:** 公开站点授权卡片新增 `https://register.agi2030.online/?product=carrier-cloud-blob-gateway&intent=commercial-authorization` 与 `intent=personal-source-review`；个人源码审查文档改为以 AGI2030 Identity Center 为 canonical intake，GitHub issue 模板提示仅作为 fallback triage。
+**实际验证命令:** `rg -n "register\\.agi2030\\.online|personal-source-review|commercial-authorization" public docs .github`；`python3 scripts/license-check.py`；`python3 scripts/check-cloudflare-public-fingerprint.py`。
+**依赖:** RELEASE-001, RELEASE-005, CF-001
+**不做事项:** 不把用户云盘凭据、gateway 管理登录或 provider OAuth 授权接入注册中心。
+**风险:** `register.agi2030.online` 当前 `HEAD /` 返回 404；若外部监控使用 HEAD 健康检查，需要注册项目补 `/healthz` 或修正 HEAD 行为。
+
 ## PARKING-ONEDRIVE-001: OneDrive 默认禁用与文档降噪
 
 **优先级:** Parking

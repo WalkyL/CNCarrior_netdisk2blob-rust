@@ -11,8 +11,8 @@ It provides:
 - product overview and documentation links
 - FAQ catalog and weighted FAQ match API (`/api/faq/catalog`, `/api/faq/match`)
 - install/download entry for LXC/Linux, fnOS(experimental), OpenWrt(experimental)
-- commercial authorization entry
-- personal non-commercial source review request entry
+- commercial authorization entry through `https://register.agi2030.online`
+- personal non-commercial source review request entry through `https://register.agi2030.online`
 - static demo control panel
 - provenance endpoints and headers
 

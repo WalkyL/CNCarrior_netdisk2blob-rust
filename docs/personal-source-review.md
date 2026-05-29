@@ -18,7 +18,15 @@ Minimum eligibility:
 
 ## Intake
 
-Public intake can use [.github/ISSUE_TEMPLATE/personal-source-review.yml](../.github/ISSUE_TEMPLATE/personal-source-review.yml).
+Public intake starts at `https://register.agi2030.online/?product=carrier-cloud-blob-gateway&intent=personal-source-review`.
+That identity center is the canonical place to collect sign-in, contact, and
+continuity context before a grant is reviewed.
+
+The GitHub issue template
+[.github/ISSUE_TEMPLATE/personal-source-review.yml](../.github/ISSUE_TEMPLATE/personal-source-review.yml)
+is a fallback triage path only. If a request arrives through GitHub first, direct
+the applicant to the AGI2030 Identity Center before collecting private proof or
+issuing a written grant.
 
 Do not collect secrets in public issues:
 
