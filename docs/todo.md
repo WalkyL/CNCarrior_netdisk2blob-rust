@@ -640,11 +640,12 @@
 ## ADMIN-003: Dashboard 顶栏布局、失败对象明细与首页文案
 
 **优先级:** P0
-**状态:** pending
+**状态:** completed
 **目标:** 调整首页顶栏布局，补齐失败对象明细展示，并更新首页主文案。
 **Coding 指导:** 维持现有 status grid 结构，基础宽度改为对象动作表 `4/12`、`Carrier I/O - Start Delay` `2/12`、`Carrier I/O - Rolling / Large Transfer` `6/12`，同步调整响应式断点；首页 hero 文案改为“把运营商网盘封装成S3块存储和SMB文件共享”；失败对象统一显示 provider、target、object、action、failed_at、message，优先前端消费现有 `monitoring.latest_failed_objects/recent_failures`，只有确实缺字段时再补后端。
 **验收方法:** 桌面和窄屏分别打开 Admin 首页；检查 Start Delay 卡片明显收窄、右侧 Rolling/Large Transfer 不再拥挤；制造至少一条失败对象，验证“最近失败对象”“最老失败对象”展示对象名和失败时间。
 **验收标准:** 顶栏视觉密度更均衡；首页文案更新生效；失败对象不再只显示 age/count，用户能直接看到是哪一个对象、何时失败、往哪个目标失败。
+**实现备注:** 顶栏基础布局已固定为对象动作表 `4/12`、Start Delay `2/12`、Rolling/Large Transfer `6/12`，并在 Admin 页面契约测试中锁定；首页主文案已直接使用“把运营商网盘封装成S3块存储和SMB文件共享”。前端新增统一失败对象格式化，Dashboard 的最近/最老失败对象、Monitoring 明细和复制失败表都会显示 provider、target、object、action、failed_at、message；后端 `monitoring.latest_failed_objects/recent_failures` 字段已足够，本任务未改 Rust 运行时 payload。
 **依赖:** ADMIN-002
 **不做事项:** 不在本任务重做整个 Dashboard 信息架构。
 **风险:** 仅靠现有 monitoring payload 无法精确表示 oldest failure 对象时，需要补一个兼容字段。

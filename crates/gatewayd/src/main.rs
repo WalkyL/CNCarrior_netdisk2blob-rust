@@ -39309,6 +39309,9 @@ mod tests {
         assert!(html.contains("id=\"carrier-first-response-panel\""));
         assert!(html.contains("id=\"carrier-io-speed-panel\""));
         assert!(
+            html.contains(".top-status-side > #top-status-object-ops { grid-column: span 4; }")
+        );
+        assert!(
             html.contains(
                 ".top-status-side > #carrier-first-response-panel { grid-column: span 2; }"
             )
@@ -39325,9 +39328,17 @@ mod tests {
         assert!(html.contains("id=\"monitoring-summary\""));
         assert!(html.contains("id=\"monitoring-failures\""));
         assert!(html.contains("renderMonitoringSummary"));
+        assert!(html.contains("failedObjectDetailText"));
+        assert!(html.contains("'failure.provider': '提供方'"));
+        assert!(html.contains("'failure.target': '目标'"));
+        assert!(html.contains("'failure.object': '对象'"));
+        assert!(html.contains("'failure.action': '动作'"));
+        assert!(html.contains("'failure.failed_at': '失败时间'"));
+        assert!(html.contains("'failure.message': '消息'"));
         assert!(html.contains("id=\"operations-overview\""));
         assert!(html.contains("id=\"operations-overview-notes\""));
         assert!(html.contains("renderOperationsOverview"));
+        assert!(html.contains("metric-card-note"));
         assert!(html.contains("Open DLQ"));
         assert!(html.contains("open_dead_letter_jobs"));
         assert!(html.contains("Fallback Reads"));
@@ -39350,6 +39361,10 @@ mod tests {
         assert!(html.contains("id=\"replication-failed-end-filter\""));
         assert!(html.contains("id=\"replication-failed-summary\""));
         assert!(html.contains("id=\"replication-failed\""));
+        assert!(html.contains("replication.jobs.provider"));
+        assert!(html.contains("replication.jobs.target"));
+        assert!(html.contains("replication.jobs.failed_at"));
+        assert!(html.contains("replication.jobs.message"));
         assert!(html.contains("id=\"export-replication-failed-json\""));
         assert!(html.contains("id=\"export-replication-failed-csv\""));
         assert!(html.contains("data-retry-replication-job"));
@@ -39372,6 +39387,7 @@ mod tests {
         assert!(html.contains("id=\"top-status-limits\""));
         assert!(html.contains("id=\"top-status-prompts\""));
         assert!(html.contains("id=\"top-status-object-ops\""));
+        assert!(html.contains("把运营商网盘封装成S3块存储和SMB文件共享"));
         assert!(html.contains("Cloud Object Semantics"));
         assert!(html.contains("S3 object actions"));
         assert!(html.contains("Cloud drive actions"));

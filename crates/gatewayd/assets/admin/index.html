@@ -332,6 +332,7 @@ Copyright (c) 2026 walky
     #admin-tab-dashboard .metric-card { padding: 10px; border-radius: 10px; min-height: 72px; }
     #admin-tab-dashboard .metric-card div:first-child { font-size: 11px; line-height: 1.35; color: var(--muted); }
     #admin-tab-dashboard .metric-card strong { font-size: 18px; line-height: 1.12; margin-top: 4px; }
+    #admin-tab-dashboard .metric-card .metric-card-note { display:block; margin-top: 6px; font-size: 10px; line-height: 1.28; color: var(--muted); overflow-wrap:anywhere; }
     #admin-tab-dashboard .dashboard-system-grid { display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:10px; }
     #admin-tab-dashboard .dashboard-mini-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:10px; }
     #admin-tab-dashboard .dashboard-provider-grid { grid-template-columns: 1fr; gap:10px; margin-top: 10px; }
@@ -2631,6 +2632,13 @@ Copyright (c) 2026 walky
         'monitoring.latest_failed_objects': 'Latest Failed Objects',
         'monitoring.action_failures': 'Action Failures',
         'monitoring.last_object_action': 'Last Object Action',
+        'failure.provider': 'Provider',
+        'failure.target': 'Target',
+        'failure.object': 'Object',
+        'failure.action': 'Action',
+        'failure.failed_at': 'Failed At',
+        'failure.message': 'Message',
+        'failure.none': 'n/a',
         'topbar.limits.detail.checked': 'Checked %time%',
         'topbar.limits.detail.cleanup_required': 'Cleanup required',
         'topbar.limits.detail.daily_flow_limit': 'Daily flow limit',
@@ -2807,6 +2815,11 @@ Copyright (c) 2026 walky
         'replication.jobs.empty': 'No jobs',
         'replication.jobs.route': 'Route',
         'replication.jobs.object': 'Object',
+        'replication.jobs.provider': 'Provider',
+        'replication.jobs.target': 'Target',
+        'replication.jobs.action': 'Action',
+        'replication.jobs.failed_at': 'Failed At',
+        'replication.jobs.message': 'Message',
         'replication.jobs.attempts': 'Attempts',
         'replication.jobs.next_retry': 'Next Retry',
         'replication.jobs.queued': 'Queued',
@@ -2969,6 +2982,13 @@ Copyright (c) 2026 walky
         'monitoring.latest_failed_objects': '最近失败对象',
         'monitoring.action_failures': '文件动作失败数',
         'monitoring.last_object_action': '最近一次文件动作',
+        'failure.provider': '提供方',
+        'failure.target': '目标',
+        'failure.object': '对象',
+        'failure.action': '动作',
+        'failure.failed_at': '失败时间',
+        'failure.message': '消息',
+        'failure.none': '无',
         'topbar.limits.detail.checked': '探测时间 %time%',
         'topbar.limits.detail.cleanup_required': '需清理',
         'topbar.limits.detail.daily_flow_limit': '日流量限制',
@@ -3397,6 +3417,11 @@ Copyright (c) 2026 walky
         'replication.jobs.empty': '当前没有任务',
         'replication.jobs.route': '路径',
         'replication.jobs.object': '对象',
+        'replication.jobs.provider': '提供方',
+        'replication.jobs.target': '目标',
+        'replication.jobs.action': '动作',
+        'replication.jobs.failed_at': '失败时间',
+        'replication.jobs.message': '消息',
         'replication.jobs.attempts': '尝试次数',
         'replication.jobs.next_retry': '下次重试',
         'replication.jobs.queued': '入队时间',
@@ -3645,6 +3670,13 @@ Copyright (c) 2026 walky
         'monitoring.latest_failed_objects': 'Последние проблемные объекты',
         'monitoring.action_failures': 'Ошибки файловых действий',
         'monitoring.last_object_action': 'Последнее файловое действие',
+        'failure.provider': 'Провайдер',
+        'failure.target': 'Цель',
+        'failure.object': 'Объект',
+        'failure.action': 'Действие',
+        'failure.failed_at': 'Время сбоя',
+        'failure.message': 'Сообщение',
+        'failure.none': 'н/д',
         'topbar.limits.detail.checked': 'Проверено %time%',
         'topbar.limits.detail.cleanup_required': 'Нужна очистка',
         'topbar.limits.detail.daily_flow_limit': 'Суточный лимит трафика',
@@ -8878,6 +8910,55 @@ Copyright (c) 2026 walky
       renderRuntimeMemoryPanel(runtime);
       renderRuntimeSpoolPanel(runtime);
     }
+    function failedObjectProvider(item) {
+      return item?.provider || item?.source_provider || '';
+    }
+    function failedObjectTarget(item) {
+      return item?.target || '';
+    }
+    function failedObjectReference(item) {
+      if (!item) {
+        return '';
+      }
+      if (typeof item.object === 'string') {
+        return item.object;
+      }
+      const bucket = item.object?.bucket || item.bucket || '';
+      const key = item.object?.key || item.key || '';
+      return [bucket, key].filter(Boolean).join('/');
+    }
+    function failedObjectAction(item) {
+      return item?.action || item?.operation || '';
+    }
+    function failedObjectFailedAt(item) {
+      return item?.occurred_at_unix_ms || item?.enqueued_at_unix_ms || null;
+    }
+    function failedObjectMessage(item) {
+      return item?.message || item?.last_error || '';
+    }
+    function failureNoneText() {
+      return tr('failure.none', {}, 'n/a');
+    }
+    function failedObjectFieldValue(value) {
+      return value === null || value === undefined || value === '' ? failureNoneText() : String(value);
+    }
+    function failedObjectProviderValue(provider) {
+      return provider ? providerLabel(provider) : failureNoneText();
+    }
+    function failedObjectDetailText(item) {
+      const rows = [
+        [tr('failure.provider', {}, 'Provider'), failedObjectProviderValue(failedObjectProvider(item))],
+        [tr('failure.target', {}, 'Target'), failedObjectProviderValue(failedObjectTarget(item))],
+        [tr('failure.object', {}, 'Object'), failedObjectFieldValue(failedObjectReference(item))],
+        [tr('failure.action', {}, 'Action'), failedObjectFieldValue(failedObjectAction(item))],
+        [tr('failure.failed_at', {}, 'Failed At'), failedObjectFieldValue(formatTimestamp(failedObjectFailedAt(item)))],
+        [tr('failure.message', {}, 'Message'), failedObjectFieldValue(failedObjectMessage(item))],
+      ];
+      return rows.map(([label, value]) => `${label}=${value}`).join(' | ');
+    }
+    function failedObjectMetricNote(item) {
+      return item ? failedObjectDetailText(item) : failureNoneText();
+    }
     function renderMonitoringSummary(monitoring) {
       const summaryNode = document.getElementById('monitoring-summary');
       const failuresNode = document.getElementById('monitoring-failures');
@@ -8923,22 +9004,12 @@ Copyright (c) 2026 walky
         </div>
       `;
       const recentFailures = monitoring?.recent_failures || [];
-      if (!recentFailures.length) {
+      const visibleFailures = recentFailures.length ? recentFailures : latestFailedObjects;
+      if (!visibleFailures.length) {
         failuresNode.textContent = '最近没有复制失败任务或文件动作失败记录。';
         return;
       }
-      failuresNode.textContent = recentFailures.map(item => {
-        const parts = [
-          `kind=${item.kind || 'unknown'}`,
-          item.provider ? `provider=${providerLabel(item.provider) || item.provider}` : null,
-          item.target ? `target=${item.target}` : null,
-          item.action ? `action=${item.action}` : null,
-          item.object ? `object=${item.object}` : null,
-          item.occurred_at_unix_ms ? `at=${formatTimestamp(item.occurred_at_unix_ms)}` : null,
-          `message=${item.message || 'none'}`,
-        ].filter(Boolean);
-        return parts.join(' | ');
-      }).join('\n');
+      failuresNode.textContent = visibleFailures.map(failedObjectDetailText).join('\n');
     }
     function renderNotifySummary(notify) {
       const container = document.getElementById('notify-summary');
@@ -8975,9 +9046,6 @@ Copyright (c) 2026 walky
       const oldestFailedObject = (latestGatewayStatus?.monitoring?.latest_failed_objects || [])
         .slice()
         .sort((a, b) => Number(a?.occurred_at_unix_ms || 0) - Number(b?.occurred_at_unix_ms || 0))[0] || null;
-      const failedObjectText = item => item
-        ? `${providerLabel(item.provider) || item.provider || 'n/a'} | ${item.target || 'n/a'} | ${item.object || 'n/a'} | ${item.action || 'n/a'} | ${formatTimestamp(item.occurred_at_unix_ms)} | ${item.message || 'n/a'}`
-        : 'n/a';
       summaryNode.innerHTML = `
         <div class="metric-card">
           <div>${escapeHtml(tr('operations.default_route', {}, 'Default Route'))}</div>
@@ -8994,6 +9062,7 @@ Copyright (c) 2026 walky
         <div class="metric-card">
           <div>${escapeHtml(tr('operations.latest_failed_objects', {}, 'Latest Failed Objects'))}</div>
           <strong>${escapeHtml(String(overview?.latest_failed_objects ?? 0))}</strong>
+          <span class="metric-card-note">${escapeHtml(failedObjectMetricNote(latestFailed))}</span>
         </div>
         <div class="metric-card">
           <div>${escapeHtml(tr('operations.open_dlq', {}, 'Open DLQ'))}</div>
@@ -9006,6 +9075,7 @@ Copyright (c) 2026 walky
         <div class="metric-card">
           <div>${escapeHtml(tr('operations.oldest_failed_object', {}, 'Oldest Failed Object'))}</div>
           <strong>${escapeHtml(oldestFailed === null || oldestFailed === undefined ? 'n/a' : formatDurationMs(oldestFailed))}</strong>
+          <span class="metric-card-note">${escapeHtml(failedObjectMetricNote(oldestFailedObject))}</span>
         </div>
         <div class="metric-card">
           <div>${escapeHtml(tr('operations.notify_freshness', {}, 'Notify Freshness'))}</div>
@@ -9050,8 +9120,8 @@ Copyright (c) 2026 walky
         `S3 secret rotated: ${overview?.s3_secret_uses_default ? 'no' : 'yes'}`,
         `Replication workers: ${overview?.replication_workers ?? 'n/a'}`,
         `Pending jobs: ${overview?.pending_jobs ?? 0} | retry scheduled: ${overview?.retry_scheduled_jobs ?? 0} | open DLQ: ${overview?.open_dead_letter_jobs ?? 0} | latest failed objects: ${overview?.latest_failed_objects ?? 0}`,
-        `Latest failed object: ${failedObjectText(latestFailed)}`,
-        `Oldest failed object: ${failedObjectText(oldestFailedObject)}`,
+        `Latest failed object: ${failedObjectMetricNote(latestFailed)}`,
+        `Oldest failed object: ${failedObjectMetricNote(oldestFailedObject)}`,
         `Failed alert gate: threshold=${overview?.replication_failed_alert_threshold ?? 'n/a'} | min_age_ms=${overview?.replication_failed_alert_min_age_ms ?? 'n/a'}`,
         `Last object action age: ${overview?.latest_object_action_age_ms === null || overview?.latest_object_action_age_ms === undefined ? 'n/a' : formatDurationMs(overview.latest_object_action_age_ms)}`,
         `Notify webhook: ${overview?.notify_webhook_enabled ? 'enabled' : 'disabled'} | last success age: ${notifyFreshness === null || notifyFreshness === undefined ? 'n/a' : formatDurationMs(notifyFreshness)}`,
@@ -9850,26 +9920,30 @@ Copyright (c) 2026 walky
           <thead>
             <tr>
               <th>ID</th>
-              <th>Route</th>
-              <th>Object</th>
-              <th>Attempts</th>
-              <th>Queued</th>
-              <th>Next Retry</th>
-              <th>Error</th>
-              <th>Actions</th>
+              <th>${escapeHtml(tr('replication.jobs.provider', {}, 'Provider'))}</th>
+              <th>${escapeHtml(tr('replication.jobs.target', {}, 'Target'))}</th>
+              <th>${escapeHtml(tr('replication.jobs.object', {}, 'Object'))}</th>
+              <th>${escapeHtml(tr('replication.jobs.action', {}, 'Action'))}</th>
+              <th>${escapeHtml(tr('replication.jobs.failed_at', {}, 'Failed At'))}</th>
+              <th>${escapeHtml(tr('replication.jobs.message', {}, 'Message'))}</th>
+              <th>${escapeHtml(tr('replication.jobs.attempts', {}, 'Attempts'))}</th>
+              <th>${escapeHtml(tr('replication.jobs.next_retry', {}, 'Next Retry'))}</th>
+              <th>${escapeHtml(tr('replication.jobs.actions', {}, 'Actions'))}</th>
             </tr>
           </thead>
           <tbody>
             ${failedJobs.map(job => `
               <tr>
-                <td class="mono">${job.job_id}</td>
-                <td class="mono">${escapeHtml(job.source_provider || 'n/a')} → ${escapeHtml(job.target)}</td>
-                <td class="mono">${escapeHtml(job.object.bucket)}/${escapeHtml(job.object.key)}</td>
+                <td class="mono">${escapeHtml(job.job_id)}</td>
+                <td>${escapeHtml(failedObjectProviderValue(failedObjectProvider(job)))}<br><span class="mono">${escapeHtml(failedObjectFieldValue(failedObjectProvider(job)))}</span></td>
+                <td>${escapeHtml(failedObjectProviderValue(failedObjectTarget(job)))}<br><span class="mono">${escapeHtml(failedObjectFieldValue(failedObjectTarget(job)))}</span></td>
+                <td class="mono">${escapeHtml(failedObjectFieldValue(failedObjectReference(job)))}</td>
+                <td class="mono">${escapeHtml(failedObjectFieldValue(failedObjectAction(job)))}</td>
+                <td>${escapeHtml(formatTimestamp(failedObjectFailedAt(job)))}</td>
+                <td>${escapeHtml(failedObjectFieldValue(failedObjectMessage(job)))}</td>
                 <td>${job.attempts || 0}</td>
-                <td>${escapeHtml(formatTimestamp(job.enqueued_at_unix_ms))}</td>
                 <td>${escapeHtml(formatTimestamp(job.next_attempt_at_unix_ms))}</td>
-                <td>${escapeHtml(job.last_error || '') || 'None'}</td>
-                <td><button class="secondary" type="button" data-retry-replication-job="${job.job_id}">Retry</button></td>
+                <td><button class="secondary" type="button" data-retry-replication-job="${escapeHtmlAttr(job.job_id)}">${escapeHtml(tr('replication.jobs.retry', {}, 'Retry'))}</button></td>
               </tr>
             `).join('')}
           </tbody>
