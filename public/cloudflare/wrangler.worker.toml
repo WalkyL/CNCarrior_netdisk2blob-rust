@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Public-Materials
+# Copyright (c) 2026 walky
+
+name = "ccbg-public"
+main = "worker.js"
+compatibility_date = "2026-05-26"
+workers_dev = false
+preview_urls = false

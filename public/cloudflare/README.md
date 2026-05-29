@@ -18,6 +18,31 @@ It provides:
 
 Deploy this directory as Cloudflare Pages assets with Pages Functions enabled.
 
+If the available Cloudflare credential has Workers permissions but no Pages
+permission, deploy the same public surface as a Worker with static Assets:
+
+```bash
+cd ../..
+rm -rf target/cloudflare-public-assets
+mkdir -p target/cloudflare-public-assets
+rsync -a --delete \
+  --exclude 'functions' \
+  --exclude 'worker.js' \
+  --exclude 'wrangler.toml' \
+  --exclude 'wrangler.worker.toml' \
+  --exclude 'target' \
+  public/cloudflare/ target/cloudflare-public-assets/
+
+export CLOUDFLARE_API_TOKEN="$CF_API_TOKEN"
+export CLOUDFLARE_ACCOUNT_ID="$CF_ACCOUNT_ID"
+wrangler deploy -c public/cloudflare/wrangler.worker.toml \
+  --assets target/cloudflare-public-assets \
+  --domain carrier-disk-gateway.agi2030.online
+```
+
+This fallback serves `/`, `/faq/`, `/install/`, `/api/faq/catalog`, and
+`/api/faq/match`.
+
 ## Local Preview
 
 ```bash
