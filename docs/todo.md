@@ -653,11 +653,12 @@
 ## ADMIN-004: China Mobile 凭据状态纠偏与助手闭环
 
 **优先级:** P0
-**状态:** pending
+**状态:** completed
 **目标:** 修正“中国移动已抓到凭据但 UI 仍显示未配置”的状态判断，并打通助手保存后的即时刷新。
 **Coding 指导:** 以 `token_present`、`root_folder_id`、`user_domain_id`、runtime health note、browser profile 绑定状态做综合判断；`applyAndSaveMobileAuthOutputs()` 之后强制刷新 provider credential 与 status；将助手反馈改为“已保存/已验证/仍需补字段”等明确状态，避免“Login finished and outputs are ready”与凭据卡“未配置”冲突。
 **验收方法:** 在真实 CDP 登录成功场景下执行 Mobile capture/save，随后刷新 Providers 页面与 Dashboard provider 状态。
 **验收标准:** 已保存可用 Mobile 凭据时，UI 不再显示“未配置”；助手、凭据卡、provider health 三处状态一致。
+**实现备注:** 前端新增 Mobile 可用凭据材料判断，统一把 provider bridge runtime 映射字段、`token_present`/cookie present、`root_folder_id`、`user_domain_id`、浏览器画像、lease 与 provider health 作为状态事实。Mobile 助手现在即使只抓到可复用浏览器画像也会允许填表/保存；保存后会重新拉取 credentials/status，并在 provider test 后再刷新一次状态，让 Dashboard、凭据卡和健康状态重新对齐。Mobile 凭据卡新增“移动凭据状态”和“识别到的材料”，避免已保存材料时仍表现成“未配置”。
 **依赖:** ADMIN-002
 **不做事项:** 不重写 Mobile browser flow。
 **风险:** 前端只看局部字段会与后端健康状态再次分叉。

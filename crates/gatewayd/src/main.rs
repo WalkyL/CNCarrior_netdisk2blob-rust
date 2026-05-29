@@ -39537,6 +39537,10 @@ mod tests {
         assert!(html.contains("data-mobile-auth-action=\"read-upload-probe\""));
         assert!(html.contains("data-mobile-auth-action=\"apply-and-save-outputs\""));
         assert!(html.contains("function renderMobileAuthAssistant()"));
+        assert!(html.contains("function mobileRuntimeHasCredentialMaterial(runtime)"));
+        assert!(html.contains("function mobileCredentialReadiness("));
+        assert!(html.contains("移动凭据状态"));
+        assert!(html.contains("识别到的材料"));
         assert!(html.contains("function mobileSendCodeFeedbackMessage(runtime)"));
         assert!(html.contains("function mobileSendCodeRateLimited(runtime)"));
         assert!(html.contains("function startMobileSmsLoginRequestCode()"));
@@ -39554,6 +39558,7 @@ mod tests {
         assert!(html.contains("mobile_capture_current_session_from_logged_in_page"));
         assert!(html.contains("mobile_prepare_upload_probe"));
         assert!(html.contains("mobile_capture_upload_probe_state"));
+        assert!(html.contains("已保存并刷新移动凭据状态；助手、凭据卡和健康状态已重新对齐。"));
         assert!(html.contains("ccbg.mobile.auth_assistant"));
         assert!(html.contains("id=\"provider-credential-output-unicom\""));
         assert!(html.contains("id=\"save-auth-capture-policy\""));

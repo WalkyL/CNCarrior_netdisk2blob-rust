@@ -5371,6 +5371,74 @@ Copyright (c) 2026 walky
         captured: capturedAt,
       }, `Browser profile: ${headerCount} headers | UA: ${normalized.user_agent || 'n/a'} | Captured: ${capturedAt}`);
     }
+    function mobileRuntimeHasCredentialMaterial(runtime) {
+      if (!runtime || typeof runtime !== 'object') {
+        return false;
+      }
+      const mappedValuePresent = providerBridgeRuntimeCredentialMappings('mobile')
+        .some(mapping => String(runtime?.[mapping.runtime_key] || '').trim());
+      return mappedValuePresent || !!browserProfileFromSession('mobile', { runtime });
+    }
+    function mobileCredentialMaterialFacts(payload = {}, browserProfile = null, health = null, lease = null) {
+      const facts = [];
+      if (payload.token_present || payload.token) {
+        facts.push('Authorization');
+      }
+      if (payload.cookie_header_present || payload.cookie_header) {
+        facts.push('Cookie');
+      }
+      if (payload.root_folder_id || payload.root_folder_id_present) {
+        facts.push('Root Folder ID');
+      }
+      if (payload.user_domain_id || payload.user_domain_id_present) {
+        facts.push('User Domain ID');
+      }
+      if (normalizeBrowserProfilePayload(browserProfile || payload.browser_profile || null)) {
+        facts.push('浏览器画像');
+      }
+      if (lease?.status === 'active') {
+        facts.push('Lease active');
+      }
+      const healthStatus = String(health?.health?.status || '').trim().toLowerCase();
+      if (healthStatus === 'healthy' || healthStatus === 'degraded') {
+        facts.push(`health=${healthStatus}`);
+      }
+      return dedupe(facts);
+    }
+    function mobileCredentialReadiness(payload = {}, browserProfile = null, health = null, lease = null) {
+      const facts = mobileCredentialMaterialFacts(payload, browserProfile, health, lease);
+      if (!facts.length) {
+        return {
+          tone: 'idle',
+          title: '未配置',
+          summary: '还没有保存中国移动可用的认证材料。',
+          facts,
+        };
+      }
+      const healthStatus = String(health?.health?.status || '').trim().toLowerCase();
+      if (healthStatus === 'healthy' || lease?.status === 'active') {
+        return {
+          tone: 'ok',
+          title: '已保存并验证',
+          summary: '中国移动凭据已保存，网关健康检查可以使用。',
+          facts,
+        };
+      }
+      if (healthStatus === 'degraded') {
+        return {
+          tone: 'warn',
+          title: '已保存，需复查',
+          summary: '中国移动凭据已保存，但健康检查仍报告降级。',
+          facts,
+        };
+      }
+      return {
+        tone: 'ready',
+        title: '已保存，待验证',
+        summary: '中国移动凭据材料已保存；运行一次 Provider Health 可确认是否可用。',
+        facts,
+      };
+    }
     function desktopMountEndpoint() {
       const runtimeBind = String(desktopMountSeed?.data_plane_bind_addr || '').trim();
       const runtimeHost = String(latestGatewayStatus?.runtime?.bind_addr || runtimeBind).trim();
@@ -6195,10 +6263,7 @@ Copyright (c) 2026 walky
     }
     function mobileAssistantLooksLoggedIn(session) {
       const runtime = session?.runtime || {};
-      const token = String(runtime.token || '').trim();
-      const rootFolderId = String(runtime.root_folder_id || '').trim();
-      const userDomainId = String(runtime.user_domain_id || '').trim();
-      return !!token || !!rootFolderId || !!userDomainId;
+      return mobileRuntimeHasCredentialMaterial(runtime);
     }
     function reconcileMobileAssistantSession(session) {
       if (!session || typeof session !== 'object') {
@@ -9140,6 +9205,11 @@ Copyright (c) 2026 walky
       const health = providerHealthEntry(provider);
       const lease = payload.lease || providerLeaseEntry(provider) || null;
       const label = providerLabel(provider);
+      const healthStatus = health?.health?.status || 'unavailable';
+      const healthNotes = health?.health?.notes || [];
+      const mobileReadiness = provider === 'mobile'
+        ? mobileCredentialReadiness(payload, payload.browser_profile || providerCredentialBrowserProfiles.mobile || null, health, lease)
+        : null;
       const route = health?.role === 'primary'
         ? '当前主用'
         : health?.role === 'secondary'
@@ -9151,17 +9221,10 @@ Copyright (c) 2026 walky
         ? !!(payload.token || payload.cookie_header || payload.family_id || payload.client_id)
         : provider === 'telecom'
           ? !!(payload.browser_id || payload.cookie_header || payload.token || payload.root_folder_id)
-          : !!(
-            payload.token
-            || payload.cookie_header
-            || payload.token_present
-            || payload.root_folder_id
-            || payload.user_domain_id
-            || payload.root_folder_id_present
-            || payload.user_domain_id_present
-          );
-      const healthStatus = health?.health?.status || 'unavailable';
-      const healthNotes = health?.health?.notes || [];
+          : !!(mobileReadiness && mobileReadiness.facts.length);
+      const mobileFactDetail = mobileReadiness?.facts?.length
+        ? `已保存: ${mobileReadiness.facts.join(', ')}`
+        : null;
 
       if (!configured) {
         return {
@@ -9201,6 +9264,7 @@ Copyright (c) 2026 walky
             `Lease: ${lease?.status || 'active'}`,
             payload.family_id ? `Family ID: ${payload.family_id}` : null,
             payload.client_id ? `Client ID: ${payload.client_id}` : null,
+            mobileFactDetail,
           ].filter(Boolean),
         };
       }
@@ -9216,11 +9280,13 @@ Copyright (c) 2026 walky
                 `路由: ${route}`,
                 `Lease: ${lease?.status || 'active'}`,
                 payload.family_id ? `Family ID: ${payload.family_id}` : null,
+                mobileFactDetail,
               ].filter(Boolean)
             : [
                 `路由: ${route}`,
                 '健康检查通过。',
-              ],
+                mobileFactDetail,
+              ].filter(Boolean),
         };
       }
 
@@ -9232,8 +9298,9 @@ Copyright (c) 2026 walky
           summary: '网关能连上，但当前有部分异常或限制。',
           details: [
             `路由: ${route}`,
+            mobileFactDetail,
             ...(healthNotes.length ? healthNotes : ['请打开 Provider Health 看详细探测信息。']),
-          ],
+          ].filter(Boolean),
         };
       }
 
@@ -9244,8 +9311,9 @@ Copyright (c) 2026 walky
         summary: '凭据已经填入，但网关目前不能正常访问。',
         details: [
           `路由: ${route}`,
+          mobileFactDetail,
           ...(healthNotes.length ? healthNotes : ['请检查凭据是否过期，或在对应运营商 Tab 重新注入。']),
-        ],
+        ].filter(Boolean),
       };
     }
     function renderCarrierAccessSummary() {
@@ -11726,6 +11794,22 @@ Copyright (c) 2026 walky
           <div class="provider-note">${escapeHtml(tr('Last Error:', {}, 'Last Error:'))} <span class="mono">${escapeHtml(lease?.last_error || 'none')}</span></div>
         `
         : '';
+      const mobileReadinessMarkup = entry.provider === 'mobile'
+        ? (() => {
+            const readiness = mobileCredentialReadiness(payload, browserProfile, providerHealthEntry('mobile'), lease);
+            const toneClass = readiness.tone === 'ok'
+              ? 'complete'
+              : readiness.tone === 'warn'
+                ? 'pending'
+                : 'ready';
+            const facts = readiness.facts.length ? readiness.facts.join(', ') : '无';
+            return `
+              <div class="provider-note">移动凭据状态：<span class="pill ${toneClass}">${escapeHtml(readiness.title)}</span></div>
+              <div class="provider-note">${escapeHtml(readiness.summary)}</div>
+              <div class="provider-note">识别到的材料：<span class="mono">${escapeHtml(facts)}</span></div>
+            `;
+          })()
+        : '';
       const extraNotes = entry.provider === 'onedrive'
         ? `${tr('OAuth session file:', {}, 'OAuth session file:')} <span class="mono">${escapeHtml(payload.session_file || 'n/a')}</span>. Optional quota guards accept raw bytes or units like <span class="mono">GiB</span> / <span class="mono">GB</span>.`
         : tr('Leave a field blank if you want the gateway to clear that override and fall back to env/default values. Optional quota guards accept raw bytes or units like GiB / GB.', {}, 'Leave a field blank if you want the gateway to clear that override and fall back to env/default values. Optional quota guards accept raw bytes or units like GiB / GB.');
@@ -11752,6 +11836,7 @@ Copyright (c) 2026 walky
           <h3>${escapeHtml(entry.label)}</h3>
           <div class="provider-note">${escapeHtml(tr('Storage file:', {}, 'Storage file:'))} <span class="mono">${escapeHtml(storagePath)}</span></div>
           ${leaseMarkup}
+          ${mobileReadinessMarkup}
           <div class="provider-note">${extraNotes}</div>
           ${browserProfileMarkup}
           ${providerCredentialInlineHelp(entry)}
@@ -14348,8 +14433,8 @@ Copyright (c) 2026 walky
     }
     function applyMobileCapturedOutputsToCredentialForm(runtime) {
       const updatedCount = applyBridgeRuntimeToCredentialForm('mobile', runtime);
-      applyCapturedBrowserProfileToProvider('mobile', { runtime });
-      return updatedCount;
+      const profileApplied = applyCapturedBrowserProfileToProvider('mobile', { runtime });
+      return updatedCount > 0 || profileApplied;
     }
     async function captureMobileCurrentSession() {
       try {
@@ -14914,7 +14999,7 @@ Copyright (c) 2026 walky
     async function applyAndSaveMobileAuthOutputs() {
       applyMobileAuthOutputsToCredentialForm();
       const runtime = mobileAuthAssistantState.session?.runtime || {};
-      if (!runtime.token && !runtime.root_folder_id && !runtime.user_domain_id) {
+      if (!mobileRuntimeHasCredentialMaterial(runtime)) {
         return;
       }
       try {
@@ -15290,6 +15375,8 @@ Copyright (c) 2026 walky
           }, `${providerLabel(provider)} credentials were saved, but the gateway could not complete post-save verification: ${healthError.message || healthError}`);
           tone = 'warn';
         }
+        await refreshStatus().catch(() => null);
+        renderProviderCredentials();
         setProviderCredentialsFeedback(provider, feedback, tone);
       } catch (error) {
         setProviderCredentialsFeedback(provider, error.message, 'warn');
@@ -18518,7 +18605,7 @@ Copyright (c) 2026 walky
         captureMobileCurrentSession()
           .then(() => {
             const runtime = mobileAuthAssistantState.session?.runtime || {};
-            if (runtime.token || runtime.root_folder_id || runtime.user_domain_id) {
+            if (mobileRuntimeHasCredentialMaterial(runtime)) {
               setMobileAuthAssistantFeedback(tr('auth.mobile.feedback.capture_done', {}, 'Mobile session capture finished. Review the captured outputs and save them when ready.'), 'ok');
             }
           })
