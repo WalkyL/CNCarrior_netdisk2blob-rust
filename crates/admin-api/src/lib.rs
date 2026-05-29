@@ -14,6 +14,7 @@ pub const ROUTE_STATUS: &str = "/api/status";
 pub const ROUTE_ADMIN_LOGIN: &str = "/api/admin/login";
 pub const ROUTE_ADMIN_LOGOUT: &str = "/api/admin/logout";
 pub const ROUTE_ADMIN_CHANGE_PASSWORD: &str = "/api/admin/change-password";
+pub const ROUTE_ADMIN_LOGS: &str = "/api/admin/logs";
 pub const ROUTE_TOPOLOGY_UPDATE: &str = "/api/control-plane/topology";
 pub const ROUTE_AUTH_CAPTURE_POLICY: &str = "/api/policy/auth-capture";
 pub const ROUTE_PROVIDER_CREDENTIALS: &str = "/api/providers/{provider}/credentials";
@@ -70,6 +71,7 @@ pub enum AdminDtoKind {
     AdminLoginPayload,
     AdminChangePasswordInput,
     AdminChangePasswordPayload,
+    AdminLogQueryResult,
     NoContent,
 }
 
@@ -703,6 +705,14 @@ pub fn route_contracts() -> Vec<AdminRouteContract> {
             request: Some(AdminDtoKind::AdminChangePasswordInput),
             response: AdminDtoKind::AdminChangePasswordPayload,
         },
+        AdminRouteContract {
+            id: "admin_logs_list",
+            method: AdminApiMethod::Get,
+            path: ROUTE_ADMIN_LOGS,
+            surface: AdminApiSurface::Operator,
+            request: None,
+            response: AdminDtoKind::AdminLogQueryResult,
+        },
     ]
 }
 
@@ -781,6 +791,23 @@ pub struct AdminChangePasswordPayload {
     pub ok: bool,
     pub must_change_password: bool,
     pub password_changed_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminLogEntryPayload {
+    pub seq: u64,
+    pub ts_unix_ms: u64,
+    pub level: String,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminLogQueryResult {
+    pub entries: Vec<AdminLogEntryPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub has_more: bool,
+    pub limit: usize,
 }
 
 #[cfg(test)]
@@ -889,6 +916,9 @@ mod tests {
         assert!(routes.iter().any(|route| {
             route.path == ROUTE_ALERT_SUPPRESSIONS && route.method == AdminApiMethod::Post
         }));
+        assert!(routes.iter().any(|route| {
+            route.path == ROUTE_ADMIN_LOGS && route.method == AdminApiMethod::Get
+        }));
     }
 
     #[test]
@@ -953,6 +983,13 @@ mod tests {
             suppress.response,
             AdminDtoKind::SuppressedAdminAlertRecordList
         );
+
+        let logs = routes
+            .iter()
+            .find(|route| route.id == "admin_logs_list")
+            .expect("admin logs route should be registered");
+        assert_eq!(logs.request, None);
+        assert_eq!(logs.response, AdminDtoKind::AdminLogQueryResult);
     }
 
     #[test]

@@ -26,9 +26,9 @@ use admin_api::{
     AuthCapturePolicyPayload, BrowserFlowSessionHandoffInput, BrowserFlowSessionHandoffPayload,
     DesiredTopologyPayload, ObjectPlacementMode, ProviderCredentialInput,
     ProviderCredentialLeasePayload, ProviderCredentialPayload, ROUTE_ADMIN_CHANGE_PASSWORD,
-    ROUTE_ADMIN_LOGIN, ROUTE_ADMIN_LOGOUT, ROUTE_ALERT_SUPPRESSIONS, ROUTE_AUTH_CAPTURE_POLICY,
-    ROUTE_BROWSER_FLOW_SESSION_HANDOFF, ROUTE_PROVIDER_CREDENTIALS, ROUTE_REPLICATION_DLQ,
-    ROUTE_REPLICATION_DLQ_REPLAY_JOB, ROUTE_REPLICATION_DLQ_REPLAY_TARGET,
+    ROUTE_ADMIN_LOGIN, ROUTE_ADMIN_LOGOUT, ROUTE_ADMIN_LOGS, ROUTE_ALERT_SUPPRESSIONS,
+    ROUTE_AUTH_CAPTURE_POLICY, ROUTE_BROWSER_FLOW_SESSION_HANDOFF, ROUTE_PROVIDER_CREDENTIALS,
+    ROUTE_REPLICATION_DLQ, ROUTE_REPLICATION_DLQ_REPLAY_JOB, ROUTE_REPLICATION_DLQ_REPLAY_TARGET,
     ROUTE_REPLICATION_RETRY_JOB, ROUTE_STATUS, ROUTE_TOPOLOGY_UPDATE, ReplicationDlqEntryPayload,
     ReplicationDlqListPayload, ReplicationDlqReplayPayload, ReplicationDlqTargetReplayPayload,
     ReplicationRetryPayload, SuppressedAdminAlertRecord, TopologyUpdateInput,
@@ -6740,7 +6740,7 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             "/api/auth-capture/prompts/{prompt_id}/cancel",
             post(cancel_auth_capture_prompt),
         )
-        .route("/api/admin/logs", get(list_admin_logs))
+        .route(ROUTE_ADMIN_LOGS, get(list_admin_logs))
         .route("/api/auth/onedrive/status", get(onedrive_auth_status))
         .route(
             "/api/auth/onedrive/web/start",
@@ -12148,6 +12148,7 @@ fn render_admin_index_html() -> String {
         .replace("{route_status}", ROUTE_STATUS)
         .replace("{route_admin_logout}", ROUTE_ADMIN_LOGOUT)
         .replace("{route_admin_change_password}", ROUTE_ADMIN_CHANGE_PASSWORD)
+        .replace("{route_admin_logs}", ROUTE_ADMIN_LOGS)
         .replace("{route_topology_update}", ROUTE_TOPOLOGY_UPDATE)
         .replace("{route_auth_capture_policy}", ROUTE_AUTH_CAPTURE_POLICY)
         .replace(
@@ -33410,12 +33411,14 @@ mod tests {
             "changePassword: \"{}\"",
             ROUTE_ADMIN_CHANGE_PASSWORD
         )));
+        assert!(html.contains(&format!("adminLogs: \"{}\"", ROUTE_ADMIN_LOGS)));
         assert!(html.contains(&format!("topologyUpdate: \"{}\"", ROUTE_TOPOLOGY_UPDATE)));
         assert!(html.contains(&format!(
             "authCapturePolicy: \"{}\"",
             ROUTE_AUTH_CAPTURE_POLICY
         )));
         assert!(html.contains("routeProviderCredentials(provider)"));
+        assert!(html.contains("routeAdminLogs()"));
         assert!(html.contains("providerCredentialsTemplate"));
         assert!(html.contains("routeBrowserFlowSessionHandoff(sessionId)"));
         assert!(html.contains("browserFlowSessionHandoffTemplate"));
@@ -33424,6 +33427,7 @@ mod tests {
         assert!(!html.contains("fetchJson('/api/admin/change-password'"));
         assert!(!html.contains("fetchJson('/api/control-plane/topology'"));
         assert!(!html.contains("fetchJson('/api/policy/auth-capture'"));
+        assert!(!html.contains("fetchJson(`/api/admin/logs?"));
         assert!(!html.contains("fetch('/api/admin/logout'"));
         assert!(!html.contains("fetchJson('/api/providers/onedrive/credentials'"));
         assert!(
@@ -39403,6 +39407,12 @@ mod tests {
         assert!(html.contains("id=\"top-status-runtime-version\""));
         assert!(html.contains("id=\"top-status-runtime-carriers\""));
         assert!(html.contains("renderTopLimitProfileChip"));
+        assert!(html.contains("id=\"admin-tab-logs\""));
+        assert!(html.contains("id=\"gateway-log-output\""));
+        assert!(html.contains("id=\"gateway-log-refresh\""));
+        assert!(html.contains("id=\"gateway-log-auto-refresh\""));
+        assert!(html.contains("function refreshGatewayLogs(append = false)"));
+        assert!(html.contains("adminApi.routeAdminLogs()"));
         assert!(!html.contains(
             "renderTopRuntimeMeta(runtime || {}, latestGatewayStatus?.operations_overview?.data_plane_transfer || {});"
         ));

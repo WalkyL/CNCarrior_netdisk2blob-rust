@@ -2492,6 +2492,7 @@ Copyright (c) 2026 walky
       status: "{route_status}",
       logout: "{route_admin_logout}",
       changePassword: "{route_admin_change_password}",
+      adminLogs: "{route_admin_logs}",
       topologyUpdate: "{route_topology_update}",
       authCapturePolicy: "{route_auth_capture_policy}",
       providerCredentialsTemplate: "{route_provider_credentials_template}",
@@ -2506,6 +2507,9 @@ Copyright (c) 2026 walky
       },
       routeChangePassword() {
         return adminApiRoutes.changePassword;
+      },
+      routeAdminLogs() {
+        return adminApiRoutes.adminLogs;
       },
       routeTopologyUpdate() {
         return adminApiRoutes.topologyUpdate;
@@ -6957,7 +6961,7 @@ Copyright (c) 2026 walky
       if (append && gatewayLogState.cursor) {
         params.set('cursor', gatewayLogState.cursor);
       }
-      const payload = await fetchJson(`/api/admin/logs?${params.toString()}`);
+      const payload = await fetchJson(`${adminApi.routeAdminLogs()}?${params.toString()}`);
       gatewayLogState.cursor = String(payload?.next_cursor || '').trim();
       if (append) {
         const mergedEntries = [...(gatewayLogState.entries || []), ...(Array.isArray(payload?.entries) ? payload.entries : [])];

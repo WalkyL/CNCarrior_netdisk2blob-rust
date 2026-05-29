@@ -666,11 +666,12 @@
 ## ADMIN-005: 真实服务日志页与受控日志 API
 
 **优先级:** P0
-**状态:** pending
+**状态:** completed
 **目标:** 新增 Admin 日志查看页，并提供受 Admin 鉴权保护的真实 `gatewayd` 进程日志读取接口。
 **Coding 指导:** 后端实现进程内有界 ring buffer 或等效轻量日志缓冲，避免直接 tail 任意文件或读取 systemd journal；接口支持按 level、keyword、limit、cursor 查询；前端提供日志页、筛选、搜索、复制、导出与自动刷新。严格限制单条日志长度、总缓存条数/字节数和刷新频率，不为日志页保留无限历史。
 **验收方法:** `cargo test -p gatewayd` 覆盖日志缓存与 API 鉴权；手工触发 warn/error/provider failure 后在日志页查到对应记录。
 **验收标准:** 日志页能稳定显示运行中的真实日志；未登录或无 Admin 权限无法读取；大量日志不会无限占用内存，默认容量和单条截断有明确上限。
+**实现备注:** 已有实现提供进程内 `AdminLogRing` 有界日志缓冲（默认 2000 条、2MiB，总单行截断 2KiB），tracing writer 同时写 stderr 和 ring buffer；受 Admin 鉴权/改密保护的 `GET /api/admin/logs` 支持 `level`、`keyword`、`limit`、`cursor` 查询并限制 limit/keyword。Admin 日志页已提供筛选、搜索、分页加载、复制、导出、自动刷新与 AI 解释入口。本次收尾把日志路由纳入 `admin-api` contract，并让前端通过注入的 `adminApi.routeAdminLogs()` 访问，避免隐藏硬编码接口。
 **依赖:** ADMIN-002
 **不做事项:** 不做跨重启持久历史日志查询。
 **风险:** 日志缓冲过大导致低配宿主额外内存压力。
