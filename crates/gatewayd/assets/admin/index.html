@@ -5032,8 +5032,9 @@ Copyright (c) 2026 walky
       loading: false,
       action: '',
     };
+    const DEFAULT_FRONT_FAQ_MATCH_ENDPOINT = 'https://carrier-disk-gateway.agi2030.online/api/faq/match';
     const frontPluginConfig = {
-      faqMatchEndpoint: localStorage.getItem('ccbg_front_faq_match_endpoint') || '',
+      faqMatchEndpoint: localStorage.getItem('ccbg_front_faq_match_endpoint') || DEFAULT_FRONT_FAQ_MATCH_ENDPOINT,
       llmProxyDisabled: true,
     };
     const gatewayLogState = {

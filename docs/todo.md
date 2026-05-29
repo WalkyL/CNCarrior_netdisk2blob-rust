@@ -679,11 +679,12 @@
 ## ADMIN-006: 前端 AI 解释与配置项问答
 
 **优先级:** P0
-**状态:** pending
+**状态:** completed
 **目标:** 把“AI解释”改成前端链路，并扩展到错误日志和晦涩配置项。
 **Coding 指导:** 不扩展 Rust `/api/llm/error-explain`；前端点击“AI解释”时先脱敏，再请求 Cloudflare FAQ match API，随后在浏览器内用用户当前配置的 LLM endpoint 发起解释；新增统一 modal，支持错误日志和配置项两种上下文；对无 CORS 或未配置 API key 的 endpoint 给出复制 prompt 的降级路径。FAQ 命中、prompt 拼装、对话框状态和解释展示都留在前端，不把这类高层交互状态落到 Rust。
 **验收方法:** 在日志页、provider test、limit probe、设置项 help 入口分别触发 AI 解释；断开 LLM endpoint 验证降级提示。
 **验收标准:** 不依赖 Rust 的错误解释接口也能完成 FAQ 命中 + LLM 解释；解释请求不发送云盘 token/cookie；配置项可以复用同一套 FAQ 匹配和 prompt 模板。
+**实现备注:** Admin 前端已有统一 `ai-explain-modal`，日志页、Provider Test、Limit Probe、凭据诊断和字段 help 都走前端 `buildAiExplainBundle()`：先脱敏上下文，再请求 Cloudflare FAQ match API，随后生成可复制 Prompt，并可尝试从浏览器直连当前启用的 LLM endpoint；CORS 或未配置 endpoint 失败时保留复制 Prompt 降级。前端不调用 Rust `/api/llm/error-explain`；本次收尾把默认 FAQ match endpoint 固定到 `https://carrier-disk-gateway.agi2030.online/api/faq/match`，同时保留 `localStorage.ccbg_front_faq_match_endpoint` 作为本地覆盖。
 **依赖:** ADMIN-005, CF-002
 **不做事项:** 不引入本地向量数据库。
 **风险:** 浏览器直连的 LLM endpoint 若不支持 CORS，需要稳定降级路径。

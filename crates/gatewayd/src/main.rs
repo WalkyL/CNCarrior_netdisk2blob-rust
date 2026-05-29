@@ -39688,6 +39688,8 @@ mod tests {
         assert!(html.contains("id=\"provider-credential-llm-feedback-telecom\""));
         assert!(html.contains("id=\"provider-credential-llm-output-mobile\""));
         assert!(html.contains("id=\"ai-explain-modal\""));
+        assert!(html.contains("DEFAULT_FRONT_FAQ_MATCH_ENDPOINT"));
+        assert!(html.contains("https://carrier-disk-gateway.agi2030.online/api/faq/match"));
         assert!(html.contains("frontPluginConfig.faqMatchEndpoint"));
         assert!(html.contains("function buildAiExplainBundle("));
         assert!(!html.contains("/api/llm/error-explain"));
