@@ -100,17 +100,17 @@
       "config_targets": [
         "config/browser-flows/telecom-web.json",
         "config/provider-bridges/telecom-web.json",
-        "future config/provider-capabilities/telecom-native.json"
+        "config/provider-capabilities/telecom-native.json"
       ],
       "notes": [
-        "Telecom write path is not yet implemented in Rust provider.",
-        "Current step is configuration-first: browser-flow upload probe and request-shape capture must land before any Rust native write implementation.",
+        "Telecom upload and metadata object actions are implemented in Rust provider tests, but the live request-shape catalog is still partial.",
+        "Current step is configuration-first: browser-flow upload probes and request-shape capture should confirm drift before broadening native implementation.",
         "As of 2026-05-21, a live personal-space upload capture on https://cloud.189.cn/web/main/file/folder/-11 confirmed a multipart upload chain built around getMultiUploadUrls, OSS-style PUT part uploads, checkTransSecond, and commitMultiUploadFile.",
         "Observed object-store part uploads used 10 MiB chunks against bjoss.ctyunxs.cn with query parameters partNumber and uploadId.",
         "Observed business requests carried Telecom-specific signing headers such as sessionkey, signature, x-request-date, x-request-id, encryptiontext, and pkid.",
         "Observed object-store PUT requests carried authorization, content-md5, x-amz-date, x-amz-limit, and content-type.",
         "The current upload probe should be re-run with a brand-new random filename because the captured sample showed 已秒传 / 覆盖上传 hints and may have skipped or compressed the earliest init branch.",
-        "Before formal native implementation, the stable request template must be written into future config/provider-capabilities/telecom-native.json so page drift remains a catalog update rather than a Rust rewrite."
+        "Before adding new native implementation paths, extend config/provider-capabilities/telecom-native.json with confirmed request templates so page drift remains a catalog update rather than a Rust rewrite."
       ]
     }
   ]

@@ -1,0 +1,14 @@
+[package]
+name = "ccbg-platform-profiles"
+edition.workspace = true
+license-file.workspace = true
+version.workspace = true
+
+[features]
+default = ["full-host"]
+full-host = []
+lite-host = []
+esp-client = []
+esp-relay = []
+
+[dependencies]

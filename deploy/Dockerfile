@@ -14,6 +14,9 @@ RUN apt-get update \
 WORKDIR /srv/gateway
 COPY --from=builder /app/target/release/gatewayd /usr/local/bin/gatewayd
 COPY config/example.env /srv/gateway/example.env
+COPY config /srv/gateway/config
+RUN mkdir -p /srv/gateway/data /srv/gateway/body-spool \
+    && chown -R gateway:gateway /srv/gateway
 
 USER gateway
 EXPOSE 61080

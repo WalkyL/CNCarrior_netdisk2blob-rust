@@ -1,5 +1,9 @@
+// SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+// Copyright (c) 2026 walky
+
 mod browser_flow;
 mod provider_bridge;
+pub mod provider_completion;
 
 use std::{
     collections::BTreeMap,
@@ -35,6 +39,12 @@ pub use provider_bridge::{
     PROVIDER_BRIDGE_SCHEMA_VERSION, ProviderBridgeBrowserProfileBinding, ProviderBridgeCatalog,
     ProviderBridgeCatalogCollection, ProviderBridgeCatalogDirectoryEntry,
     ProviderBridgeCredentialMapping, ProviderBridgeLoggedInProbe,
+};
+pub use provider_completion::{
+    CompletionDimensionReport, CompletionDimensionStatus, CompletionOverallStatus,
+    ProviderCompletionAssertions, ProviderCompletionCase, ProviderCompletionExpectation,
+    ProviderCompletionFixture, ProviderCompletionObserved, ProviderCompletionReport,
+    assert_provider_completion, assert_provider_completion_fixture,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

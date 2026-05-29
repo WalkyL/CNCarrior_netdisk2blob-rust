@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+// Copyright (c) 2026 walky
+
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::Path,
     sync::{
@@ -103,6 +106,8 @@ pub struct TelecomConfig {
     pub max_single_download_bytes: Option<u64>,
     #[serde(default)]
     pub body_spool_dir: Option<String>,
+    #[serde(default)]
+    pub native_capability_catalog_path: Option<String>,
     #[serde(skip, default)]
     pub body_spool_observer: Option<SharedBodySpoolObserver>,
 }
@@ -110,6 +115,14 @@ pub struct TelecomConfig {
 pub struct TelecomBlobAdapter {
     config: TelecomConfig,
     client: reqwest::Client,
+    native_capability_catalog: Option<NativeCapabilityCatalogMeta>,
+}
+
+#[derive(Debug, Clone)]
+struct NativeCapabilityCatalogMeta {
+    schema_version: u64,
+    status: String,
+    capability_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -357,11 +370,121 @@ impl TelecomFileEntry {
     }
 }
 
+fn load_native_capability_catalog(
+    path: Option<&str>,
+) -> Result<Option<NativeCapabilityCatalogMeta>, BlobError> {
+    let Some(path) = path.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let raw = fs::read_to_string(path).map_err(|error| {
+        BlobError::Configuration(format!(
+            "failed to read Telecom native capability catalog {path}: {error}"
+        ))
+    })?;
+    let payload: Value = serde_json::from_str(&raw).map_err(|error| {
+        BlobError::Configuration(format!(
+            "failed to parse Telecom native capability catalog {path}: {error}"
+        ))
+    })?;
+    let provider = payload
+        .get("provider")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if provider != "telecom" {
+        return Err(BlobError::Configuration(format!(
+            "Telecom native capability catalog provider mismatch at {path}: expected telecom, got {}",
+            if provider.is_empty() {
+                "<missing>"
+            } else {
+                provider
+            }
+        )));
+    }
+    let schema_version = payload
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            BlobError::Configuration(format!(
+                "Telecom native capability catalog at {path} is missing positive schema_version"
+            ))
+        })?;
+    let capabilities = payload
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            BlobError::Configuration(format!(
+                "Telecom native capability catalog at {path} is missing capabilities array"
+            ))
+        })?;
+    if capabilities.is_empty() {
+        return Err(BlobError::Configuration(format!(
+            "Telecom native capability catalog at {path} has empty capabilities array"
+        )));
+    }
+    let mut seen_ids = BTreeSet::new();
+    for capability in capabilities {
+        let capability_id = capability
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                BlobError::Configuration(format!(
+                    "Telecom native capability catalog at {path} contains a capability without id"
+                ))
+            })?;
+        if !seen_ids.insert(capability_id.to_string()) {
+            return Err(BlobError::Configuration(format!(
+                "duplicate Telecom native capability id in catalog {path}: {capability_id}"
+            )));
+        }
+        let method = capability
+            .get("method")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let url = capability
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if method.is_none() || url.is_none() {
+            return Err(BlobError::Configuration(format!(
+                "Telecom native capability catalog at {path} capability {capability_id} must include method and url"
+            )));
+        }
+    }
+    let status = payload
+        .get("native_capability_status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("active")
+        .to_ascii_lowercase();
+    if !matches!(status.as_str(), "active" | "stable") {
+        return Err(BlobError::Configuration(format!(
+            "Telecom native capability catalog at {path} must be active or stable, got {status}"
+        )));
+    }
+
+    Ok(Some(NativeCapabilityCatalogMeta {
+        schema_version,
+        status,
+        capability_count: capabilities.len(),
+    }))
+}
+
 impl TelecomBlobAdapter {
     pub fn new(config: TelecomConfig) -> Result<Self, BlobError> {
+        let native_capability_catalog =
+            load_native_capability_catalog(config.native_capability_catalog_path.as_deref())?;
         Ok(Self {
             client: build_http_client(&config)?,
             config,
+            native_capability_catalog,
         })
     }
 
@@ -447,6 +570,23 @@ impl TelecomBlobAdapter {
             .as_deref()
             .map(normalize_object_key)
             .filter(|value| !value.is_empty())
+    }
+
+    fn catalog_health_notes(&self) -> Vec<String> {
+        match self.native_capability_catalog.as_ref() {
+            Some(meta) => vec![
+                format!(
+                    "native_capability_catalog_schema_version={}",
+                    meta.schema_version
+                ),
+                format!("native_capability_catalog_status={}", meta.status),
+                format!(
+                    "native_capability_catalog_capability_count={}",
+                    meta.capability_count
+                ),
+            ],
+            None => vec!["native_capability_catalog=not_configured".to_string()],
+        }
     }
 
     fn managed_container_root(&self, container: &str) -> Result<String, BlobError> {
@@ -634,6 +774,13 @@ impl TelecomBlobAdapter {
     fn family_download_url_api(&self) -> String {
         format!(
             "{}/open/family/file/getFileDownloadUrl.action",
+            self.family_api_base_url()
+        )
+    }
+
+    fn family_create_folder_url(&self) -> String {
+        format!(
+            "{}/open/family/file/createFolder.action",
             self.family_api_base_url()
         )
     }
@@ -1110,7 +1257,7 @@ impl TelecomBlobAdapter {
             id: family_id.to_string(),
             label: "Family Cloud".to_string(),
             kind: StorageScopeKind::Family,
-            writable: false,
+            writable: true,
             root: Some(DEFAULT_FAMILY_ROOT_FOLDER_ID.to_string()),
             container: Some(TELECOM_FAMILY_CONTAINER.to_string()),
             object_count: Some(root_page.count.unwrap_or(root_page.fetched_count() as u64)),
@@ -1118,8 +1265,9 @@ impl TelecomBlobAdapter {
             notes: vec![
                 format!("family_id={family_id}"),
                 "scope is mapped to container=family".to_string(),
-                "family upload is not enabled yet; delete uses the web recycle-bin batch API"
+                "family upload uses the same bounded multipart spool path as personal uploads"
                     .to_string(),
+                "family delete uses the web recycle-bin batch API".to_string(),
             ],
         }
     }
@@ -1652,41 +1800,50 @@ impl TelecomBlobAdapter {
 
     async fn ensure_folder(
         &self,
+        scope: TelecomContainerScope,
         parent_folder_id: &str,
         folder_name: &str,
     ) -> Result<String, BlobError> {
         if let Some(existing) = self
-            .find_child_folder_id(
-                TelecomContainerScope::Personal,
-                parent_folder_id,
-                folder_name,
-            )
+            .find_child_folder_id(scope, parent_folder_id, folder_name)
             .await?
         {
             return Ok(existing);
         }
-
-        let payload = self
-            .send_form_value(
-                self.create_folder_url().as_str(),
-                self.folder_referer(parent_folder_id).as_str(),
-                &[
-                    ("parentFolderId".to_string(), parent_folder_id.to_string()),
-                    ("folderName".to_string(), folder_name.to_string()),
-                ],
-                "createFolder.action",
-            )
-            .await?;
+        let payload = match scope {
+            TelecomContainerScope::Personal => {
+                self.send_form_value(
+                    self.create_folder_url().as_str(),
+                    self.folder_referer(parent_folder_id).as_str(),
+                    &[
+                        ("parentFolderId".to_string(), parent_folder_id.to_string()),
+                        ("folderName".to_string(), folder_name.to_string()),
+                    ],
+                    "createFolder.action",
+                )
+                .await?
+            }
+            TelecomContainerScope::Family => {
+                let family_id = self.family_id()?;
+                self.send_signed_form_value(
+                    self.family_create_folder_url().as_str(),
+                    self.family_referer(parent_folder_id).as_str(),
+                    &[
+                        ("familyId".to_string(), family_id.to_string()),
+                        ("parentId".to_string(), parent_folder_id.to_string()),
+                        ("folderName".to_string(), folder_name.to_string()),
+                    ],
+                    "family createFolder.action",
+                )
+                .await?
+            }
+        };
 
         if let Some(res_code) = json_lookup_string(&payload, &[&["res_code"], &["resCode"]]) {
             if res_code != "0" {
                 if res_code == "FileAlreadyExists" {
                     return self
-                        .find_child_folder_id(
-                            TelecomContainerScope::Personal,
-                            parent_folder_id,
-                            folder_name,
-                        )
+                        .find_child_folder_id(scope, parent_folder_id, folder_name)
                         .await?
                         .ok_or_else(|| {
                             BlobError::Upstream(format!(
@@ -1721,23 +1878,36 @@ impl TelecomBlobAdapter {
 
     async fn ensure_managed_parent_folder_id(
         &self,
+        scope: TelecomContainerScope,
         container: &str,
         key: &str,
     ) -> Result<(String, String), BlobError> {
         let provider_key = self.provider_object_key(container, key)?;
         let (parent_path, file_name) = match provider_key.rsplit_once('/') {
             Some((parent_path, file_name)) => (Some(parent_path), file_name.to_string()),
-            None => return Ok((self.root_folder_id().to_string(), provider_key)),
+            None => {
+                let root = match scope {
+                    TelecomContainerScope::Personal => self.root_folder_id(),
+                    TelecomContainerScope::Family => DEFAULT_FAMILY_ROOT_FOLDER_ID,
+                };
+                return Ok((root.to_string(), provider_key));
+            }
         };
 
-        let mut parent_id = self.root_folder_id().to_string();
+        let mut parent_id = match scope {
+            TelecomContainerScope::Personal => self.root_folder_id(),
+            TelecomContainerScope::Family => DEFAULT_FAMILY_ROOT_FOLDER_ID,
+        }
+        .to_string();
         if let Some(parent_path) = parent_path {
             for segment in parent_path
                 .split('/')
                 .map(str::trim)
                 .filter(|segment| !segment.is_empty())
             {
-                parent_id = self.ensure_folder(parent_id.as_str(), segment).await?;
+                parent_id = self
+                    .ensure_folder(scope, parent_id.as_str(), segment)
+                    .await?;
             }
         }
 
@@ -1803,6 +1973,7 @@ impl TelecomBlobAdapter {
 
     async fn init_multi_upload(
         &self,
+        scope: TelecomContainerScope,
         bootstrap: &TelecomUploadBootstrap,
         parent_folder_id: &str,
         file_name: &str,
@@ -1821,13 +1992,20 @@ impl TelecomBlobAdapter {
             fields.push(("lazyCheck".to_string(), "1".to_string()));
         }
 
+        if scope == TelecomContainerScope::Family {
+            fields.push(("familyId".to_string(), self.family_id()?.to_string()));
+        }
+        let (uri, action) = match scope {
+            TelecomContainerScope::Personal => ("/person/initMultiUpload", "initMultiUpload"),
+            TelecomContainerScope::Family => ("/family/initMultiUpload", "family initMultiUpload"),
+        };
         let value = self
             .send_upload_control_get(
                 self.upload_control_base_url(),
-                "/person/initMultiUpload",
+                uri,
                 &fields,
                 bootstrap,
-                "initMultiUpload",
+                action,
             )
             .await?;
         let upload_host = json_lookup_string(&value, &[&["data", "uploadHost"]])
@@ -1848,26 +2026,31 @@ impl TelecomBlobAdapter {
 
     async fn get_multi_upload_url(
         &self,
+        scope: TelecomContainerScope,
         bootstrap: &TelecomUploadBootstrap,
         upload_host: &str,
         upload_file_id: &str,
         part_number: usize,
         part_md5_base64: &str,
     ) -> Result<(String, String), BlobError> {
+        let mut fields = vec![
+            ("uploadFileId".to_string(), upload_file_id.to_string()),
+            (
+                "partInfo".to_string(),
+                format!("{part_number}-{part_md5_base64}"),
+            ),
+        ];
+        if scope == TelecomContainerScope::Family {
+            fields.push(("familyId".to_string(), self.family_id()?.to_string()));
+        }
+        let (uri, action) = match scope {
+            TelecomContainerScope::Personal => ("/person/getMultiUploadUrls", "getMultiUploadUrls"),
+            TelecomContainerScope::Family => {
+                ("/family/getMultiUploadUrls", "family getMultiUploadUrls")
+            }
+        };
         let value = self
-            .send_upload_control_get(
-                upload_host,
-                "/person/getMultiUploadUrls",
-                &[
-                    ("uploadFileId".to_string(), upload_file_id.to_string()),
-                    (
-                        "partInfo".to_string(),
-                        format!("{part_number}-{part_md5_base64}"),
-                    ),
-                ],
-                bootstrap,
-                "getMultiUploadUrls",
-            )
+            .send_upload_control_get(upload_host, uri, &fields, bootstrap, action)
             .await?;
         let key = format!("partNumber_{part_number}");
         let request_url =
@@ -1971,6 +2154,7 @@ impl TelecomBlobAdapter {
 
     async fn upload_multi_parts(
         &self,
+        scope: TelecomContainerScope,
         bootstrap: &TelecomUploadBootstrap,
         plan: &TelecomUploadPlan,
         upload: &PreparedTelecomUpload,
@@ -1981,6 +2165,7 @@ impl TelecomBlobAdapter {
             let part_number = index + 1;
             let (request_url, request_header) = self
                 .get_multi_upload_url(
+                    scope,
                     bootstrap,
                     plan.upload_host.as_str(),
                     plan.upload_file_id.as_str(),
@@ -2006,22 +2191,27 @@ impl TelecomBlobAdapter {
 
     async fn check_trans_second(
         &self,
+        scope: TelecomContainerScope,
         bootstrap: &TelecomUploadBootstrap,
         plan: &mut TelecomUploadPlan,
         upload: &PreparedTelecomUpload,
     ) -> Result<(), BlobError> {
+        let mut fields = vec![
+            ("fileMd5".to_string(), upload.file_md5_upper.clone()),
+            ("sliceMd5".to_string(), upload.slice_md5_upper.clone()),
+            ("uploadFileId".to_string(), plan.upload_file_id.clone()),
+        ];
+        if scope == TelecomContainerScope::Family {
+            fields.push(("familyId".to_string(), self.family_id()?.to_string()));
+        }
+        let (uri, action) = match scope {
+            TelecomContainerScope::Personal => ("/person/checkTransSecond", "checkTransSecond"),
+            TelecomContainerScope::Family => {
+                ("/family/checkTransSecond", "family checkTransSecond")
+            }
+        };
         let value = self
-            .send_upload_control_get(
-                plan.upload_host.as_str(),
-                "/person/checkTransSecond",
-                &[
-                    ("fileMd5".to_string(), upload.file_md5_upper.clone()),
-                    ("sliceMd5".to_string(), upload.slice_md5_upper.clone()),
-                    ("uploadFileId".to_string(), plan.upload_file_id.clone()),
-                ],
-                bootstrap,
-                "checkTransSecond",
-            )
+            .send_upload_control_get(plan.upload_host.as_str(), uri, &fields, bootstrap, action)
             .await?;
         if let Some(upload_file_id) = json_lookup_string(&value, &[&["data", "uploadFileId"]]) {
             plan.upload_file_id = upload_file_id;
@@ -2035,32 +2225,40 @@ impl TelecomBlobAdapter {
 
     async fn commit_multi_upload(
         &self,
+        scope: TelecomContainerScope,
         bootstrap: &TelecomUploadBootstrap,
         plan: &TelecomUploadPlan,
         upload: &PreparedTelecomUpload,
     ) -> Result<String, BlobError> {
+        let mut fields = vec![
+            ("uploadFileId".to_string(), plan.upload_file_id.clone()),
+            (
+                "lazyCheck".to_string(),
+                if upload.part_md5_upper.len() > 1 {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            ("fileMd5".to_string(), upload.file_md5_upper.clone()),
+            ("sliceMd5".to_string(), upload.slice_md5_upper.clone()),
+            ("opertype".to_string(), "3".to_string()),
+        ];
+        if scope == TelecomContainerScope::Family {
+            fields.push(("familyId".to_string(), self.family_id()?.to_string()));
+        }
+        let (uri, action) = match scope {
+            TelecomContainerScope::Personal => {
+                ("/person/commitMultiUploadFile", "commitMultiUploadFile")
+            }
+            TelecomContainerScope::Family => (
+                "/family/commitMultiUploadFile",
+                "family commitMultiUploadFile",
+            ),
+        };
         let value = self
-            .send_upload_control_get(
-                plan.upload_host.as_str(),
-                "/person/commitMultiUploadFile",
-                &[
-                    ("uploadFileId".to_string(), plan.upload_file_id.clone()),
-                    (
-                        "lazyCheck".to_string(),
-                        if upload.part_md5_upper.len() > 1 {
-                            "1"
-                        } else {
-                            "0"
-                        }
-                        .to_string(),
-                    ),
-                    ("fileMd5".to_string(), upload.file_md5_upper.clone()),
-                    ("sliceMd5".to_string(), upload.slice_md5_upper.clone()),
-                    ("opertype".to_string(), "3".to_string()),
-                ],
-                bootstrap,
-                "commitMultiUploadFile",
-            )
+            .send_upload_control_get(plan.upload_host.as_str(), uri, &fields, bootstrap, action)
             .await?;
         Ok(json_lookup_string(
             &value,
@@ -2090,6 +2288,14 @@ impl TelecomBlobAdapter {
     }
 
     fn batch_task_infos_for_file(&self, entry: &TelecomFileEntry) -> Result<String, BlobError> {
+        self.batch_task_infos_for_file_with_name(entry, None)
+    }
+
+    fn batch_task_infos_for_file_with_name(
+        &self,
+        entry: &TelecomFileEntry,
+        new_file_name: Option<&str>,
+    ) -> Result<String, BlobError> {
         let file_id = entry.id().ok_or_else(|| {
             BlobError::Upstream(
                 "China Telecom delete cannot run because file id is missing".to_string(),
@@ -2100,26 +2306,30 @@ impl TelecomBlobAdapter {
                 "China Telecom delete cannot run because file name is missing".to_string(),
             )
         })?;
-        serde_json::to_string(&[serde_json::json!({
+        let mut task_info = serde_json::json!({
             "fileId": file_id,
             "fileName": file_name,
             "isFolder": 0,
             "srcParentId": entry.parent_id().unwrap_or_default(),
-        })])
-        .map_err(|error| BlobError::Upstream(format!("failed to encode delete taskInfos: {error}")))
+        });
+        if let Some(next_name) = new_file_name.map(str::trim).filter(|name| !name.is_empty()) {
+            task_info["destFileName"] = Value::String(next_name.to_string());
+        }
+        serde_json::to_string(&[task_info]).map_err(|error| {
+            BlobError::Upstream(format!("failed to encode delete taskInfos: {error}"))
+        })
     }
 
-    async fn create_personal_delete_task(
+    async fn create_personal_batch_task(
         &self,
-        entry: &TelecomFileEntry,
+        task_type: &str,
+        task_infos: String,
+        target_folder_id: &str,
     ) -> Result<String, BlobError> {
         let fields = vec![
-            ("type".to_string(), "DELETE".to_string()),
-            (
-                "taskInfos".to_string(),
-                self.batch_task_infos_for_file(entry)?,
-            ),
-            ("targetFolderId".to_string(), String::new()),
+            ("type".to_string(), task_type.to_string()),
+            ("taskInfos".to_string(), task_infos),
+            ("targetFolderId".to_string(), target_folder_id.to_string()),
         ];
         let payload = self
             .send_form_value(
@@ -2135,18 +2345,17 @@ impl TelecomBlobAdapter {
         })
     }
 
-    async fn create_family_delete_task(
+    async fn create_family_batch_task(
         &self,
-        entry: &TelecomFileEntry,
+        task_type: &str,
+        task_infos: String,
+        target_folder_id: &str,
     ) -> Result<String, BlobError> {
         let family_id = self.family_id()?;
         let fields = vec![
-            ("type".to_string(), "DELETE".to_string()),
-            (
-                "taskInfos".to_string(),
-                self.batch_task_infos_for_file(entry)?,
-            ),
-            ("targetFolderId".to_string(), String::new()),
+            ("type".to_string(), task_type.to_string()),
+            ("taskInfos".to_string(), task_infos),
+            ("targetFolderId".to_string(), target_folder_id.to_string()),
             ("familyId".to_string(), family_id.to_string()),
         ];
         let payload = self
@@ -2161,6 +2370,25 @@ impl TelecomBlobAdapter {
         json_lookup_string(&payload, &[&["taskId"], &["data", "taskId"]]).ok_or_else(|| {
             BlobError::Upstream("family createBatchTask.action returned no taskId".to_string())
         })
+    }
+
+    async fn create_batch_task_for_scope(
+        &self,
+        scope: TelecomContainerScope,
+        task_type: &str,
+        task_infos: String,
+        target_folder_id: &str,
+    ) -> Result<String, BlobError> {
+        match scope {
+            TelecomContainerScope::Personal => {
+                self.create_personal_batch_task(task_type, task_infos, target_folder_id)
+                    .await
+            }
+            TelecomContainerScope::Family => {
+                self.create_family_batch_task(task_type, task_infos, target_folder_id)
+                    .await
+            }
+        }
     }
 
     async fn check_personal_batch_task(
@@ -2260,11 +2488,69 @@ impl TelecomBlobAdapter {
         scope: TelecomContainerScope,
         entry: &TelecomFileEntry,
     ) -> Result<(), BlobError> {
-        let task_id = match scope {
-            TelecomContainerScope::Personal => self.create_personal_delete_task(entry).await?,
-            TelecomContainerScope::Family => self.create_family_delete_task(entry).await?,
-        };
+        let task_id = self
+            .create_batch_task_for_scope(
+                scope,
+                "DELETE",
+                self.batch_task_infos_for_file(entry)?,
+                "",
+            )
+            .await?;
         self.wait_for_batch_task(scope, task_id.as_str(), "DELETE")
+            .await
+    }
+
+    async fn copy_file_for_scope(
+        &self,
+        scope: TelecomContainerScope,
+        entry: &TelecomFileEntry,
+        target_folder_id: &str,
+    ) -> Result<(), BlobError> {
+        let task_id = self
+            .create_batch_task_for_scope(
+                scope,
+                "COPY",
+                self.batch_task_infos_for_file(entry)?,
+                target_folder_id,
+            )
+            .await?;
+        self.wait_for_batch_task(scope, task_id.as_str(), "COPY")
+            .await
+    }
+
+    async fn move_file_for_scope(
+        &self,
+        scope: TelecomContainerScope,
+        entry: &TelecomFileEntry,
+        target_folder_id: &str,
+    ) -> Result<(), BlobError> {
+        let task_id = self
+            .create_batch_task_for_scope(
+                scope,
+                "MOVE",
+                self.batch_task_infos_for_file(entry)?,
+                target_folder_id,
+            )
+            .await?;
+        self.wait_for_batch_task(scope, task_id.as_str(), "MOVE")
+            .await
+    }
+
+    async fn rename_file_for_scope(
+        &self,
+        scope: TelecomContainerScope,
+        entry: &TelecomFileEntry,
+        new_file_name: &str,
+    ) -> Result<(), BlobError> {
+        let task_id = self
+            .create_batch_task_for_scope(
+                scope,
+                "RENAME",
+                self.batch_task_infos_for_file_with_name(entry, Some(new_file_name))?,
+                "",
+            )
+            .await?;
+        self.wait_for_batch_task(scope, task_id.as_str(), "RENAME")
             .await
     }
 
@@ -2378,6 +2664,7 @@ impl BlobBackend for TelecomBlobAdapter {
             format!("managed_root={managed_root}"),
             format!("upload_part_size_bytes={}", self.upload_part_size_bytes()),
         ];
+        notes.extend(self.catalog_health_notes());
         let mut scopes = Vec::new();
 
         let status = match self.list_files_page(self.root_folder_id(), 1).await {
@@ -2521,14 +2808,8 @@ impl BlobBackend for TelecomBlobAdapter {
 
     async fn put_object(&self, request: PutObjectRequest) -> Result<PutObjectResult, BlobError> {
         let scope = self.container_scope(&request.container)?;
-        if scope == TelecomContainerScope::Family {
-            return Err(BlobError::NotImplemented(
-                "China Telecom family upload is not enabled yet; use container=root for writes"
-                    .to_string(),
-            ));
-        }
         let (parent_folder_id, file_name) = self
-            .ensure_managed_parent_folder_id(&request.container, &request.key)
+            .ensure_managed_parent_folder_id(scope, &request.container, &request.key)
             .await?;
         let upload = self
             .prepare_upload_body(
@@ -2541,6 +2822,7 @@ impl BlobBackend for TelecomBlobAdapter {
         let first_response_started_at = Instant::now();
         let mut plan = self
             .init_multi_upload(
+                scope,
                 &bootstrap,
                 parent_folder_id.as_str(),
                 file_name.as_str(),
@@ -2551,18 +2833,22 @@ impl BlobBackend for TelecomBlobAdapter {
         if !plan.file_data_exists {
             let upload_started_at = Instant::now();
             let first_response_latency_ms = self
-                .upload_multi_parts(&bootstrap, &plan, &upload, upload_started_at)
+                .upload_multi_parts(scope, &bootstrap, &plan, &upload, upload_started_at)
                 .await?
                 .or(Some(elapsed_millis(upload_started_at).max(1)));
-            self.check_trans_second(&bootstrap, &mut plan, &upload)
+            self.check_trans_second(scope, &bootstrap, &mut plan, &upload)
                 .await?;
-            let etag = self.commit_multi_upload(&bootstrap, &plan, &upload).await?;
+            let etag = self
+                .commit_multi_upload(scope, &bootstrap, &plan, &upload)
+                .await?;
             return Ok(PutObjectResult {
                 etag: Some(etag),
                 first_response_latency_ms,
             });
         }
-        let etag = self.commit_multi_upload(&bootstrap, &plan, &upload).await?;
+        let etag = self
+            .commit_multi_upload(scope, &bootstrap, &plan, &upload)
+            .await?;
         Ok(PutObjectResult {
             etag: Some(etag),
             first_response_latency_ms: Some(create_latency_ms),
@@ -2577,29 +2863,118 @@ impl BlobBackend for TelecomBlobAdapter {
     }
 
     async fn rename_object(&self, request: RenameObjectRequest) -> Result<(), BlobError> {
-        let source = self.provider_object_key(&request.container, &request.key)?;
-        let destination = self.provider_object_key(&request.container, &request.new_key)?;
-        Err(BlobError::NotImplemented(format!(
-            "China Telecom native rename is not completed yet; source={source} destination={destination}"
-        )))
+        let scope = self.container_scope(&request.container)?;
+        let source_key = self.provider_object_key(&request.container, &request.key)?;
+        let destination_key = self.provider_object_key(&request.container, &request.new_key)?;
+        let source_parent = source_key.rsplit_once('/').map(|(parent, _)| parent);
+        let destination_parent = destination_key.rsplit_once('/').map(|(parent, _)| parent);
+        if source_parent != destination_parent {
+            return Err(BlobError::NotImplemented(
+                "China Telecom rename_object currently requires staying within the same parent directory".to_string(),
+            ));
+        }
+        let new_name = destination_key
+            .rsplit('/')
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                BlobError::Configuration("new object name must not be empty".to_string())
+            })?;
+        let (entry, _) = self.resolve_provider_file_entry(scope, &source_key).await?;
+        self.rename_file_for_scope(scope, &entry, new_name).await
     }
 
     async fn copy_object(&self, request: CopyObjectRequest) -> Result<(), BlobError> {
-        let source = self.provider_object_key(&request.source_container, &request.source_key)?;
-        let destination =
-            self.provider_object_key(&request.destination_container, &request.destination_key)?;
-        Err(BlobError::NotImplemented(format!(
-            "China Telecom native copy is not completed yet; source={source} destination={destination}"
-        )))
+        let source_scope = self.container_scope(&request.source_container)?;
+        let destination_scope = self.container_scope(&request.destination_container)?;
+        if source_scope != destination_scope {
+            return Err(BlobError::NotImplemented(
+                "China Telecom copy_object across personal/family containers is not implemented"
+                    .to_string(),
+            ));
+        }
+        let source_key =
+            self.provider_object_key(&request.source_container, &request.source_key)?;
+        let (entry, _) = self
+            .resolve_provider_file_entry(source_scope, &source_key)
+            .await?;
+        let (destination_parent_id, destination_name) = self
+            .ensure_managed_parent_folder_id(
+                destination_scope,
+                &request.destination_container,
+                &request.destination_key,
+            )
+            .await?;
+        self.copy_file_for_scope(source_scope, &entry, &destination_parent_id)
+            .await?;
+        if entry.display_name() != Some(destination_name.as_str()) {
+            let source_name = entry.display_name().ok_or_else(|| {
+                BlobError::Upstream(
+                    "China Telecom copy cannot run because source file name is missing".to_string(),
+                )
+            })?;
+            let destination_parent_path = self
+                .provider_object_key(&request.destination_container, &request.destination_key)?
+                .rsplit_once('/')
+                .map(|(parent, _)| parent.to_string());
+            let copied_key = destination_parent_path
+                .as_deref()
+                .map(|parent| join_relative_key(parent, source_name))
+                .unwrap_or_else(|| source_name.to_string());
+            let (copied_entry, _) = self
+                .resolve_provider_file_entry(source_scope, copied_key.as_str())
+                .await?;
+            self.rename_file_for_scope(source_scope, &copied_entry, &destination_name)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn move_object(&self, request: MoveObjectRequest) -> Result<(), BlobError> {
-        let source = self.provider_object_key(&request.source_container, &request.source_key)?;
-        let destination =
-            self.provider_object_key(&request.destination_container, &request.destination_key)?;
-        Err(BlobError::NotImplemented(format!(
-            "China Telecom native move is not completed yet; source={source} destination={destination}"
-        )))
+        let source_scope = self.container_scope(&request.source_container)?;
+        let destination_scope = self.container_scope(&request.destination_container)?;
+        if source_scope != destination_scope {
+            return Err(BlobError::NotImplemented(
+                "China Telecom move_object across personal/family containers is not implemented"
+                    .to_string(),
+            ));
+        }
+        let source_key =
+            self.provider_object_key(&request.source_container, &request.source_key)?;
+        let (entry, _) = self
+            .resolve_provider_file_entry(source_scope, &source_key)
+            .await?;
+        let (destination_parent_id, destination_name) = self
+            .ensure_managed_parent_folder_id(
+                destination_scope,
+                &request.destination_container,
+                &request.destination_key,
+            )
+            .await?;
+        self.move_file_for_scope(source_scope, &entry, &destination_parent_id)
+            .await?;
+        if entry.display_name() != Some(destination_name.as_str()) {
+            let source_name = entry.display_name().ok_or_else(|| {
+                BlobError::Upstream(
+                    "China Telecom move cannot run because source file name is missing".to_string(),
+                )
+            })?;
+            let destination_parent_path = self
+                .provider_object_key(&request.destination_container, &request.destination_key)?
+                .rsplit_once('/')
+                .map(|(parent, _)| parent.to_string());
+            let moved_key = destination_parent_path
+                .as_deref()
+                .map(|parent| join_relative_key(parent, source_name))
+                .unwrap_or_else(|| source_name.to_string());
+            let (moved_entry, _) = self
+                .resolve_provider_file_entry(source_scope, moved_key.as_str())
+                .await?;
+            self.rename_file_for_scope(source_scope, &moved_entry, &destination_name)
+                .await?;
+        }
+        Ok(())
     }
 }
 
@@ -3135,14 +3510,16 @@ mod tests {
         Router,
         body::{Body, Bytes as AxumBytes},
         extract::{Path, Query, State},
-        http::{HeaderMap, StatusCode},
+        http::{HeaderMap, StatusCode, Uri},
         response::IntoResponse,
         routing::{get, post, put},
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use blob_core::{
-        BlobBackend, BodySpoolLease, BodySpoolObserver, HealthStatus, ObjectBody, OutboundIpFamily,
-        PutObjectRequest, StorageScopeKind,
+        BlobBackend, BlobError, BodySpoolLease, BodySpoolObserver, CompletionDimensionStatus,
+        CopyObjectRequest, HealthStatus, MoveObjectRequest, ObjectBody, OutboundIpFamily,
+        ProviderCompletionAssertions, ProviderCompletionExpectation, ProviderCompletionObserved,
+        PutObjectRequest, RenameObjectRequest, StorageScopeKind, assert_provider_completion,
     };
     use md5::{Digest, Md5};
     use percent_encoding::percent_decode_str;
@@ -3154,8 +3531,8 @@ mod tests {
         access_token: String,
         require_signed_download_url: bool,
         fail_family_list_with_internal_error: bool,
-        entries_by_parent: Arc<BTreeMap<String, Vec<Value>>>,
-        file_bodies_by_id: Arc<BTreeMap<String, Vec<u8>>>,
+        entries_by_parent: Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
+        file_bodies_by_id: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         requests: Arc<Mutex<Vec<Value>>>,
     }
 
@@ -3217,11 +3594,14 @@ mod tests {
     struct MockUploadServerState {
         base_url: String,
         entries_by_parent: Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
+        file_bodies_by_id: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
         next_folder_id: Arc<AtomicUsize>,
         next_part_number: Arc<AtomicUsize>,
+        next_file_id: Arc<AtomicUsize>,
         created_folders: Arc<Mutex<Vec<HashMap<String, String>>>>,
         uploaded_parts: Arc<Mutex<Vec<(usize, Vec<u8>, Option<String>)>>>,
         control_headers: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        requests: Arc<Mutex<Vec<Value>>>,
     }
 
     struct MockUploadServer {
@@ -3229,6 +3609,7 @@ mod tests {
         created_folders: Arc<Mutex<Vec<HashMap<String, String>>>>,
         uploaded_parts: Arc<Mutex<Vec<(usize, Vec<u8>, Option<String>)>>>,
         control_headers: Arc<Mutex<Vec<HashMap<String, String>>>>,
+        requests: Arc<Mutex<Vec<Value>>>,
         _task: tokio::task::JoinHandle<()>,
     }
 
@@ -3267,8 +3648,8 @@ mod tests {
                 access_token: access_token.to_string(),
                 require_signed_download_url,
                 fail_family_list_with_internal_error,
-                entries_by_parent: Arc::new(entries_by_parent),
-                file_bodies_by_id: Arc::new(file_bodies_by_id),
+                entries_by_parent: Arc::new(Mutex::new(entries_by_parent)),
+                file_bodies_by_id: Arc::new(Mutex::new(file_bodies_by_id)),
                 requests: requests.clone(),
             };
 
@@ -3337,15 +3718,18 @@ mod tests {
             let base_url = format!("http://{addr}");
             let state = MockUploadServerState {
                 base_url: base_url.clone(),
-                entries_by_parent: Arc::new(Mutex::new(BTreeMap::from([(
-                    DEFAULT_ROOT_FOLDER_ID.to_string(),
-                    Vec::new(),
-                )]))),
+                entries_by_parent: Arc::new(Mutex::new(BTreeMap::from([
+                    (DEFAULT_ROOT_FOLDER_ID.to_string(), Vec::new()),
+                    (DEFAULT_FAMILY_ROOT_FOLDER_ID.to_string(), Vec::new()),
+                ]))),
+                file_bodies_by_id: Arc::new(Mutex::new(BTreeMap::new())),
                 next_folder_id: Arc::new(AtomicUsize::new(1)),
                 next_part_number: Arc::new(AtomicUsize::new(1)),
+                next_file_id: Arc::new(AtomicUsize::new(1)),
                 created_folders: Arc::new(Mutex::new(Vec::new())),
                 uploaded_parts: Arc::new(Mutex::new(Vec::new())),
                 control_headers: Arc::new(Mutex::new(Vec::new())),
+                requests: Arc::new(Mutex::new(Vec::new())),
             };
             let app = Router::new()
                 .route(
@@ -3355,6 +3739,18 @@ mod tests {
                 .route(
                     "/api/open/file/createFolder.action",
                     post(mock_upload_create_folder),
+                )
+                .route(
+                    "/open/family/file/listFiles.action",
+                    get(mock_upload_family_list_files),
+                )
+                .route(
+                    "/open/family/file/createFolder.action",
+                    post(mock_upload_family_create_folder),
+                )
+                .route(
+                    "/open/family/file/getFileDownloadUrl.action",
+                    get(mock_upload_family_get_download_url),
                 )
                 .route(
                     "/api/portal/v2/getUserBriefInfo.action",
@@ -3380,11 +3776,29 @@ mod tests {
                     "/person/commitMultiUploadFile",
                     get(mock_upload_commit_multi_upload_file),
                 )
+                .route(
+                    "/family/initMultiUpload",
+                    get(mock_upload_init_multi_upload),
+                )
+                .route(
+                    "/family/getMultiUploadUrls",
+                    get(mock_upload_get_multi_upload_urls),
+                )
+                .route(
+                    "/family/checkTransSecond",
+                    get(mock_upload_check_trans_second),
+                )
+                .route(
+                    "/family/commitMultiUploadFile",
+                    get(mock_upload_commit_multi_upload_file),
+                )
                 .route("/upload/{part_number}", put(mock_upload_part))
+                .route("/download/{id}", get(mock_upload_download))
                 .with_state(state.clone());
             let created_folders = Arc::clone(&state.created_folders);
             let uploaded_parts = Arc::clone(&state.uploaded_parts);
             let control_headers = Arc::clone(&state.control_headers);
+            let requests = Arc::clone(&state.requests);
             let task = tokio::spawn(async move {
                 axum::serve(listener, app)
                     .await
@@ -3396,8 +3810,16 @@ mod tests {
                 created_folders,
                 uploaded_parts,
                 control_headers,
+                requests,
                 _task: task,
             }
+        }
+
+        fn requests(&self) -> Vec<Value> {
+            self.requests
+                .lock()
+                .expect("mock telecom upload requests")
+                .clone()
         }
     }
 
@@ -3435,6 +3857,26 @@ mod tests {
                 "folderList": folder_list,
             }
         }))
+    }
+
+    async fn mock_upload_family_list_files(
+        State(state): State<MockUploadServerState>,
+        Query(query): Query<HashMap<String, String>>,
+        headers: HeaderMap,
+    ) -> axum::Json<Value> {
+        let query_snapshot = query.clone();
+        state
+            .requests
+            .lock()
+            .expect("record upload mock request")
+            .push(json!({
+                "kind": "family_upload_list",
+                "query": query_snapshot,
+                "accessToken": header_to_string(&headers, "AccessToken"),
+                "timestamp": header_to_string(&headers, "Timestamp"),
+                "signature": header_to_string(&headers, "Signature"),
+            }));
+        mock_upload_list_files(State(state), Query(query)).await
     }
 
     async fn mock_upload_create_folder(
@@ -3485,6 +3927,64 @@ mod tests {
         }))
     }
 
+    async fn mock_upload_family_create_folder(
+        State(state): State<MockUploadServerState>,
+        headers: HeaderMap,
+        body: AxumBytes,
+    ) -> axum::Json<Value> {
+        let mut fields = parse_form_fields(body.as_ref());
+        fields.insert(
+            "signedAccessToken".to_string(),
+            header_to_string(&headers, "AccessToken").unwrap_or_default(),
+        );
+        fields.insert(
+            "signedTimestamp".to_string(),
+            header_to_string(&headers, "Timestamp").unwrap_or_default(),
+        );
+        fields.insert(
+            "signedSignature".to_string(),
+            header_to_string(&headers, "Signature").unwrap_or_default(),
+        );
+        let parent_folder_id = fields
+            .get("parentId")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_FAMILY_ROOT_FOLDER_ID.to_string());
+        let folder_name = fields
+            .get("folderName")
+            .cloned()
+            .unwrap_or_else(|| "folder".to_string());
+        state
+            .created_folders
+            .lock()
+            .expect("mock created folders poisoned")
+            .push(fields.clone());
+        let folder_id = format!(
+            "dir-created-{}",
+            state.next_folder_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let entry = json!({
+            "isFolder": true,
+            "id": folder_id,
+            "parentId": parent_folder_id,
+            "fileName": folder_name,
+            "createDate": "2026-05-21 03:43:54",
+            "lastOpTime": "2026-05-21 03:43:54",
+            "fileCount": 0,
+        });
+        state
+            .entries_by_parent
+            .lock()
+            .expect("mock upload entries poisoned")
+            .entry(parent_folder_id)
+            .or_default()
+            .push(entry.clone());
+        axum::Json(json!({
+            "res_code": 0,
+            "res_message": "成功",
+            "id": entry["id"],
+        }))
+    }
+
     async fn mock_upload_get_user_brief_info() -> axum::Json<Value> {
         axum::Json(json!({
             "sessionKey": "telecom-session-key"
@@ -3502,6 +4002,12 @@ mod tests {
         State(state): State<MockUploadServerState>,
         headers: HeaderMap,
     ) -> axum::Json<Value> {
+        state.next_part_number.store(1, Ordering::SeqCst);
+        state
+            .uploaded_parts
+            .lock()
+            .expect("mock uploaded parts poisoned")
+            .clear();
         state
             .control_headers
             .lock()
@@ -3563,6 +4069,7 @@ mod tests {
 
     async fn mock_upload_commit_multi_upload_file(
         State(state): State<MockUploadServerState>,
+        uri: Uri,
         headers: HeaderMap,
     ) -> axum::Json<Value> {
         state
@@ -3570,12 +4077,96 @@ mod tests {
             .lock()
             .expect("mock control headers poisoned")
             .push(control_header_snapshot(&headers));
+        if uri.path().contains("/family/commitMultiUploadFile") {
+            let file_id = format!(
+                "family-uploaded-file-{}",
+                state.next_file_id.fetch_add(1, Ordering::SeqCst)
+            );
+            let mut body_parts = state
+                .uploaded_parts
+                .lock()
+                .expect("mock uploaded parts poisoned")
+                .clone();
+            body_parts.sort_by_key(|(part_number, _, _)| *part_number);
+            let body = body_parts
+                .into_iter()
+                .flat_map(|(_, bytes, _)| bytes)
+                .collect::<Vec<_>>();
+            let parent_id = {
+                let entries = state
+                    .entries_by_parent
+                    .lock()
+                    .expect("mock upload entries poisoned");
+                let managed_id = entries
+                    .get(DEFAULT_FAMILY_ROOT_FOLDER_ID)
+                    .and_then(|children| {
+                        children.iter().find_map(|entry| {
+                            (entry["fileName"].as_str() == Some("ccbg-tests"))
+                                .then(|| entry["id"].as_str().unwrap_or_default().to_string())
+                        })
+                    })
+                    .unwrap_or_else(|| DEFAULT_FAMILY_ROOT_FOLDER_ID.to_string());
+                entries
+                    .get(&managed_id)
+                    .and_then(|children| {
+                        children.iter().find_map(|entry| {
+                            (entry["fileName"].as_str() == Some("family-docs"))
+                                .then(|| entry["id"].as_str().unwrap_or_default().to_string())
+                        })
+                    })
+                    .unwrap_or(managed_id)
+            };
+            state
+                .entries_by_parent
+                .lock()
+                .expect("mock upload entries poisoned")
+                .entry(parent_id.clone())
+                .or_default()
+                .push(json!({
+                    "isFolder": false,
+                    "fileId": file_id,
+                    "parentId": parent_id,
+                    "fileName": "uploaded.bin",
+                    "fileSize": body.len(),
+                    "createDate": "2026-05-26 08:00:00",
+                    "lastOpTime": "2026-05-26 08:00:00",
+                }));
+            state
+                .file_bodies_by_id
+                .lock()
+                .expect("mock upload file bodies poisoned")
+                .insert(file_id, body);
+        }
         axum::Json(json!({
             "code": "SUCCESS",
             "file": {
                 "userFileId": "user-file-1",
                 "fileMd5": "5EB63BBBE01EEED093CB22BB8F5ACDC3"
             }
+        }))
+    }
+
+    async fn mock_upload_family_get_download_url(
+        State(state): State<MockUploadServerState>,
+        Query(query): Query<HashMap<String, String>>,
+        headers: HeaderMap,
+    ) -> axum::Json<Value> {
+        state
+            .requests
+            .lock()
+            .expect("record upload mock request")
+            .push(json!({
+                "kind": "family_upload_download_url",
+                "query": query,
+                "accessToken": header_to_string(&headers, "AccessToken"),
+                "timestamp": header_to_string(&headers, "Timestamp"),
+                "signature": header_to_string(&headers, "Signature"),
+            }));
+        let file_id = query.get("fileId").cloned().unwrap_or_default();
+        axum::Json(json!({
+            "res_code": 0,
+            "res_message": "成功",
+            "fileDownloadUrl": format!("{}/download/{}", state.base_url, file_id),
         }))
     }
 
@@ -3595,6 +4186,20 @@ mod tests {
                 header_to_string(&headers, "Content-MD5"),
             ));
         (StatusCode::OK, Body::from(Vec::<u8>::new()))
+    }
+
+    async fn mock_upload_download(
+        State(state): State<MockUploadServerState>,
+        Path(id): Path<String>,
+    ) -> impl IntoResponse {
+        let body = state
+            .file_bodies_by_id
+            .lock()
+            .expect("mock upload file bodies poisoned")
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        (StatusCode::OK, Body::from(body))
     }
 
     async fn mock_list_files(
@@ -3632,6 +4237,8 @@ mod tests {
 
         let entries = state
             .entries_by_parent
+            .lock()
+            .expect("mock entries poisoned")
             .get(&folder_id)
             .cloned()
             .unwrap_or_default();
@@ -3720,7 +4327,12 @@ mod tests {
                 "signature": signature,
             }));
 
-        if !state.file_bodies_by_id.contains_key(&file_id) {
+        if !state
+            .file_bodies_by_id
+            .lock()
+            .expect("mock file bodies poisoned")
+            .contains_key(&file_id)
+        {
             return axum::Json(json!({
                 "res_code": "FileNotFound",
                 "res_message": "文件不存在",
@@ -3775,6 +4387,8 @@ mod tests {
         body: AxumBytes,
     ) -> axum::Json<Value> {
         let fields = parse_form_fields(body.as_ref());
+        apply_mock_batch_task(&state, &fields);
+        let task_type = fields.get("type").cloned().unwrap_or_default();
         state
             .requests
             .lock()
@@ -3787,7 +4401,7 @@ mod tests {
             }));
         axum::Json(json!({
             "res_code": 0,
-            "taskId": "task-delete-1",
+            "taskId": format!("task-{}-1", task_type.to_lowercase()),
         }))
     }
 
@@ -3834,6 +4448,8 @@ mod tests {
             .unwrap_or(60);
         let entries = state
             .entries_by_parent
+            .lock()
+            .expect("mock entries poisoned")
             .get(&folder_id)
             .cloned()
             .unwrap_or_default();
@@ -3923,6 +4539,8 @@ mod tests {
         body: AxumBytes,
     ) -> axum::Json<Value> {
         let fields = parse_form_fields(body.as_ref());
+        apply_mock_batch_task(&state, &fields);
+        let task_type = fields.get("type").cloned().unwrap_or_default();
         state
             .requests
             .lock()
@@ -3936,7 +4554,7 @@ mod tests {
             }));
         axum::Json(json!({
             "res_code": 0,
-            "taskId": "family-task-delete-1",
+            "taskId": format!("family-task-{}-1", task_type.to_lowercase()),
         }))
     }
 
@@ -3970,8 +4588,14 @@ mod tests {
         State(state): State<MockServerState>,
         Path(id): Path<String>,
     ) -> impl IntoResponse {
-        match state.file_bodies_by_id.get(&id) {
-            Some(body) => ResponseTuple(StatusCode::OK, body.clone()),
+        match state
+            .file_bodies_by_id
+            .lock()
+            .expect("mock file bodies poisoned")
+            .get(&id)
+            .cloned()
+        {
+            Some(body) => ResponseTuple(StatusCode::OK, body),
             None => ResponseTuple(StatusCode::NOT_FOUND, Vec::new()),
         }
     }
@@ -4023,6 +4647,132 @@ mod tests {
                 (decode(key), decode(value))
             })
             .collect()
+    }
+
+    fn apply_mock_batch_task(state: &MockServerState, fields: &HashMap<String, String>) {
+        let task_type = fields.get("type").map(String::as_str).unwrap_or_default();
+        let target_folder_id = fields.get("targetFolderId").cloned().unwrap_or_default();
+        let task_infos = fields
+            .get("taskInfos")
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+
+        for task in task_infos {
+            let Some(file_id) = task
+                .get("fileId")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            match task_type {
+                "DELETE" => remove_mock_entry(state, file_id.as_str()),
+                "MOVE" => move_mock_entry(state, file_id.as_str(), target_folder_id.as_str()),
+                "COPY" => copy_mock_entry(state, file_id.as_str(), target_folder_id.as_str()),
+                "RENAME" => {
+                    if let Some(next_name) = task.get("destFileName").and_then(Value::as_str) {
+                        rename_mock_entry(state, file_id.as_str(), next_name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn remove_mock_entry(state: &MockServerState, file_id: &str) {
+        let mut entries = state
+            .entries_by_parent
+            .lock()
+            .expect("mock entries poisoned");
+        for children in entries.values_mut() {
+            children.retain(|entry| entry_file_id(entry).as_deref() != Some(file_id));
+        }
+    }
+
+    fn move_mock_entry(state: &MockServerState, file_id: &str, target_folder_id: &str) {
+        let mut entries = state
+            .entries_by_parent
+            .lock()
+            .expect("mock entries poisoned");
+        let mut moved = None;
+        for children in entries.values_mut() {
+            if let Some(index) = children
+                .iter()
+                .position(|entry| entry_file_id(entry).as_deref() == Some(file_id))
+            {
+                moved = Some(children.remove(index));
+                break;
+            }
+        }
+        if let Some(mut entry) = moved {
+            set_entry_parent_id(&mut entry, target_folder_id);
+            entries
+                .entry(target_folder_id.to_string())
+                .or_default()
+                .push(entry);
+        }
+    }
+
+    fn copy_mock_entry(state: &MockServerState, file_id: &str, target_folder_id: &str) {
+        let mut entries = state
+            .entries_by_parent
+            .lock()
+            .expect("mock entries poisoned");
+        let source = entries.values().find_map(|children| {
+            children
+                .iter()
+                .find(|entry| entry_file_id(entry).as_deref() == Some(file_id))
+                .cloned()
+        });
+        let Some(mut copied) = source else {
+            return;
+        };
+        let next_id = format!("{file_id}-copy");
+        set_entry_file_id(&mut copied, next_id.as_str());
+        set_entry_parent_id(&mut copied, target_folder_id);
+        entries
+            .entry(target_folder_id.to_string())
+            .or_default()
+            .push(copied);
+    }
+
+    fn rename_mock_entry(state: &MockServerState, file_id: &str, next_name: &str) {
+        let mut entries = state
+            .entries_by_parent
+            .lock()
+            .expect("mock entries poisoned");
+        for children in entries.values_mut() {
+            if let Some(entry) = children
+                .iter_mut()
+                .find(|entry| entry_file_id(entry).as_deref() == Some(file_id))
+            {
+                set_entry_name(entry, next_name);
+                break;
+            }
+        }
+    }
+
+    fn entry_file_id(entry: &Value) -> Option<String> {
+        entry
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| entry.get("fileId").and_then(Value::as_str))
+            .map(str::to_string)
+    }
+
+    fn set_entry_parent_id(entry: &mut Value, parent_id: &str) {
+        entry["parentId"] = Value::String(parent_id.to_string());
+    }
+
+    fn set_entry_file_id(entry: &mut Value, file_id: &str) {
+        entry["id"] = Value::String(file_id.to_string());
+        entry["fileId"] = Value::String(file_id.to_string());
+    }
+
+    fn set_entry_name(entry: &mut Value, name: &str) {
+        entry["name"] = Value::String(name.to_string());
+        entry["fileName"] = Value::String(name.to_string());
     }
 
     fn sample_upload_part_md5_base64s() -> Vec<String> {
@@ -4082,6 +4832,7 @@ AwIDAQAB\n\
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
+            native_capability_catalog_path: None,
             body_spool_observer: None,
         })
         .expect("telecom test adapter should build")
@@ -4225,6 +4976,7 @@ AwIDAQAB\n\
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
+            native_capability_catalog_path: None,
             body_spool_observer: None,
         })
         .expect("telecom family test adapter should build")
@@ -4256,6 +5008,7 @@ AwIDAQAB\n\
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
+            native_capability_catalog_path: None,
             body_spool_observer: None,
         })
         .expect("telecom managed-root adapter should build")
@@ -4285,9 +5038,40 @@ AwIDAQAB\n\
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
+            native_capability_catalog_path: None,
             body_spool_observer: Some(Arc::new(MockSpoolObserver { stats: spool_stats })),
         })
         .expect("telecom upload adapter should build")
+    }
+
+    fn mock_upload_family_adapter(
+        base_url: &str,
+        spool_stats: Arc<Mutex<MockSpoolStats>>,
+    ) -> TelecomBlobAdapter {
+        TelecomBlobAdapter::new(TelecomConfig {
+            base_url: base_url.to_string(),
+            token_source: TokenSource::Static {
+                bearer: "telecom-family-access-token".to_string(),
+            },
+            outbound_ip_family: OutboundIpFamily::Auto,
+            browser_id: Some("browser-id-123".to_string()),
+            cookie_header: Some("JSESSIONID=abc; COOKIE_LOGIN_USER=def".to_string()),
+            user_agent: "carrier-cloud-blob-gateway/test".to_string(),
+            browser_profile: None,
+            request_timeout_secs: 10,
+            sign_type: "1".to_string(),
+            family_id: Some("family-123".to_string()),
+            root_folder_id: DEFAULT_ROOT_FOLDER_ID.to_string(),
+            page_size: 20,
+            root_prefix: Some("ccbg-tests".to_string()),
+            upload_part_size_bytes: 5,
+            max_single_upload_bytes: None,
+            max_single_download_bytes: None,
+            body_spool_dir: None,
+            native_capability_catalog_path: None,
+            body_spool_observer: Some(Arc::new(MockSpoolObserver { stats: spool_stats })),
+        })
+        .expect("telecom family upload adapter should build")
     }
 
     fn sample_entries() -> BTreeMap<String, Vec<Value>> {
@@ -4647,7 +5431,7 @@ AwIDAQAB\n\
             family_scope.container.as_deref(),
             Some(TELECOM_FAMILY_CONTAINER)
         );
-        assert!(!family_scope.writable);
+        assert!(family_scope.writable);
 
         let containers = adapter
             .list_containers()
@@ -4707,6 +5491,65 @@ AwIDAQAB\n\
                 .notes
                 .iter()
                 .any(|note| note.contains("family_scope_probe_failed="))
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_completion_report_marks_telecom_object_actions_as_partial() {
+        let token = "telecom-family-access-token";
+        let family_id = "family-123";
+        let server = MockServer::start(
+            sample_entries_with_family(),
+            sample_file_bodies(),
+            token,
+            false,
+        )
+        .await;
+        let adapter = mock_telecom_family_adapter(
+            &server.base_url,
+            "browser-id-123",
+            "JSESSIONID=abc; COOKIE_LOGIN_USER=def",
+            token,
+            family_id,
+        );
+        let health = adapter.health().await.expect("telecom health");
+        let capabilities = adapter.capabilities();
+
+        let report = assert_provider_completion(
+            "telecom",
+            ProviderCompletionExpectation {
+                auth_session: CompletionDimensionStatus::Full,
+                scope_discovery: CompletionDimensionStatus::Full,
+                native_read_path: CompletionDimensionStatus::Full,
+                native_write_path: CompletionDimensionStatus::Full,
+                object_actions: CompletionDimensionStatus::Partial,
+                health_catalog_docs: CompletionDimensionStatus::Partial,
+            },
+            ProviderCompletionObserved {
+                health,
+                capabilities,
+                auth_material_confirmed: true,
+                native_read_roundtrip: true,
+                native_write_roundtrip: true,
+                create_directory_supported: true,
+                writable_scope_coverage: CompletionDimensionStatus::Full,
+                supports_rename: true,
+                supports_copy: true,
+                supports_move: false,
+                probe_catalog_confirmed: false,
+                capability_catalog_present: true,
+                browser_flow_catalog_present: true,
+                docs_synced: true,
+            },
+            ProviderCompletionAssertions { strict: false },
+        );
+        assert_eq!(
+            report.overall_observed,
+            blob_core::CompletionOverallStatus::Partial
+        );
+        assert_eq!(
+            report.object_actions.observed,
+            CompletionDimensionStatus::Partial
         );
     }
 
@@ -4984,6 +5827,188 @@ AwIDAQAB\n\
     }
 
     #[tokio::test]
+    async fn telecom_object_actions_personal_use_batch_tasks() {
+        let server = MockServer::start(
+            sample_entries(),
+            sample_file_bodies(),
+            "unused-token",
+            false,
+        )
+        .await;
+        let adapter = mock_telecom_adapter(
+            &server.base_url,
+            "browser-id-123",
+            "JSESSIONID=abc; COOKIE_LOGIN_USER=def",
+            None,
+        );
+
+        adapter
+            .rename_object(RenameObjectRequest {
+                container: TELECOM_ROOT_CONTAINER.to_string(),
+                key: "docs/alpha.txt".to_string(),
+                new_key: "docs/alpha-renamed.txt".to_string(),
+            })
+            .await
+            .expect("personal rename should succeed");
+        adapter
+            .copy_object(CopyObjectRequest {
+                source_container: TELECOM_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha-renamed.txt".to_string(),
+                destination_container: TELECOM_ROOT_CONTAINER.to_string(),
+                destination_key: "media/alpha-copied.txt".to_string(),
+            })
+            .await
+            .expect("personal copy should succeed");
+        adapter
+            .move_object(MoveObjectRequest {
+                source_container: TELECOM_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha-renamed.txt".to_string(),
+                destination_container: TELECOM_ROOT_CONTAINER.to_string(),
+                destination_key: "media/alpha-moved.txt".to_string(),
+            })
+            .await
+            .expect("personal move should succeed");
+        adapter
+            .delete_object(TELECOM_ROOT_CONTAINER, "media/alpha-moved.txt")
+            .await
+            .expect("personal delete should succeed");
+
+        let requests = server.requests();
+        let create_batches = requests
+            .iter()
+            .filter(|request| request["kind"] == "create_batch")
+            .collect::<Vec<_>>();
+        assert!(create_batches.iter().any(|request| {
+            request["fields"]["type"] == "RENAME"
+                && request["fields"]["targetFolderId"] == ""
+                && request["fields"]["taskInfos"]
+                    .as_str()
+                    .is_some_and(|raw| raw.contains("\"destFileName\":\"alpha-renamed.txt\""))
+        }));
+        assert!(create_batches.iter().any(|request| {
+            request["fields"]["type"] == "COPY"
+                && request["fields"]["targetFolderId"] == "dir-media"
+        }));
+        assert!(create_batches.iter().any(|request| {
+            request["fields"]["type"] == "MOVE"
+                && request["fields"]["targetFolderId"] == "dir-media"
+        }));
+        assert!(
+            create_batches
+                .iter()
+                .any(|request| request["fields"]["type"] == "DELETE")
+        );
+    }
+
+    #[tokio::test]
+    async fn telecom_object_actions_family_use_signed_batch_tasks_and_block_cross_scope() {
+        let token = "telecom-family-access-token";
+        let family_id = "family-123";
+        let server = MockServer::start(
+            sample_entries_with_family(),
+            sample_file_bodies(),
+            token,
+            false,
+        )
+        .await;
+        let adapter = mock_telecom_family_adapter(
+            &server.base_url,
+            "browser-id-123",
+            "JSESSIONID=abc; COOKIE_LOGIN_USER=def",
+            token,
+            family_id,
+        );
+
+        adapter
+            .rename_object(RenameObjectRequest {
+                container: TELECOM_FAMILY_CONTAINER.to_string(),
+                key: "family-docs/alpha.txt".to_string(),
+                new_key: "family-docs/alpha-renamed.txt".to_string(),
+            })
+            .await
+            .expect("family rename should succeed");
+        adapter
+            .copy_object(CopyObjectRequest {
+                source_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                source_key: "family-docs/alpha-renamed.txt".to_string(),
+                destination_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                destination_key: "family-docs/alpha-copy.txt".to_string(),
+            })
+            .await
+            .expect("family copy should succeed");
+        adapter
+            .move_object(MoveObjectRequest {
+                source_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                source_key: "family-docs/alpha-renamed.txt".to_string(),
+                destination_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                destination_key: "family-docs/alpha-moved.txt".to_string(),
+            })
+            .await
+            .expect("family move should succeed");
+        adapter
+            .delete_object(TELECOM_FAMILY_CONTAINER, "family-docs/alpha-moved.txt")
+            .await
+            .expect("family delete should succeed");
+
+        let cross_copy = adapter
+            .copy_object(CopyObjectRequest {
+                source_container: TELECOM_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                destination_key: "family-docs/alpha.txt".to_string(),
+            })
+            .await
+            .expect_err("cross-scope copy should not be implemented");
+        assert!(matches!(cross_copy, BlobError::NotImplemented(_)));
+        let cross_move = adapter
+            .move_object(MoveObjectRequest {
+                source_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                source_key: "family-docs/alpha-moved.txt".to_string(),
+                destination_container: TELECOM_ROOT_CONTAINER.to_string(),
+                destination_key: "docs/alpha-moved.txt".to_string(),
+            })
+            .await
+            .expect_err("cross-scope move should not be implemented");
+        assert!(matches!(cross_move, BlobError::NotImplemented(_)));
+        let cross_parent_rename = adapter
+            .rename_object(RenameObjectRequest {
+                container: TELECOM_FAMILY_CONTAINER.to_string(),
+                key: "family-docs/alpha-moved.txt".to_string(),
+                new_key: "elsewhere/alpha-moved.txt".to_string(),
+            })
+            .await
+            .expect_err("cross-parent rename should not be implemented");
+        assert!(matches!(cross_parent_rename, BlobError::NotImplemented(_)));
+
+        let requests = server.requests();
+        let family_batches = requests
+            .iter()
+            .filter(|request| request["kind"] == "family_create_batch")
+            .collect::<Vec<_>>();
+        assert!(family_batches.iter().any(|request| {
+            request["fields"]["type"] == "RENAME"
+                && request["fields"]["familyId"] == family_id
+                && request["accessToken"] == token
+                && request["signature"].as_str().is_some()
+        }));
+        assert!(
+            family_batches
+                .iter()
+                .any(|request| request["fields"]["type"] == "COPY")
+        );
+        assert!(
+            family_batches
+                .iter()
+                .any(|request| request["fields"]["type"] == "MOVE")
+        );
+        assert!(
+            family_batches
+                .iter()
+                .any(|request| request["fields"]["type"] == "DELETE")
+        );
+    }
+
+    #[tokio::test]
     async fn managed_root_head_list_and_get_are_scoped_under_one_provider_folder() {
         let server = MockServer::start(
             sample_entries_under_managed_root(),
@@ -5178,5 +6203,94 @@ AwIDAQAB\n\
         assert_eq!(spool_stats.active_bytes, 0);
         assert_eq!(spool_stats.peak_files, 1);
         assert_eq!(spool_stats.peak_bytes, 11);
+    }
+
+    #[tokio::test]
+    async fn family_upload_roundtrip_uses_family_scope_endpoints() {
+        let server = MockUploadServer::start().await;
+        let spool_stats = Arc::new(Mutex::new(MockSpoolStats::default()));
+        let adapter = mock_upload_family_adapter(&server.base_url, Arc::clone(&spool_stats));
+
+        adapter
+            .put_object(PutObjectRequest {
+                container: TELECOM_FAMILY_CONTAINER.to_string(),
+                key: "family-docs/uploaded.bin".to_string(),
+                body: ObjectBody::from_stream(futures_util::stream::iter([
+                    Ok(bytes::Bytes::from_static(b"hello ")),
+                    Ok(bytes::Bytes::from_static(b"world")),
+                ])),
+                size: Some(11),
+                content_type: Some("application/octet-stream".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("telecom family put_object should succeed");
+
+        let objects = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(TELECOM_FAMILY_CONTAINER.to_string()),
+                prefix: None,
+                limit: None,
+            })
+            .await
+            .expect("telecom family list_objects should succeed");
+        assert_eq!(
+            objects
+                .iter()
+                .map(|object| object.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["family-docs/uploaded.bin"]
+        );
+
+        let payload = adapter
+            .get_object(TELECOM_FAMILY_CONTAINER, "family-docs/uploaded.bin")
+            .await
+            .expect("telecom family get_object should succeed");
+        assert_eq!(
+            payload
+                .body
+                .collect()
+                .await
+                .expect("family body should collect")
+                .as_ref(),
+            b"hello world"
+        );
+
+        let created_folders = server
+            .created_folders
+            .lock()
+            .expect("created folders poisoned")
+            .clone();
+        let family_create = created_folders
+            .iter()
+            .find(|fields| fields.get("parentId").is_some())
+            .expect("family createFolder should be used");
+        assert_eq!(
+            family_create.get("familyId").map(String::as_str),
+            Some("family-123")
+        );
+        assert_eq!(
+            family_create.get("signedAccessToken").map(String::as_str),
+            Some("telecom-family-access-token")
+        );
+        assert!(
+            family_create
+                .get("signedSignature")
+                .is_some_and(|value| !value.is_empty())
+        );
+
+        let requests = server.requests();
+        let family_list = requests
+            .iter()
+            .find(|request| request["kind"] == "family_upload_list")
+            .expect("family list endpoint should be used");
+        assert_eq!(family_list["query"]["familyId"], "family-123");
+        assert_eq!(family_list["accessToken"], "telecom-family-access-token");
+
+        let family_download = requests
+            .iter()
+            .find(|request| request["kind"] == "family_upload_download_url")
+            .expect("family download endpoint should be used");
+        assert_eq!(family_download["query"]["familyId"], "family-123");
     }
 }

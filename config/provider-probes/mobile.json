@@ -1,11 +1,12 @@
 {
   "schema_version": 1,
   "provider": "mobile",
+  "probe_catalog_status": "partial",
   "description": "Probe catalog for China Mobile Cloud Drive.",
   "probe_items": [
     {
       "id": "capture_auth_session",
-      "status": "planned",
+      "status": "confirmed",
       "category": "auth",
       "transport": "browser_capture",
       "goal": "Capture a reusable logged-in mobile cloud session including token and cookie context.",
@@ -18,15 +19,18 @@
         "client_headers"
       ],
       "config_targets": [
-        "future mobile credential store"
+        "CCBG_MOBILE_TOKEN",
+        "CCBG_MOBILE_COOKIE_HEADER",
+        "CCBG_MOBILE_ROOT_FOLDER_ID",
+        "CCBG_MOBILE_USER_DOMAIN_ID"
       ],
       "notes": [
-        "Provider-mobile is still a discovery skeleton."
+        "Implemented by mobile_capture_current_session and mobile_capture_current_session_from_logged_in_page browser flows."
       ]
     },
     {
       "id": "root_listing_discovery",
-      "status": "planned",
+      "status": "confirmed",
       "category": "native_read",
       "transport": "browser_capture_or_manual",
       "goal": "Identify the stable root listing endpoint and its pagination contract.",
@@ -39,15 +43,17 @@
         "page_size"
       ],
       "config_targets": [
-        "future provider-mobile config"
+        "CCBG_MOBILE_LIST_URL",
+        "CCBG_MOBILE_ROOT_FOLDER_ID",
+        "CCBG_MOBILE_PAGE_SIZE"
       ],
       "notes": [
-        "This is the first blocking probe for mobile."
+        "Current stable native capability is file_list in config/provider-capabilities/mobile-native.json."
       ]
     },
     {
       "id": "capacity_probe_discovery",
-      "status": "planned",
+      "status": "confirmed",
       "category": "metadata",
       "transport": "browser_capture_or_manual",
       "goal": "Identify the endpoint that exposes total and used capacity.",
@@ -58,12 +64,18 @@
         "capacity_endpoint",
         "response_shape"
       ],
-      "config_targets": [],
-      "notes": []
+      "config_targets": [
+        "CCBG_MOBILE_PERSONAL_DISK_INFO_URL",
+        "CCBG_MOBILE_FAMILY_DISK_INFO_URL",
+        "CCBG_MOBILE_USER_DOMAIN_ID"
+      ],
+      "notes": [
+        "Provider-mobile uses getPersonalDiskInfo and getFamilyDiskInfo for capacity facts; family object mapping still requires a real family_root_folder_id."
+      ]
     },
     {
       "id": "download_probe_discovery",
-      "status": "planned",
+      "status": "confirmed",
       "category": "native_read",
       "transport": "browser_capture_or_manual",
       "goal": "Identify how a listed file is converted into a real download URL or stream request.",
@@ -75,12 +87,16 @@
         "required_headers",
         "identifier_kind"
       ],
-      "config_targets": [],
-      "notes": []
+      "config_targets": [
+        "config/provider-capabilities/mobile-native.json#file_get_download_url"
+      ],
+      "notes": [
+        "Provider-mobile resolves listed fileId values through file_get_download_url."
+      ]
     },
     {
       "id": "write_path_discovery",
-      "status": "planned",
+      "status": "partial",
       "category": "native_write",
       "transport": "browser_capture_or_manual",
       "goal": "Discover stable create/delete/rename/copy/move/upload request paths for future native or hybrid writes.",
@@ -93,9 +109,11 @@
         "dynamic_fields"
       ],
       "config_targets": [
-        "future config/provider-capabilities/mobile-native.json"
+        "config/provider-capabilities/mobile-native.json"
       ],
-      "notes": []
+      "notes": [
+        "file_create, file_complete, file_update, file_batch_delete, and file_batch_move are cataloged; file_batch_copy remains capability-gated until a real stable endpoint/shape is confirmed."
+      ]
     }
   ]
 }

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+// Copyright (c) 2026 walky
+
 use aes_gcm::{
     Aes256Gcm,
     aead::{AeadInPlace, KeyInit, generic_array::GenericArray},

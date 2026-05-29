@@ -78,16 +78,17 @@ RUST_LOG=warn
 
 `CCBG_CONTROL_API_KEY` 只保护控制面脚本调用、机器间调用和指标接口，不影响 S3 数据面。脚本可以用 `x-api-key` 或 `Authorization: Bearer`；浏览器 Admin Web 应改用本地用户名密码登录，并由服务端发 `HttpOnly` session cookie。
 
-## 4. OneDrive 建议
+## 4. OneDrive Parking
 
-软路由场景下，OneDrive 仍建议保持“异步备份 / 可选 fallback”定位，而不是主写。
+软路由默认流程不启用 OneDrive，也不把 OneDrive 放进 `CCBG_SYNC_TARGETS` 或 `CCBG_FALLBACK_READ_ORDER`。当前阶段的近线主线是运营商 provider、本地 S3、MCP、Skill 和本地控制面；OneDrive 只保留为未来真实需求触发后的恢复项。
 
 建议:
 
-- `primary provider` 用联通/电信/移动其一
-- `onedrive` 只放在 `CCBG_SYNC_TARGETS`
-- `fallback` 只在明确需要时启用
-- 如果宿主很小，先关闭 OneDrive，再按资源逐步打开
+- `primary provider` 用联通/电信/移动其一，或测试期使用 `stub`
+- `CCBG_SYNC_TARGETS` 默认留空；如需异步备份，优先选择已完成探测和回归的运营商 provider
+- `CCBG_FALLBACK_READ_ORDER` 默认留空；只有明确需要读侧 fallback 时才填写
+- 保持 `CCBG_ONEDRIVE_ENABLED=false` 与 `CCBG_ONEDRIVE_REPLICATION_ENABLED=false`
+- 如果后续确有真实 OneDrive 需求，先按恢复清单完成产品、OAuth、Graph 行为、复制、告警和回滚验证，再进入默认示例
 
 ## 5. 运维方式
 

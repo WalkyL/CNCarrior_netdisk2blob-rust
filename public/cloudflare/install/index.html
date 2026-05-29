@@ -1,0 +1,59 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: LicenseRef-CCBG-Public-Materials -->
+<!-- Copyright (c) 2026 walky -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCBG Install</title>
+  <meta name="ccbg-provenance" content="ccbg-0.1.0-walky-20260526-e756003d846d2c46" />
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <div class="brand-title">CCBG Install</div>
+          <div class="brand-subtitle">LXC / fnOS(exp) / OpenWrt(exp)</div>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <a href="/">首页</a>
+        <a href="/faq/">FAQ</a>
+        <a href="/.well-known/ccbg-provenance.json">Provenance</a>
+      </nav>
+    </header>
+    <main class="layout">
+      <section class="section" style="margin-top: 1rem; padding: 1rem;">
+        <h2>安装与下载入口</h2>
+        <p class="section-lead">安装路径优先级：LXC/Linux 稳定优先；fnOS 为 NAS/Linux 实验宿主；OpenWrt 保留实验支持。</p>
+        <div class="card-grid">
+          <article class="card" style="padding: 1rem;">
+            <h3>LXC / Linux（推荐）</h3>
+            <p>包名：<code>ccbg-lxc-package.tar.gz</code></p>
+            <p>SHA256：构建后见 <code>target/lxc-package/ccbg-lxc-package.tar.gz.sha256</code></p>
+            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/scripts/build-lxc-package.sh">build-lxc-package.sh</a></p>
+            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/deploy/lxc/install.sh">install.sh</a></p>
+          </article>
+          <article class="card" style="padding: 1rem;">
+            <h3>fnOS（实验，优先于 OpenWrt）</h3>
+            <p>定位：NAS/Linux 实验宿主，优先 Docker/Compose 路径。</p>
+            <p>风险：不承诺应用商店上架，不承诺零配置。</p>
+            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/pve-lxc-deployment.md">参考 Linux/LXC 部署与 smoke</a></p>
+          </article>
+          <article class="card" style="padding: 1rem;">
+            <h3>OpenWrt（实验）</h3>
+            <p>包名：<code>ccbg-openwrt-lite.tar.gz</code></p>
+            <p>SHA256：构建后见 <code>target/openwrt-lite/ccbg-openwrt-lite.tar.gz.sha256</code></p>
+            <p>支持线：<strong>64MB 仅实验</strong>；<strong>128MB 可测</strong>；<strong>256MB+ 推荐</strong></p>
+            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/scripts/build-openwrt-lite-package.sh">build-openwrt-lite-package.sh</a></p>
+            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/deploy/openwrt/install.sh">install.sh</a></p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

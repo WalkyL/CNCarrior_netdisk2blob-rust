@@ -2,9 +2,9 @@
 
 面向 Hermes Agent、Open Claw Agent 等编程 Agent 的本地 S3 兼容对象网关。
 
-项目目标是把中国联通、中国电信、中国移动云盘与 OneDrive 接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商或 `stub` provider 作为唯一写入主云盘，其他被选中的后端可作为异步同步目标，OneDrive 默认仍作为异步备份同步对象，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。源码一期按公开 GitHub 仓库形式发布。
+项目目标是把中国联通、中国电信、中国移动云盘接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商或 `stub` provider 作为唯一写入主云盘，其他被选中的运营商后端可作为异步同步目标，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。OneDrive 相关实现当前保留为延后集成能力，默认禁用并从近期主线隐藏，等出现真实用户需求后再恢复评估。仓库采用“商业核心 + 公开材料 + 个人非商业源码审查申请”模式，不是 MIT，也不是 OSI 开源。
 
-当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及 `provider-onedrive` 的 Graph 读写与内置 OAuth 会话支持。当前状态是: OneDrive 已支持 Web PKCE / Device Code / 显式 access token 注入下的健康检查、容器映射、对象读写删、对象级 rename/copy/move、session 持久化与异步复制，但在本项目中仍仅作为异步备份同步对象与可选 fallback 目标，不作为主写后端；`gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载、上传、对象删除，并把 personal/family scope 映射成 `root`/`family` 两个容器；电信 provider 已打通真实目录列举、流式下载、受控根目录下的 multipart 上传与有界 spool 写路径，但对象级 delete/rename/copy/move 仍待补；移动 provider 已打通真实对象列举、上传与下载，family 视图与对象动作仍待补。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置、运行态监控摘要、聚合监控摘要面板、自动刷新控制，以及带 `operator/ticket/notes`、时间范围筛选的对象动作共享审计历史。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
+当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及三大运营商 provider 的基础适配。当前状态是: `gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载、上传、对象删除，并把 personal/family scope 映射成 `root`/`family` 两个容器；电信 provider 已打通真实目录列举、流式下载、受控根目录下的 multipart 上传与有界 spool 写路径，但对象级 delete/rename/copy/move 仍待补；移动 provider 已打通真实对象列举、上传与下载，family 视图与对象动作仍待补。OneDrive Graph 读写与 OAuth 会话代码仍在仓库中，但当前阶段不作为默认备份、默认 fallback 或近期完成度目标。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置、运行态监控摘要、聚合监控摘要面板、自动刷新控制，以及带 `operator/ticket/notes`、时间范围筛选的对象动作共享审计历史。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
 针对网页端经常改版的运营商流程，仓库现在额外引入了三层可替换事实配置: `config/provider-bridges/*.json` 负责 `gatewayd` / Admin Web / auth session 与 provider-specific surface、flow alias、runtime→credential 映射之间的绑定；`config/browser-flows/*.json` 负责页面元素、JS 入口点和关键请求形状；`config/provider-capabilities/*.json` 负责已经证明稳定的 native 请求模板。对“每个云盘后续还要自动探测哪些账号、作用域、读写路径事实”，则额外放进 `config/provider-probes/*.json`。这几层的目的都是把页面和控制面漂移优先收敛成 JSON 改动，而不是重写 Rust 数据面。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程，并为 native `CreateDirectory` / `DeleteFile` 和后续自动探测项维护独立 catalog。
 
@@ -21,7 +21,7 @@
 ## 当前目标
 
 - 用 Rust 建立一个可长期维护的 Agent-first 边缘对象网关，而不是一次性脚本。
-- 将“运营商云盘访问”“OneDrive 异步复制”“本地 S3 兼容 API 暴露”“管理界面”解耦。
+- 将“运营商云盘访问”“本地 S3 兼容 API 暴露”“管理界面”和延后集成 provider 解耦。
 - 将“核心网关能力”和“Agent 集成封装”解耦，确保能分别交付为 daemon、MCP 和 Skill。
 - 明确采用“单写主云盘 + 多异步同步目标”模型，避免多主写入导致的数据冲突。
 - 数据面正式目标兼容 S3 API，优先支持 Agent 常用的最小 S3 子集。
@@ -48,7 +48,7 @@ carrier-cloud-blob-gateway/
 │   ├── provider-unicom/  # 中国联通云盘适配层
 │   ├── provider-telecom/ # 中国电信云盘适配层
 │   ├── provider-mobile/  # 中国移动云盘适配层
-│   ├── provider-onedrive/ # OneDrive 备份后端适配层
+│   ├── provider-onedrive/ # OneDrive 延后集成适配层
 │   └── replication-engine/ # 异步复制任务队列
 ├── deploy/
 │   └── Containerfile
@@ -84,9 +84,12 @@ carrier-cloud-blob-gateway/
 公开仓库基础资产:
 
 - [LICENSE](LICENSE)
+- [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)
+- [PUBLIC-MATERIALS-LICENSE.md](PUBLIC-MATERIALS-LICENSE.md)
 - [.github/workflows/ci.yml](.github/workflows/ci.yml)
 - [Dockerfile](deploy/Dockerfile)
 - [Containerfile](deploy/Containerfile)
+- [public/cloudflare](public/cloudflare)
 
 推荐优先阅读的运维文档:
 
@@ -106,7 +109,6 @@ carrier-cloud-blob-gateway/
 cd /path/to/carrier-cloud-blob-gateway
 cp config/example.env .env.local
 sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" .env.local
-sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-token#" .env.local
 ./scripts/run-dev.sh
 ```
 
@@ -121,8 +123,8 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 规划中的同步拓扑:
 
 - `CCBG_PRIMARY_PROVIDER` 指定唯一写入主云盘
-- `CCBG_SYNC_TARGETS` 指定异步同步目标，支持其他运营商和 `onedrive`
-- `onedrive` 默认应包含在同步目标中，作为最终 fallback 备份层
+- `CCBG_SYNC_TARGETS` 指定异步同步目标，近期主线只默认考虑其他运营商
+- OneDrive 不再默认加入同步目标或 fallback 顺序；有真实需求后再按 Parking 清单恢复
 
 当前已落地的拓扑与复制骨架:
 
@@ -130,13 +132,13 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - `gatewayd` 在 `PutObject` / `DeleteObject` 成功后会入队复制任务，并由后台 worker 消费
 - `metadata-store` 使用 SQLite 持久化复制任务与状态摘要，并会裁剪多余的 `completed/failed` 历史，只保留 fallback 必需的最新对象状态和全部 pending job
 - `replication-engine` 当前负责内存队列、最近任务记录和启动时 pending job 恢复，最近历史条数可通过环境变量限制
-- `provider-onedrive` 已支持显式 token 模式下的 Graph 最小读写删与 bucket-folder 映射
+- OneDrive 相关 provider 代码保留但默认禁用，不作为当前阶段验收主线
 
 规划中的端口分配:
 
 - S3 API: `61080`
 - Admin Web UI: `61081`
-- OneDrive OAuth 本地回调: `61082`
+- OneDrive OAuth 本地回调: `61082`（延后集成时才启用）
 - Metrics / 扩展健康检查: `61083`
 - MCP Streamable HTTP: `61084`（可选，默认优先 stdio）
 
@@ -223,12 +225,12 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - 仅保证 `path-style` bucket 访问
 - 暂未支持 `Presigned URL`
 - 暂未支持 `Multipart Upload`
-- OneDrive 当前通过 `root_prefix/<bucket>/<key>` 映射到单个 drive 命名空间
+- OneDrive 映射逻辑保留在延后集成代码中，但默认不进入当前 S3 主线
 - 读请求当前会先尝试 primary provider，失败后按 `fallback_read_order` 尝试 sync targets
 - 当响应来自备份侧时，会附带 `x-ccbg-source-provider` 和 `x-ccbg-fallback-from`
-- 当前自动化测试已覆盖 `stub` backend 与 OneDrive mock Graph；运营商 provider 仍未完成真实读写
+- 当前自动化测试已覆盖 `stub` backend 与部分 provider mock；运营商 provider 仍未完成全量真实读写回归
 
-当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要、基础重试退避，以及 latest-only 语义的单 job / 按 target 批量人工重试都已经落地；复制失败相关监控现在也按“每个对象在每个 target 上的最新状态”统计，避免旧失败在后续成功后继续误报；后续仍可继续演进更完整的死信体系和 OneDrive OAuth broker。
+当前运行时仍只允许一个 primary provider，但 `sync targets` 的异步复制 worker、per-target 复制状态摘要、基础重试退避，以及 latest-only 语义的单 job / 按 target 批量人工重试都已经落地；复制失败相关监控现在也按“每个对象在每个 target 上的最新状态”统计，避免旧失败在后续成功后继续误报；后续仍可继续演进更完整的死信体系和独立 auth-broker。
 
 一期平台兼容边界:
 
@@ -273,10 +275,10 @@ sed -i "s#^CCBG_ONEDRIVE_TOKEN=.*#CCBG_ONEDRIVE_TOKEN=replace-with-your-own-toke
 - 支持 `CCBG_TELECOM_BROWSER_ID` / `CCBG_TELECOM_BROWSER_ID_FILE`
 - 支持 `CCBG_TELECOM_COOKIE_HEADER` / `CCBG_TELECOM_COOKIE_HEADER_FILE`
 - 支持 `CCBG_MOBILE_TOKEN` / `CCBG_MOBILE_TOKEN_FILE`
-- 支持 `CCBG_ONEDRIVE_TOKEN` / `CCBG_ONEDRIVE_TOKEN_FILE`
+- OneDrive 相关环境变量仅作为延后集成保留项，不属于当前默认认证路径
 - 支持 `CCBG_UNICOM_IP_FAMILY` / `CCBG_TELECOM_IP_FAMILY` / `CCBG_MOBILE_IP_FAMILY`
 - 支持 `CCBG_AUTH_CAPTURE_BROKER_URL`、`CCBG_AUTH_CAPTURE_CDP_ENDPOINT_URL`、`CCBG_AUTH_CAPTURE_CDP_TARGET_SELECTOR`、`CCBG_AUTH_CAPTURE_CDP_TARGET_TIMEOUT_MS`、`CCBG_AUTH_CAPTURE_LLM_ENDPOINT`、`CCBG_AUTH_CAPTURE_LLM_MODEL_ID`、`CCBG_AUTH_CAPTURE_LLM_API_KEY`
-- 支持 `CCBG_ONEDRIVE_CLIENT_ID`、`CCBG_ONEDRIVE_REDIRECT_URL`、`CCBG_ONEDRIVE_SESSION_FILE` 搭配内置 Web PKCE / Device Code 授权
+- OneDrive Web PKCE / Device Code 授权保留为 Parking 恢复项，默认流程不启用
 - 成品规划支持 MCP 封装与 Skill 封装
 - 不实现浏览器会话自动抓取
 - 不在代码里写死账号密码、Cookie、refresh token

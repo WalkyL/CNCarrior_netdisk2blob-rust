@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+# Copyright (c) 2026 walky
 """Reference CCBG notify webhook receiver with optional HMAC verification."""
 
 from __future__ import annotations

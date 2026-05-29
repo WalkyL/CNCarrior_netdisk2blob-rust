@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+# Copyright (c) 2026 walky
+name: Personal source review request
+description: Apply for a personal, non-commercial source review grant after 90+ days of genuine personal use.
+title: "[source-review] Personal non-commercial source review request"
+labels:
+  - source-review
+  - legal-review
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is not an open-source license request. Approval is discretionary and requires a separate written grant.
+        Do not include secrets, provider tokens, cookies, refresh tokens, government IDs, or private account credentials in this issue.
+  - type: input
+    id: applicant_name
+    attributes:
+      label: Applicant legal or preferred name
+      description: The grant, if approved, is personal and non-transferable.
+    validations:
+      required: true
+  - type: input
+    id: contact_email
+    attributes:
+      label: Contact email
+      description: Use a personal email where possible, not an employer/shared team mailbox.
+    validations:
+      required: true
+  - type: input
+    id: usage_start_date
+    attributes:
+      label: First genuine personal use date
+      description: Use YYYY-MM-DD. Must be at least 90 consecutive days before this request.
+      placeholder: "2026-01-01"
+    validations:
+      required: true
+  - type: textarea
+    id: usage_summary
+    attributes:
+      label: Personal use summary
+      description: Describe your personal non-commercial use. Do not include credentials.
+    validations:
+      required: true
+  - type: dropdown
+    id: commercial_use
+    attributes:
+      label: Are you requesting any commercial, employer, client, hosted service, redistribution, or competitive use rights?
+      options:
+        - "No"
+        - "Yes"
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      options:
+        - label: I understand this request does not grant rights until walky approves it in writing.
+          required: true
+        - label: I will not redistribute, mirror, publish, transfer, sublicense, or share source access.
+          required: true
+        - label: I will not use the source for commercial, employer, client, hosted service, SaaS, OEM, or competitive product purposes.
+          required: true
+        - label: I will keep copyright, license, trademark, provenance, and release fingerprint notices intact.
+          required: true
+        - label: I understand approval can be revoked on breach.
+          required: true

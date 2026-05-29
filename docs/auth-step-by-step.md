@@ -33,6 +33,27 @@
 - `CCBG_TELECOM_BROWSER_ID`
 - `CCBG_TELECOM_BROWSER_ID_FILE`
 
+`auth-broker` 的边界也保持一致:
+
+- 只编排你明确提交的人工输入（text/phone_number/sms_code/password/captcha）
+- 不做会话窃取、不自动抓 cookie
+- 不把验证码或口令明文写进日志
+- 当前主要服务于 unicom / telecom / mobile 的人工输入认证流程
+
+AUTH-003 之后，浏览器认证会话交接改为纯服务端路径:
+
+- 通过 `POST /api/browser-flow/sessions/{session_id}/handoff` 触发 handoff（只接受已完成的 `unicom/telecom/mobile` session）
+- gateway 仅根据 provider-bridge 的 `runtime_credential_mappings` 与 browser_profile 绑定把 runtime 映射进 credential store
+- handoff 会落盘审计记录到 `credentials_dir/auth-session-handoffs/<safe-session-file>.json`（不写 token/cookie/sms/captcha 明文，非安全文件名会改用 hash）
+- handoff 保存后会立即热更新对应 provider backend；认证材料不放前端 localStorage
+
+人工输入队列（AUTH-002）当前语义:
+
+- 每条输入项默认 TTL 为 10 分钟，到期会从 `pending` 自动迁移为 `expired`
+- 输入项只允许一次有效回答，状态迁移为 `answered` 后不能再次提交
+- 你可以主动取消某条输入项，状态迁移为 `canceled`，取消后不能再次提交
+- API 返回的是脱敏 prompt（不包含 `answer_value` 明文）
+
 最推荐的做法:
 
 1. 先给服务配置一个独立的 `CCBG_CREDENTIALS_DIR`。
@@ -788,6 +809,8 @@ chmod 600 $HOME/.config/ccbg/credentials/mobile.cookie
 ```dotenv
 CCBG_MOBILE_TOKEN_FILE=$HOME/.config/ccbg/credentials/mobile.token
 CCBG_MOBILE_COOKIE_HEADER=
+# Optional: only set this after capturing a real Mobile family object root.
+CCBG_MOBILE_FAMILY_ROOT_FOLDER_ID=
 ```
 
 如果你更想走网页方式，也可以直接打开 `Mobile`，把 token / cookie 粘进去。保存后会写入 `CCBG_CREDENTIALS_DIR/mobile.json`，并立即热生效。
@@ -935,13 +958,15 @@ CCBG_ONEDRIVE_DRIVE_ID=
 
 不知道就先留空，默认走 `me/drive`。
 
-### OneDrive 验证
+### OneDrive Parking 状态
 
 ```bash
 curl -s http://127.0.0.1:61080/__ccbg/providers
 ```
 
-你应该重点看:
+当前阶段 OneDrive 默认禁用并从近期认证主线隐藏。只有在真实需求触发并完成 [OneDrive Parking Restore Checklist](./onedrive-parking-restore-checklist.md) 后，才应单独验证它的授权状态。
+
+如果进入恢复演练，你应该重点看:
 
 - `backend=onedrive`
 - `auth_source=file` 或 `auth_source=env`
@@ -953,7 +978,7 @@ OneDrive 的状态解释:
 - `degraded`: 授权已完成，但根路径还没创建，或 Graph 访问只部分可用
 - `unavailable`: session / token 缺失、已过期且刷新失败，或 Graph 请求失败
 
-## 把认证写进 `.env.local`
+## 把运营商认证写进 `.env.local`
 
 下面是一个最常见的写法:
 
@@ -961,23 +986,22 @@ OneDrive 的状态解释:
 CCBG_CONTROL_PLANE_FILE=$HOME/.config/ccbg/control-plane.json
 
 CCBG_PRIMARY_PROVIDER=unicom
-CCBG_SYNC_TARGETS=onedrive
-CCBG_FALLBACK_READ_ORDER=onedrive
+CCBG_SYNC_TARGETS=
+CCBG_FALLBACK_READ_ORDER=
 
 CCBG_UNICOM_TOKEN_FILE=$HOME/.config/ccbg/credentials/unicom.token
 CCBG_UNICOM_COOKIE_HEADER=
 
-CCBG_ONEDRIVE_ENABLED=true
-CCBG_ONEDRIVE_CLIENT_ID=replace-with-your-entra-app-client-id
-CCBG_ONEDRIVE_SESSION_FILE=$HOME/.config/ccbg/credentials/onedrive-session.json
-CCBG_ONEDRIVE_ROOT_PREFIX=carrier-cloud-blob-gateway
-CCBG_ONEDRIVE_REPLICATION_ENABLED=true
+CCBG_ONEDRIVE_ENABLED=false
+CCBG_ONEDRIVE_REPLICATION_ENABLED=false
 CCBG_ONEDRIVE_POLICY_MODE=memory_only
 CCBG_ONEDRIVE_MEMORY_BUCKETS=agent-memory
 CCBG_ONEDRIVE_MEMORY_PREFIXES=memory/,sessions/
 ```
 
-## 在网页里控制主写和 OneDrive 范围
+OneDrive 相关变量保留为 Parking 恢复项。不要在默认认证流程里填写 OneDrive client、session、sync target 或 fallback；恢复时按 checklist 单独演练。
+
+## 在网页里控制主写和运营商同步范围
 
 打开:
 

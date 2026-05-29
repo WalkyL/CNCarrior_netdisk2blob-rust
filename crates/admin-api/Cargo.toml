@@ -1,0 +1,11 @@
+[package]
+name = "admin-api"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../COMMERCIAL-LICENSE.md"
+
+[dependencies]
+blob-core = { path = "../blob-core" }
+policy-engine = { path = "../policy-engine" }
+serde = { workspace = true }
+serde_json = { workspace = true }

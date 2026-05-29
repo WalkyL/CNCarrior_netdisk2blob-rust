@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "package_name": "ccbg-personal-source-review",
+  "include": [
+    "LICENSE",
+    "COMMERCIAL-LICENSE.md",
+    "PUBLIC-MATERIALS-LICENSE.md",
+    "NOTICE",
+    "PROVENANCE.md",
+    "TRADEMARKS.md",
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/platform-profiles/**",
+    "crates/blob-core/**",
+    "crates/policy-engine/**",
+    "examples/stm32-client-only/**",
+    "examples/esp32-s3-client-only/**",
+    "examples/esp32-s3-relay-lite-poc/**",
+    "docs/personal-source-review.md",
+    "docs/feature-profiles.md",
+    "docs/stm32-client-only.md",
+    "docs/esp32-s3-client-only.md",
+    "docs/esp32-s3-relay-lite-feasibility.md",
+    "config/source-review-package.json"
+  ],
+  "exclude": [
+    "**/target/**",
+    "**/.git/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/.DS_Store"
+  ]
+}

@@ -319,6 +319,108 @@
 - 尽量输出到 `tmpfs`
 - 不在小 flash 设备上长期保留高频文本日志
 
+## 显式收敛与本地 spool 预算
+
+上面的 RAM / Flash 模型还不够，因为历史对象显式收敛会把“本地磁盘缓冲”变成单独的约束。
+
+这类场景包括:
+
+- 给历史对象补新副本
+- 从 `A` 迁移 home provider 到 `B`
+- 把明文对象改写成加密对象
+- 切换加密 profile
+- 把加密对象改回明文
+
+这些路径的完整运维规则见:
+
+- [docs/historical-object-reconcile-and-buffer-budget.md](./historical-object-reconcile-and-buffer-budget.md)
+
+这里先给部署预算公式。
+
+### 1. 本地 spool 不是 provider 容量的一部分
+
+对显式收敛来说，至少要分别考虑:
+
+- 目标 provider 容量
+- 原 provider 旧副本
+- 本地 `spool` 卷
+
+即使远端 provider 空间够，本地机器也可能因为以下原因失败:
+
+- 需要预哈希
+- 需要预分片
+- 需要对象流回放
+- 某一侧 provider 还不是全链路流式
+
+### 2. 单对象的本地 spool 上界
+
+记号:
+
+- `stored_size_current`: 当前对象的远端落盘体积
+- `stored_size_target`: 收敛后对象在目标端的落盘体积
+
+单对象本地 spool 的保守上界可分三档:
+
+1. 理想流式:
+
+`peak_local_spool ~= O(chunk_window)`
+
+2. 只有一侧需要整对象回放:
+
+`peak_local_spool ~= max(stored_size_current, stored_size_target)`
+
+3. 两侧都需要整对象回放:
+
+`peak_local_spool ~= stored_size_current + stored_size_target`
+
+工程上不要把自己默认想成第 1 档，尤其是大对象、签名上传和加密重写。
+
+### 3. 同 provider 两阶段重写的 provider 峰值
+
+如果对象还是写回同一个 provider、同一个 key，但内容要改写:
+
+- 明文 -> 加密
+- 加密 -> 明文
+- profile A -> profile B
+
+那就必须使用临时对象两阶段。
+
+这时 provider 侧峰值空间应按:
+
+`peak_remote_same_provider_rewrite ~= stored_size_current + stored_size_target`
+
+来预算。
+
+注意:
+
+- 这是 provider 侧峰值，不是本地 spool
+- 但两者经常同时成为阻断条件
+
+### 4. 多对象并发时的本地 spool 总量
+
+如果同时跑多个显式收敛任务:
+
+`peak_local_spool_total ~= Σ each_in_flight_object_peak_local_spool`
+
+建议的部署余量:
+
+`recommended_free_spool >= peak_local_spool_total * 1.2`
+
+### 5. 对小机器的直接结论
+
+对 `N100` 小主机、`OpenWRT arm64`、小型软路由，真正危险的往往不是空载 RSS，而是:
+
+- 大对象显式收敛时的本地 spool
+- 同 provider 两阶段重写时的远端峰值空间
+- 多对象并发时的叠加放大
+
+因此这类设备默认应遵守:
+
+- 显式收敛低并发
+- 大对象逐个执行
+- `CCBG_BODY_SPOOL_DIR` 使用独立卷
+- 执行前先看本地 spool 剩余空间，而不是只看远端云盘
+
 ## 设备级预算与结论
 
 ## `PVE LXC x86/x64`

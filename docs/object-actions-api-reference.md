@@ -300,6 +300,8 @@ POST /api/content-policies
 - 历史对象不会因为策略变化而自动补副本、删旧副本、迁移 home provider、加密重写或解密重写。
 - 历史对象的这些变化必须通过 Admin 里的显式工具先预览、再执行，避免操作者在不知情的情况下丢数据或制造大规模搬迁。
 - 为了让历史对象能够安全预览和后续显式迁移，网关会从新写入开始把 `application_id` 持久化进逻辑对象元数据；更早的旧对象如果缺少这个上下文，Admin 只会提示“暂不能安全预览”，不会猜测策略结果。
+- 这类显式收敛在设计上必须额外检查目标 provider 容量、同 provider 两阶段重写峰值，以及本地 spool 预算；只要其中任一项不足或未知，就必须阻断执行。
+- 这组规则的完整说明见 [docs/historical-object-reconcile-and-buffer-budget.md](./historical-object-reconcile-and-buffer-budget.md)。
 
 `replication_state` 当前除了 `persisted.recent_jobs` 和 `target_statuses`，还会额外返回:
 

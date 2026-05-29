@@ -150,6 +150,15 @@
 - 至少覆盖 provider 单测和网关集成测试。
 - 关键边界条件必须有测试，例如 family scope、对象动作、复制语义、degraded health。
 
+补充约定:
+
+- provider 完成度报告统一由 `blob-core` 的 `provider_completion` 测试夹具生成，字段保持稳定:
+  - `provider`
+  - `overall_expected` / `overall_observed`
+  - `coverage_total` / `coverage_full` / `coverage_partial_or_full`
+  - 六个维度(`auth_session`、`scope_discovery`、`native_read_path`、`native_write_path`、`object_actions`、`health_catalog_docs`)的 `expected` / `observed` / `notes`
+- provider crate 单测只提供本地 mock 的 `health/capabilities` 与已知能力事实，不伪造未实现能力；当前缺口应在报告中体现为 `planned` 或 `partial`。
+
 ## 4. 联通当前对照
 
 按这份标准，`unicom` 当前已经达到 `full`:

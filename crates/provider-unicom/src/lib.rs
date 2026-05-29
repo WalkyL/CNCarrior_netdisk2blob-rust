@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+// Copyright (c) 2026 walky
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -3121,9 +3124,11 @@ mod tests {
         routing::{get, post},
     };
     use blob_core::{
-        BlobBackend, CopyObjectRequest, HealthStatus, ListObjectsRequest, MoveObjectRequest,
-        ObjectBody, OutboundIpFamily, PutObjectRequest, RenameObjectRequest, StorageScopeKind,
-        TokenSource,
+        BlobBackend, CompletionDimensionStatus, CopyObjectRequest, HealthStatus,
+        ListObjectsRequest, MoveObjectRequest, ObjectBody, OutboundIpFamily,
+        ProviderCompletionAssertions, ProviderCompletionExpectation, ProviderCompletionObserved,
+        PutObjectRequest, RenameObjectRequest, StorageScopeKind, TokenSource,
+        assert_provider_completion,
     };
     use bytes::Bytes;
     use futures_util::stream;
@@ -4219,6 +4224,45 @@ mod tests {
                 .iter()
                 .any(|note| note.contains("family_root_probe_failed="))
         );
+    }
+
+    #[tokio::test]
+    async fn provider_completion_report_marks_unicom_as_full() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+        let health = adapter.health().await.expect("unicom health");
+        let capabilities = adapter.capabilities();
+
+        let report = assert_provider_completion(
+            "unicom",
+            ProviderCompletionExpectation {
+                auth_session: CompletionDimensionStatus::Full,
+                scope_discovery: CompletionDimensionStatus::Full,
+                native_read_path: CompletionDimensionStatus::Full,
+                native_write_path: CompletionDimensionStatus::Full,
+                object_actions: CompletionDimensionStatus::Full,
+                health_catalog_docs: CompletionDimensionStatus::Full,
+            },
+            ProviderCompletionObserved {
+                health,
+                capabilities,
+                auth_material_confirmed: true,
+                native_read_roundtrip: true,
+                native_write_roundtrip: true,
+                create_directory_supported: true,
+                writable_scope_coverage: CompletionDimensionStatus::Full,
+                supports_rename: true,
+                supports_copy: true,
+                supports_move: true,
+                probe_catalog_confirmed: true,
+                capability_catalog_present: true,
+                browser_flow_catalog_present: true,
+                docs_synced: true,
+            },
+            ProviderCompletionAssertions { strict: true },
+        );
+        assert_eq!(report.coverage_full, 6);
     }
 
     #[tokio::test]

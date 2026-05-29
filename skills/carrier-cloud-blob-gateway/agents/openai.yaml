@@ -1,0 +1,4 @@
+interface:
+  display_name: "Carrier Cloud Blob Gateway"
+  short_description: "Diagnose provider and replication status safely."
+  default_prompt: "Use $carrier-cloud-blob-gateway to check provider health, replication state, and safe fallback readiness before risky operations."

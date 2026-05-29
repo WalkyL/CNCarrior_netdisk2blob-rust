@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "provider": "telecom",
+  "native_capability_status": "active",
+  "description": "Active native capability catalog for China Telecom Tianyi Cloud Drive. Entries are limited to provider-telecom request paths that are already implemented and covered by local tests. Capture-only or unconfirmed request variants stay out of this catalog.",
+  "capabilities": [
+    {
+      "id": "personal_list_files",
+      "method": "GET",
+      "url": "https://cloud.189.cn/api/open/file/listFiles.action",
+      "auth": "browser_id_cookie_or_signed_token",
+      "body_defaults": {},
+      "notes": [
+        "folderId, pageNum, pageSize, mediaType, orderBy, descending, and iconOption are injected at runtime."
+      ]
+    },
+    {
+      "id": "personal_get_download_url",
+      "method": "GET",
+      "url": "https://cloud.189.cn/api/open/file/getFileDownloadUrl.action",
+      "auth": "browser_id_cookie_or_signed_token",
+      "body_defaults": {
+        "dt": "1",
+        "shareId": ""
+      },
+      "notes": [
+        "fileId is injected at runtime. The provider retries with signed access token when the unsigned request is rejected."
+      ]
+    },
+    {
+      "id": "personal_capacity",
+      "method": "GET",
+      "url": "https://cloud.189.cn/api/open/user/getUserInfoForPortal.action",
+      "auth": "browser_id_cookie_or_signed_token",
+      "body_defaults": {},
+      "notes": [
+        "Used by the Telecom health path to recover total and available byte counts."
+      ]
+    },
+    {
+      "id": "personal_create_folder",
+      "method": "POST",
+      "url": "https://cloud.189.cn/api/open/file/createFolder.action",
+      "auth": "browser_id_cookie",
+      "body_defaults": {},
+      "notes": [
+        "parentFolderId and folderName are injected at runtime for upload parent creation."
+      ]
+    },
+    {
+      "id": "personal_batch_create_task",
+      "method": "POST",
+      "url": "https://cloud.189.cn/api/portal/createBatchTask.action",
+      "auth": "browser_id_cookie",
+      "body_defaults": {},
+      "notes": [
+        "type, taskInfos, and targetFolderId are injected at runtime for DELETE, COPY, MOVE, and RENAME object actions."
+      ]
+    },
+    {
+      "id": "personal_batch_check_task",
+      "method": "GET",
+      "url": "https://cloud.189.cn/api/portal/checkBatchTask.action",
+      "auth": "browser_id_cookie",
+      "body_defaults": {},
+      "notes": [
+        "taskId and type are injected at runtime while polling object action completion."
+      ]
+    },
+    {
+      "id": "upload_session",
+      "method": "GET",
+      "url": "https://cloud.189.cn/api/portal/v2/getUserBriefInfo.action",
+      "auth": "browser_id_cookie",
+      "body_defaults": {},
+      "notes": [
+        "Returns the sessionKey used by the Telecom upload-control signature flow."
+      ]
+    },
+    {
+      "id": "upload_generate_rsa_key",
+      "method": "GET",
+      "url": "https://cloud.189.cn/api/security/generateRsaKey.action",
+      "auth": "browser_id_cookie",
+      "body_defaults": {},
+      "notes": [
+        "Returns pubKey and pkId for encrypted upload-control requests."
+      ]
+    },
+    {
+      "id": "upload_init_multi_upload",
+      "method": "GET",
+      "url": "https://upload.cloud.189.cn/person/initMultiUpload",
+      "auth": "telecom_upload_signature",
+      "body_defaults": {},
+      "notes": [
+        "parentFolderId, fileName, fileSize, sliceSize, lazyCheck, fileMd5, and sliceMd5 are injected at runtime."
+      ]
+    },
+    {
+      "id": "upload_get_multi_upload_urls",
+      "method": "GET",
+      "url": "https://upload.cloud.189.cn/person/getMultiUploadUrls",
+      "auth": "telecom_upload_signature",
+      "body_defaults": {},
+      "notes": [
+        "uploadFileId and partInfo are injected at runtime; the response supplies the object-store PUT URL and headers for each part."
+      ]
+    },
+    {
+      "id": "upload_check_trans_second",
+      "method": "GET",
+      "url": "https://upload.cloud.189.cn/person/checkTransSecond",
+      "auth": "telecom_upload_signature",
+      "body_defaults": {},
+      "notes": [
+        "fileMd5, sliceMd5, and uploadFileId are injected at runtime to reconcile instant-transfer state."
+      ]
+    },
+    {
+      "id": "upload_commit_multi_upload_file",
+      "method": "GET",
+      "url": "https://upload.cloud.189.cn/person/commitMultiUploadFile",
+      "auth": "telecom_upload_signature",
+      "body_defaults": {
+        "opertype": "3"
+      },
+      "notes": [
+        "uploadFileId, lazyCheck, fileMd5, and sliceMd5 are injected at runtime."
+      ]
+    },
+    {
+      "id": "family_list_files",
+      "method": "GET",
+      "url": "https://api.cloud.189.cn/open/family/file/listFiles.action",
+      "auth": "signed_access_token",
+      "body_defaults": {},
+      "notes": [
+        "familyId, folderId, pageNum, pageSize, mediaType, orderBy, descending, and iconOption are injected at runtime."
+      ]
+    },
+    {
+      "id": "family_get_download_url",
+      "method": "GET",
+      "url": "https://api.cloud.189.cn/open/family/file/getFileDownloadUrl.action",
+      "auth": "signed_access_token",
+      "body_defaults": {
+        "type": "1"
+      },
+      "notes": [
+        "familyId and fileId are injected at runtime."
+      ]
+    },
+    {
+      "id": "family_create_folder",
+      "method": "POST",
+      "url": "https://api.cloud.189.cn/open/family/file/createFolder.action",
+      "auth": "signed_access_token",
+      "body_defaults": {},
+      "notes": [
+        "familyId, parentFolderId, and folderName are injected at runtime for family upload parent creation."
+      ]
+    },
+    {
+      "id": "family_batch_create_task",
+      "method": "POST",
+      "url": "https://api.cloud.189.cn/open/batch/createBatchTask.action",
+      "auth": "signed_access_token",
+      "body_defaults": {},
+      "notes": [
+        "familyId, type, taskInfos, and targetFolderId are injected at runtime for family DELETE, COPY, MOVE, and RENAME object actions."
+      ]
+    },
+    {
+      "id": "family_batch_check_task",
+      "method": "POST",
+      "url": "https://api.cloud.189.cn/open/batch/checkBatchTask.action",
+      "auth": "signed_access_token",
+      "body_defaults": {},
+      "notes": [
+        "familyId, taskId, and type are injected at runtime while polling family object action completion."
+      ]
+    },
+    {
+      "id": "family_upload_init_multi_upload",
+      "method": "GET",
+      "url": "https://upload.cloud.189.cn/family/initMultiUpload",
+      "auth": "telecom_upload_signature",
+      "body_defaults": {},
+      "notes": [
+        "Same upload-control contract as personal upload with familyId injected at runtime."
+      ]
+    },
+    {
+      "id": "family_upload_get_multi_upload_urls",
+      "method": "GET",
+      "url": "https://upload.cloud.189.cn/family/getMultiUploadUrls",
+      "auth": "telecom_upload_signature",
+      "body_defaults": {},
+      "notes": [
+        "Same part URL discovery contract as personal upload with familyId injected at runtime."
+      ]
+    },
+    {
+      "id": "family_upload_check_trans_second",
+      "method": "GET",
+      "url": "https://upload.cloud.189.cn/family/checkTransSecond",
+      "auth": "telecom_upload_signature",
+      "body_defaults": {},
+      "notes": [
+        "Same instant-transfer reconciliation contract as personal upload with familyId injected at runtime."
+      ]
+    },
+    {
+      "id": "family_upload_commit_multi_upload_file",
+      "method": "GET",
+      "url": "https://upload.cloud.189.cn/family/commitMultiUploadFile",
+      "auth": "telecom_upload_signature",
+      "body_defaults": {
+        "opertype": "3"
+      },
+      "notes": [
+        "Same upload commit contract as personal upload with familyId injected at runtime."
+      ]
+    }
+  ]
+}

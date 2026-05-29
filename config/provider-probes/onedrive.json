@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "provider": "onedrive",
+  "provider_lifecycle_status": "parking",
   "description": "Probe catalog for Microsoft OneDrive.",
   "probe_items": [
     {

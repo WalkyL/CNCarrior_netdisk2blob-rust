@@ -2,8 +2,16 @@
 name = "gatewayd"
 version = "0.1.0"
 edition = "2024"
+license-file = "../../COMMERCIAL-LICENSE.md"
+
+[features]
+default = ["full-host"]
+full-host = []
+lite-host = []
 
 [dependencies]
+admin-api = { path = "../admin-api" }
+auth-broker = { path = "../auth-broker" }
 anyhow = { workspace = true }
 argon2 = { workspace = true }
 async-trait = { workspace = true }
@@ -11,6 +19,8 @@ axum = { workspace = true }
 base64 = { workspace = true }
 blob-core = { path = "../blob-core" }
 browser-cdp = { path = "../browser-cdp" }
+chacha20poly1305 = { workspace = true }
+flate2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 libc = { workspace = true }

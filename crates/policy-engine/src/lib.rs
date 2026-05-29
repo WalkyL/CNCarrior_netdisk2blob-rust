@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+// Copyright (c) 2026 walky
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

@@ -13,6 +13,7 @@
 - 自定义 endpoint
 - SigV4 本地鉴权
 - path-style bucket 访问
+- virtual-hosted-style bucket 访问（本地 `*.localhost` / `*.127.0.0.1`）
 - 常用对象读写接口
 
 明确不在一期承诺:
@@ -41,17 +42,19 @@
 - `GetObject`
 - `PutObject`
 - `DeleteObject`
+- `CopyObject`
+- `CreateMultipartUpload` / `UploadPart` / `CompleteMultipartUpload` / `AbortMultipartUpload`
+- `Range GET`（单区间）
+- Presigned `GET` / `PUT` / multipart part upload
 
 ### 后续阶段
 
-- `Multipart Upload`
-- `CopyObject`
-- `Presigned URL`
-- 更完整的 `Range GET`
+- 更完整的 AWS 错误码矩阵
+- 客户端兼容矩阵持续扩展
 
 ## 地址风格
 
-一期默认只保证 `path-style`:
+当前默认推荐 `path-style`:
 
 ```text
 http://127.0.0.1:61080/<bucket>/<key>
@@ -63,7 +66,12 @@ http://127.0.0.1:61080/<bucket>/<key>
 - 不依赖额外 DNS
 - 对 Agent、容器和软路由部署更简单
 
-`virtual-hosted-style` 可留到后续阶段。
+当前也支持本地测试用途的 `virtual-hosted-style`:
+
+```text
+http://<bucket>.localhost:61080/<key>
+http://<bucket>.127.0.0.1:61080/<key>
+```
 
 ## 认证模型
 
@@ -169,3 +177,7 @@ S3 兼容带来的直接好处:
 3. 完成本地 SigV4 校验。
 4. 完成 bucket 到 provider policy 的映射。
 5. 再补 multipart upload。
+
+## Smoke Matrix
+
+S3 兼容 smoke 矩阵与运行说明见 [docs/s3-smoke-tests.md](./s3-smoke-tests.md)。

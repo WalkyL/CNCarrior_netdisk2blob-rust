@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+// Copyright (c) 2026 walky
+
 use std::{
     collections::VecDeque,
     sync::{
@@ -275,6 +278,27 @@ impl ReplicationEngine {
         pending.extend(jobs);
     }
 
+    pub fn replace_pending(&self, jobs: Vec<ReplicationJob>) {
+        let next_job_id = jobs
+            .iter()
+            .map(|job| job.job_id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+        self.ensure_next_job_id_at_least(next_job_id);
+
+        let mut pending = self
+            .pending_jobs
+            .lock()
+            .expect("replication queue poisoned");
+        pending.clear();
+        pending.extend(jobs);
+
+        let mut recent = self.recent_jobs.lock().expect("replication queue poisoned");
+        recent.clear();
+    }
+
     fn enqueue_jobs(
         &self,
         topology: &TopologyPolicy,
@@ -474,6 +498,45 @@ mod tests {
             .pop_next_ready_at(2_000)
             .expect("retry job should become ready when due");
         assert_eq!(retry.job_id, 1);
+    }
+
+    #[test]
+    fn replace_pending_resets_queue_and_recent_history() {
+        let engine = ReplicationEngine::with_recent_limit(4);
+        engine.enqueue_delete(
+            &topology(),
+            Some("unicom".to_string()),
+            "bucket-a",
+            "old.txt",
+        );
+        let completed = engine.pop_next_ready().expect("job should exist");
+        engine.record_completed(completed);
+
+        let replacement = ReplicationJob {
+            job_id: 99,
+            target: "telecom".to_string(),
+            source_provider: Some("mobile".to_string()),
+            operation: ReplicationOperation::Put,
+            object: ReplicationObjectRef {
+                bucket: "root".to_string(),
+                key: "restore.txt".to_string(),
+                etag: Some("etag-99".to_string()),
+                size: Some(123),
+                content_type: Some("text/plain".to_string()),
+            },
+            status: ReplicationStatus::Pending,
+            attempts: 0,
+            enqueued_at_unix_ms: 9_999,
+            next_attempt_at_unix_ms: None,
+            last_error: None,
+        };
+        engine.replace_pending(vec![replacement.clone()]);
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.pending_jobs, vec![replacement]);
+        assert_eq!(snapshot.pending_count, 1);
+        assert_eq!(snapshot.recent_jobs.len(), 0);
+        assert_eq!(snapshot.recent_count, 0);
     }
 
     #[test]

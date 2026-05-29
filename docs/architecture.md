@@ -10,7 +10,7 @@
 6. 认证信息只允许通过受控输入进入服务；如后续启用自动抓取，也必须经由独立 `auth-broker` / sidecar，而不是直接塞进 data plane。
 7. 一期完整宿主优先覆盖 PVE LXC `x86/x64`、Docker `x86/x64`、Podman `x86/x64` 和 OpenWRT `arm64`。
 8. STM32 在一期按客户端兼容处理，而不是网关宿主。
-9. 源码一期按公开 GitHub 仓库交付，仓库必须具备基础许可证、CI 和容器构建入口。
+9. 源码一期按公开仓库交付，但商业核心、公开材料和个人非商业源码审查边界必须分开，仓库必须具备基础许可证、CI 和容器构建入口。
 10. 所有正式 provider 都必须最终达到流式读与流式写；若上游要求预哈希或预分片，只允许使用有界磁盘 spool，不允许整对象内存缓冲。
 11. provider 页面改版时，优先改 catalog / probe / flow / action executor 等可插拔层，不能因为页面细节变化就重写整个 Rust 数据面。
 12. 对象动作执行器、客户端 bucket 派生策略、桶级加密写入策略都必须保持可插拔，不能写死为某一家云盘或某一种动作流程。
@@ -122,12 +122,14 @@
 - 已支持在 flow 成功执行后把 `script_value` / `dom_text` / `url` 类型的 browser-flow outputs 回填到该 auth session 的 `runtime`，供后续复用同一 `auth_session_id` 的 flow 直接消费登录态
 - `POST /api/browser-flows/session-run` 的返回值当前也会直接带回这次会话最新的 `runtime`，方便控制面或 auth-broker 读取页面事实，而不用再写 provider-specific API
 - 已支持按 `prerequisite_flow_id` 递归执行浏览器 flow 前置链，便于把“当前会话抓取 -> uploader 准备 -> 实际上传”这类页面内依赖收口到同一条 auth session
+- Admin Web 已从 Rust 内联模板抽出到 `crates/gatewayd/assets/admin/index.html`；后续 FAQ 匹配、AI 解释弹窗、运营商引导文案、多语言渲染和大部分交互逻辑都应继续留在前端资产层，而不是再回灌到 Rust
+- Admin 动态面板的本地化需要在每次重渲染后重新执行；优先使用 `tr(...)` 和 exact-text 映射，不要在 Rust 里复制 UI 文案分支
 - 输出健康检查、日志、后续指标和审计信息
 
 ### `provider-onedrive`
 
 - 封装 OneDrive 授权后访问能力的 provider
-- 作为默认异步备份目标和最终 fallback 目标的入口
+- 保留为 Parking optional provider；默认不作为异步备份目标或 fallback 目标
 - 当前已落 Graph 映射，支持 `root_prefix/<bucket>/<key>` 路径映射、健康检查、列容器、列对象、对象读写删，以及对象级 rename/copy/move
 - 当前已支持显式 access token、token file、OAuth session file，以及 access token 过期后使用 refresh token 自动续期并回写 session
 - 对象动作执行层已做成可替换结构；当前默认执行器走 Graph `PATCH` 更新 `name` / `parentReference` 完成 rename/move，并走 Graph async copy + monitor URL 轮询完成 copy
@@ -137,7 +139,7 @@
 ### `policy-engine`
 
 - 统一表达 `primary provider`、`sync targets`、`fallback read order`
-- 校验主写唯一、fallback 子集、OneDrive 默认备份等约束
+- 校验主写唯一、fallback 子集、parking provider 不进入默认拓扑等约束
 - 为 `gatewayd` 和后续控制面提供稳定的拓扑判定边界
 
 ### `replication-engine`
@@ -152,7 +154,16 @@
 
 - 基于 SQLite 持久化复制任务
 - 提供 pending job 恢复、状态更新、`next_attempt_at` 记录和 per-target 复制摘要查询
-- 当前已用于 `gatewayd` 内部状态接口、worker 状态落盘和对象级复制视图
+- 当前已用于 `gatewayd` 内部状态接口、worker 状态落盘、对象级复制视图，以及关键应用远端 WAL 的本地高水位状态
+
+## 关键应用写前日志
+
+- 对被显式标记为关键的应用，`gatewayd` 会在主写前把一条很小的远端 WAL 记录写到第三个 provider 的专用目录
+- 控制面备份继续承担 checkpoint 角色；恢复时先恢复 checkpoint，再回放 `checkpoint_lsn` 之后的远端 WAL
+- 如果 home provider 上真实对象存在，则恢复器重建 placement / logical object / protection plan，并补回缺失复制任务
+- 如果 home provider 上真实对象不存在，则恢复器按 WAL 中记录的旧状态回滚本地残留元数据
+- 这套能力的目标是降低关键应用控制面恢复 `RPO`，而不是替代对象数据迁移或对象字节归档
+- 详细设计见 [docs/gateway-write-ahead-log.md](/home/walky/workspaces/carrier-cloud-blob-gateway/docs/gateway-write-ahead-log.md:1) 和 [docs/decisions/ADR-003-remote-write-ahead-log-for-critical-apps.md](/home/walky/workspaces/carrier-cloud-blob-gateway/docs/decisions/ADR-003-remote-write-ahead-log-for-critical-apps.md:1)
 
 ### `gatewayd` 内嵌 `auth-broker`
 
@@ -263,6 +274,18 @@ Agent -> Skill -> mcp-server / gatewayd
   - 电信: `listFiles.action` personal root，`getUserInfoForPortal.action` 容量解析；配置 Family ID + Access Token 后通过 `/open/family/file/listFiles.action` 探测 family root
   - 移动: 仍为骨架，scope 先报告为 `personal` + `capacity unknown`
 
+## 历史对象收敛与本地缓冲
+
+- 内容策略变化默认只影响新写入和后续覆盖写；历史对象不会自动补副本、删旧副本、迁移 home provider、加密重写或解密重写。
+- 历史对象相关变化必须走“先预览、再显式执行”的路径，不能在后台静默搬迁。
+- 任何显式收敛都必须同时检查三类空间:
+  - 目标 provider 的最终所需空间
+  - 目标 provider 的峰值所需空间
+  - 本地 spool 卷的峰值所需空间
+- 如果目标 provider 容量未知，默认阻断；如果本地 spool 预算未知或不足，也默认阻断。
+- 同 provider、同 key 的加密 / 解密 / profile 切换必须走临时对象两阶段路径，不能原地覆盖。
+- 对这组规则的完整说明单独放在 [docs/historical-object-reconcile-and-buffer-budget.md](./historical-object-reconcile-and-buffer-budget.md)。
+
 ## 数据语义
 
 ### 写入
@@ -293,7 +316,7 @@ Agent -> Skill -> mcp-server / gatewayd
 
 - `primary provider`: 唯一写入主云盘
 - `sync targets`: 零个或多个异步同步目标
-- `default backup target`: `onedrive`
+- `parking provider`: OneDrive 当前保留实现但默认不进入 sync/fallback
 
 约束:
 

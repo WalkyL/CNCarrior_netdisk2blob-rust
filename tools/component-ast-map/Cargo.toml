@@ -2,6 +2,7 @@
 name = "component-ast-map"
 version = "0.1.0"
 edition = "2024"
+license-file = "../../COMMERCIAL-LICENSE.md"
 
 [workspace]
 

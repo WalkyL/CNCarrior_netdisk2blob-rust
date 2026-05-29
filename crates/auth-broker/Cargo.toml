@@ -1,0 +1,11 @@
+[package]
+name = "auth-broker"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../COMMERCIAL-LICENSE.md"
+
+[dependencies]
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,50 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: LicenseRef-CCBG-Public-Materials -->
+<!-- Copyright (c) 2026 walky -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CCBG FAQ</title>
+  <meta name="ccbg-provenance" content="ccbg-0.1.0-walky-20260526-e756003d846d2c46" />
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <div class="brand-title">CCBG FAQ</div>
+          <div class="brand-subtitle">carrier-disk-gateway.agi2030.online</div>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <a href="/">首页</a>
+        <a href="/install/">安装下载</a>
+        <a href="/api/faq/catalog">FAQ Catalog API</a>
+      </nav>
+    </header>
+    <main class="layout">
+      <section class="section" style="margin-top: 1rem; padding: 1rem;">
+        <h2>FAQ 目录与匹配 API</h2>
+        <p class="section-lead">FAQ catalog 是结构化 JSON；匹配使用关键词/provider/context/config_key/error_pattern 加权评分，不使用向量库。</p>
+        <div class="card-grid">
+          <article class="card" style="padding: 1rem;">
+            <h3>Catalog</h3>
+            <p><code>GET /api/faq/catalog</code></p>
+            <a href="/api/faq/catalog">打开 catalog</a>
+          </article>
+          <article class="card" style="padding: 1rem;">
+            <h3>Match API</h3>
+            <p><code>POST /api/faq/match</code>，输入 query/provider/context/config_keys/limit。</p>
+            <pre style="white-space: pre-wrap;">curl -sS -X POST /api/faq/match \
+  -H 'content-type: application/json' \
+  -d '{"query":"mobile token expired","provider":"mobile","context":"logs","limit":3}'</pre>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

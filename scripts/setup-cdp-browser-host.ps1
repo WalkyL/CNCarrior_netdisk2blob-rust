@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+# Copyright (c) 2026 walky
+
 param(
     [Parameter(Mandatory = $true)]
     [string]$HostIp,

@@ -1,0 +1,20 @@
+{
+  "name": "Carrier Cloud Blob Gateway",
+  "short_name": "CCBG",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f7f9",
+  "theme_color": "#214c5a",
+  "description": "Public authorization, documentation, and provenance surface for Carrier Cloud Blob Gateway.",
+  "ccbg_provenance": {
+    "service": "carrier-cloud-blob-gateway-public",
+    "version": "0.1.0",
+    "release_channel": "public-materials",
+    "release_date": "2026-05-26",
+    "release_fingerprint": "ccbg-0.1.0-walky-20260526-e756003d846d2c46",
+    "fingerprint_sha256": "e756003d846d2c460f892a20402d59539c8c6980ba011c62d17ab5ad962de6b6",
+    "canonical_repo": "https://github.com/walky/carrier-cloud-blob-gateway",
+    "copyright": "Copyright (c) 2026 walky",
+    "license_id": "LicenseRef-CCBG-Public-Materials"
+  }
+}

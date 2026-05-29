@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+# Copyright (c) 2026 walky
+
+[Unit]
+Description=carrier-cloud-blob-gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ccbg
+Group=ccbg
+WorkingDirectory=/var/lib/ccbg
+EnvironmentFile=/etc/ccbg/ccbg.env
+ExecStart=/opt/ccbg/bin/gatewayd
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/ccbg /var/log/ccbg
+
+[Install]
+WantedBy=multi-user.target

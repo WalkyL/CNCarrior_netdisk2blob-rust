@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+// Copyright (c) 2026 walky
+
 use std::{
     collections::BTreeMap,
     fs,
@@ -37,6 +40,7 @@ use tokio::{
 };
 
 const MOBILE_ROOT_CONTAINER: &str = "root";
+const MOBILE_FAMILY_CONTAINER: &str = "family";
 const MOBILE_NATIVE_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MOBILE_UPLOAD_MAX_PART_COUNT: u64 = 41;
 const MOBILE_UPLOAD_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
@@ -56,6 +60,8 @@ pub struct MobileConfig {
     pub personal_disk_info_url: String,
     pub family_disk_info_url: String,
     pub root_folder_id: Option<String>,
+    #[serde(default)]
+    pub family_root_folder_id: Option<String>,
     pub user_domain_id: Option<String>,
     pub page_size: usize,
     pub root_prefix: Option<String>,
@@ -377,6 +383,10 @@ impl MobileBlobAdapter {
                 "China Mobile native capability is not configured: {id}"
             ))
         })
+    }
+
+    fn has_native_capability(&self, id: &str) -> bool {
+        self.native_capabilities.contains_key(id)
     }
 
     fn base_headers(&self) -> Result<Vec<(HeaderName, HeaderValue)>, BlobError> {
@@ -1032,20 +1042,13 @@ impl MobileBlobAdapter {
         Ok(Some(current_id))
     }
 
-    async fn resolve_directory_path_if_exists(
-        &self,
-        directory_path: &str,
-    ) -> Result<Option<String>, BlobError> {
-        self.resolve_child_directory_path_if_exists(self.root_folder_id()?, directory_path)
-            .await
-    }
-
     async fn resolve_container_root_folder_id(
         &self,
         container: &str,
     ) -> Result<Option<String>, BlobError> {
+        let native_root = self.native_root_folder_id_for_container(container).await?;
         let managed_root = self.managed_container_root(container)?;
-        self.resolve_directory_path_if_exists(managed_root.as_str())
+        self.resolve_child_directory_path_if_exists(native_root.as_str(), managed_root.as_str())
             .await
     }
 
@@ -1113,15 +1116,16 @@ impl MobileBlobAdapter {
         container: &str,
         key: &str,
     ) -> Result<(String, String), BlobError> {
+        let native_root = self.native_root_folder_id_for_container(container).await?;
         let managed_object_key = self.managed_object_key(container, key)?;
         let (parent_path, file_name) = match managed_object_key.rsplit_once('/') {
             Some((parent_path, file_name)) => (parent_path, file_name.to_string()),
             None => {
-                return Ok((self.root_folder_id()?.to_string(), managed_object_key));
+                return Ok((native_root, managed_object_key));
             }
         };
 
-        let mut parent_id = self.root_folder_id()?.to_string();
+        let mut parent_id = native_root;
         for segment in parent_path
             .split('/')
             .map(str::trim)
@@ -1242,6 +1246,30 @@ impl MobileBlobAdapter {
         .await
     }
 
+    async fn copy_file_id(
+        &self,
+        file_id: &str,
+        target_parent_file_id: &str,
+    ) -> Result<(), BlobError> {
+        ensure_non_empty(file_id, "China Mobile file id")?;
+        ensure_non_empty(target_parent_file_id, "China Mobile target parent file id")?;
+        let mut body = self
+            .native_capability("file_batch_copy")?
+            .body_defaults
+            .clone();
+        body.insert("fileIds".to_string(), json!([file_id]));
+        body.insert(
+            "toParentFileId".to_string(),
+            Value::String(target_parent_file_id.to_string()),
+        );
+        self.send_metadata_action(
+            "file_batch_copy",
+            Value::Object(body),
+            "China Mobile file/batchCopy",
+        )
+        .await
+    }
+
     async fn send_metadata_action(
         &self,
         capability_id: &str,
@@ -1272,6 +1300,36 @@ impl MobileBlobAdapter {
                     "missing China Mobile Root Folder ID; capture the current Mobile session from the logged-in file-list page".to_string(),
                 )
             })
+    }
+
+    fn family_root_folder_id(&self) -> Option<&str> {
+        self.config
+            .family_root_folder_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+
+    async fn native_root_folder_id_for_container(
+        &self,
+        container: &str,
+    ) -> Result<String, BlobError> {
+        match container {
+            MOBILE_ROOT_CONTAINER => Ok(self.root_folder_id()?.to_string()),
+            MOBILE_FAMILY_CONTAINER => {
+                if self.family_disk_info_if_available().await.is_none() {
+                    return Err(BlobError::NotFound(format!(
+                        "container not found: {container}"
+                    )));
+                }
+                self.family_root_folder_id()
+                    .map(str::to_string)
+                    .ok_or_else(|| BlobError::NotFound(format!("container not found: {container}")))
+            }
+            _ => Err(BlobError::NotFound(format!(
+                "container not found: {container}"
+            ))),
+        }
     }
 
     fn user_domain_id(&self) -> Result<&str, BlobError> {
@@ -1548,21 +1606,44 @@ impl MobileBlobAdapter {
         }
     }
 
-    fn family_scope_health(&self, capacity: Option<StorageCapacity>) -> StorageScopeHealth {
+    fn family_scope_health(
+        &self,
+        family_root_folder_id: &str,
+        root_page: &MobileListData,
+        capacity: Option<StorageCapacity>,
+    ) -> StorageScopeHealth {
+        let managed_root = self
+            .managed_container_root(MOBILE_FAMILY_CONTAINER)
+            .unwrap_or_else(|_| MOBILE_FAMILY_CONTAINER.to_string());
         StorageScopeHealth {
-            id: "family".to_string(),
+            id: MOBILE_FAMILY_CONTAINER.to_string(),
             label: "Family Cloud".to_string(),
             kind: StorageScopeKind::Family,
             writable: false,
-            root: None,
-            container: None,
-            object_count: None,
+            root: Some(family_root_folder_id.to_string()),
+            container: Some(MOBILE_FAMILY_CONTAINER.to_string()),
+            object_count: if root_page.next_page_cursor.is_none() {
+                Some(root_page.items.len() as u64)
+            } else {
+                None
+            },
             capacity,
             notes: vec![
                 "family quota is available".to_string(),
-                "family file listing is not mapped yet".to_string(),
+                "capacity_source=getFamilyDiskInfo".to_string(),
+                format!("family_root_folder_id={family_root_folder_id}"),
+                format!("managed_root={managed_root}"),
+                if root_page.next_page_cursor.is_some() {
+                    "family_root_page_incomplete=true".to_string()
+                } else {
+                    "family_root_page_incomplete=false".to_string()
+                },
             ],
         }
+    }
+
+    async fn family_disk_info_if_available(&self) -> Option<MobileDiskInfoData> {
+        self.disk_info(MobileScope::Family).await.ok()
     }
 
     async fn list_scope_objects(
@@ -1575,12 +1656,11 @@ impl MobileBlobAdapter {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or(MOBILE_ROOT_CONTAINER);
-        if container != MOBILE_ROOT_CONTAINER {
+        if container != MOBILE_ROOT_CONTAINER && container != MOBILE_FAMILY_CONTAINER {
             return Err(BlobError::NotFound(format!(
                 "container not found: {container}"
             )));
         }
-
         let normalized_prefix = request.prefix.as_deref().map(normalize_object_key);
         let Some(container_root_id) = self.resolve_container_root_folder_id(container).await?
         else {
@@ -1713,7 +1793,26 @@ impl BlobBackend for MobileBlobAdapter {
                 scopes.push(self.personal_scope_health(&page, personal_capacity));
 
                 match self.disk_info(MobileScope::Family).await {
-                    Ok(info) => scopes.push(self.family_scope_health(Self::disk_capacity(&info))),
+                    Ok(info) => {
+                        let family_capacity = Self::disk_capacity(&info);
+                        match self.family_root_folder_id().map(str::to_string) {
+                            Some(family_root_folder_id) => {
+                                match self.list_page(family_root_folder_id.as_str(), None).await {
+                                    Ok(family_page) => scopes.push(self.family_scope_health(
+                                        family_root_folder_id.as_str(),
+                                        &family_page,
+                                        family_capacity,
+                                    )),
+                                    Err(error) => {
+                                        notes.push(format!("family_scope_probe_failed={error}"))
+                                    }
+                                }
+                            }
+                            None => notes.push(
+                                "family_scope=capacity_available_root_not_configured".to_string(),
+                            ),
+                        }
+                    }
                     Err(error) => notes.push(format!("family_capacity_error={error}")),
                 }
 
@@ -1742,10 +1841,27 @@ impl BlobBackend for MobileBlobAdapter {
     }
 
     async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
-        Ok(vec![ContainerInfo {
+        let mut containers = vec![ContainerInfo {
             name: MOBILE_ROOT_CONTAINER.to_string(),
             object_count: None,
-        }])
+        }];
+        if let Ok(family_root_folder_id) = self
+            .native_root_folder_id_for_container(MOBILE_FAMILY_CONTAINER)
+            .await
+        {
+            if self
+                .list_page(family_root_folder_id.as_str(), None)
+                .await
+                .is_err()
+            {
+                return Ok(containers);
+            }
+            containers.push(ContainerInfo {
+                name: MOBILE_FAMILY_CONTAINER.to_string(),
+                object_count: None,
+            });
+        }
+        Ok(containers)
     }
 
     async fn list_objects(
@@ -1862,12 +1978,56 @@ impl BlobBackend for MobileBlobAdapter {
     }
 
     async fn copy_object(&self, request: CopyObjectRequest) -> Result<(), BlobError> {
+        if !self.has_native_capability("file_batch_copy") {
+            return Err(BlobError::NotImplemented(
+                "China Mobile native copy is unavailable because capability file_batch_copy is not configured".to_string(),
+            ));
+        }
+
         let source = self.managed_object_key(&request.source_container, &request.source_key)?;
         let destination =
             self.managed_object_key(&request.destination_container, &request.destination_key)?;
-        Err(BlobError::NotImplemented(format!(
-            "China Mobile native copy is not completed yet; source={source} destination={destination}"
-        )))
+        let (_, destination_name) = split_parent_and_name(&request.destination_key)?;
+        if request.source_container != request.destination_container {
+            return Err(BlobError::NotImplemented(format!(
+                "China Mobile native copy does not support cross-container copies yet: source={source} destination={destination}"
+            )));
+        }
+        let source_native_root = self
+            .native_root_folder_id_for_container(&request.source_container)
+            .await?;
+        let destination_native_root = self
+            .native_root_folder_id_for_container(&request.destination_container)
+            .await?;
+        if source_native_root != destination_native_root {
+            return Err(BlobError::NotImplemented(format!(
+                "China Mobile native copy does not support cross-scope roots yet: source={source} destination={destination}"
+            )));
+        }
+
+        let (entry, _) = self
+            .resolve_object_entry(&request.source_container, &request.source_key)
+            .await?;
+        let source_name = entry.display_name().ok_or_else(|| {
+            BlobError::Upstream("China Mobile file/list returned a file without a name".to_string())
+        })?;
+        if source_name != destination_name {
+            return Err(BlobError::NotImplemented(format!(
+                "China Mobile native copy with rename is not supported yet: source={source} destination={destination}"
+            )));
+        }
+        let source_file_id = entry.file_id().ok_or_else(|| {
+            BlobError::Upstream("China Mobile file/list returned a file without an id".to_string())
+        })?;
+        let (target_parent_file_id, _) = self
+            .ensure_managed_parent_folder_id(
+                &request.destination_container,
+                &request.destination_key,
+            )
+            .await?;
+        self.copy_file_id(source_file_id, target_parent_file_id.as_str())
+            .await?;
+        Ok(())
     }
 
     async fn move_object(&self, request: MoveObjectRequest) -> Result<(), BlobError> {
@@ -2327,6 +2487,10 @@ mod tests {
         http::StatusCode,
         routing::{get, post, put},
     };
+    use blob_core::{
+        CompletionDimensionStatus, HealthStatus, ProviderCompletionAssertions,
+        ProviderCompletionExpectation, ProviderCompletionObserved, assert_provider_completion,
+    };
     use bytes::Bytes;
     use futures_util::stream;
     use std::{
@@ -2353,6 +2517,7 @@ mod tests {
             family_disk_info_url: "https://user-njs.yun.139.com/user/disk/getFamilyDiskInfo"
                 .to_string(),
             root_folder_id: Some("/".to_string()),
+            family_root_folder_id: None,
             user_domain_id: Some("123".to_string()),
             page_size: 100,
             root_prefix: Some("ccbg-managed".to_string()),
@@ -2471,6 +2636,351 @@ mod tests {
         );
     }
 
+    async fn mock_health_list() -> Json<Value> {
+        Json(json!({
+            "success": true,
+            "code": "0000",
+            "message": "ok",
+            "data": {
+                "items": [],
+                "nextPageCursor": null
+            }
+        }))
+    }
+
+    async fn mock_health_personal_disk_info() -> Json<Value> {
+        Json(json!({
+            "success": true,
+            "code": "0000",
+            "message": "ok",
+            "data": {
+                "diskSize": 1024,
+                "freeDiskSize": 512,
+                "usedSize": 512
+            }
+        }))
+    }
+
+    async fn mock_health_family_disk_info() -> Json<Value> {
+        Json(json!({
+            "success": false,
+            "code": "5010",
+            "message": "family not enabled"
+        }))
+    }
+
+    async fn mock_health_family_disk_info_enabled() -> Json<Value> {
+        Json(json!({
+            "success": true,
+            "code": "0000",
+            "message": "ok",
+            "data": {
+                "diskSize": 2048,
+                "freeDiskSize": 1024,
+                "usedSize": 1024
+            }
+        }))
+    }
+
+    #[tokio::test]
+    async fn provider_completion_report_marks_mobile_as_partial_with_known_gaps() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile health server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile health local addr");
+        let base_url = format!("http://{address}");
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_health_list))
+            .route("/health/personal", post(mock_health_personal_disk_info))
+            .route("/health/family", post(mock_health_family_disk_info));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile health server");
+        });
+
+        let mut config = sample_config();
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.personal_disk_info_url = format!("{base_url}/health/personal");
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+        let health = adapter.health().await.expect("mobile health");
+        assert!(matches!(
+            health.status,
+            HealthStatus::Healthy | HealthStatus::Degraded
+        ));
+        let capabilities = adapter.capabilities();
+
+        let report = assert_provider_completion(
+            "mobile",
+            ProviderCompletionExpectation {
+                auth_session: CompletionDimensionStatus::Full,
+                scope_discovery: CompletionDimensionStatus::Partial,
+                native_read_path: CompletionDimensionStatus::Full,
+                native_write_path: CompletionDimensionStatus::Partial,
+                object_actions: CompletionDimensionStatus::Partial,
+                health_catalog_docs: CompletionDimensionStatus::Partial,
+            },
+            ProviderCompletionObserved {
+                health,
+                capabilities,
+                auth_material_confirmed: true,
+                native_read_roundtrip: true,
+                native_write_roundtrip: true,
+                create_directory_supported: true,
+                writable_scope_coverage: CompletionDimensionStatus::Partial,
+                supports_rename: true,
+                supports_copy: false,
+                supports_move: true,
+                probe_catalog_confirmed: false,
+                capability_catalog_present: true,
+                browser_flow_catalog_present: true,
+                docs_synced: true,
+            },
+            ProviderCompletionAssertions { strict: false },
+        );
+
+        assert!(matches!(
+            report.overall_observed,
+            blob_core::CompletionOverallStatus::Partial
+        ));
+        assert!(matches!(
+            report.auth_session.observed,
+            CompletionDimensionStatus::Full
+        ));
+        assert!(matches!(
+            report.scope_discovery.observed,
+            CompletionDimensionStatus::Partial
+        ));
+        assert!(matches!(
+            report.object_actions.observed,
+            CompletionDimensionStatus::Partial
+        ));
+        assert!(matches!(
+            report.health_catalog_docs.observed,
+            CompletionDimensionStatus::Partial
+        ));
+        assert!(matches!(
+            report.native_read_path.observed,
+            CompletionDimensionStatus::Full
+        ));
+        assert!(matches!(
+            report.native_write_path.observed,
+            CompletionDimensionStatus::Partial
+        ));
+    }
+
+    #[tokio::test]
+    async fn health_and_containers_expose_family_only_when_family_disk_info_and_root_are_available()
+    {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile family health server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile family health local addr");
+        let base_url = format!("http://{address}");
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_health_list))
+            .route("/health/personal", post(mock_health_personal_disk_info))
+            .route("/health/family", post(mock_health_family_disk_info_enabled));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile family health server");
+        });
+
+        let mut config = sample_config();
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.personal_disk_info_url = format!("{base_url}/health/personal");
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        config.family_root_folder_id = Some("family-root".to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let health = adapter.health().await.expect("mobile health");
+        let family_scope = health
+            .scopes
+            .iter()
+            .find(|scope| scope.id == MOBILE_FAMILY_CONTAINER)
+            .expect("family scope");
+        assert_eq!(family_scope.kind, StorageScopeKind::Family);
+        assert_eq!(
+            family_scope.container.as_deref(),
+            Some(MOBILE_FAMILY_CONTAINER)
+        );
+        assert_eq!(family_scope.root.as_deref(), Some("family-root"));
+        let family_capacity = family_scope.capacity.as_ref().expect("family capacity");
+        assert_eq!(family_capacity.total_bytes, Some(2_147_483_648));
+        assert_eq!(family_capacity.free_bytes, Some(1_073_741_824));
+        assert_eq!(family_capacity.used_bytes, Some(1_073_741_824));
+
+        let containers = adapter.list_containers().await.expect("list containers");
+        assert_eq!(containers.len(), 2);
+        assert_eq!(containers[0].name, MOBILE_ROOT_CONTAINER);
+        assert_eq!(containers[1].name, MOBILE_FAMILY_CONTAINER);
+    }
+
+    #[tokio::test]
+    async fn list_containers_keeps_root_when_family_disk_info_is_unavailable() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile family-disabled server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile family-disabled local addr");
+        let base_url = format!("http://{address}");
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_health_list))
+            .route("/health/personal", post(mock_health_personal_disk_info))
+            .route("/health/family", post(mock_health_family_disk_info));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile family-disabled server");
+        });
+
+        let mut config = sample_config();
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.personal_disk_info_url = format!("{base_url}/health/personal");
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let health = adapter.health().await.expect("mobile health");
+        assert!(
+            health
+                .scopes
+                .iter()
+                .any(|scope| scope.kind == StorageScopeKind::Personal)
+        );
+        assert!(
+            !health
+                .scopes
+                .iter()
+                .any(|scope| scope.kind == StorageScopeKind::Family)
+        );
+        assert!(
+            health
+                .notes
+                .iter()
+                .any(|note| note.contains("family_capacity_error="))
+        );
+
+        let containers = adapter.list_containers().await.expect("list containers");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].name, MOBILE_ROOT_CONTAINER);
+
+        let error = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(MOBILE_FAMILY_CONTAINER.to_string()),
+                prefix: None,
+                limit: None,
+            })
+            .await
+            .expect_err("family container should stay hidden when family probe fails");
+        assert!(matches!(error, BlobError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn health_hides_family_when_disk_info_available_but_family_root_is_not_configured() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile family-without-root server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile family-without-root local addr");
+        let base_url = format!("http://{address}");
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_health_list))
+            .route("/health/personal", post(mock_health_personal_disk_info))
+            .route("/health/family", post(mock_health_family_disk_info_enabled));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile family-without-root server");
+        });
+
+        let mut config = sample_config();
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.personal_disk_info_url = format!("{base_url}/health/personal");
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let health = adapter.health().await.expect("mobile health");
+        assert!(
+            !health
+                .scopes
+                .iter()
+                .any(|scope| scope.kind == StorageScopeKind::Family)
+        );
+        assert!(
+            health
+                .notes
+                .iter()
+                .any(|note| note == "family_scope=capacity_available_root_not_configured")
+        );
+
+        let containers = adapter.list_containers().await.expect("list containers");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].name, MOBILE_ROOT_CONTAINER);
+    }
+
+    #[tokio::test]
+    async fn health_hides_family_when_configured_family_root_cannot_be_listed() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile broken-family-root server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile broken-family-root local addr");
+        let base_url = format!("http://{address}");
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_fails_for_family_root))
+            .route("/health/personal", post(mock_health_personal_disk_info))
+            .route("/health/family", post(mock_health_family_disk_info_enabled));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile broken-family-root server");
+        });
+
+        let mut config = sample_config();
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.personal_disk_info_url = format!("{base_url}/health/personal");
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        config.family_root_folder_id = Some("family-root".to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let health = adapter.health().await.expect("mobile health");
+        assert!(
+            !health
+                .scopes
+                .iter()
+                .any(|scope| scope.kind == StorageScopeKind::Family)
+        );
+        assert!(
+            health
+                .notes
+                .iter()
+                .any(|note| note.contains("family_scope_probe_failed="))
+        );
+
+        let containers = adapter.list_containers().await.expect("list containers");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].name, MOBILE_ROOT_CONTAINER);
+    }
+
     #[test]
     fn effective_upload_part_size_respects_max_part_count() {
         let adapter = MobileBlobAdapter::new(sample_config()).expect("adapter");
@@ -2566,6 +3076,22 @@ mod tests {
                 "nextPageCursor": null
             }
         }))
+    }
+
+    async fn mock_file_list_fails_for_family_root(Json(body): Json<Value>) -> Json<Value> {
+        let parent_file_id = body
+            .get("parentFileId")
+            .and_then(Value::as_str)
+            .unwrap_or("/");
+        if parent_file_id == "family-root" {
+            Json(json!({
+                "success": false,
+                "code": "4040",
+                "message": "family root not found"
+            }))
+        } else {
+            mock_health_list().await
+        }
     }
 
     async fn mock_get_download_url(
@@ -2795,6 +3321,7 @@ mod tests {
         update_requests: Arc<Mutex<Vec<Value>>>,
         delete_requests: Arc<Mutex<Vec<Value>>>,
         move_requests: Arc<Mutex<Vec<Value>>>,
+        copy_requests: Arc<Mutex<Vec<Value>>>,
     }
 
     async fn mock_file_list_metadata(
@@ -2869,6 +3396,22 @@ mod tests {
         }))
     }
 
+    async fn mock_file_copy_metadata(
+        State(state): State<Arc<MockMobileMetadataState>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        state
+            .copy_requests
+            .lock()
+            .expect("copy requests poisoned")
+            .push(body);
+        Json(json!({
+            "success": true,
+            "code": "0000",
+            "message": "ok"
+        }))
+    }
+
     fn write_mobile_metadata_capability_catalog(base_url: &str) -> NamedTempFile {
         let temp = NamedTempFile::new().expect("temp metadata capability catalog");
         fs::write(
@@ -2910,6 +3453,15 @@ mod tests {
                         "url": format!("{base_url}/hcy/file/batchMove"),
                         "signature_strategy": "mcloud_md5_v1",
                         "body_defaults": {}
+                    },
+                    {
+                        "id": "file_batch_copy",
+                        "method": "POST",
+                        "url": format!("{base_url}/hcy/file/batchCopy"),
+                        "signature_strategy": "mcloud_md5_v1",
+                        "body_defaults": {
+                            "fileRenameMode": "auto_rename"
+                        }
                     }
                 ]
             }))
@@ -2977,6 +3529,25 @@ mod tests {
                 41,
             )],
         );
+        items_by_parent.insert(
+            "family-root".to_string(),
+            vec![
+                sample_folder_item("family-managed", "ccbg-managed"),
+                sample_folder_item("family-other-top-level", "other-family-top-level"),
+            ],
+        );
+        items_by_parent.insert(
+            "family-managed".to_string(),
+            vec![sample_folder_item("folder-family", "family")],
+        );
+        items_by_parent.insert(
+            "folder-family".to_string(),
+            vec![sample_file_item(
+                "file-family",
+                "diag-mobile-family-20260526.txt",
+                37,
+            )],
+        );
         let mut downloads = BTreeMap::new();
         downloads.insert(
             flat_file_id.to_string(),
@@ -2994,6 +3565,7 @@ mod tests {
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list))
             .route("/hcy/file/getDownloadUrl", post(mock_get_download_url))
+            .route("/health/family", post(mock_health_family_disk_info_enabled))
             .route("/download/{file_id}", get(mock_download))
             .with_state(Arc::new(state));
         tokio::spawn(async move {
@@ -3006,7 +3578,14 @@ mod tests {
         let mut config = sample_config();
         config.native_capability_catalog_path =
             Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        config.family_root_folder_id = Some("family-root".to_string());
         let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let containers = adapter.list_containers().await.expect("list containers");
+        assert_eq!(containers.len(), 2);
+        assert_eq!(containers[0].name, MOBILE_ROOT_CONTAINER);
+        assert_eq!(containers[1].name, MOBILE_FAMILY_CONTAINER);
 
         let head = adapter
             .head_object(MOBILE_ROOT_CONTAINER, "diag-unicom-flat-20260520-v2.txt")
@@ -3051,6 +3630,17 @@ mod tests {
             body,
             Bytes::from_static(b"unicom nested probe via default topology\n")
         );
+
+        let family_listed = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(MOBILE_FAMILY_CONTAINER.to_string()),
+                prefix: Some("diag-mobile-family-20260526.txt".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list family file by prefix");
+        assert_eq!(family_listed.len(), 1);
+        assert_eq!(family_listed[0].key, "diag-mobile-family-20260526.txt");
     }
 
     #[tokio::test]
@@ -3270,12 +3860,14 @@ mod tests {
             update_requests: Arc::new(Mutex::new(Vec::new())),
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
+            copy_requests: Arc::new(Mutex::new(Vec::new())),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
             .route("/hcy/file/update", post(mock_file_update_metadata))
             .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
             .route("/hcy/file/batchMove", post(mock_file_move_metadata))
+            .route("/hcy/file/batchCopy", post(mock_file_copy_metadata))
             .with_state(Arc::new(state.clone()));
         tokio::spawn(async move {
             axum::serve(listener, app)
@@ -3311,6 +3903,15 @@ mod tests {
             })
             .await
             .expect("move should use native metadata api");
+        adapter
+            .copy_object(CopyObjectRequest {
+                source_container: MOBILE_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: MOBILE_ROOT_CONTAINER.to_string(),
+                destination_key: "media/alpha.txt".to_string(),
+            })
+            .await
+            .expect("copy should use native metadata api");
 
         let delete_requests = state
             .delete_requests
@@ -3352,5 +3953,256 @@ mod tests {
                 "toParentFileId": "folder-media"
             })]
         );
+
+        let copy_requests = state
+            .copy_requests
+            .lock()
+            .expect("copy requests poisoned")
+            .clone();
+        assert_eq!(
+            copy_requests,
+            vec![json!({
+                "fileIds": ["file-alpha"],
+                "fileRenameMode": "auto_rename",
+                "toParentFileId": "folder-media"
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_object_returns_not_implemented_when_copy_capability_missing() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile metadata server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile metadata local addr");
+        let base_url = format!("http://{address}");
+
+        let state = MockMobileMetadataState {
+            items_by_parent: BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-managed", "ccbg-managed")],
+                ),
+                (
+                    "folder-managed".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![sample_folder_item("folder-docs", "docs")],
+                ),
+                (
+                    "folder-docs".to_string(),
+                    vec![sample_file_item("file-alpha", "alpha.txt", 5)],
+                ),
+            ]),
+            update_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            move_requests: Arc::new(Mutex::new(Vec::new())),
+            copy_requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/update", post(mock_file_update_metadata))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
+            .route("/hcy/file/batchMove", post(mock_file_move_metadata))
+            .with_state(Arc::new(state));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile metadata server");
+        });
+
+        let catalog = write_mobile_metadata_capability_catalog(base_url.as_str());
+        let mut raw_catalog: Value =
+            serde_json::from_str(&fs::read_to_string(catalog.path()).expect("read catalog"))
+                .expect("parse catalog json");
+        let capabilities = raw_catalog
+            .get_mut("capabilities")
+            .and_then(Value::as_array_mut)
+            .expect("capabilities array");
+        capabilities
+            .retain(|item| item.get("id").and_then(Value::as_str) != Some("file_batch_copy"));
+        fs::write(
+            catalog.path(),
+            serde_json::to_string_pretty(&raw_catalog).expect("serialize catalog"),
+        )
+        .expect("write catalog");
+
+        let mut config = sample_config();
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+        let error = adapter
+            .copy_object(CopyObjectRequest {
+                source_container: MOBILE_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: MOBILE_ROOT_CONTAINER.to_string(),
+                destination_key: "docs/bravo.txt".to_string(),
+            })
+            .await
+            .expect_err("copy should require configured capability");
+        assert!(matches!(error, BlobError::NotImplemented(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("capability file_batch_copy is not configured")
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_object_rejects_cross_scope_copy_with_not_implemented() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile metadata server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile metadata local addr");
+        let base_url = format!("http://{address}");
+
+        let state = MockMobileMetadataState {
+            items_by_parent: BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-managed", "ccbg-managed")],
+                ),
+                (
+                    "folder-managed".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![sample_folder_item("folder-docs", "docs")],
+                ),
+                (
+                    "folder-docs".to_string(),
+                    vec![sample_file_item("file-alpha", "alpha.txt", 5)],
+                ),
+                (
+                    "family-root".to_string(),
+                    vec![sample_folder_item("family-managed", "ccbg-managed")],
+                ),
+                (
+                    "family-managed".to_string(),
+                    vec![sample_folder_item("folder-family", "family")],
+                ),
+            ]),
+            update_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            move_requests: Arc::new(Mutex::new(Vec::new())),
+            copy_requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/update", post(mock_file_update_metadata))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
+            .route("/hcy/file/batchMove", post(mock_file_move_metadata))
+            .route("/hcy/file/batchCopy", post(mock_file_copy_metadata))
+            .route("/health/family", post(mock_health_family_disk_info_enabled))
+            .with_state(Arc::new(state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile metadata server");
+        });
+
+        let catalog = write_mobile_metadata_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        config.family_root_folder_id = Some("family-root".to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+        let error = adapter
+            .copy_object(CopyObjectRequest {
+                source_container: MOBILE_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: MOBILE_FAMILY_CONTAINER.to_string(),
+                destination_key: "family/bravo.txt".to_string(),
+            })
+            .await
+            .expect_err("copy should reject cross-scope roots");
+        assert!(matches!(error, BlobError::NotImplemented(_)));
+        assert!(error.to_string().contains("cross-container copies"));
+        let copy_requests = state
+            .copy_requests
+            .lock()
+            .expect("copy requests poisoned")
+            .clone();
+        assert!(copy_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn copy_object_rejects_copy_with_rename_using_stable_error() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile metadata server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile metadata local addr");
+        let base_url = format!("http://{address}");
+
+        let state = MockMobileMetadataState {
+            items_by_parent: BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-managed", "ccbg-managed")],
+                ),
+                (
+                    "folder-managed".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![
+                        sample_folder_item("folder-docs", "docs"),
+                        sample_folder_item("folder-media", "media"),
+                    ],
+                ),
+                (
+                    "folder-docs".to_string(),
+                    vec![sample_file_item("file-alpha", "alpha.txt", 5)],
+                ),
+                ("folder-media".to_string(), vec![]),
+            ]),
+            update_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            move_requests: Arc::new(Mutex::new(Vec::new())),
+            copy_requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/batchCopy", post(mock_file_copy_metadata))
+            .with_state(Arc::new(state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile metadata server");
+        });
+
+        let catalog = write_mobile_metadata_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+        let error = adapter
+            .copy_object(CopyObjectRequest {
+                source_container: MOBILE_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: MOBILE_ROOT_CONTAINER.to_string(),
+                destination_key: "media/bravo.txt".to_string(),
+            })
+            .await
+            .expect_err("copy+rename should be rejected before native copy");
+        assert!(matches!(error, BlobError::NotImplemented(_)));
+        assert!(error.to_string().contains("copy with rename"));
+        let copy_requests = state
+            .copy_requests
+            .lock()
+            .expect("copy requests poisoned")
+            .clone();
+        assert!(copy_requests.is_empty());
     }
 }

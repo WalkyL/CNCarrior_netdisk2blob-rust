@@ -2,6 +2,8 @@
 /tools/component-ast-map/target/
 /dist
 data/
+!public/cloudflare/data/
+!public/cloudflare/data/**
 /.env
 /.env.local
 /.idea

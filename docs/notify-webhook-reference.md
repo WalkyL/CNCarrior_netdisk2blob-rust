@@ -36,7 +36,28 @@
 - `monitoring`
 - `alerts`
 
-## 2. 签名规则
+`monitoring` 会携带生产告警所需的摘要字段，包括 provider 可用性、复制队列数量、最新失败对象、对象操作失败历史。`runtime` 内的 operations overview 会额外显示 data-plane 请求/流量/fallback 命中、复制队列年龄、DLQ 打开数量与 notify 最近成功时间。
+
+同一组 alerts 会先按稳定字段生成指纹；只有指纹变化时才发送 webhook，避免告警顺序波动造成重复通知。
+
+## 2. Prometheus SLI
+
+`/metrics` 暴露以下生产 SLI，供 Prometheus 抓取并配置告警:
+
+- `ccbg_provider_health{provider,role}`: provider 可用性，`2=healthy`、`1=degraded`、`0=unavailable`
+- `ccbg_replication_oldest_job_age_ms{status}`: pending、retry_scheduled、latest_failed_object 的最老年龄
+- `ccbg_replication_dead_letter_jobs{target}`: 打开的 DLQ job 数，包含 `target="all"` 总数和各目标 provider 分组
+- `ccbg_data_plane_fallback_reads_total`: data-plane fallback 读命中累计次数
+- `ccbg_admin_alerts_open`: 当前打开告警数
+
+建议初始告警:
+
+- primary provider `ccbg_provider_health == 0` 持续 1 分钟
+- `ccbg_replication_oldest_job_age_ms{status="pending"} > 60000` 持续 1 分钟
+- `ccbg_replication_dead_letter_jobs{target="all"} > 0` 立即告警
+- `increase(ccbg_data_plane_fallback_reads_total[5m]) > 0` 作为降级读事件记录或低优先级告警
+
+## 3. 签名规则
 
 签名算法:
 
@@ -51,7 +72,7 @@
 
 因此接收端必须先拿到原始 body，再计算摘要和 HMAC，不能先把 JSON 解析后再重新序列化。
 
-## 3. 接收端最低要求
+## 4. 接收端最低要求
 
 建议至少做以下校验:
 
@@ -68,7 +89,7 @@
 - 局域网或同机部署: `60-300s`
 - 经公网反代: `300-600s`
 
-## 4. 参考接收器脚本
+## 5. 参考接收器脚本
 
 仓库提供了一个最小参考实现:
 
@@ -104,7 +125,7 @@ python3 ./scripts/notify-webhook-receiver-example.py \
 {"received_at_unix_ms": 1710000001234, "event_id": "abc123", "timestamp_unix_ms": 1710000001200, "alert_count": 2, "payload": {"service": "carrier-cloud-blob-gateway"}}
 ```
 
-## 5. 网关侧配置示例
+## 6. 网关侧配置示例
 
 ```bash
 CCBG_NOTIFY_WEBHOOK_URL=http://127.0.0.1:61110/
@@ -124,7 +145,7 @@ CCBG_NOTIFY_WEBHOOK_URL=http://127.0.0.1:61110/
 - `x-ccbg-notify-timestamp`
 - 时间窗
 
-## 6. 去重点
+## 7. 去重点
 
 参考脚本不会内置持久化去重，因为每个接收系统的存储约束不同。
 
@@ -136,7 +157,7 @@ CCBG_NOTIFY_WEBHOOK_URL=http://127.0.0.1:61110/
 
 如果你的告警系统本身支持幂等键，也可以直接把 `event_id` 当幂等键透传。
 
-## 7. 常见失败场景
+## 8. 常见失败场景
 
 - `400 missing x-ccbg-notify-event-id`: 说明接收端前面有代理错误改写，或请求并非来自当前网关实现
 - `400 stale webhook timestamp`: 说明接收端主机时钟漂移过大，或 webhook 长时间滞留

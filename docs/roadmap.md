@@ -13,11 +13,11 @@
 - 固化 `61080+` 端口策略
 - 引入统一配置模型和本地状态库存储
 - 设计 `auth-broker`、`metadata-store`、`policy-engine` 接口
-- 明确 OneDrive 作为异步备份层的系统语义
+- 明确 OneDrive 当前阶段延后集成、默认禁用和隐藏的系统语义
 - 明确唯一主云盘与 sync targets 配置模型
 - 明确 daemon、MCP、Skill 三种交付形态
 - 明确一期兼容矩阵: `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`、`OpenWRT arm64`、`STM32 client`
-- 明确公开 GitHub 仓库交付要求
+- 明确公开仓库交付要求，以及商业核心 / 公开材料 / 个人源码审查边界
 - 明确 S3 兼容边界和最小数据面子集
 
 当前进展:
@@ -37,28 +37,22 @@
 - GitHub 发布规划文档
 - S3 兼容文档
 
-## Phase 2: OneDrive 备份层
+## Phase 2: 三大运营商复制底座
 
-- 实现 `provider-onedrive`
 - 建立异步复制队列
 - 完成对象复制状态记录
-- 打通最小 OneDrive 授权流程
+- 先围绕联通 / 电信 / 移动完成同步目标与 fallback 骨架
+- OneDrive 保留为 Parking 集成项，不作为当前阶段默认备份层
 
 当前进展:
 
-- `provider-onedrive` 已落最小可用 Graph 后端，支持 Graph 健康检查、列举、读写删
+- OneDrive 代码已存在，但当前产品口径为默认禁用 / 隐藏，后续有真实需求再恢复
 - `metadata-store` 已落 SQLite 持久化层，可保存并恢复 pending replication jobs
 - `replication-engine` 已接入后台 worker，`PutObject` / `DeleteObject` 后会入队并消费
-- `gatewayd` 已补最小 OneDrive auth broker:
-  - Web `Authorization Code + PKCE`
-  - Terminal `Device Code Flow`
-  - session 文件落盘
-  - provider 侧自动 refresh token 续期
 - 对象级状态已支持按 target 汇总与按对象查询；更完整的死信、人工重试入口和更细粒度策略仍待实现
 
 交付物:
 
-- OneDrive 授权成功
 - 可写入复制任务
 - 可查询对象复制状态
 
@@ -66,12 +60,12 @@
 
 - 先接入联通或最先确认接口的一家运营商
 - 打通 `ListObjectsV2`、`GetObject`、`PutObject` 的最小 S3 闭环
-- 实现主写成功后异步复制到 OneDrive
+- 实现主写成功后异步复制到已配置的运营商同步目标
 - 实现读取时按规则 fallback
 
 交付物:
 
-- 一个对象完成主写 + 异步备份 + fallback 读取
+- 一个对象完成主写 + 异步同步 + fallback 读取
 - 本地 S3 客户端可完成最小对象读写
 - fallback 事件可查询
 - 错误日志能区分认证失败、风控失败、接口变更
@@ -103,7 +97,7 @@
 
 - 实现 `admin-api`
 - 先交付 Web UI
-- 支持 OneDrive 连接、运营商 provider 测试、复制队列与告警展示
+- 支持运营商 provider 测试、复制队列与告警展示
 - 支持设置 primary provider 与 sync targets
 - 支持 auth-broker / LLM endpoint 配置
 - 支持把手机号 / 短信验证码 / 图形验证码 等交互式认证输入回显到网页
@@ -111,7 +105,6 @@
 
 交付物:
 
-- 浏览器内完成 OneDrive 连接
 - 浏览器内查看 provider 健康状态和告警
 - 浏览器内查看对象复制状态
 - 浏览器内能响应运营商登录时的交互式输入步骤

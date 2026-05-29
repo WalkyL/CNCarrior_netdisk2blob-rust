@@ -14,10 +14,11 @@
 
 ## 当前实现的现实边界
 
-当前 `gatewayd` 已经可以作为 OpenWRT host 的基础，但它仍然是“非流式对象路径”:
+当前 `gatewayd` 已经可以作为 OpenWRT host 的基础，但 OpenWRT 档位仍必须按“小对象、低并发、可控缓存”设计:
 
-- `PUT` 请求体会整块进入内存
-- `GET` / fallback / replication 也会整块读出对象
+- `PUT` / `GET` / fallback / replication 的实际峰值取决于 provider 的 streaming/spool 能力
+- 不支持 streaming 的 provider 仍可能整块缓冲对象
+- 即使启用 spool，`/tmp` 和 overlay 写放大也需要受控
 - SQLite 仍用于复制状态持久化
 
 因此 OpenWRT 档位的关键不是追求完整功能，而是限制:
@@ -83,6 +84,9 @@
 - `CCBG_METADATA_COMPLETED_HISTORY_LIMIT=64`
 - `CCBG_METADATA_FAILED_HISTORY_LIMIT=64`
 - `CCBG_MAX_IN_MEMORY_OBJECT_BYTES=4194304`
+- `CCBG_DATA_PLANE_MAX_IN_FLIGHT=2`
+- `CCBG_DATA_PLANE_MAX_REQUESTS_PER_SECOND=8`
+- `CCBG_BODY_SPOOL_DIR=/tmp/ccbg-spool`
 - `RUST_LOG=warn`
 - 默认先不启用 OneDrive
 - 先只启用一个 primary provider

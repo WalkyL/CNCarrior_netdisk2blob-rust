@@ -1,0 +1,17 @@
+SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+
+Carrier Cloud Blob Gateway (CCBG)
+Copyright (c) 2026 walky. All rights reserved.
+
+Canonical project name: carrier-cloud-blob-gateway
+Short name: CCBG
+Canonical repository: https://github.com/walky/carrier-cloud-blob-gateway
+Release fingerprint: ccbg-0.1.0-walky-20260526-e756003d846d2c46
+
+CCBG is a commercial-first source-available project. The core gateway,
+provider adapters, metadata, replication, encryption, browser automation, and
+release tooling are not MIT licensed. See `LICENSE` and
+`COMMERCIAL-LICENSE.md`.
+
+Public materials and the Cloudflare public frontend are separate
+source-available materials. See `PUBLIC-MATERIALS-LICENSE.md`.

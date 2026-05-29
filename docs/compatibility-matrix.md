@@ -103,6 +103,8 @@ STM32 一期兼容的正确解释是:
 - 二进制协议或串口桥接
 - 极小内存占用的对象上传下载适配层
 
+当前 client-only 示例见 [stm32-client-only.md](stm32-client-only.md)，它只覆盖本地 S3 `HeadObject` / `GetObject` / streaming `PutObject`，并要求板级工程注入 HTTP、UTC 时间、SHA256 与 HMAC-SHA256。
+
 如果目标进一步扩展到 `ESP32-S3`，请额外参考 [esp32-s3-profile.md](esp32-s3-profile.md)。该档位默认仍不应承载完整 daemon。
 所有平台的 RAM / Flash 预算推导见 [resource-budget.md](resource-budget.md)。
 

@@ -2,22 +2,29 @@
 
 ## 目标
 
-源码一期就按公开 GitHub 仓库交付，因此仓库必须从一开始具备最基本的开源发布条件。
+源码一期按公开仓库交付，但仓库不是 MIT 开源仓库。它采用商业核心、公开材料、以及可申请的个人非商业源码审查模式。
 
 ## 一期最小资产
 
 - `LICENSE`
+- `COMMERCIAL-LICENSE.md`
+- `PUBLIC-MATERIALS-LICENSE.md`
 - 清晰的 `README.md`
 - 基础 CI
 - Docker / Podman 构建入口
 - 公开的规划文档
+- `public/cloudflare/`
 
 ## 当前发布资产
 
-- MIT 许可证: [LICENSE](../LICENSE)
+- 商业核心边界: [LICENSE](../LICENSE)
+- 商业许可文本: [COMMERCIAL-LICENSE.md](../COMMERCIAL-LICENSE.md)
+- 公开材料许可文本: [PUBLIC-MATERIALS-LICENSE.md](../PUBLIC-MATERIALS-LICENSE.md)
 - GitHub Actions CI: [.github/workflows/ci.yml](../.github/workflows/ci.yml)
 - Docker 构建入口: [Dockerfile](../deploy/Dockerfile)
 - Podman 构建入口: [Containerfile](../deploy/Containerfile)
+- Cloudflare 公共前端: [public/cloudflare](../public/cloudflare)
+- 个人非商业源码审查流程: [personal-source-review.md](personal-source-review.md)
 
 ## 仓库结构要求
 
@@ -27,6 +34,7 @@
 2. 当前哪些能力已经实现，哪些还在规划中。
 3. 哪些平台是一期目标，哪些只是客户端兼容。
 4. MCP 和 Skill 是正式交付物，而不是未来可选集成。
+5. 商业核心、公开材料和个人非商业源码审查边界是分开的。
 
 ## CI 最低要求
 

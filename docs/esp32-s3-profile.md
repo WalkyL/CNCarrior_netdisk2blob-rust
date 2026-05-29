@@ -249,6 +249,8 @@ OneDrive:
 3. 二期再评估是否值得做 `esp32-s3-relay-lite`。
 4. 在开始 `esp32-s3-relay-lite` 之前，先完成流式对象 API 改造。
 
+当前 client-only 参考实现见 [esp32-s3-client-only.md](esp32-s3-client-only.md)。它复用 portable S3 client 核心，并用 ESP-IDF 的 mbedTLS / `esp_http_client` 做板级适配。
+
 ## 当前建议
 
 对于你现在这个项目，最稳妥的判断是:

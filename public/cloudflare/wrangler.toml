@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Public-Materials
+# Copyright (c) 2026 walky
+
+name = "ccbg-public"
+pages_build_output_dir = "."
+compatibility_date = "2026-05-26"

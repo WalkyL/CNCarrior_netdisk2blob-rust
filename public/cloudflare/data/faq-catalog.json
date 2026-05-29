@@ -1,0 +1,88 @@
+{
+  "license_id": "LicenseRef-CCBG-Public-Materials",
+  "copyright": "Copyright (c) 2026 walky",
+  "release_fingerprint": "ccbg-0.1.0-walky-20260526-e756003d846d2c46",
+  "version": "2026-05-28",
+  "items": [
+    {
+      "id": "mobile-credential-configured-but-unavailable",
+      "title": "移动凭据已保存但状态仍异常",
+      "summary": "通常是 token/root_folder_id/user_domain_id 字段缺失或已过期，需重新抓取并保存。",
+      "keywords": ["mobile", "credential", "token_present", "root_folder_id", "user_domain_id", "未配置", "reauth"],
+      "provider": ["mobile"],
+      "context": ["provider_health", "credential_card", "mobile_assistant"],
+      "config_keys": ["CCBG_PRIMARY_PROVIDER", "CCBG_CONTROL_API_KEY"],
+      "error_patterns": ["reauth", "token expired", "missing root_folder_id", "missing user_domain_id"],
+      "actions": [
+        "在 Admin 的移动助手重新抓取当前登录会话",
+        "保存后强制刷新 Providers 与 Dashboard 状态",
+        "确认 provider health 与 credential card 状态一致"
+      ],
+      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/auth-step-by-step.md"
+    },
+    {
+      "id": "limit-probe-cleanup-required",
+      "title": "体积探测完成但提示需手工清理",
+      "summary": "探测目录删除失败或能力受限时会保留 cleanup_required 标记。",
+      "keywords": ["limit probe", "cleanup", "delete", "probe directory"],
+      "provider": ["unicom", "telecom", "mobile"],
+      "context": ["limit_probe", "dashboard"],
+      "config_keys": ["CCBG_DATA_PLANE_MAX_IN_FLIGHT"],
+      "error_patterns": ["cleanup failed", "delete not supported", "cleanup_required"],
+      "actions": [
+        "按提示在对应云盘删除探测目录",
+        "在 Admin 点击 Mark Cleaned 清理标记",
+        "重新跑一次小体积探测验证"
+      ],
+      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/provider-probes.md"
+    },
+    {
+      "id": "replication-failed-object-triage",
+      "title": "复制失败对象排查",
+      "summary": "先看 latest/oldest failed object 明细，再按 target/provider 分组定位。",
+      "keywords": ["replication", "failed object", "target", "retry", "dlq"],
+      "provider": ["unicom", "telecom", "mobile"],
+      "context": ["replication", "dashboard", "logs"],
+      "config_keys": ["CCBG_SYNC_TARGETS", "CCBG_FALLBACK_READ_ORDER"],
+      "error_patterns": ["replication failed", "retry scheduled", "open DLQ"],
+      "actions": [
+        "导出 failed JSON/CSV 归档",
+        "按 target/provider 过滤后重试",
+        "检查 fallback/sync 策略是否与实际对象归属一致"
+      ],
+      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/object-actions-api-reference.md"
+    },
+    {
+      "id": "openwrt-memory-budget-risk",
+      "title": "OpenWrt 资源不足风险",
+      "summary": "64MB 仅实验，不承诺稳定；128MB 可测；256MB+ 推荐。",
+      "keywords": ["openwrt", "memory", "64MB", "128MB", "256MB", "OOM"],
+      "provider": [],
+      "context": ["install", "host_profile"],
+      "config_keys": ["CCBG_MAX_IN_MEMORY_OBJECT_BYTES", "CCBG_DATA_PLANE_MAX_REQUESTS_PER_SECOND"],
+      "error_patterns": ["out of memory", "killed", "insufficient memory"],
+      "actions": [
+        "按 OpenWrt host profile 下调并发和内存参数",
+        "优先升级到 256MB+",
+        "保留 dry-run 与 smoke 校验流程"
+      ],
+      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/openwrt-host-profile.md"
+    },
+    {
+      "id": "fnos-experimental-install-path",
+      "title": "fnOS 实验宿主安装路径",
+      "summary": "fnOS 作为 NAS/Linux 实验宿主，优先 Docker/Compose，不承诺应用商店上架。",
+      "keywords": ["fnos", "docker", "compose", "nas", "experimental"],
+      "provider": [],
+      "context": ["install", "platform"],
+      "config_keys": ["CCBG_PRIMARY_PROVIDER", "CCBG_ADMIN_MODE"],
+      "error_patterns": ["container restart", "permission denied", "bind failed"],
+      "actions": [
+        "按 install 页面 Docker/Compose 步骤部署",
+        "使用 LXC/Linux 包的 smoke 流程验证",
+        "遇到权限问题先校验挂载目录与端口占用"
+      ],
+      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/pve-lxc-deployment.md"
+    }
+  ]
+}

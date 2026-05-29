@@ -42,7 +42,7 @@ New product requirements:
 - Keep the capability pluggable instead of hard-coding it into a single provider.
 - Keep memory usage low enough for `N100`-class routers and ARM64 soft routers.
 - Avoid turning replication into a forced decrypt-then-re-encrypt slow path.
-- Preserve a path for desktop mounts and possible future SMB sidecars.
+- Preserve a path for desktop mounts and possible future SMB plugins.
 
 ## Decision
 
@@ -342,7 +342,7 @@ This matches the existing gateway bias toward low-memory streaming and spool-bas
 
 ## Desktop Mounts and Future SMB
 
-Encryption is compatible with desktop mounts and a future SMB sidecar, but it changes where the
+Encryption is compatible with desktop mounts and a future SMB plugin, but it changes where the
 cost shows up.
 
 - `rclone mount` or other desktop clients will read plaintext through the gateway S3 API.
@@ -354,7 +354,7 @@ cost shows up.
 That means:
 
 - encryption is usually not the only overhead,
-- SMB should stay a sidecar or separate service,
+- SMB should stay a plugin or separate service,
 - the weakest routers should not be expected to run
   `gatewayd + heavy desktop mount traffic + SMB + encryption` as a default profile.
 

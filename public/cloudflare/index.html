@@ -1,0 +1,199 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: LicenseRef-CCBG-Public-Materials -->
+<!-- Copyright (c) 2026 walky -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Carrier Cloud Blob Gateway</title>
+  <meta name="description" content="Carrier Cloud Blob Gateway public authorization, documentation, and provenance surface." />
+  <meta name="ccbg-provenance" content="ccbg-0.1.0-walky-20260526-e756003d846d2c46" />
+  <meta name="ccbg-fingerprint-sha256" content="e756003d846d2c460f892a20402d59539c8c6980ba011c62d17ab5ad962de6b6" />
+  <meta name="ccbg-license" content="LicenseRef-CCBG-Public-Materials" />
+  <meta name="ccbg-core-license" content="LicenseRef-CCBG-Commercial" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="assets/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div>
+          <div class="brand-title">Carrier Cloud Blob Gateway</div>
+          <div class="brand-subtitle">CCBG public surface</div>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <a href="/faq/">FAQ</a>
+        <a href="/install/">安装下载</a>
+        <a href="#licenses">授权</a>
+        <a href=".well-known/ccbg-provenance.json">Provenance</a>
+      </nav>
+    </header>
+
+    <main class="layout">
+      <section class="hero" id="demo">
+        <div class="intro">
+          <div class="eyebrow">carrier-disk-gateway.agi2030.online</div>
+          <h1>Carrier Cloud Blob Gateway</h1>
+          <p class="lead">
+            把运营商网盘封装成 S3 块存储和 SMB 文件共享。这个 Cloudflare 站点提供公开介绍、FAQ、安装下载入口、
+            授权与个人源码审查说明，以及 provenance 指纹校验信息。站点不接收云盘凭据，不暴露商业核心实现细节。
+          </p>
+          <div class="actions">
+            <a class="button primary" href="/install/">安装与下载</a>
+            <a class="button" href="/faq/">打开 FAQ</a>
+          </div>
+          <div class="facts" aria-label="Release facts">
+            <div class="fact">
+              <strong>90+ days</strong>
+              <span>Verified personal users may apply for non-commercial source review.</span>
+            </div>
+            <div class="fact">
+              <strong>0 secrets</strong>
+              <span>This frontend never asks for carrier, gateway, or LLM credentials.</span>
+            </div>
+            <div class="fact">
+              <strong>1 fingerprint</strong>
+              <span>The public frontend and commercial core share one release identifier.</span>
+            </div>
+          </div>
+        </div>
+
+        <section class="demo-panel" aria-label="Static gateway demo panel">
+          <div class="demo-header">
+            <div>
+              <div class="demo-title">Gateway operations demo</div>
+              <div class="brand-subtitle">Static sample state, no live credentials</div>
+            </div>
+            <span class="status-dot" aria-label="Demo healthy"></span>
+          </div>
+          <div class="demo-grid">
+            <div class="metric">
+              <label>Primary write provider</label>
+              <strong id="demo-primary">Unicom</strong>
+              <span>Only one primary write target is active at a time.</span>
+            </div>
+            <div class="metric">
+              <label>Async sync targets</label>
+              <strong id="demo-sync">Telecom / Mobile</strong>
+              <span>Sync/fallback order is explicit and policy-driven.</span>
+            </div>
+            <div class="metric">
+              <label>Pending jobs</label>
+              <strong id="demo-queue">7</strong>
+              <span>Replication queue is tracked separately from the data plane.</span>
+            </div>
+            <div class="metric">
+              <label>Latest failures</label>
+              <strong id="demo-failed">0</strong>
+              <span>Operational alerts use latest-object semantics.</span>
+            </div>
+          </div>
+          <div class="provider-lanes" aria-label="Provider sample lanes">
+            <div class="lane">
+              <strong>Unicom</strong>
+              <span class="bar" aria-hidden="true"><i style="width: 74%"></i></span>
+              <span>write</span>
+            </div>
+            <div class="lane">
+              <strong>Telecom</strong>
+              <span class="bar" aria-hidden="true"><i style="width: 56%"></i></span>
+              <span>sync</span>
+            </div>
+            <div class="lane">
+              <strong>Mobile</strong>
+              <span class="bar" aria-hidden="true"><i style="width: 42%"></i></span>
+              <span>sync</span>
+            </div>
+          </div>
+          <div class="demo-actions">
+            <button class="button" id="rotate-primary" type="button">Rotate demo primary</button>
+            <button class="button" id="acknowledge-queue" type="button">Reduce demo queue</button>
+          </div>
+        </section>
+      </section>
+
+      <div class="sections">
+        <section class="section" id="licenses">
+          <h2>Licensing And Source Access</h2>
+          <p class="section-lead">
+            The gateway core is commercial-first. Public materials are source-available.
+            Personal source review is available only by written grant and remains
+            non-commercial.
+          </p>
+          <div class="card-grid">
+            <article class="card">
+              <h3>Commercial authorization</h3>
+              <p>Required for companies, hosted services, OEM packaging, paid operations, redistribution, or competitive gateway products.</p>
+              <a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/COMMERCIAL-LICENSE.md">Open commercial terms</a>
+            </article>
+            <article class="card">
+              <h3>Personal source review</h3>
+              <p>Real individual users may apply after <span id="source-review-days">90</span> consecutive days of genuine personal use.</p>
+              <ul>
+                <li>Non-commercial personal review only</li>
+                <li>No hosting, redistribution, or transfer</li>
+                <li>No employer, client, or team access</li>
+              </ul>
+            </article>
+            <article class="card">
+              <h3>Public materials</h3>
+              <p>Documentation, screenshots, this frontend, and release notes are separate from the commercial gateway core.</p>
+              <a href="release-notes/v0.1.0-public.md">Open release notes</a>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="docs">
+          <h2>Documentation Entry</h2>
+          <p class="section-lead">
+            These links are intended for public evaluation and operational planning. Core
+            provider adapters, metadata, replication, encryption, and browser automation
+            implementation remain under the commercial license boundary.
+          </p>
+          <div class="card-grid">
+            <article class="card">
+              <h3>Architecture</h3>
+              <p>Provider topology, S3-compatible data plane, control plane, and operations model.</p>
+              <a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/architecture.md">Read architecture</a>
+            </article>
+            <article class="card">
+              <h3>API reference</h3>
+              <p>Public-facing control-plane and object-action API semantics.</p>
+              <a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/object-actions-api-reference.md">Read API reference</a>
+            </article>
+            <article class="card">
+              <h3>FAQ catalog and match API</h3>
+              <p>Cloudflare-side FAQ catalog and weighted match endpoint for frontend AI explain flows.</p>
+              <a href="/faq/">Open FAQ and API usage</a>
+            </article>
+            <article class="card">
+              <h3>Provenance</h3>
+              <p>Release fingerprint, evidence checklist, and legal boundary notes.</p>
+              <a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/PROVENANCE.md">Read provenance</a>
+            </article>
+          </div>
+        </section>
+
+        <section class="section" id="provenance">
+          <h2>Release Provenance</h2>
+          <p class="section-lead">
+            The same fingerprint should appear in public frontend assets, release notes,
+            Cloudflare headers, gateway binary version output, Admin status, startup logs,
+            backups, SBOM, and signed release records.
+          </p>
+          <div class="provenance-box" id="footer-fingerprint">ccbg-0.1.0-walky-20260526-e756003d846d2c46</div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <span>Copyright (c) 2026 walky. Public materials license: LicenseRef-CCBG-Public-Materials.</span>
+      <span> Core license: LicenseRef-CCBG-Commercial.</span>
+    </footer>
+  </div>
+  <script src="assets/app.js"></script>
+</body>
+</html>

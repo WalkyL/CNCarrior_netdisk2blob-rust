@@ -40,7 +40,7 @@
 
 - 教会 Agent 在什么场景下使用 MCP 工具
 - 指导 Agent 如何理解复制状态、fallback 语义和错误分类
-- 限制 Agent 不要错误假设“主写成功等于 OneDrive 已备份”
+- 限制 Agent 不要错误假设“主写成功等于所有同步目标已完成”
 - 限制 Agent 不要错误假设“多个运营商账号可以同时作为主写入端”
 
 ## MCP 设计原则
@@ -122,7 +122,7 @@ MCP 不应把所有内部细节暴露成工具。建议分成四类:
 ### Admin / Auth Tools
 
 - `auth_get_status`
-- `auth_begin_onedrive_login`
+- `auth_begin_carrier_login`
 - `auth_set_carrier_token`
 - `alerts_list_recent`
 
@@ -155,7 +155,7 @@ Skill 的职责是给 Agent 提供:
 
 ### Skill 必须强调的语义
 
-1. 主写成功不代表 OneDrive 已备份。
+1. 主写成功不代表异步同步目标已完成。
 2. 同一时刻只能有一个运营商云盘作为主写入端。
 3. fallback 只有在对象状态为 `replicated` 时才能依赖。
 4. 删除和覆盖应优先确认对象状态，避免破坏尚未复制的数据。
@@ -219,12 +219,12 @@ Skill -> MCP tools/resources/prompts -> gatewayd -> policy-engine -> providers
 
 1. 只允许一个账号所在 provider 被指定为唯一写入主云盘。
 2. 其他运营商账号如被选中，只参与异步同步，不参与并发主写。
-3. `onedrive` 作为默认同步目标，应默认加入同步目标集合。
+3. OneDrive 当前属于延后集成 provider，默认禁用 / 隐藏，不默认加入同步目标集合。
 4. Agent 在修改 primary provider 前，应先检查当前复制积压和目标健康状态。
 
 ## 路线建议
 
-1. 先完成核心服务与 OneDrive 异步复制闭环
+1. 先完成核心服务与运营商异步复制闭环
 2. 再完成 `mcp-server` 的 stdio 版
 3. 基于 MCP 工具稳定面再生成 Skill
 4. 最后才补 Streamable HTTP transport

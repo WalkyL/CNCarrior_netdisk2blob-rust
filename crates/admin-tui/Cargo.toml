@@ -1,0 +1,16 @@
+[package]
+name = "admin-tui"
+version = "0.1.0"
+edition = "2024"
+license-file = "../../COMMERCIAL-LICENSE.md"
+
+[dependencies]
+admin-api = { path = "../admin-api" }
+anyhow = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
