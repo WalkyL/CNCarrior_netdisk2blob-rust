@@ -742,3 +742,5 @@
 **依赖:** ADMIN-006, CF-002
 **不做事项:** 不在本任务把 LXC 实机安装自动化跑在生产容器里。
 **风险:** 如果同时改动 Rust 和 CF 站点，人工验收时容易把本地缓存与远端部署状态混淆。
+**执行备注:** 2026-05-30 已将 release `gatewayd` 发布到 `.43` 的 `/home/walky/apps/ccbg`，远端 binary sha256 为 `fa5d855722b2a6922f08202207841c79d264f839aeb5193c806ef94b916fb174`，进程 PID `619802`。`/healthz` 返回 200 且 `unicom-cloud-drive` healthy；Admin API 未登录返回合同化 401；Admin 根路径跳转 `/login`。详细记录见 `docs/ops-006-43-acceptance.md`。
+**阻塞项:** `carrier-disk-gateway.agi2030.online` 和 `ccbg-public.pages.dev` 当前 DNS 解析失败，本机 wrangler 未登录，无法直接发布/绑定 Cloudflare Pages；登录后的 Admin 浏览器人工验收仍需补做。
