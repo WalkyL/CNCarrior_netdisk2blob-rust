@@ -39391,7 +39391,7 @@ mod tests {
         assert!(html.contains("id=\"top-status-limits\""));
         assert!(html.contains("id=\"top-status-prompts\""));
         assert!(html.contains("id=\"top-status-object-ops\""));
-        assert!(html.contains("把运营商网盘封装成S3块存储和SMB文件共享"));
+        assert!(html.contains("把运营商云盘转换为S3挂载点和SMB服务器"));
         assert!(html.contains("Cloud Object Semantics"));
         assert!(html.contains("S3 object actions"));
         assert!(html.contains("Cloud drive actions"));
