@@ -9176,7 +9176,7 @@ async fn request_llm_error_explain_response(
                 "error-explain LLM endpoint {} returned no message",
                 auth_capture_llm_endpoint_display_name(endpoint)
             ))
-    })?;
+        })?;
     openai_chat_completion_message_text(&message, "error-explain response")
 }
 
@@ -9913,7 +9913,8 @@ fn browser_flow_prefers_navigate_bootstrap(
     surface: &str,
     flow_id: &str,
 ) -> bool {
-    let Ok((catalog, flow)) = browser_flow_catalog_and_flow(state, provider, surface, flow_id) else {
+    let Ok((catalog, flow)) = browser_flow_catalog_and_flow(state, provider, surface, flow_id)
+    else {
         return false;
     };
     fn flow_has_navigate_step(flow: &BrowserFlow) -> bool {
@@ -12273,9 +12274,7 @@ async fn admin_showcase_feed(
         .and_then(|value| value.trim().parse::<u32>().ok())
         .map(|value| value.clamp(1, 24))
         .unwrap_or(12);
-    let remote_url = format!(
-        "https://llm-router.agi2030.online/v1/feeds/showcase?limit={limit}"
-    );
+    let remote_url = format!("https://llm-router.agi2030.online/v1/feeds/showcase?limit={limit}");
     let client = HttpClient::builder().build().map_err(|error| {
         (
             StatusCode::BAD_GATEWAY,
@@ -12309,7 +12308,10 @@ async fn admin_showcase_feed(
     })?;
     Ok((
         status,
-        [(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"))],
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        )],
         payload,
     )
         .into_response())
@@ -15673,15 +15675,18 @@ async fn open_browser_cdp_endpoint_info(
         "data:text/html;charset=utf-8,{}",
         utf8_percent_encode(&html, NON_ALPHANUMERIC)
     );
-    let session = CdpBrowserFlowSession::connect(&cdp_connection_config_from_browser_endpoint(
-        &endpoint,
-    ))
-    .await
-    .map_err(|error| {
-        BlobError::Upstream(format!("failed to connect CDP endpoint for info page: {error}"))
-    })?;
+    let session =
+        CdpBrowserFlowSession::connect(&cdp_connection_config_from_browser_endpoint(&endpoint))
+            .await
+            .map_err(|error| {
+                BlobError::Upstream(format!(
+                    "failed to connect CDP endpoint for info page: {error}"
+                ))
+            })?;
     session.navigate(&data_url).await.map_err(|error| {
-        BlobError::Upstream(format!("failed to open endpoint info page in CDP browser: {error}"))
+        BlobError::Upstream(format!(
+            "failed to open endpoint info page in CDP browser: {error}"
+        ))
     })?;
 
     Ok(Json(BrowserCdpOpenInfoPayload {
@@ -35833,9 +35838,7 @@ mod tests {
         }
     }
 
-    async fn spawn_slow_auth_capture_llm_server(
-        delay: Duration,
-    ) -> (String, oneshot::Sender<()>) {
+    async fn spawn_slow_auth_capture_llm_server(delay: Duration) -> (String, oneshot::Sender<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test llm listener should bind");

@@ -3264,7 +3264,10 @@ mod tests {
             .expect("telecom phone input should be bound");
         assert_eq!(phone_input.frame.as_deref(), Some("name:udb_login"));
         assert_eq!(
-            phone_input.selectors.first().map(|selector| selector.value.as_str()),
+            phone_input
+                .selectors
+                .first()
+                .map(|selector| selector.value.as_str()),
             Some("#dynamicUserName")
         );
         assert!(

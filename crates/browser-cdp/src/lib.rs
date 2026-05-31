@@ -1465,7 +1465,10 @@ async fn resolve_websocket_url(
     }
 
     if selector.is_none() {
-        if let Some(url) = bootstrap_target_url.map(str::trim).filter(|value| !value.is_empty()) {
+        if let Some(url) = bootstrap_target_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             return create_bootstrap_target(http, endpoint_url, url).await;
         }
     }
@@ -1523,7 +1526,9 @@ async fn create_bootstrap_target(
         .send()
         .await
         .map_err(|error| {
-            BlobError::Upstream(format!("failed to create CDP bootstrap target {url}: {error}"))
+            BlobError::Upstream(format!(
+                "failed to create CDP bootstrap target {url}: {error}"
+            ))
         })?
         .error_for_status()
         .map_err(|error| {
@@ -1548,7 +1553,9 @@ async fn create_bootstrap_target(
 
 fn percent_encode_target_url(target_url: &str) -> Result<String, BlobError> {
     let parsed = Url::parse(target_url).map_err(|error| {
-        BlobError::Configuration(format!("invalid bootstrap target url {target_url}: {error}"))
+        BlobError::Configuration(format!(
+            "invalid bootstrap target url {target_url}: {error}"
+        ))
     })?;
     Ok(parsed.as_str().replace(' ', "%20"))
 }
@@ -1650,11 +1657,10 @@ fn choose_target(
     selector: Option<&CdpTargetSelector>,
 ) -> Result<CdpTargetDescriptor, BlobError> {
     let matches = |target: &&CdpTargetDescriptor| match selector {
-        None => target
-            .web_socket_debugger_url
-            .as_deref()
-            .is_some()
-            && target_is_bootstrap_candidate(target),
+        None => {
+            target.web_socket_debugger_url.as_deref().is_some()
+                && target_is_bootstrap_candidate(target)
+        }
         Some(CdpTargetSelector::TargetId(id)) => target.id.as_deref() == Some(id.as_str()),
         Some(CdpTargetSelector::UrlPattern(pattern)) => target
             .url
@@ -2032,8 +2038,8 @@ mod tests {
         CdpObservedRequestState, CdpTargetDescriptor, CdpTargetSelector,
         DISPATCH_EVENTS_FUNCTION_SOURCE, SET_INPUT_FUNCTION_SOURCE, apply_event_state,
         choose_frame, choose_target, extract_runtime_value, javascript_element_resolver_expression,
-        parse_network_request, percent_encode_target_url, request_post_field_value, validate_page_websocket_url,
-        wildcard_match,
+        parse_network_request, percent_encode_target_url, request_post_field_value,
+        validate_page_websocket_url, wildcard_match,
     };
     use blob_core::{
         BlobError, BrowserFlowElement, BrowserFlowRequest, BrowserFlowSelector,
