@@ -58,10 +58,14 @@ Optional GitHub variables:
 - `CCBG_CF_BIND_DOMAIN_ON_DEPLOY` defaults to unset/false. Set it to `true`
   only for the one-time custom-domain binding job with a token that has zone
   route permissions.
+- `CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY` defaults to unset/false. Set it to `true`
+  only when GitHub-hosted runners can access the production domain without
+  Cloudflare WAF or edge security returning a false 403.
 
 Routine production deploys update the existing Worker + Assets deployment and
 skip custom-domain rebinding. The custom domain should already point at the
-Worker.
+Worker. Run the public URL smoke checks from an allowed network after the
+GitHub deployment completes.
 
 ## Local Preview
 

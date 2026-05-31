@@ -101,7 +101,7 @@ jobs:
           npx wrangler@latest "${args[@]}"
 
       - name: Deployed HTTP smoke
-        if: steps.target.outputs.domain != ''
+        if: steps.target.outputs.domain != '' && vars.CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY == 'true'
         run: |
           set -euo pipefail
           base="https://${{ steps.target.outputs.domain }}"
