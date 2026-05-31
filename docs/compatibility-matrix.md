@@ -4,24 +4,28 @@
 
 一期目标不是“所有平台都运行同一个完整版进程”，而是按平台能力分层兼容:
 
-- 完整宿主兼容
-- 轻量宿主兼容
+- 官方宿主兼容
+- 实验宿主兼容
 - 客户端兼容
 
 ## 平台矩阵
 
 | 目标 | 角色 | 一期定位 | 说明 |
 | --- | --- | --- | --- |
-| PVE LXC `x86/x64` | 完整宿主 | 支持 | 优先级最高，适合作为主部署目标 |
-| Docker `x86/x64` | 完整宿主 | 支持 | 使用 `deploy/Dockerfile` |
-| Podman `x86/x64` | 完整宿主 | 支持 | 使用 `deploy/Containerfile` 或 `deploy/Dockerfile` |
-| OpenWRT `arm64` | 轻量宿主 | 支持 | 优先 `daemon + stdio MCP`，管理界面按资源情况裁剪 |
+| PVE LXC `x86/x64` | 官方宿主 | 支持 | 优先级最高，适合作为主部署目标，systemd 后台常驻 |
+| Docker `x86/x64` | 官方宿主 | 支持 | 使用 `deploy/Dockerfile` |
+| Podman `x86/x64` | 官方宿主 | 支持 | 使用 `deploy/Containerfile` 或 `deploy/Dockerfile` |
+| Windows `x86_64` | 官方宿主 | 支持 | 原生发布包，默认 Scheduled Task 后台常驻路径 |
+| macOS `x86_64` | 官方宿主 | 支持 | 原生发布包，默认 `launchd` user agent |
+| macOS `arm64` | 官方宿主 | 支持 | 原生发布包，默认 `launchd` user agent |
+| fnOS | 实验宿主 | 实验 | 优先复用 Docker / Linux 路径，不承诺应用商店上架 |
+| OpenWRT `arm64` | 实验宿主 | 实验 | 优先 `daemon + stdio MCP`，管理界面按资源情况裁剪 |
 | STM32 | 客户端/从设备 | 支持 | 不承载完整 daemon，作为本地 S3/MCP 的调用端 |
 | ESP32-S3 | 客户端/从设备 | 支持 | 默认按 `client-only` 兼容处理，不承载完整 daemon |
 
 ## 宿主分级
 
-### 完整宿主
+### 官方宿主
 
 包含:
 
@@ -29,7 +33,7 @@
 - `policy-engine`
 - `metadata-store`
 - `replication-engine`
-- `provider-onedrive`
+- 运营商 provider adapters
 - `mcp-server`
 - 可选 `admin-ui-web`
 
@@ -38,8 +42,17 @@
 - PVE LXC `x86/x64`
 - Docker `x86/x64`
 - Podman `x86/x64`
+- Windows `x86_64`
+- macOS `x86_64`
+- macOS `arm64`
 
-### 轻量宿主
+发布包要求:
+
+- Rust `gatewayd` 二进制和 `assets/admin/index.html` 必须在同一个 artifact 内。
+- Windows/macOS 原生包使用 [build-native-package.sh](../scripts/build-native-package.sh) 生成。
+- macOS 默认安装到用户级 `launchd`；Windows 默认安装为无额外依赖的后台常驻任务。
+
+### 实验宿主
 
 包含:
 
@@ -57,6 +70,7 @@
 
 一期目标:
 
+- fnOS
 - OpenWRT `arm64`
 
 参考:
@@ -133,4 +147,6 @@ STM32 一期兼容的正确解释是:
 1. PVE LXC `x86/x64` 可运行完整 daemon。
 2. Docker 和 Podman 镜像都可成功构建并启动。
 3. OpenWRT `arm64` 能运行轻量化部署配置。
-4. STM32 有明确的客户端兼容接口，不再被误认为完整宿主目标。
+4. Windows `x86_64` 原生包包含 `gatewayd.exe`、Admin HTML 和后台常驻安装脚本。
+5. macOS `x86_64` / `arm64` 原生包包含 `gatewayd`、Admin HTML 和 `launchd` 安装脚本。
+6. STM32 / ESP32-S3 有明确的客户端兼容接口，不再被误认为完整宿主目标。

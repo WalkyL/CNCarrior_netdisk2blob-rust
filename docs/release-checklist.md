@@ -20,6 +20,11 @@
 - [x] 容器镜像构建文件已显式复制 Admin HTML
 - [ ] 生成本次正式 release 的 provenance 文件
 - [ ] 生成本次正式 release 的对外交付包与 SHA256
+- [ ] Windows `x86_64` 原生包包含 `gatewayd.exe` 与 `assets/admin/index.html`
+- [ ] macOS `x86_64` 原生包包含 `gatewayd` 与 `assets/admin/index.html`
+- [ ] macOS `arm64` 原生包包含 `gatewayd` 与 `assets/admin/index.html`
+- [ ] Homebrew formula 模板已用正式 tag/SHA256 渲染
+- [ ] winget manifest 模板已用正式 tag/SHA256 渲染
 
 ## 2. 本地质量门
 
@@ -29,6 +34,7 @@
 - [x] `cargo test -p blob-core --quiet`
 - [x] `git diff --check`
 - [ ] 需要时补跑完整 workspace 级测试
+- [ ] `scripts/build-native-package.sh --skip-build --target x86_64-unknown-linux-gnu` 包结构 smoke 通过
 
 ## 3. `.43` 自动 smoke
 
@@ -43,10 +49,21 @@
 
 ## 4. 公共站点 smoke
 
+- [ ] `https://carrier-disk-gateway.agi2030.online/` 首屏为深色安装优先入口
 - [x] `https://carrier-disk-gateway.agi2030.online/faq/` 返回 `200`
 - [x] `https://carrier-disk-gateway.agi2030.online/install/` 返回 `200`
+- [ ] `https://carrier-disk-gateway.agi2030.online/data/install-catalog.json` 返回 `200`
 - [x] `https://carrier-disk-gateway.agi2030.online/api/faq/catalog` 返回 `200`
 - [x] `https://carrier-disk-gateway.agi2030.online/api/faq/match` 返回 `200`
+
+### 4.1 安装页人工验收
+
+- [ ] 首页顶部配色与 `llm-router.agi2030.online` 的深色运维风格一致
+- [ ] 首页首屏可见 LXC/Linux 推荐安装命令
+- [ ] `/install/` 可见 Windows `winget`、macOS `brew`、PVE LXC、Docker、Podman 命令
+- [ ] OpenWrt / fnOS 明确标为实验宿主
+- [ ] STM32 / ESP32-S3 明确标为 client-only
+- [ ] 页面没有要求输入任何运营商、网关或 LLM 凭据
 
 ## 5. `.43` 全量人工验收
 
@@ -113,6 +130,7 @@
 - [ ] provenance 已生成
 - [ ] 回滚包 / 上一个稳定版本可用
 - [ ] 发布记录已落文档
+- [ ] Windows/macOS 后台常驻路径至少经过对应真机 smoke
 
 ## 7. 回滚准备
 

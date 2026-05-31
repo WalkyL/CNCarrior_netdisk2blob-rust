@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "license": "LicenseRef-CCBG-Public-Materials",
+  "release_fingerprint": "ccbg-0.1.0-walky-20260526-e756003d846d2c46",
+  "release_base_url": "https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download",
+  "support_note": "Official host packages include the Rust gatewayd binary and assets/admin/index.html in the same release artifact.",
+  "groups": [
+    {
+      "id": "official-hosts",
+      "title": "官方宿主",
+      "summary": "推荐用于长期运行，默认按后台常驻网关部署。",
+      "items": [
+        {
+          "id": "pve-lxc",
+          "name": "PVE LXC",
+          "status": "official",
+          "arch": "x86 / x64",
+          "service_mode": "systemd",
+          "package": "ccbg-lxc-package.tar.gz",
+          "command": "curl -fsSLO https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-lxc-package.tar.gz && tar -xzf ccbg-lxc-package.tar.gz && sudo ./ccbg-lxc-package/scripts/install.sh",
+          "verify": "curl -fsS http://127.0.0.1:61080/healthz"
+        },
+        {
+          "id": "docker",
+          "name": "Docker",
+          "status": "official",
+          "arch": "x86 / x64",
+          "service_mode": "container",
+          "package": "ghcr.io/walky/carrier-cloud-blob-gateway:latest",
+          "command": "docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walky/carrier-cloud-blob-gateway:latest",
+          "verify": "docker exec ccbg gatewayd --version"
+        },
+        {
+          "id": "podman",
+          "name": "Podman",
+          "status": "official",
+          "arch": "x86 / x64",
+          "service_mode": "container",
+          "package": "ghcr.io/walky/carrier-cloud-blob-gateway:latest",
+          "command": "podman run -d --name ccbg --replace --restart=unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walky/carrier-cloud-blob-gateway:latest",
+          "verify": "podman exec ccbg gatewayd --version"
+        },
+        {
+          "id": "windows-x86_64",
+          "name": "Windows",
+          "status": "official",
+          "arch": "x86_64",
+          "service_mode": "Scheduled Task resident process",
+          "package": "ccbg-windows-x86_64.zip",
+          "command": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip; Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\\ccbg-release; .\\ccbg-release\\ccbg-windows-x86_64\\deploy\\windows\\install.ps1\"",
+          "fallback_command": "winget install AGI2030.CarrierCloudBlobGateway",
+          "verify": "powershell -Command \"Invoke-WebRequest http://127.0.0.1:61080/healthz\""
+        },
+        {
+          "id": "macos-x86_64",
+          "name": "macOS Intel",
+          "status": "official",
+          "arch": "x86_64",
+          "service_mode": "launchd user agent",
+          "package": "ccbg-macos-x86_64.tar.gz",
+          "command": "brew install walky/tap/carrier-cloud-blob-gateway && brew services start carrier-cloud-blob-gateway",
+          "fallback_command": "curl -fsSLO https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
+          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd"
+        },
+        {
+          "id": "macos-arm64",
+          "name": "macOS Apple Silicon",
+          "status": "official",
+          "arch": "arm64",
+          "service_mode": "launchd user agent",
+          "package": "ccbg-macos-arm64.tar.gz",
+          "command": "brew install walky/tap/carrier-cloud-blob-gateway && brew services start carrier-cloud-blob-gateway",
+          "fallback_command": "curl -fsSLO https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
+          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd"
+        }
+      ]
+    },
+    {
+      "id": "experimental-hosts",
+      "title": "实验宿主",
+      "summary": "可测试，但 release 前不作为默认推荐路径。",
+      "items": [
+        {
+          "id": "fnos",
+          "name": "fnOS",
+          "status": "experimental",
+          "arch": "x86 / x64",
+          "service_mode": "Docker or Linux host",
+          "package": "reuse Docker or LXC package",
+          "command": "docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walky/carrier-cloud-blob-gateway:latest",
+          "verify": "curl -fsS http://127.0.0.1:61080/healthz"
+        },
+        {
+          "id": "openwrt-arm64",
+          "name": "OpenWrt",
+          "status": "experimental",
+          "arch": "arm64",
+          "service_mode": "procd init script",
+          "package": "ccbg-openwrt-lite.tar.gz",
+          "command": "curl -fsSLO https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-openwrt-lite.tar.gz && tar -xzf ccbg-openwrt-lite.tar.gz && ./ccbg-openwrt-lite/scripts/install.sh",
+          "verify": "/etc/init.d/ccbg status"
+        }
+      ]
+    },
+    {
+      "id": "client-only",
+      "title": "Client-only",
+      "summary": "只作为本地 S3/MCP 客户端，不承载完整 gatewayd。",
+      "items": [
+        {
+          "id": "stm32",
+          "name": "STM32",
+          "status": "client-only",
+          "arch": "MCU",
+          "service_mode": "S3/MCP client",
+          "package": "client example",
+          "command": "scripts/check-stm32-client-example.sh",
+          "verify": "docs/stm32-client-only.md"
+        },
+        {
+          "id": "esp32-s3",
+          "name": "ESP32-S3",
+          "status": "client-only",
+          "arch": "MCU",
+          "service_mode": "S3/MCP client",
+          "package": "client example",
+          "command": "python3 scripts/check-esp32-s3-client-example.py",
+          "verify": "docs/esp32-s3-client-only.md"
+        }
+      ]
+    }
+  ]
+}

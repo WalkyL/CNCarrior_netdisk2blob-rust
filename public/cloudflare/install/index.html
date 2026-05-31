@@ -1,59 +1,84 @@
 <!doctype html>
 <!-- SPDX-License-Identifier: LicenseRef-CCBG-Public-Materials -->
 <!-- Copyright (c) 2026 walky -->
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CCBG Install</title>
+  <title>CCBG 安装与下载</title>
+  <meta name="description" content="Carrier Cloud Blob Gateway supported platform install commands." />
   <meta name="ccbg-provenance" content="ccbg-0.1.0-walky-20260526-e756003d846d2c46" />
   <link rel="stylesheet" href="/assets/styles.css" />
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark" aria-hidden="true"></div>
-        <div>
-          <div class="brand-title">CCBG Install</div>
-          <div class="brand-subtitle">LXC / fnOS(exp) / OpenWrt(exp)</div>
-        </div>
-      </div>
+      <a class="brand" href="/" aria-label="Carrier Cloud Blob Gateway 首页">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>
+          <span class="brand-title">CCBG Install</span>
+          <span class="brand-subtitle">Windows / macOS / LXC / Container</span>
+        </span>
+      </a>
       <nav class="nav" aria-label="Primary">
         <a href="/">首页</a>
         <a href="/faq/">FAQ</a>
         <a href="/.well-known/ccbg-provenance.json">Provenance</a>
       </nav>
     </header>
-    <main class="layout">
-      <section class="section" style="margin-top: 1rem; padding: 1rem;">
-        <h2>安装与下载入口</h2>
-        <p class="section-lead">安装路径优先级：LXC/Linux 稳定优先；fnOS 为 NAS/Linux 实验宿主；OpenWrt 保留实验支持。</p>
-        <div class="card-grid">
-          <article class="card" style="padding: 1rem;">
-            <h3>LXC / Linux（推荐）</h3>
-            <p>包名：<code>ccbg-lxc-package.tar.gz</code></p>
-            <p>SHA256：构建后见 <code>target/lxc-package/ccbg-lxc-package.tar.gz.sha256</code></p>
-            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/scripts/build-lxc-package.sh">build-lxc-package.sh</a></p>
-            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/deploy/lxc/install.sh">install.sh</a></p>
+
+    <main>
+      <section class="hero install-hero">
+        <div class="hero-copy">
+          <div class="eyebrow">Install first</div>
+          <h1>选择平台，一条命令启动本地网关</h1>
+          <p class="lead">
+            官方宿主包会把 Rust `gatewayd` 和 Admin HTML 放在同一发布物里。macOS 使用 `launchd`，
+            Windows 使用无额外依赖的后台常驻任务路径；Linux 优先 LXC、Docker 和 Podman。
+          </p>
+          <div class="actions">
+            <a class="button primary" href="#install-catalog">查看命令</a>
+            <a class="button" href="https://github.com/walky/carrier-cloud-blob-gateway/releases/latest">GitHub Releases</a>
+          </div>
+        </div>
+        <aside class="install-console">
+          <div class="console-title">
+            <span>macOS</span>
+            <strong>Homebrew</strong>
+          </div>
+          <pre><code>brew install walky/tap/carrier-cloud-blob-gateway
+brew services start carrier-cloud-blob-gateway</code></pre>
+          <div class="console-title secondary-title">
+            <span>Windows</span>
+            <strong>PowerShell</strong>
+          </div>
+<pre><code>Invoke-WebRequest https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip
+Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\ccbg-release
+.\ccbg-release\ccbg-windows-x86_64\deploy\windows\install.ps1</code></pre>
+        </aside>
+      </section>
+
+      <section class="section compact" id="install-catalog">
+        <div class="section-header">
+          <div>
+            <h2>安装 catalog</h2>
+            <p class="section-lead">页面从静态 JSON 渲染，便于后续替换包管理器、镜像源和平台 profile。</p>
+          </div>
+        </div>
+        <div id="install-catalog-root" class="catalog-stack" data-install-catalog>
+          <noscript>需要启用 JavaScript 才能展开完整平台 catalog。</noscript>
+          <article class="card">
+            <h3>PVE LXC / Linux</h3>
+            <p>推荐宿主：下载 `ccbg-lxc-package.tar.gz`，执行包内 `scripts/install.sh`。</p>
           </article>
-          <article class="card" style="padding: 1rem;">
-            <h3>fnOS（实验，优先于 OpenWrt）</h3>
-            <p>定位：NAS/Linux 实验宿主，优先 Docker/Compose 路径。</p>
-            <p>风险：不承诺应用商店上架，不承诺零配置。</p>
-            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/pve-lxc-deployment.md">参考 Linux/LXC 部署与 smoke</a></p>
-          </article>
-          <article class="card" style="padding: 1rem;">
-            <h3>OpenWrt（实验）</h3>
-            <p>包名：<code>ccbg-openwrt-lite.tar.gz</code></p>
-            <p>SHA256：构建后见 <code>target/openwrt-lite/ccbg-openwrt-lite.tar.gz.sha256</code></p>
-            <p>支持线：<strong>64MB 仅实验</strong>；<strong>128MB 可测</strong>；<strong>256MB+ 推荐</strong></p>
-            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/scripts/build-openwrt-lite-package.sh">build-openwrt-lite-package.sh</a></p>
-            <p><a href="https://github.com/walky/carrier-cloud-blob-gateway/blob/main/deploy/openwrt/install.sh">install.sh</a></p>
+          <article class="card">
+            <h3>Windows / macOS</h3>
+            <p>Windows 使用 winget 或包内 PowerShell 安装脚本；macOS 使用 Homebrew 或包内 launchd 安装脚本。</p>
           </article>
         </div>
       </section>
     </main>
   </div>
+  <script src="/assets/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+# Copyright (c) 2026 walky
+PackageIdentifier: AGI2030.CarrierCloudBlobGateway
+PackageVersion: "{{VERSION}}"
+PackageLocale: en-US
+Publisher: AGI2030
+PackageName: Carrier Cloud Blob Gateway
+License: Commercial
+ShortDescription: Convert carrier cloud disks into a local S3 mount point and SMB server.
+PackageUrl: https://carrier-disk-gateway.agi2030.online/
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0

@@ -12,6 +12,7 @@
 - 清晰的 `README.md`
 - 基础 CI
 - Docker / Podman 构建入口
+- Windows / macOS 原生包脚本
 - 公开的规划文档
 - `public/cloudflare/`
 
@@ -23,6 +24,11 @@
 - GitHub Actions CI: [.github/workflows/ci.yml](../.github/workflows/ci.yml)
 - Docker 构建入口: [Dockerfile](../deploy/Dockerfile)
 - Podman 构建入口: [Containerfile](../deploy/Containerfile)
+- 原生宿主打包入口: [build-native-package.sh](../scripts/build-native-package.sh)
+- macOS `launchd` 安装脚本: [deploy/macos](../deploy/macos)
+- Windows 后台常驻安装脚本: [deploy/windows](../deploy/windows)
+- Homebrew formula 模板: [packaging/homebrew](../packaging/homebrew)
+- winget manifest 模板: [packaging/winget](../packaging/winget)
 - Cloudflare 公共前端: [public/cloudflare](../public/cloudflare)
 - 个人非商业源码审查流程: [personal-source-review.md](personal-source-review.md)
 
@@ -42,12 +48,15 @@
 
 - `cargo fmt --check`
 - `cargo test --workspace`
+- Cloudflare public fingerprint check
+- 原生发布包结构 smoke
 
 后续可扩展:
 
 - `clippy`
 - 交叉编译检查
 - Docker / Podman 构建验证
+- Homebrew formula / winget manifest 发布校验
 
 ## 建议的 GitHub 发布节奏
 

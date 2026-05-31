@@ -10,10 +10,12 @@ It provides:
 
 - product overview and documentation links
 - FAQ catalog and weighted FAQ match API (`/api/faq/catalog`, `/api/faq/match`)
-- install/download entry for LXC/Linux, fnOS(experimental), OpenWrt(experimental)
+- install/download catalog for PVE LXC, Docker, Podman, Windows, macOS,
+  fnOS(experimental), OpenWrt(experimental), STM32(client-only), and
+  ESP32-S3(client-only)
 - commercial authorization entry through `https://register.agi2030.online`
 - personal non-commercial source review request entry through `https://register.agi2030.online`
-- static demo control panel
+- install-first dark public homepage aligned with the llm-router operational palette
 - provenance endpoints and headers
 
 Deploy this directory as Cloudflare Pages assets with Pages Functions enabled.
@@ -41,7 +43,7 @@ wrangler deploy -c public/cloudflare/wrangler.worker.toml \
 ```
 
 This fallback serves `/`, `/faq/`, `/install/`, `/api/faq/catalog`, and
-`/api/faq/match`.
+`/api/faq/match`. Static data files under `/data/` are served as assets.
 
 ## Local Preview
 

@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+# Copyright (c) 2026 walky
+
+class CarrierCloudBlobGateway < Formula
+  desc "Convert carrier cloud disks into a local S3 mount point and SMB server"
+  homepage "https://carrier-disk-gateway.agi2030.online/"
+  version "{{VERSION}}"
+  license :cannot_represent
+
+  on_macos do
+    on_intel do
+      url "https://github.com/walky/carrier-cloud-blob-gateway/releases/download/{{TAG}}/ccbg-macos-x86_64.tar.gz"
+      sha256 "{{MACOS_X86_64_SHA256}}"
+    end
+
+    on_arm do
+      url "https://github.com/walky/carrier-cloud-blob-gateway/releases/download/{{TAG}}/ccbg-macos-arm64.tar.gz"
+      sha256 "{{MACOS_ARM64_SHA256}}"
+    end
+  end
+
+  def install
+    prefix.install Dir["*"]
+    bin.install_symlink prefix/"bin/gatewayd" => "gatewayd"
+  end
+
+  service do
+    run [opt_prefix/"bin/gatewayd"]
+    working_dir var/"ccbg"
+    environment_variables CCBG_ADMIN_ASSET_PATH: opt_prefix/"assets/admin/index.html",
+                          CCBG_CONFIG_DIR: etc/"ccbg",
+                          CCBG_DATA_DIR: var/"ccbg"
+    keep_alive true
+    log_path var/"log/ccbg/gatewayd.out.log"
+    error_log_path var/"log/ccbg/gatewayd.err.log"
+  end
+
+  test do
+    assert_match "gatewayd", shell_output("#{bin}/gatewayd --version")
+  end
+end

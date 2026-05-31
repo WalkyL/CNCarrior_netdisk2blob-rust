@@ -4,14 +4,9 @@
   "sources": [
     "app.js"
   ],
-  "sourcesContent": [
-    "CCBG public frontend demo controls. SPDX-License-Identifier: LicenseRef-CCBG-Public-Materials. Copyright (c) 2026 walky. release_fingerprint=ccbg-0.1.0-walky-20260526-e756003d846d2c46"
-  ],
   "names": [],
   "mappings": "",
-  "x_ccbg_provenance": {
-    "release_fingerprint": "ccbg-0.1.0-walky-20260526-e756003d846d2c46",
-    "fingerprint_sha256": "e756003d846d2c460f892a20402d59539c8c6980ba011c62d17ab5ad962de6b6",
-    "license_id": "LicenseRef-CCBG-Public-Materials"
-  }
+  "x_license": "LicenseRef-CCBG-Public-Materials",
+  "x_ccbg_release_fingerprint": "ccbg-0.1.0-walky-20260526-e756003d846d2c46",
+  "x_ccbg_release_fingerprint_legacy": "release_fingerprint=ccbg-0.1.0-walky-20260526-e756003d846d2c46"
 }

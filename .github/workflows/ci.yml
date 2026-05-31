@@ -54,6 +54,13 @@ jobs:
       - name: Cloudflare public fingerprint check
         run: python3 scripts/check-cloudflare-public-fingerprint.py
 
+      - name: Native package structure smoke
+        run: |
+          mkdir -p target/release
+          printf '#!/bin/sh\nexit 0\n' > target/release/gatewayd
+          chmod +x target/release/gatewayd
+          scripts/build-native-package.sh --skip-build --target x86_64-unknown-linux-gnu
+
       - name: OneDrive parking checks
         run: |
           python3 scripts/check-onedrive-parking.py
