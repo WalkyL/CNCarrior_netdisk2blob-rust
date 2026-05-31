@@ -3,7 +3,7 @@
   "license": "LicenseRef-CCBG-Public-Materials",
   "release_fingerprint": "ccbg-0.1.0-walky-20260526-e756003d846d2c46",
   "release_base_url": "https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download",
-  "support_note": "Official host packages include the Rust gatewayd binary and assets/admin/index.html in the same release artifact.",
+  "support_note": "Official host packages are intended to run as a local resident gateway with a LAN admin surface.",
   "groups": [
     {
       "id": "official-hosts",
