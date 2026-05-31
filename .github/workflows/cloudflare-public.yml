@@ -105,9 +105,26 @@ jobs:
         run: |
           set -euo pipefail
           base="https://${{ steps.target.outputs.domain }}"
-          curl -fsS "$base/" | grep -F '/assets/ccbg-icon.svg' >/dev/null
-          curl -fsS "$base/" | grep -F 'Windows、macOS、Linux 和常见备份工具可以通过 S3 或 SMB 访问' >/dev/null
-          curl -fsS "$base/install/" | grep -F '选择平台，一条命令启动本地网关' >/dev/null
-          curl -fsS "$base/faq/" | grep -F 'FAQ 目录与匹配 API' >/dev/null
-          curl -fsS "$base/assets/ccbg-icon.svg" | grep -F 'CCBG-Release-Fingerprint' >/dev/null
-          curl -fsS "$base/api/faq/catalog" | grep -F '"count"' >/dev/null
+          expect_http() {
+            path="$1"
+            needle="$2"
+            url="${base}${path}"
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              if body="$(curl -fsS --max-time 15 -A ccbg-github-actions-smoke "$url" 2>/dev/null)" &&
+                printf '%s' "$body" | grep -F "$needle" >/dev/null; then
+                return 0
+              fi
+              echo "Waiting for ${url} to expose expected content (${attempt}/12)."
+              sleep 5
+            done
+            curl -fsS --max-time 15 -A ccbg-github-actions-smoke "$url"
+            echo "Expected content was not found in ${url}: ${needle}" >&2
+            return 1
+          }
+
+          expect_http "/" "/assets/ccbg-icon.svg"
+          expect_http "/" "Windows、macOS、Linux 和常见备份工具可以通过 S3 或 SMB 访问"
+          expect_http "/install/" "选择平台，一条命令启动本地网关"
+          expect_http "/faq/" "FAQ 目录与匹配 API"
+          expect_http "/assets/ccbg-icon.svg" "CCBG-Release-Fingerprint"
+          expect_http "/api/faq/catalog" '"count"'
