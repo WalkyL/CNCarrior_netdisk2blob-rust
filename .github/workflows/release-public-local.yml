@@ -162,9 +162,15 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Install Rust target
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.rust_target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup default stable
+          if ! rustup target list --installed | grep -Fxq "${{ matrix.rust_target }}"; then
+            rustup target add "${{ matrix.rust_target }}"
+          fi
+          rustc --version
 
       - name: Install cargo-zigbuild
         shell: bash

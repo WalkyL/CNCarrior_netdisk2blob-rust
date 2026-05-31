@@ -50,6 +50,12 @@
   - `ghcr.io/<owner>/carrier-cloud-blob-gateway:<tag>`
   - `ghcr.io/<owner>/carrier-cloud-blob-gateway:latest`
 
+局域网 runner 可以和 `llm-router` 复用同一台机器，但不要复用同一个 repo-scoped
+runner 注册。CCBG 当前使用独立 runner `ccbg-local-linux-x64-01`，标签保持
+`self-hosted, Linux, X64, local-linux-x64, release-core-linux`。本地 job 直接复用
+runner 上已有的 stable Rust toolchain，只在缺少目标时执行 `rustup target add`，
+避免每次发版都更新完整 toolchain。
+
 每个宿主包都必须包含 Rust `gatewayd` 和 `assets/admin/index.html`。
 OpenWrt lite 包还必须包含 `mcp-server`。Release job 会把所有包合并到同一个
 GitHub release，生成 `ccbg-checksums.txt`、`release-provenance.json` 和
