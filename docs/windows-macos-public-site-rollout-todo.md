@@ -28,10 +28,10 @@
 
 **优先级:** P0
 **状态:** in-progress
-**目标:** 新增 `install-catalog.json`，统一声明官方宿主、实验宿主和 client-only 平台。
+**目标:** 新增 `install-catalog.json`，统一声明官方宿主、实验宿主和嵌入式客户端示例。
 **Coding 指导:** catalog 包含平台 id、状态、架构、安装命令、包名、服务模式和验收命令；页面只消费 catalog，不复制平台矩阵。
 **验收方法:** JSON 可由浏览器 `fetch` 读取；无敏感字段名；Cloudflare public boundary check 通过。
-**验收标准:** 官方宿主包含 PVE LXC `x86/x64`、Docker `x86/x64`、Podman `x86/x64`、Windows `x86_64`、macOS `x86_64`、macOS `arm64`；实验包含 fnOS、OpenWrt `arm64`；client-only 包含 STM32、ESP32-S3。
+**验收标准:** 官方宿主包含 PVE LXC `x86/x64`、Docker `x86/x64`、Podman `x86/x64`、Windows `x86_64`、macOS `x86_64`、macOS `arm64`；实验包含 fnOS、OpenWrt `arm64`；STM32、ESP32-S3 只作为嵌入式客户端示例展示。
 **依赖:** 无
 **不做事项:** 不把 OneDrive 或运营商凭据样例写进 catalog。
 **风险:** catalog 与 release 脚本漂移，需要 CI 或文档 checklist 兜底。
@@ -101,7 +101,7 @@
 **优先级:** P0
 **状态:** in-progress
 **目标:** 更新 compatibility matrix、GitHub publication 和 release checklist。
-**Coding 指导:** 明确“官方宿主 / 实验宿主 / client-only”三类，不把 STM32/ESP32-S3 描述为完整宿主。
+**Coding 指导:** 明确“官方宿主 / 实验宿主 / 嵌入式客户端示例”三类，不把 STM32/ESP32-S3 描述为完整宿主或可安装平台。
 **验收方法:** 人工检查文档；release checklist 能直接指导 `.43` 与公网验收。
 **验收标准:** Windows/macOS 被列为官方宿主；fnOS/OpenWrt 是实验；release 二进制必须包含 Rust 程序和 Admin HTML。
 **依赖:** WS-001, PKG-001

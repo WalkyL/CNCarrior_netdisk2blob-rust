@@ -6,7 +6,7 @@
 
 - 官方宿主兼容
 - 实验宿主兼容
-- 客户端兼容
+- 嵌入式客户端示例
 
 ## 平台矩阵
 
@@ -20,8 +20,8 @@
 | macOS `arm64` | 官方宿主 | 支持 | 原生发布包，默认 `launchd` user agent |
 | fnOS | 实验宿主 | 实验 | 优先复用 Docker / Linux 路径，不承诺应用商店上架 |
 | OpenWRT `arm64` | 实验宿主 | 实验 | 优先 `daemon + stdio MCP`，管理界面按资源情况裁剪 |
-| STM32 | 客户端/从设备 | 支持 | 不承载完整 daemon，作为本地 S3/MCP 的调用端 |
-| ESP32-S3 | 客户端/从设备 | 支持 | 默认按 `client-only` 兼容处理，不承载完整 daemon |
+| STM32 | 嵌入式客户端示例 | 示例 | 不承载完整 daemon，只提供本地 S3 客户端参考实现 |
+| ESP32-S3 | 嵌入式客户端示例 | 示例 | 默认按 ESP-IDF S3 client-only 示例处理，不承载完整 daemon |
 
 ## 宿主分级
 
@@ -78,12 +78,11 @@
 - [openwrt-host-profile.md](openwrt-host-profile.md)
 - [resource-budget.md](resource-budget.md)
 
-### 客户端兼容
+### 嵌入式客户端示例
 
 包含:
 
 - 调用本地 S3 API
-- 调用 MCP
 - 小对象上传下载
 - 状态查询
 
@@ -93,16 +92,18 @@
 - SQLite 元数据层
 - OneDrive OAuth 控制面
 - 多 provider 协调
+- MCP stdio
 
-一期目标:
+一期示例:
 
 - STM32
+- ESP32-S3
 
 ## STM32 兼容定义
 
-STM32 一期兼容的正确解释是:
+STM32 一期边界的正确解释是:
 
-- 作为 `carrier-cloud-blob-gateway` 的 S3 / MCP 客户端
+- 作为 `carrier-cloud-blob-gateway` 的本地 S3 客户端示例
 - 调用宿主机暴露的本地接口
 - 处理少量对象、短请求和状态查询
 
@@ -111,7 +112,7 @@ STM32 一期兼容的正确解释是:
 - 在 STM32 上运行完整 Rust daemon
 - 在 STM32 上承载 OneDrive 授权与复制引擎
 
-如果后续需要 STM32 原生接入，建议单独提供:
+如果后续需要 STM32 原生接入产品化，建议单独提供:
 
 - 极简 HTTP client
 - 二进制协议或串口桥接
@@ -149,4 +150,4 @@ STM32 一期兼容的正确解释是:
 3. OpenWRT `arm64` 能运行轻量化部署配置。
 4. Windows `x86_64` 原生包包含 `gatewayd.exe`、Admin HTML 和后台常驻安装脚本。
 5. macOS `x86_64` / `arm64` 原生包包含 `gatewayd`、Admin HTML 和 `launchd` 安装脚本。
-6. STM32 / ESP32-S3 有明确的客户端兼容接口，不再被误认为完整宿主目标。
+6. STM32 / ESP32-S3 明确为嵌入式客户端示例，不再被误认为完整宿主目标。

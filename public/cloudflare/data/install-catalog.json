@@ -103,16 +103,16 @@
       ]
     },
     {
-      "id": "client-only",
-      "title": "Client-only",
-      "summary": "只作为本地 S3/MCP 客户端，不承载完整 gatewayd。",
+      "id": "embedded-client-examples",
+      "title": "嵌入式客户端示例",
+      "summary": "这是 MCU 侧 S3 客户端参考实现，不是可安装完整网关的宿主平台。",
       "items": [
         {
           "id": "stm32",
           "name": "STM32",
-          "status": "client-only",
+          "status": "client-example",
           "arch": "MCU",
-          "service_mode": "S3/MCP client",
+          "service_mode": "S3 client example",
           "package": "client example",
           "command": "scripts/check-stm32-client-example.sh",
           "verify": "docs/stm32-client-only.md"
@@ -120,9 +120,9 @@
         {
           "id": "esp32-s3",
           "name": "ESP32-S3",
-          "status": "client-only",
+          "status": "client-example",
           "arch": "MCU",
-          "service_mode": "S3/MCP client",
+          "service_mode": "ESP-IDF S3 client example",
           "package": "client example",
           "command": "python3 scripts/check-esp32-s3-client-example.py",
           "verify": "docs/esp32-s3-client-only.md"

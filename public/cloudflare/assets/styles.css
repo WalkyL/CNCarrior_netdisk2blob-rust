@@ -410,6 +410,11 @@ pre code {
   color: var(--blue);
 }
 
+.status-client-example {
+  border-color: rgba(88, 166, 255, 0.4);
+  color: var(--blue);
+}
+
 .command-block {
   display: grid;
   gap: 0.5rem;

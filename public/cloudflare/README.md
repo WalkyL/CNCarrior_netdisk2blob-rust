@@ -11,8 +11,8 @@ It provides:
 - product overview and documentation links
 - FAQ catalog and weighted FAQ match API (`/api/faq/catalog`, `/api/faq/match`)
 - install/download catalog for PVE LXC, Docker, Podman, Windows, macOS,
-  fnOS(experimental), OpenWrt(experimental), STM32(client-only), and
-  ESP32-S3(client-only)
+  fnOS(experimental), OpenWrt(experimental), plus STM32 / ESP32-S3 embedded
+  client examples
 - commercial authorization entry through `https://register.agi2030.online`
 - personal non-commercial source review request entry through `https://register.agi2030.online`
 - install-first dark public homepage aligned with the llm-router operational palette

@@ -16,7 +16,7 @@
 
 浏览器执行层当前统一收口到标准 CDP，而不是绑定某个浏览器品牌。`browser-cdp` crate 负责连接可配置的 CDP endpoint、选择 page target、执行基础页面动作，`gatewayd` 则提供 catalog 查询、dry-run 和最小真实 session 执行入口，便于后续把 auth-capture 编排继续外挂出来。
 
-当前针对轻量设备的策略也已明确: `OpenWRT` 优先作为 host 服务宿主，默认通过 `CCBG_MAX_IN_MEMORY_OBJECT_BYTES` 控制非流式对象路径的峰值内存，并通过 SQLite 元数据保留上限控制 flash 增长；`ESP32-S3` 默认按 `client-only` 兼容处理，只有在确认资源充足时才考虑更小功能集的 relay 形态，后续元数据应走更轻量的 `tiny-state-client` 路线而不是继续复用完整 SQLite 宿主形态。
+当前针对轻量设备的策略也已明确: `OpenWRT` 优先作为 host 服务宿主，默认通过 `CCBG_MAX_IN_MEMORY_OBJECT_BYTES` 控制非流式对象路径的峰值内存，并通过 SQLite 元数据保留上限控制 flash 增长；`STM32` / `ESP32-S3` 只提供嵌入式 S3 客户端示例，不是完整网关宿主。只有在确认资源充足时，才考虑更小功能集的 ESP32-S3 relay 形态，后续元数据应走更轻量的 `tiny-state-client` 路线而不是继续复用完整 SQLite 宿主形态。
 
 ## 当前目标
 
@@ -25,7 +25,7 @@
 - 将“核心网关能力”和“Agent 集成封装”解耦，确保能分别交付为 daemon、MCP 和 Skill。
 - 明确采用“单写主云盘 + 多异步同步目标”模型，避免多主写入导致的数据冲突。
 - 数据面正式目标兼容 S3 API，优先支持 Agent 常用的最小 S3 子集。
-- 一期兼容目标覆盖 `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`、`OpenWRT arm64`，以及 `STM32` 客户端接入。
+- 一期宿主目标覆盖 `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`、`OpenWRT arm64`；`STM32` / `ESP32-S3` 只作为嵌入式 S3 客户端示例。
 - 先跑通本地 Ubuntu，后续平滑迁移到 PVE/LXC、软路由和 ARM Linux 设备。
 - 统一将监听端口约束在 `60000-65534` 区间，降低与系统常用端口冲突的概率。
 
@@ -236,8 +236,8 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 
 - `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`: 完整宿主目标
 - `OpenWRT arm64`: 轻量宿主目标，当前采用 `sqlite-host` 路线
-- `STM32`: 客户端目标，不承载完整 daemon
-- `ESP32-S3`: 默认客户端目标，后续按 `tiny-state-client` 或 `relay-lite` 子集演进，详见 `docs/esp32-s3-profile.md`
+- `STM32`: 嵌入式 S3 客户端示例，不承载完整 daemon
+- `ESP32-S3`: 嵌入式 S3 客户端示例；后续按 `tiny-state-client` 或 `relay-lite` 子集评估，详见 `docs/esp32-s3-profile.md`
 
 ## 轻量设备资源边界
 

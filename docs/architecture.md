@@ -58,7 +58,7 @@
 - `full-host`: PVE LXC `x86/x64`、Docker `x86/x64`、Podman `x86/x64`
 - `lite-host`: OpenWRT `arm64`
 - `split-host`: `gateway-lite` 跑在 OpenWRT / 软路由，`auth-broker` 跑在另一台 `x86/x64`
-- `client-only`: STM32
+- 嵌入式客户端示例: STM32 / ESP32-S3
 
 ## 当前模块与规划模块
 

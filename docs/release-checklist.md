@@ -62,7 +62,7 @@
 - [ ] 首页首屏可见 LXC/Linux 推荐安装命令
 - [ ] `/install/` 可见 Windows `winget`、macOS `brew`、PVE LXC、Docker、Podman 命令
 - [ ] OpenWrt / fnOS 明确标为实验宿主
-- [ ] STM32 / ESP32-S3 明确标为 client-only
+- [ ] STM32 / ESP32-S3 明确标为嵌入式客户端示例，不进入可安装宿主列表
 - [ ] 页面没有要求输入任何运营商、网关或 LLM 凭据
 
 ## 5. `.43` 全量人工验收
