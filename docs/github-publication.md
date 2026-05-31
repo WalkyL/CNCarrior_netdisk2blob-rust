@@ -32,6 +32,49 @@
 - Cloudflare 公共前端: [public/cloudflare](../public/cloudflare)
 - 个人非商业源码审查流程: [personal-source-review.md](personal-source-review.md)
 
+## GitHub Release 发版流程
+
+正式二进制 release 使用 [release-public-local.yml](../.github/workflows/release-public-local.yml)。
+这个流程借鉴 `llm-router` 的 local release 模式：
+
+- GitHub Actions 负责调度、权限、release 创建、checksums 和 provenance。
+- 局域网 Linux self-hosted runner `self-hosted, Linux, X64, local-linux-x64`
+  负责重编译资源更重或更适合内网缓存的包：
+  - `ccbg-lxc-package.tar.gz`
+  - `ccbg-openwrt-lite.tar.gz`
+  - `ccbg-windows-x86_64.zip`（GNU toolchain）
+- GitHub macOS runner 负责需要 Darwin 工具链的包：
+  - `ccbg-macos-x86_64.tar.gz`
+  - `ccbg-macos-arm64.tar.gz`
+- GitHub-hosted Linux runner 负责发布 GHCR 多架构镜像：
+  - `ghcr.io/<owner>/carrier-cloud-blob-gateway:<tag>`
+  - `ghcr.io/<owner>/carrier-cloud-blob-gateway:latest`
+
+每个宿主包都必须包含 Rust `gatewayd` 和 `assets/admin/index.html`。
+OpenWrt lite 包还必须包含 `mcp-server`。Release job 会把所有包合并到同一个
+GitHub release，生成 `ccbg-checksums.txt`、`release-provenance.json` 和
+`release-provenance.md`，然后验证公网安装页使用的 `releases/latest/download/*`
+URL 能返回 `200`。
+
+如果公开下载仓库和当前源码仓库不是同一个仓库，需要配置：
+
+- GitHub variable `CCBG_PUBLIC_RELEASE_REPO`，例如 `walky/carrier-cloud-blob-gateway`
+- GitHub secret `CCBG_PUBLIC_RELEASE_REPO_TOKEN`，需要能在该公开仓库创建/更新 release
+
+未配置镜像仓库时，workflow 只会发布到当前仓库；这适合内部验证，但不满足公网
+安装页已经写死到公开下载仓库的场景。
+
+当前公网安装 catalog 要求 latest release 至少包含:
+
+- `ccbg-lxc-package.tar.gz`
+- `ccbg-windows-x86_64.zip`
+- `ccbg-macos-x86_64.tar.gz`
+- `ccbg-macos-arm64.tar.gz`
+- `ccbg-openwrt-lite.tar.gz`
+- `ccbg-checksums.txt`
+- `release-provenance.json`
+- `release-provenance.md`
+
 ## 仓库结构要求
 
 公开仓库需要让第一次打开的人快速理解:

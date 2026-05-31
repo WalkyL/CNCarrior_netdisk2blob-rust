@@ -13,11 +13,12 @@
 ## 1. Release 产物
 
 - [x] Git 工作区干净
-- [x] 已有明确 release 候选提交：`460a27f`
+- [x] 已有明确 release 候选提交：`2cf2634`
 - [x] `gatewayd` 与 Admin HTML 作为同一发布物交付
 - [x] LXC 包包含 `assets/admin/index.html`
 - [x] OpenWRT lite 包包含 `assets/admin/index.html`
 - [x] 容器镜像构建文件已显式复制 Admin HTML
+- [x] 已有 GitHub Actions local release 流程：`.github/workflows/release-public-local.yml`
 - [ ] 生成本次正式 release 的 provenance 文件
 - [ ] 生成本次正式 release 的对外交付包与 SHA256
 - [ ] Windows `x86_64` 原生包包含 `gatewayd.exe` 与 `assets/admin/index.html`
@@ -25,6 +26,17 @@
 - [ ] macOS `arm64` 原生包包含 `gatewayd` 与 `assets/admin/index.html`
 - [ ] Homebrew formula 模板已用正式 tag/SHA256 渲染
 - [ ] winget manifest 模板已用正式 tag/SHA256 渲染
+
+正式 GitHub release 必须至少包含下面这些公网安装页会引用的资产：
+
+- `ccbg-lxc-package.tar.gz`
+- `ccbg-windows-x86_64.zip`
+- `ccbg-macos-x86_64.tar.gz`
+- `ccbg-macos-arm64.tar.gz`
+- `ccbg-openwrt-lite.tar.gz`
+- `ccbg-checksums.txt`
+- `release-provenance.json`
+- `release-provenance.md`
 
 ## 2. 本地质量门
 
