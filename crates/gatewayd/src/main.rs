@@ -121,7 +121,7 @@ use tar::{Builder as TarBuilder, Header as TarHeader};
 #[cfg(test)]
 use tokio::sync::oneshot;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tokio::time::{Duration, Instant, sleep, timeout_at};
+use tokio::time::{Duration, Instant, sleep, timeout, timeout_at};
 use tokio::{
     fs::File as TokioFile,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
@@ -204,6 +204,10 @@ const DEFAULT_ADMIN_LOG_LINE_MAX_BYTES: usize = 2 * 1024;
 const DEFAULT_ADMIN_LOG_QUERY_LIMIT: usize = 80;
 const MAX_ADMIN_LOG_QUERY_LIMIT: usize = 200;
 const MAX_ADMIN_LOG_KEYWORD_BYTES: usize = 120;
+#[cfg(test)]
+const AUTH_CAPTURE_LLM_REQUEST_TIMEOUT_SECS: u64 = 1;
+#[cfg(not(test))]
+const AUTH_CAPTURE_LLM_REQUEST_TIMEOUT_SECS: u64 = 12;
 const CCBG_COPYRIGHT: &str = "Copyright (c) 2026 walky";
 const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/walky/carrier-cloud-blob-gateway";
@@ -860,6 +864,24 @@ struct BrowserCdpProbePayload {
     discovered_user_agent: String,
     #[serde(default)]
     target_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct BrowserCdpOpenInfoPayload {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    target_id: String,
+    #[serde(default)]
+    endpoint_url: String,
+    #[serde(default)]
+    target_selector: String,
+    #[serde(default)]
+    target_timeout_ms: Option<u64>,
+    #[serde(default)]
+    navigated_url: String,
+    #[serde(default)]
+    summary: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -6725,6 +6747,11 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         )
         .route("/api/browser-cdp/probe", post(probe_browser_cdp_endpoint))
         .route(
+            "/api/browser-cdp/open-endpoint-info",
+            post(open_browser_cdp_endpoint_info),
+        )
+        .route("/api/showcase", get(admin_showcase_feed))
+        .route(
             "/api/auth-capture/prompts",
             get(list_auth_capture_prompts).post(create_auth_capture_prompt),
         )
@@ -8733,24 +8760,7 @@ async fn request_visual_captcha_answer(
         builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
     }
 
-    let response = builder.send().await.map_err(|error| {
-        BlobError::Upstream(format!(
-            "failed to call captcha LLM endpoint {}: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
-    let response = response.error_for_status().map_err(|error| {
-        BlobError::Upstream(format!(
-            "captcha LLM endpoint {} returned error: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
-    let raw = response.text().await.map_err(|error| {
-        BlobError::Upstream(format!(
-            "failed to read captcha LLM response from {}: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
+    let raw = send_auth_capture_llm_request(builder, endpoint, "captcha").await?;
     let parsed: OpenAiChatCompletionResponse = serde_json::from_str(&raw).map_err(|error| {
         BlobError::Upstream(format!(
             "failed to decode captcha LLM response from {}: {} | body={}",
@@ -8854,24 +8864,7 @@ async fn request_visual_layout_validation(
         builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
     }
 
-    let response = builder.send().await.map_err(|error| {
-        BlobError::Upstream(format!(
-            "failed to call visual layout LLM endpoint {}: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
-    let response = response.error_for_status().map_err(|error| {
-        BlobError::Upstream(format!(
-            "visual layout LLM endpoint {} returned error: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
-    let raw = response.text().await.map_err(|error| {
-        BlobError::Upstream(format!(
-            "failed to read visual layout LLM response from {}: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
+    let raw = send_auth_capture_llm_request(builder, endpoint, "visual layout").await?;
     let parsed: OpenAiChatCompletionResponse = serde_json::from_str(&raw).map_err(|error| {
         BlobError::Upstream(format!(
             "failed to decode visual layout LLM response from {}: {} | body={}",
@@ -9165,24 +9158,7 @@ async fn request_llm_error_explain_response(
     {
         builder = builder.header(AUTHORIZATION, format!("Bearer {api_key}"));
     }
-    let response = builder.send().await.map_err(|error| {
-        BlobError::Upstream(format!(
-            "failed to call error-explain LLM endpoint {}: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
-    let response = response.error_for_status().map_err(|error| {
-        BlobError::Upstream(format!(
-            "error-explain LLM endpoint {} returned error: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
-    let raw = response.text().await.map_err(|error| {
-        BlobError::Upstream(format!(
-            "failed to read error-explain LLM response from {}: {error}",
-            auth_capture_llm_endpoint_display_name(endpoint)
-        ))
-    })?;
+    let raw = send_auth_capture_llm_request(builder, endpoint, "error-explain").await?;
     let parsed: OpenAiChatCompletionResponse = serde_json::from_str(&raw).map_err(|error| {
         BlobError::Upstream(format!(
             "failed to decode error-explain LLM response from {}: {} | body={}",
@@ -9200,8 +9176,45 @@ async fn request_llm_error_explain_response(
                 "error-explain LLM endpoint {} returned no message",
                 auth_capture_llm_endpoint_display_name(endpoint)
             ))
-        })?;
+    })?;
     openai_chat_completion_message_text(&message, "error-explain response")
+}
+
+async fn send_auth_capture_llm_request(
+    builder: reqwest::RequestBuilder,
+    endpoint: &AuthCaptureLlmEndpoint,
+    operation: &str,
+) -> Result<String, BlobError> {
+    let endpoint_name = auth_capture_llm_endpoint_display_name(endpoint);
+    let endpoint_name_for_request = endpoint_name.clone();
+    let response = timeout(
+        Duration::from_secs(AUTH_CAPTURE_LLM_REQUEST_TIMEOUT_SECS),
+        async move {
+            let response = builder.send().await.map_err(|error| {
+                BlobError::Upstream(format!(
+                    "failed to call {operation} LLM endpoint {endpoint_name_for_request}: {error}"
+                ))
+            })?;
+            let response = response.error_for_status().map_err(|error| {
+                BlobError::Upstream(format!(
+                    "{operation} LLM endpoint {endpoint_name_for_request} returned error: {error}"
+                ))
+            })?;
+            response.text().await.map_err(|error| {
+                BlobError::Upstream(format!(
+                    "failed to read {operation} LLM response from {endpoint_name_for_request}: {error}"
+                ))
+            })
+        },
+    )
+    .await
+    .map_err(|_| {
+        BlobError::Upstream(format!(
+            "{operation} LLM endpoint {endpoint_name} timed out after {}s",
+            AUTH_CAPTURE_LLM_REQUEST_TIMEOUT_SECS
+        ))
+    })??;
+    Ok(response)
 }
 
 fn parse_json_object_from_text<T>(raw: &str, context: &str) -> Result<T, BlobError>
@@ -9356,6 +9369,7 @@ fn cdp_connection_config_from_browser_endpoint(
         endpoint_url: endpoint.endpoint_url.clone(),
         target_selector: endpoint.target_selector.clone(),
         target_timeout_ms: endpoint.target_timeout_ms,
+        bootstrap_target_url: None,
     }
 }
 
@@ -9863,6 +9877,27 @@ async fn connect_browser_flow_cdp_session(
     for candidate in candidates {
         match CdpBrowserFlowSession::connect(&candidate).await {
             Ok(session) => return Ok((candidate, session)),
+            Err(BlobError::NotFound(message))
+                if message.contains("no matching CDP target found")
+                    && candidate.target_selector.is_some()
+                    && browser_flow_prefers_navigate_bootstrap(
+                        state,
+                        &input.provider,
+                        &input.surface,
+                        &input.flow_id,
+                    ) =>
+            {
+                let mut fallback = candidate.clone();
+                fallback.target_selector = None;
+                fallback.bootstrap_target_url = Some("about:blank".to_string());
+                match CdpBrowserFlowSession::connect(&fallback).await {
+                    Ok(session) => return Ok((fallback, session)),
+                    Err(fallback_error) => errors.push(format!(
+                        "{}: {} | fallback-without-selector: {}",
+                        candidate.endpoint_url, message, fallback_error
+                    )),
+                }
+            }
             Err(error) => errors.push(format!("{}: {}", candidate.endpoint_url, error)),
         }
     }
@@ -9870,6 +9905,56 @@ async fn connect_browser_flow_cdp_session(
         "failed to connect any configured CDP endpoint: {}",
         errors.join(" | ")
     )))
+}
+
+fn browser_flow_prefers_navigate_bootstrap(
+    state: &AppState,
+    provider: &str,
+    surface: &str,
+    flow_id: &str,
+) -> bool {
+    let Ok((catalog, flow)) = browser_flow_catalog_and_flow(state, provider, surface, flow_id) else {
+        return false;
+    };
+    fn flow_has_navigate_step(flow: &BrowserFlow) -> bool {
+        flow.steps
+            .iter()
+            .any(|step| matches!(step, blob_core::BrowserFlowStep::Navigate { .. }))
+    }
+
+    fn page_looks_like_login(page: &blob_core::BrowserFlowPage) -> bool {
+        page.url_patterns.iter().any(|pattern| {
+            let normalized = pattern.trim().to_ascii_lowercase();
+            normalized.contains("/login") || normalized.contains("yun.139.com")
+        })
+    }
+
+    if let Some(page) = catalog.pages.iter().find(|page| page.id == flow.start_page) {
+        if page_looks_like_login(page) && flow_has_navigate_step(flow) {
+            return true;
+        }
+    }
+
+    let mut prerequisite_flow_id = flow.prerequisite_flow_id.as_deref();
+    while let Some(current_id) = prerequisite_flow_id {
+        let Some(prerequisite_flow) = catalog.find_flow(current_id) else {
+            break;
+        };
+        let Some(page) = catalog
+            .pages
+            .iter()
+            .find(|page| page.id == prerequisite_flow.start_page)
+        else {
+            prerequisite_flow_id = prerequisite_flow.prerequisite_flow_id.as_deref();
+            continue;
+        };
+        if page_looks_like_login(page) && flow_has_navigate_step(prerequisite_flow) {
+            return true;
+        }
+        prerequisite_flow_id = prerequisite_flow.prerequisite_flow_id.as_deref();
+    }
+
+    false
 }
 
 fn auth_prompt_field_kind_for_input(input: &BrowserFlowInput) -> AuthPromptFieldKind {
@@ -12163,6 +12248,56 @@ fn render_admin_index_html() -> String {
 
 async fn admin_index() -> Html<String> {
     Html(render_admin_index_html())
+}
+
+async fn admin_showcase_feed(
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Response, Response> {
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .map(|value| value.clamp(1, 24))
+        .unwrap_or(12);
+    let remote_url = format!(
+        "https://llm-router.agi2030.online/v1/feeds/showcase?limit={limit}"
+    );
+    let client = HttpClient::builder().build().map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": format!("failed to build showcase proxy client: {error}"),
+                "api_version": ADMIN_API_VERSION,
+            })),
+        )
+            .into_response()
+    })?;
+    let response = client.get(remote_url).send().await.map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": format!("failed to fetch llm-router showcase feed: {error}"),
+                "api_version": ADMIN_API_VERSION,
+            })),
+        )
+            .into_response()
+    })?;
+    let status = response.status();
+    let payload = response.text().await.map_err(|error| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": format!("failed to read llm-router showcase feed: {error}"),
+                "api_version": ADMIN_API_VERSION,
+            })),
+        )
+            .into_response()
+    })?;
+    Ok((
+        status,
+        [(CONTENT_TYPE, HeaderValue::from_static("application/json; charset=utf-8"))],
+        payload,
+    )
+        .into_response())
 }
 
 async fn admin_status(
@@ -15481,6 +15616,68 @@ async fn probe_browser_cdp_endpoint(
         }
     }
     Ok(Json(payload))
+}
+
+async fn open_browser_cdp_endpoint_info(
+    Json(input): Json<BrowserCdpProbeInput>,
+) -> Result<Json<BrowserCdpOpenInfoPayload>, ApiError> {
+    let endpoint_url = normalize_secret_field(input.endpoint_url).ok_or_else(|| {
+        BlobError::Configuration("endpoint_url is required for CDP endpoint info page".to_string())
+    })?;
+    let target_selector = normalize_secret_field(input.target_selector);
+    let target_timeout_ms = input.target_timeout_ms.filter(|value| *value > 0);
+    let target_id =
+        normalize_secret_field(input.id).unwrap_or_else(|| "browser-endpoint".to_string());
+    let endpoint = AuthCaptureBrowserEndpoint {
+        id: target_id.clone(),
+        label: None,
+        endpoint_url: endpoint_url.clone(),
+        enabled: true,
+        target_selector: target_selector.clone(),
+        target_timeout_ms,
+        detected_browser: None,
+        detected_protocol_version: None,
+        detected_user_agent: None,
+        detected_at_unix_ms: None,
+    };
+    let selector_display = target_selector
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("(default target)")
+        .to_string();
+    let timeout_display = target_timeout_ms
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "default".to_string());
+    let timestamp = current_unix_ms().to_string();
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Carrier Gateway CDP Endpoint</title><style>body{{font-family:ui-monospace,Consolas,Menlo,monospace;background:#0b1220;color:#dbeafe;margin:0;padding:24px}}h1{{margin:0 0 16px;font-size:20px}}.card{{background:#111827;border:1px solid #334155;border-radius:8px;padding:16px}}.line{{margin:8px 0;word-break:break-all}}.k{{color:#93c5fd}}.v{{color:#e2e8f0}}</style></head><body><h1>Carrier Gateway CDP Endpoint Identity</h1><div class=\"card\"><div class=\"line\"><span class=\"k\">endpoint_id:</span> <span class=\"v\">{}</span></div><div class=\"line\"><span class=\"k\">endpoint_url:</span> <span class=\"v\">{}</span></div><div class=\"line\"><span class=\"k\">target_selector:</span> <span class=\"v\">{}</span></div><div class=\"line\"><span class=\"k\">target_timeout_ms:</span> <span class=\"v\">{}</span></div><div class=\"line\"><span class=\"k\">opened_at:</span> <span class=\"v\">{}</span></div></div></body></html>",
+        target_id, endpoint_url, selector_display, timeout_display, timestamp
+    );
+    let data_url = format!(
+        "data:text/html;charset=utf-8,{}",
+        utf8_percent_encode(&html, NON_ALPHANUMERIC)
+    );
+    let session = CdpBrowserFlowSession::connect(&cdp_connection_config_from_browser_endpoint(
+        &endpoint,
+    ))
+    .await
+    .map_err(|error| {
+        BlobError::Upstream(format!("failed to connect CDP endpoint for info page: {error}"))
+    })?;
+    session.navigate(&data_url).await.map_err(|error| {
+        BlobError::Upstream(format!("failed to open endpoint info page in CDP browser: {error}"))
+    })?;
+
+    Ok(Json(BrowserCdpOpenInfoPayload {
+        ok: true,
+        target_id,
+        endpoint_url,
+        target_selector: selector_display,
+        target_timeout_ms,
+        navigated_url: data_url,
+        summary: "opened endpoint info page in the selected CDP browser target".to_string(),
+    }))
 }
 
 async fn list_auth_capture_prompts(
@@ -35621,6 +35818,44 @@ mod tests {
         }
     }
 
+    async fn spawn_slow_auth_capture_llm_server(
+        delay: Duration,
+    ) -> (String, oneshot::Sender<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test llm listener should bind");
+        let addr = listener
+            .local_addr()
+            .expect("test llm listener addr should resolve");
+        let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let delay = delay;
+                async move {
+                    sleep(delay).await;
+                    Json(json!({
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "{\"captcha\":\"A1B2\"}"
+                                }
+                            }
+                        ]
+                    }))
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        (format!("http://{addr}/v1"), shutdown_tx)
+    }
+
     #[test]
     fn visual_captcha_solver_prompt_defaults_to_json_harness() {
         let prompt = visual_captcha_solver_prompt(&sample_visual_captcha_request());
@@ -35722,6 +35957,29 @@ mod tests {
         let error = parse_visual_captcha_response("{\"captcha\":\"<CAPTCHA>\"}", Some(4))
             .expect_err("template placeholder must not parse as a real captcha");
         assert!(error.to_string().contains("ASCII alphanumeric"));
+    }
+
+    #[tokio::test]
+    async fn request_visual_captcha_answer_times_out_slow_llm_endpoints() {
+        let (endpoint_url, shutdown) =
+            spawn_slow_auth_capture_llm_server(Duration::from_secs(2)).await;
+        let mut endpoint = sample_auth_capture_llm_endpoint();
+        endpoint.endpoint_url = endpoint_url;
+        let client = HttpClient::builder()
+            .build()
+            .expect("http client should build");
+
+        let error = request_visual_captcha_answer(
+            &client,
+            &endpoint,
+            &sample_visual_captcha_request(),
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7ZlXQAAAAASUVORK5CYII=",
+        )
+        .await
+        .expect_err("slow llm endpoint should time out");
+
+        let _ = shutdown.send(());
+        assert!(error.to_string().contains("timed out after"));
     }
 
     #[test]

@@ -36,12 +36,12 @@ Copyright (c) 2026 walky
     main { width: 100%; max-width: none; box-sizing:border-box; margin: 0 auto; padding: 24px 8px 40px; }
     h1 { margin: 0 0 8px; font-size: 22px; color: var(--ink-strong); }
     p { color: var(--muted); }
-    .header-toolbar { display:grid; grid-template-columns:minmax(260px, 1fr) minmax(360px, 1.35fr) auto; align-items:center; gap: 12px; margin-bottom: 14px; }
+    .header-toolbar { display:grid; grid-template-columns:minmax(260px, 1fr) minmax(360px, 1.35fr) auto; align-items:center; gap: 12px; margin-bottom: 10px; }
     .header-copy { min-width: 0; display:flex; align-items:flex-start; gap:14px; }
     .header-brand-icon { width:42px; height:42px; flex:0 0 auto; border-radius:12px; box-shadow: 0 10px 24px rgba(15, 23, 34, 0.12); }
     .header-copy-body { min-width:0; }
     .header-copy p { margin: 0; font-size: 12px; line-height: 1.55; max-width: 80ch; }
-    .header-showcase { min-width:0; display:flex; justify-content:center; }
+    .header-showcase { min-width:0; display:flex; justify-content:center; margin: 0; }
     .header-showcase-shell { width:min(100%, 920px); display:grid; grid-template-columns:auto minmax(0, 1fr); align-items:center; gap:10px; padding:8px 12px; border:1px solid var(--border); border-radius:999px; background: linear-gradient(180deg, rgba(255, 252, 246, 0.98) 0%, rgba(247, 240, 229, 0.98) 100%); box-shadow: 0 10px 24px rgba(37, 30, 18, 0.06); overflow:hidden; }
     .header-showcase-label { display:inline-flex; align-items:center; justify-content:center; padding:5px 10px; border-radius:999px; background:#edf7f4; border:1px solid rgba(15, 118, 110, 0.22); color:#0f766e; font-size:11px; font-weight:700; white-space:nowrap; }
     .header-showcase-marquee { min-width:0; overflow:hidden; position:relative; mask-image:linear-gradient(90deg, transparent 0%, #000 6%, #000 94%, transparent 100%); -webkit-mask-image:linear-gradient(90deg, transparent 0%, #000 6%, #000 94%, transparent 100%); }
@@ -920,9 +920,8 @@ Copyright (c) 2026 walky
     a { color: var(--accent); }
     button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid rgba(126, 200, 255, 0.72); outline-offset: 2px; }
     @media (max-width: 1420px) {
-      .header-toolbar { grid-template-columns: 1fr; }
-      .header-copy { align-items:center; }
       .header-toolbar { grid-template-columns:1fr; align-items:stretch; }
+      .header-copy { align-items:center; }
       .header-showcase-shell { width:100%; }
       .header-controls { justify-content:flex-start; }
       .lang-switch { align-self:flex-start; }
@@ -2786,6 +2785,36 @@ Copyright (c) 2026 walky
         'assistant.unicom.validation_sub': 'The broker compares the send-code control before and after the click so operators can confirm the page really moved into countdown mode.',
         'assistant.unicom.launcher_intro': 'Start the live carrier flow here. As soon as the operator begins, a focused floating window takes over so the next input stays impossible to miss.',
         'assistant.unicom.launcher_expires': 'Session expires:',
+        'assistant.unicom.window.kicker': 'Guided Carrier Login',
+        'assistant.unicom.window.title': 'Unicom SMS Assistant',
+        'assistant.unicom.window_intro': 'This floating panel keeps the live session status and the next input in one place. When the OTP arrives, type it below in this same panel and continue from here.',
+        'assistant.unicom.status': 'Status:',
+        'assistant.unicom.field.phone': 'Phone Number',
+        'assistant.unicom.field.sms_code': 'SMS Code',
+        'assistant.unicom.current_session': 'Current Session',
+        'assistant.unicom.quick_actions': 'Quick Actions',
+        'assistant.unicom.outputs': 'Captured Outputs',
+        'assistant.unicom.validation_details': 'Validation Details',
+        'assistant.unicom.validation.before': 'Before:',
+        'assistant.unicom.validation.after': 'After:',
+        'assistant.unicom.validation.feedback': 'Carrier Feedback:',
+        'assistant.unicom.validation.countdown': 'Countdown Detected:',
+        'assistant.unicom.validation.rate_limited': 'Rate Limited:',
+        'assistant.unicom.validation.runtime_snapshot': 'Runtime Snapshot',
+        'assistant.unicom.fact.session_id': 'Session ID',
+        'assistant.unicom.fact.flow': 'Flow',
+        'assistant.unicom.fact.updated': 'Updated',
+        'assistant.unicom.fact.phone_number': 'Phone Number',
+        'assistant.unicom.fact.current_url': 'Current URL',
+        'assistant.unicom.fact.session_expires': 'Session Expires',
+        'assistant.unicom.fact.timeout_window': 'Timeout Window',
+        'assistant.unicom.fact.access_token': 'Access Token',
+        'assistant.unicom.fact.family_id': 'Family ID',
+        'assistant.unicom.fact.client_id': 'Client ID',
+        'assistant.value.not_available': 'n/a',
+        'assistant.value.not_entered': 'not entered',
+        'assistant.value.yes': 'yes',
+        'assistant.value.no': 'no',
         'assistant.mobile.manual_probe_title': 'Live Page Probe',
         'assistant.mobile.manual_probe_subtitle': 'When the live Mobile page drifts away from the known layout or opens another verification step, the assistant pauses here instead of failing blind.',
         'assistant.mobile.window_intro': 'This floating panel keeps the Mobile login status and the next input in one place. If the live page later asks for a slider or another verification step, finish it there, then continue from this same panel.',
@@ -3167,6 +3196,7 @@ Copyright (c) 2026 walky
         'auth.unicom.feedback.recover_failed_no_page': '当前 CDP 端点上没有检测到可复用的已登录中国联通浏览器页面。',
         'auth.unicom.feedback.request_start': '正在启动中国联通短信登录、请求验证码，并从真实页面抓取校验信息…',
         'auth.unicom.feedback.rate_limited': '运营商拦截了短信请求：‘%message%’。请稍等后再重试“启动短信登录并校验”。',
+        'auth.unicom.feedback.preflight_probe_failed': '启动前探测失败：端点 %endpoint% 无法匹配目标页面（selector=%selector%）。详情：%detail%。请先在同一个CDP浏览器里打开联通页面，或点击“打开识别页”确认你连的是正确浏览器。',
         'auth.unicom.feedback.validation_ok': '校验通过：检测到点击后的文案“%value%”。',
         'auth.unicom.feedback.validation_warn_feedback': '校验警告：点击后的运营商反馈为“%message%”%current%。',
         'auth.unicom.feedback.validation_warn_no_countdown': '校验警告：点击后没有检测到倒计时%current%。',
@@ -3388,6 +3418,36 @@ Copyright (c) 2026 walky
         'assistant.unicom.validation_sub': 'broker 会对比点击发送验证码前后的控件状态，方便操作人确认页面是否真的进入倒计时。',
         'assistant.unicom.launcher_intro': '从这里启动真实运营商流程。操作一开始，焦点悬浮窗就会接管后续步骤，避免下一步输入被遗漏。',
         'assistant.unicom.launcher_expires': '会话过期：',
+        'assistant.unicom.window.kicker': '运营商引导登录',
+        'assistant.unicom.window.title': '联通短信助手',
+        'assistant.unicom.window_intro': '这个悬浮窗口会把实时会话状态和下一步输入集中在同一个地方。短信验证码到了以后，直接在这里输入并继续。',
+        'assistant.unicom.status': '状态：',
+        'assistant.unicom.field.phone': '手机号',
+        'assistant.unicom.field.sms_code': '短信验证码',
+        'assistant.unicom.current_session': '当前会话',
+        'assistant.unicom.quick_actions': '快捷操作',
+        'assistant.unicom.outputs': '抓取输出',
+        'assistant.unicom.validation_details': '校验详情',
+        'assistant.unicom.validation.before': '点击前：',
+        'assistant.unicom.validation.after': '点击后：',
+        'assistant.unicom.validation.feedback': '运营商反馈：',
+        'assistant.unicom.validation.countdown': '是否检测到倒计时：',
+        'assistant.unicom.validation.rate_limited': '是否限流：',
+        'assistant.unicom.validation.runtime_snapshot': '运行时快照',
+        'assistant.unicom.fact.session_id': '会话 ID',
+        'assistant.unicom.fact.flow': '流程',
+        'assistant.unicom.fact.updated': '更新时间',
+        'assistant.unicom.fact.phone_number': '手机号',
+        'assistant.unicom.fact.current_url': '当前 URL',
+        'assistant.unicom.fact.session_expires': '会话过期时间',
+        'assistant.unicom.fact.timeout_window': '超时窗口',
+        'assistant.unicom.fact.access_token': 'Access Token',
+        'assistant.unicom.fact.family_id': 'Family ID',
+        'assistant.unicom.fact.client_id': 'Client ID',
+        'assistant.value.not_available': '无',
+        'assistant.value.not_entered': '未填写',
+        'assistant.value.yes': '是',
+        'assistant.value.no': '否',
         'assistant.mobile.manual_probe_title': '实时页面探针',
         'assistant.mobile.manual_probe_subtitle': '如果真实中国移动页面偏离已知布局，或者弹出额外验证步骤，助手会停在这里，而不是盲目失败。',
         'assistant.mobile.window_intro': '这个悬浮面板会把中国移动登录状态和下一步输入集中到一个地方。后续如果真实页面要求滑块或其他验证，先去那边完成，再回到这个面板继续。',
@@ -4429,6 +4489,17 @@ Copyright (c) 2026 walky
         'browser.cdp.disabled': '已禁用',
         'browser.cdp.same_host': '与管理界面同机',
         'browser.cdp.probe': '探测',
+        'browser.cdp.identify.open': '打开识别页',
+        'browser.cdp.identify.opened': '已在CDP浏览器打开识别页',
+        'browser.cdp.field.label': '标签',
+        'browser.cdp.field.enabled': '启用状态',
+        'browser.cdp.field.endpoint_url': 'CDP 端点 URL',
+        'browser.cdp.field.target_selector': '高级目标选择器',
+        'browser.cdp.field.target_timeout': '目标超时 (ms)',
+        'browser.cdp.placeholder.label': '客厅 Chrome',
+        'browser.cdp.placeholder.endpoint_url': 'http://192.168.1.10:9222',
+        'browser.cdp.placeholder.target_selector': '可选：url:https://pan.wo.cn/*',
+        'browser.cdp.placeholder.target_timeout': '15000',
         'browser.cdp.up': '上移',
         'browser.cdp.down': '下移',
         'browser.cdp.remove': '删除',
@@ -4689,7 +4760,7 @@ Copyright (c) 2026 walky
     const UI_TEXT_NODE_ORIGINALS = new WeakMap();
     const UI_PLACEHOLDER_ORIGINALS = new WeakMap();
     let currentUiLanguage = 'en';
-    const SHOWCASE_FEED_URL = 'https://llm-router.agi2030.online/v1/feeds/showcase?limit=12';
+    const SHOWCASE_FEED_URL = '/api/showcase?limit=12';
     let headerShowcaseState = {
       loading: false,
       error: '',
@@ -7257,8 +7328,6 @@ Copyright (c) 2026 walky
       try {
         const response = await fetch(SHOWCASE_FEED_URL, {
           method: 'GET',
-          mode: 'cors',
-          credentials: 'omit',
         });
         if (!response.ok) {
           throw new Error(await readResponseMessage(response));
@@ -7324,6 +7393,10 @@ Copyright (c) 2026 walky
       return formatTimestamp(numeric * 1000);
     }
     function activateAdminTab(tabId) {
+      const previousTab = activeAdminTab;
+      if (tabId === 'unicom' && previousTab !== 'unicom' && unicomAuthAssistantState.window_open === true) {
+        setUnicomAssistantWindowOpen(false, { render: false });
+      }
       activeAdminTab = tabId;
       document.querySelectorAll('.admin-tab').forEach(node => {
         node.classList.toggle('active', node.dataset.adminTab === tabId);
@@ -8042,6 +8115,30 @@ Copyright (c) 2026 walky
         renderAuthCaptureBrowserEndpoints();
       }
     }
+    async function openAuthCaptureBrowserEndpointInfo(index) {
+      const entry = authCaptureBrowserEndpointsState[index];
+      if (!entry) {
+        return;
+      }
+      try {
+        const payload = await fetchJson('/api/browser-cdp/open-endpoint-info', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            id: entry.id || authCaptureBrowserEndpointId(index),
+            endpoint_url: entry.endpoint_url || '',
+            target_selector: entry.target_selector || '',
+            target_timeout_ms: entry.target_timeout_ms || null,
+          }),
+        });
+        setAuthCaptureBrowserProbeFeedback(
+          `${entry.label || tr('browser.cdp.endpoint_title', { index: index + 1 }, `CDP endpoint ${index + 1}`)}: ${payload.summary || tr('browser.cdp.identify.opened', {}, 'endpoint info page opened')}`,
+          payload.ok ? 'ok' : 'warn',
+        );
+      } catch (error) {
+        setAuthCaptureBrowserProbeFeedback(error.message, 'warn');
+      }
+    }
     async function probePreferredAuthCaptureBrowserEndpoint() {
       const preferred = authCaptureBrowserEndpointPreferredOrder()[0];
       if (!preferred) {
@@ -8083,6 +8180,7 @@ Copyright (c) 2026 walky
             </div>
             <div class="browser-endpoint-toolbar">
               <button class="secondary" type="button" data-browser-endpoint-probe="${index}">${escapeHtml(entry.probe_loading ? tr('assistant.state.probing', {}, 'Probing…') : tr('browser.cdp.probe', {}, 'Probe'))}</button>
+              <button class="secondary" type="button" data-browser-endpoint-identify="${index}">${escapeHtml(tr('browser.cdp.identify.open', {}, 'Open ID Page'))}</button>
               <button class="secondary" type="button" data-browser-endpoint-move="${index}" data-browser-endpoint-offset="-1">${escapeHtml(tr('browser.cdp.up', {}, 'Up'))}</button>
               <button class="secondary" type="button" data-browser-endpoint-move="${index}" data-browser-endpoint-offset="1">${escapeHtml(tr('browser.cdp.down', {}, 'Down'))}</button>
               <button class="secondary" type="button" data-browser-endpoint-remove="${index}">${escapeHtml(tr('browser.cdp.remove', {}, 'Remove'))}</button>
@@ -8090,27 +8188,27 @@ Copyright (c) 2026 walky
           </div>
           <div class="browser-endpoint-grid">
             <label>
-              Label
-              <input type="text" data-browser-endpoint-field="${index}" data-browser-endpoint-key="label" value="${escapeHtml(entry.label || '')}" placeholder="Living room Chrome" />
+              ${escapeHtml(tr('browser.cdp.field.label', {}, 'Label'))}
+              <input type="text" data-browser-endpoint-field="${index}" data-browser-endpoint-key="label" value="${escapeHtml(entry.label || '')}" placeholder="${escapeHtmlAttr(tr('browser.cdp.placeholder.label', {}, 'Living room Chrome'))}" />
             </label>
             <label>
-              Enabled
+              ${escapeHtml(tr('browser.cdp.field.enabled', {}, 'Enabled'))}
               <select data-browser-endpoint-field="${index}" data-browser-endpoint-key="enabled">
                 <option value="true" ${entry.enabled ? 'selected' : ''}>enabled</option>
                 <option value="false" ${entry.enabled ? '' : 'selected'}>disabled</option>
               </select>
             </label>
             <label class="browser-endpoint-wide">
-              CDP Endpoint URL
-              <input type="text" data-browser-endpoint-field="${index}" data-browser-endpoint-key="endpoint_url" value="${escapeHtml(entry.endpoint_url || '')}" placeholder="http://192.168.1.10:9222" />
+              ${escapeHtml(tr('browser.cdp.field.endpoint_url', {}, 'CDP Endpoint URL'))}
+              <input type="text" data-browser-endpoint-field="${index}" data-browser-endpoint-key="endpoint_url" value="${escapeHtml(entry.endpoint_url || '')}" placeholder="${escapeHtmlAttr(tr('browser.cdp.placeholder.endpoint_url', {}, 'http://192.168.1.10:9222'))}" />
             </label>
             <label>
-              Advanced Target Selector
-              <input type="text" data-browser-endpoint-field="${index}" data-browser-endpoint-key="target_selector" value="${escapeHtml(entry.target_selector || '')}" placeholder="Optional: url:https://pan.wo.cn/*" />
+              ${escapeHtml(tr('browser.cdp.field.target_selector', {}, 'Advanced Target Selector'))}
+              <input type="text" data-browser-endpoint-field="${index}" data-browser-endpoint-key="target_selector" value="${escapeHtml(entry.target_selector || '')}" placeholder="${escapeHtmlAttr(tr('browser.cdp.placeholder.target_selector', {}, 'Optional: url:https://pan.wo.cn/*'))}" />
             </label>
             <label>
-              Target Timeout (ms)
-              <input type="number" min="1" step="1" data-browser-endpoint-field="${index}" data-browser-endpoint-key="target_timeout_ms" value="${entry.target_timeout_ms || ''}" placeholder="15000" />
+              ${escapeHtml(tr('browser.cdp.field.target_timeout', {}, 'Target Timeout (ms)'))}
+              <input type="number" min="1" step="1" data-browser-endpoint-field="${index}" data-browser-endpoint-key="target_timeout_ms" value="${entry.target_timeout_ms || ''}" placeholder="${escapeHtmlAttr(tr('browser.cdp.placeholder.target_timeout', {}, '15000'))}" />
             </label>
           </div>
           <div class="browser-endpoint-footer">
@@ -12079,13 +12177,13 @@ Copyright (c) 2026 walky
         ? tr('assistant.state.capturing', {}, 'Capturing…')
         : 'Capture Current Session';
       const sessionFacts = [
-        ['Session ID', session?.session_id || tr('assistant.value.not_created', {}, 'not created yet')],
-        ['Flow', session?.flow_id || 'n/a'],
-        ['Updated', session?.updated_at_unix_ms ? formatTimestamp(session.updated_at_unix_ms) : 'n/a'],
-        ['Phone Number', phoneNumber || 'not entered'],
-        ['Current URL', currentUrl || 'n/a'],
-        ['Session Expires', sessionExpiresAt > 0 ? formatTimestamp(sessionExpiresAt) : tr('assistant.value.unknown', {}, 'unknown')],
-        ['Timeout Window', sessionTimeoutMs > 0 ? formatDurationMs(sessionTimeoutMs) : tr('assistant.value.not_detected', {}, 'not detected')],
+        [tr('assistant.unicom.fact.session_id', {}, 'Session ID'), session?.session_id || tr('assistant.value.not_created', {}, 'not created yet')],
+        [tr('assistant.unicom.fact.flow', {}, 'Flow'), session?.flow_id || tr('assistant.value.not_available', {}, 'n/a')],
+        [tr('assistant.unicom.fact.updated', {}, 'Updated'), session?.updated_at_unix_ms ? formatTimestamp(session.updated_at_unix_ms) : tr('assistant.value.not_available', {}, 'n/a')],
+        [tr('assistant.unicom.fact.phone_number', {}, 'Phone Number'), phoneNumber || tr('assistant.value.not_entered', {}, 'not entered')],
+        [tr('assistant.unicom.fact.current_url', {}, 'Current URL'), currentUrl || tr('assistant.value.not_available', {}, 'n/a')],
+        [tr('assistant.unicom.fact.session_expires', {}, 'Session Expires'), sessionExpiresAt > 0 ? formatTimestamp(sessionExpiresAt) : tr('assistant.value.unknown', {}, 'unknown')],
+        [tr('assistant.unicom.fact.timeout_window', {}, 'Timeout Window'), sessionTimeoutMs > 0 ? formatDurationMs(sessionTimeoutMs) : tr('assistant.value.not_detected', {}, 'not detected')],
       ];
       const sessionFactsMarkup = sessionFacts.map(([label, value]) => `
         <div class="unicom-assistant-kv-card">
@@ -12094,9 +12192,9 @@ Copyright (c) 2026 walky
         </div>
       `).join('');
       const outputsFacts = [
-        ['Access Token', accessToken ? tr('assistant.value.captured', {}, 'captured') : tr('assistant.value.not_captured', {}, 'not captured')],
-        ['Family ID', familyId || tr('assistant.value.not_captured', {}, 'not captured')],
-        ['Client ID', capturedClientId || tr('assistant.value.not_captured', {}, 'not captured')],
+        [tr('assistant.unicom.fact.access_token', {}, 'Access Token'), accessToken ? tr('assistant.value.captured', {}, 'captured') : tr('assistant.value.not_captured', {}, 'not captured')],
+        [tr('assistant.unicom.fact.family_id', {}, 'Family ID'), familyId || tr('assistant.value.not_captured', {}, 'not captured')],
+        [tr('assistant.unicom.fact.client_id', {}, 'Client ID'), capturedClientId || tr('assistant.value.not_captured', {}, 'not captured')],
       ];
       const outputsFactsMarkup = outputsFacts.map(([label, value]) => `
         <div class="unicom-assistant-kv-card">
@@ -12157,12 +12255,12 @@ Copyright (c) 2026 walky
           </div>
           <div class="unicom-assistant-window-head">
             <div>
-              <div class="unicom-assistant-window-kicker">Guided Carrier Login</div>
-              <h3 id="unicom-assistant-dialog-title">Unicom SMS Assistant</h3>
-              <div class="provider-note">${escapeHtml(tr('This floating panel keeps the live session status and the next input in one place. When the OTP arrives, type it below in this same panel and continue from here.', {}, 'This floating panel keeps the live session status and the next input in one place. When the OTP arrives, type it below in this same panel and continue from here.'))}</div>
+              <div class="unicom-assistant-window-kicker">${escapeHtml(tr('assistant.unicom.window.kicker', {}, 'Guided Carrier Login'))}</div>
+              <h3 id="unicom-assistant-dialog-title">${escapeHtml(tr('assistant.unicom.window.title', {}, 'Unicom SMS Assistant'))}</h3>
+              <div class="provider-note">${escapeHtml(tr('assistant.unicom.window_intro', {}, 'This floating panel keeps the live session status and the next input in one place. When the OTP arrives, type it below in this same panel and continue from here.'))}</div>
             </div>
             <div>
-              <div class="provider-note">Status: <span class="pill ${unicomAssistantStatusTone(sessionState)}">${escapeHtml(browserFlowStatusLabel(sessionState))}</span></div>
+              <div class="provider-note">${escapeHtml(tr('assistant.unicom.status', {}, 'Status:'))} <span class="pill ${unicomAssistantStatusTone(sessionState)}">${escapeHtml(browserFlowStatusLabel(sessionState))}</span></div>
               <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
               <div class="provider-note">${escapeHtml(tr('Pending inputs:', {}, 'Pending inputs:'))} ${promptsMarkup}</div>
             </div>
@@ -12178,7 +12276,7 @@ Copyright (c) 2026 walky
                   <span class="pill ${pendingPromptTone}">${escapeHtml(pendingPromptSummary)}</span>
                 </div>
                 <div class="provider-grid" style="margin-top: 0;">
-                  <label>Phone Number
+                  <label>${escapeHtml(tr('assistant.unicom.field.phone', {}, 'Phone Number'))}
                     <input
                       id="unicom-auth-assistant-phone"
                       data-unicom-assistant-field="phone_number"
@@ -12188,7 +12286,7 @@ Copyright (c) 2026 walky
                       value="${escapeHtmlAttr(phoneNumber)}"
                       placeholder="18513581767" />
                   </label>
-                  <label>SMS Code
+                  <label>${escapeHtml(tr('assistant.unicom.field.sms_code', {}, 'SMS Code'))}
                     <input
                       id="unicom-auth-assistant-sms-code"
                       data-unicom-assistant-field="sms_code"
@@ -12213,7 +12311,7 @@ Copyright (c) 2026 walky
               <section class="unicom-assistant-section">
                 <div class="unicom-assistant-section-head">
                   <div>
-                    <h4>Current Session</h4>
+                    <h4>${escapeHtml(tr('assistant.unicom.current_session', {}, 'Current Session'))}</h4>
                     <div class="unicom-assistant-section-sub">${escapeHtml(tr('assistant.unicom.current_session_sub', {}, 'These values describe the live auth-broker session that this panel is operating on.'))}</div>
                   </div>
                   <span class="pill ${unicomAssistantStatusTone(sessionState)}">${escapeHtml(browserFlowStatusLabel(sessionState))}</span>
@@ -12228,7 +12326,7 @@ Copyright (c) 2026 walky
               <section class="unicom-assistant-section">
                 <div class="unicom-assistant-section-head">
                   <div>
-                    <h4>Quick Actions</h4>
+                    <h4>${escapeHtml(tr('assistant.unicom.quick_actions', {}, 'Quick Actions'))}</h4>
                     <div class="unicom-assistant-section-sub">${escapeHtml(tr('assistant.unicom.quick_actions_sub', {}, 'Use these when the browser is already logged in, or after a manual captcha / prompt step when you want to detach from the live page by pulling the current session.'))}</div>
                   </div>
                 </div>
@@ -12241,7 +12339,7 @@ Copyright (c) 2026 walky
               <section class="unicom-assistant-section">
                 <div class="unicom-assistant-section-head">
                   <div>
-                    <h4>Captured Outputs</h4>
+                    <h4>${escapeHtml(tr('assistant.unicom.outputs', {}, 'Captured Outputs'))}</h4>
                     <div class="unicom-assistant-section-sub">${escapeHtml(tr('assistant.unicom.outputs_sub', {}, 'These come from browser-flow runtime outputs after a successful login or current-session capture.'))}</div>
                   </div>
                 </div>
@@ -12253,17 +12351,17 @@ Copyright (c) 2026 walky
               <section class="unicom-assistant-section">
                 <div class="unicom-assistant-section-head">
                   <div>
-                    <h4>Validation Details</h4>
+                    <h4>${escapeHtml(tr('assistant.unicom.validation_details', {}, 'Validation Details'))}</h4>
                     <div class="unicom-assistant-section-sub">${escapeHtml(tr('assistant.unicom.validation_sub', {}, 'The broker compares the send-code control before and after the click so operators can confirm the page really moved into countdown mode.'))}</div>
                   </div>
                 </div>
-                <div class="provider-note">Before: <span class="mono">${escapeHtml(sendCodeBefore || 'n/a')}</span></div>
-                <div class="provider-note">After: <span class="mono">${escapeHtml(sendCodeAfter || 'n/a')}</span></div>
-                <div class="provider-note">Carrier Feedback: <span class="mono">${escapeHtml(sendCodeFeedback || 'n/a')}</span></div>
-                <div class="provider-note">Countdown Detected: <span class="mono">${escapeHtml(countdownDetected ? 'yes' : 'no')}</span></div>
-                <div class="provider-note">Rate Limited: <span class="mono">${escapeHtml(sendCodeRateLimited ? 'yes' : 'no')}</span></div>
+                <div class="provider-note">${escapeHtml(tr('assistant.unicom.validation.before', {}, 'Before:'))} <span class="mono">${escapeHtml(sendCodeBefore || 'n/a')}</span></div>
+                <div class="provider-note">${escapeHtml(tr('assistant.unicom.validation.after', {}, 'After:'))} <span class="mono">${escapeHtml(sendCodeAfter || 'n/a')}</span></div>
+                <div class="provider-note">${escapeHtml(tr('assistant.unicom.validation.feedback', {}, 'Carrier Feedback:'))} <span class="mono">${escapeHtml(sendCodeFeedback || 'n/a')}</span></div>
+                <div class="provider-note">${escapeHtml(tr('assistant.unicom.validation.countdown', {}, 'Countdown Detected:'))} <span class="mono">${escapeHtml(countdownDetected ? tr('assistant.value.yes', {}, 'yes') : tr('assistant.value.no', {}, 'no'))}</span></div>
+                <div class="provider-note">${escapeHtml(tr('assistant.unicom.validation.rate_limited', {}, 'Rate Limited:'))} <span class="mono">${escapeHtml(sendCodeRateLimited ? tr('assistant.value.yes', {}, 'yes') : tr('assistant.value.no', {}, 'no'))}</span></div>
                 <details>
-                  <summary>Runtime Snapshot</summary>
+                  <summary>${escapeHtml(tr('assistant.unicom.validation.runtime_snapshot', {}, 'Runtime Snapshot'))}</summary>
                   <pre>${escapeHtml(JSON.stringify(runtime, null, 2) || '{}')}</pre>
                 </details>
               </section>
@@ -13328,6 +13426,33 @@ Copyright (c) 2026 walky
       const pattern = browserFlowPreferredUrlPattern(page.url_patterns);
       return pattern ? `url:${String(pattern).trim()}` : '';
     }
+    async function probeBrowserEndpointsWithFlowTargetHint(browserEndpoints, catalogPayload, flowId) {
+      const endpoints = Array.isArray(browserEndpoints)
+        ? browserEndpoints.filter(endpoint => endpoint?.enabled !== false && String(endpoint?.endpoint_url || '').trim())
+        : [];
+      const endpoint = endpoints[0] || preferredAuthCaptureBrowserEndpoint();
+      if (!endpoint?.endpoint_url) {
+        return null;
+      }
+      const selector = String(
+        endpoint.target_selector
+        || browserFlowCatalogDefaultTargetSelector(catalogPayload, flowId)
+        || ''
+      ).trim();
+      if (!selector) {
+        return null;
+      }
+      return fetchJson('/api/browser-cdp/probe', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: endpoint.id || `flow-preflight-${String(flowId || 'unknown').trim() || 'unknown'}`,
+          endpoint_url: endpoint.endpoint_url,
+          target_selector: selector,
+          target_timeout_ms: endpoint.target_timeout_ms || null,
+        }),
+      });
+    }
     async function probePreferredBrowserEndpointForSelector(selector, targetTimeoutMs = null) {
       const endpoint = preferredAuthCaptureBrowserEndpoint();
       const normalizedSelector = String(selector || '').trim();
@@ -13845,31 +13970,48 @@ Copyright (c) 2026 walky
       }
     }
     async function startUnicomSmsLoginRequestCode() {
-      const catalog = await loadUnicomBrowserFlowCatalog().catch(() => null);
-      const requestCodeFlowId = unicomFlowId('sms_request_code', 'unicom_sms_login_request_code_validate');
-      const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId);
-      if (!browserEndpoints.length) {
-        setUnicomAuthAssistantFeedback(tr('auth.unicom.feedback.no_cdp', {}, 'Configure at least one enabled CDP endpoint in Browser / CDP before using the Unicom login assistant.'), 'warn');
-        activateAdminTab('browser-cdp');
-        return;
-      }
-      if (await maybeAutoCaptureAndSaveUnicomLoggedInSession()) {
-        return;
-      }
-      const livePhone = currentUnicomAssistantFieldValue('phone_number');
-      const normalizedPhone = setUnicomAssistantPhoneNumber(
-        preferAssistantFieldValue(
-          livePhone,
-          unicomAuthAssistantState.phone_number || unicomSessionPhoneNumber(),
-        ),
-      );
-      setUnicomAssistantWindowOpen(true, { focusField: normalizedPhone ? 'sms_code' : 'phone_number' });
-      if (!normalizedPhone) {
-        setUnicomAuthAssistantFeedback(tr('Phone number is required in the assistant panel before starting the Unicom SMS login flow.', {}, 'Phone number is required in the assistant panel before starting the Unicom SMS login flow.'), 'warn');
-        focusUnicomAssistantField('phone_number');
-        return;
-      }
       try {
+        const livePhone = currentUnicomAssistantFieldValue('phone_number');
+        const normalizedPhone = setUnicomAssistantPhoneNumber(
+          preferAssistantFieldValue(
+            livePhone,
+            unicomAuthAssistantState.phone_number || unicomSessionPhoneNumber(),
+          ),
+        );
+        setUnicomAssistantWindowOpen(true, { focusField: normalizedPhone ? 'sms_code' : 'phone_number' });
+        const catalog = await loadUnicomBrowserFlowCatalog().catch(() => null);
+        const requestCodeFlowId = unicomFlowId('sms_request_code', 'unicom_sms_login_request_code_validate');
+        const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId);
+        if (!browserEndpoints.length) {
+          setUnicomAuthAssistantFeedback(tr('auth.unicom.feedback.no_cdp', {}, 'Configure at least one enabled CDP endpoint in Browser / CDP before using the Unicom login assistant.'), 'warn');
+          activateAdminTab('browser-cdp');
+          return;
+        }
+        const probePayload = await probeBrowserEndpointsWithFlowTargetHint(browserEndpoints, catalog, requestCodeFlowId).catch(() => null);
+        if (probePayload && !probePayload.ok) {
+          const summary = String(probePayload.summary || '').trim();
+          if (!summary.includes('no matching CDP target found')) {
+            const selectorHint = String(
+              browserEndpoints[0]?.target_selector
+              || browserFlowCatalogDefaultTargetSelector(catalog, requestCodeFlowId)
+              || ''
+            ).trim() || tr('assistant.value.unknown', {}, 'unknown');
+            const endpointHint = (browserEndpoints[0]?.label || browserEndpoints[0]?.endpoint_url || tr('assistant.value.unknown', {}, 'unknown'));
+            setUnicomAuthAssistantFeedback(tr('auth.unicom.feedback.preflight_probe_failed', {
+              endpoint: endpointHint,
+              selector: selectorHint,
+              detail: probePayload?.summary || tr('browser.cdp.probe.failed', {}, 'probe failed'),
+            }, `CDP preflight failed for ${endpointHint}. selector=${selectorHint}. ${probePayload?.summary || 'probe failed'}`), 'warn');
+          }
+        }
+        if (await maybeAutoCaptureAndSaveUnicomLoggedInSession()) {
+          return;
+        }
+        if (!normalizedPhone) {
+          setUnicomAuthAssistantFeedback(tr('Phone number is required in the assistant panel before starting the Unicom SMS login flow.', {}, 'Phone number is required in the assistant panel before starting the Unicom SMS login flow.'), 'warn');
+          focusUnicomAssistantField('phone_number');
+          return;
+        }
         setUnicomAssistantBusy('request-code', true, { openWindow: true, focusField: 'sms_code' });
         setUnicomAuthAssistantFeedback(tr('auth.unicom.feedback.request_start', {}, 'Starting Unicom SMS login, requesting verification code, and capturing validation facts from the live page…'), 'warn');
         const result = await runUnicomBrowserFlow(requestCodeFlowId, {
@@ -13923,7 +14065,7 @@ Copyright (c) 2026 walky
         setUnicomAssistantFocusField('sms_code');
         focusUnicomAssistantField('sms_code');
       } catch (error) {
-        setUnicomAuthAssistantFeedback(error.message, 'warn');
+        setUnicomAuthAssistantFeedback(error?.message || String(error || 'Unicom SMS login start failed.'), 'warn');
       } finally {
         setUnicomAssistantBusy('', false);
       }
@@ -18467,6 +18609,11 @@ Copyright (c) 2026 walky
       const probeButton = event.target.closest('button[data-browser-endpoint-probe]');
       if (probeButton) {
         probeAuthCaptureBrowserEndpoint(Number(probeButton.dataset.browserEndpointProbe));
+        return;
+      }
+      const identifyButton = event.target.closest('button[data-browser-endpoint-identify]');
+      if (identifyButton) {
+        openAuthCaptureBrowserEndpointInfo(Number(identifyButton.dataset.browserEndpointIdentify));
         return;
       }
       const moveButton = event.target.closest('button[data-browser-endpoint-move]');

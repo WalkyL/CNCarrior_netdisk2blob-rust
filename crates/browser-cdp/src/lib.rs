@@ -134,6 +134,8 @@ pub struct CdpConnectionConfig {
     pub target_selector: Option<String>,
     #[serde(default)]
     pub target_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub bootstrap_target_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -527,6 +529,7 @@ impl CdpBrowserFlowSession {
             endpoint_url,
             config.target_selector.as_deref(),
             config.target_timeout_ms,
+            config.bootstrap_target_url.as_deref(),
         )
         .await?;
 
@@ -1454,10 +1457,17 @@ async fn resolve_websocket_url(
     endpoint_url: &str,
     raw_selector: Option<&str>,
     target_timeout_ms: Option<u64>,
+    bootstrap_target_url: Option<&str>,
 ) -> Result<String, BlobError> {
     let selector = raw_selector.map(CdpTargetSelector::parse).transpose()?;
     if let Some(CdpTargetSelector::WebSocketDebuggerUrl(url)) = selector.clone() {
         return validate_page_websocket_url(&url).map(ToString::to_string);
+    }
+
+    if selector.is_none() {
+        if let Some(url) = bootstrap_target_url.map(str::trim).filter(|value| !value.is_empty()) {
+            return create_bootstrap_target(http, endpoint_url, url).await;
+        }
     }
 
     let timeout = target_timeout_ms
@@ -1495,6 +1505,52 @@ async fn resolve_websocket_url_once(
         BlobError::NotFound("selected CDP target does not expose webSocketDebuggerUrl".to_string())
     })?;
     validate_page_websocket_url(&url).map(ToString::to_string)
+}
+
+async fn create_bootstrap_target(
+    http: &HttpClient,
+    endpoint_url: &str,
+    target_url: &str,
+) -> Result<String, BlobError> {
+    let encoded_target = percent_encode_target_url(target_url)?;
+    let url = format!(
+        "{}/json/new?{}",
+        endpoint_url.trim_end_matches('/'),
+        encoded_target
+    );
+    let target: JsonTargetDescriptor = http
+        .put(&url)
+        .send()
+        .await
+        .map_err(|error| {
+            BlobError::Upstream(format!("failed to create CDP bootstrap target {url}: {error}"))
+        })?
+        .error_for_status()
+        .map_err(|error| {
+            BlobError::Upstream(format!(
+                "CDP bootstrap target endpoint {url} returned error: {error}"
+            ))
+        })?
+        .json()
+        .await
+        .map_err(|error| {
+            BlobError::Upstream(format!(
+                "failed to decode CDP bootstrap target payload {url}: {error}"
+            ))
+        })?;
+    let websocket_url = target.web_socket_debugger_url.ok_or_else(|| {
+        BlobError::NotFound(
+            "created CDP bootstrap target does not expose webSocketDebuggerUrl".to_string(),
+        )
+    })?;
+    validate_page_websocket_url(&websocket_url).map(ToString::to_string)
+}
+
+fn percent_encode_target_url(target_url: &str) -> Result<String, BlobError> {
+    let parsed = Url::parse(target_url).map_err(|error| {
+        BlobError::Configuration(format!("invalid bootstrap target url {target_url}: {error}"))
+    })?;
+    Ok(parsed.as_str().replace(' ', "%20"))
 }
 
 async fn fetch_targets(
@@ -1594,7 +1650,11 @@ fn choose_target(
     selector: Option<&CdpTargetSelector>,
 ) -> Result<CdpTargetDescriptor, BlobError> {
     let matches = |target: &&CdpTargetDescriptor| match selector {
-        None => target.r#type.as_deref().is_none_or(|value| value == "page"),
+        None => target
+            .web_socket_debugger_url
+            .as_deref()
+            .is_some()
+            && target_is_bootstrap_candidate(target),
         Some(CdpTargetSelector::TargetId(id)) => target.id.as_deref() == Some(id.as_str()),
         Some(CdpTargetSelector::UrlPattern(pattern)) => target
             .url
@@ -1609,6 +1669,25 @@ fn choose_target(
         }
     };
 
+    if selector.is_none() {
+        if let Some(target) = targets
+            .iter()
+            .find(|target| target_is_blank_bootstrap_target(target))
+            .cloned()
+        {
+            return Ok(target);
+        }
+        return targets
+            .iter()
+            .filter(|target| {
+                target.web_socket_debugger_url.is_some()
+                    && target.r#type.as_deref().is_none_or(|value| value == "page")
+            })
+            .next()
+            .cloned()
+            .ok_or_else(|| BlobError::NotFound("no matching CDP target found".to_string()));
+    }
+
     targets
         .iter()
         .filter(matches)
@@ -1616,6 +1695,19 @@ fn choose_target(
         .or_else(|| targets.iter().filter(matches).next())
         .cloned()
         .ok_or_else(|| BlobError::NotFound("no matching CDP target found".to_string()))
+}
+
+fn target_is_blank_bootstrap_target(target: &CdpTargetDescriptor) -> bool {
+    let url = target.url.as_deref().unwrap_or_default().trim();
+    matches!(url, "about:blank" | "edge://newtab/" | "chrome://newtab/")
+}
+
+fn target_is_bootstrap_candidate(target: &CdpTargetDescriptor) -> bool {
+    target_is_blank_bootstrap_target(target)
+        || target
+            .r#type
+            .as_deref()
+            .is_some_and(|value| value == "page")
 }
 
 fn choose_frame<'a>(
@@ -1940,7 +2032,7 @@ mod tests {
         CdpObservedRequestState, CdpTargetDescriptor, CdpTargetSelector,
         DISPATCH_EVENTS_FUNCTION_SOURCE, SET_INPUT_FUNCTION_SOURCE, apply_event_state,
         choose_frame, choose_target, extract_runtime_value, javascript_element_resolver_expression,
-        parse_network_request, request_post_field_value, validate_page_websocket_url,
+        parse_network_request, percent_encode_target_url, request_post_field_value, validate_page_websocket_url,
         wildcard_match,
     };
     use blob_core::{
@@ -2014,6 +2106,64 @@ mod tests {
         )
         .expect("matching target should be found");
         assert_eq!(selected.id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn choose_target_without_selector_prefers_blank_bootstrap_page() {
+        let selected = choose_target(
+            &[
+                CdpTargetDescriptor {
+                    id: Some("carrier".to_string()),
+                    title: Some("China Mobile".to_string()),
+                    url: Some("https://yun.139.com/w/#/".to_string()),
+                    web_socket_debugger_url: Some(
+                        "ws://127.0.0.1:9222/devtools/page/carrier".to_string(),
+                    ),
+                    r#type: Some("page".to_string()),
+                },
+                CdpTargetDescriptor {
+                    id: Some("newtab".to_string()),
+                    title: Some("新建标签页".to_string()),
+                    url: Some("edge://newtab/".to_string()),
+                    web_socket_debugger_url: Some(
+                        "ws://127.0.0.1:9222/devtools/page/newtab".to_string(),
+                    ),
+                    r#type: Some("page".to_string()),
+                },
+            ],
+            None,
+        )
+        .expect("bootstrap target should be found");
+        assert_eq!(selected.id.as_deref(), Some("newtab"));
+    }
+
+    #[test]
+    fn choose_target_without_selector_falls_back_to_first_page_when_needed() {
+        let selected = choose_target(
+            &[
+                CdpTargetDescriptor {
+                    id: Some("carrier".to_string()),
+                    title: Some("China Mobile".to_string()),
+                    url: Some("https://yun.139.com/w/#/".to_string()),
+                    web_socket_debugger_url: Some(
+                        "ws://127.0.0.1:9222/devtools/page/carrier".to_string(),
+                    ),
+                    r#type: Some("page".to_string()),
+                },
+                CdpTargetDescriptor {
+                    id: Some("worker".to_string()),
+                    title: Some("worker".to_string()),
+                    url: Some(String::new()),
+                    web_socket_debugger_url: Some(
+                        "ws://127.0.0.1:9222/devtools/page/worker".to_string(),
+                    ),
+                    r#type: Some("service_worker".to_string()),
+                },
+            ],
+            None,
+        )
+        .expect("page fallback target should be found");
+        assert_eq!(selected.id.as_deref(), Some("carrier"));
     }
 
     #[test]
@@ -2405,6 +2555,14 @@ mod tests {
             CdpObservedRequestState::Failed(
                 "CDP request POST https://personal-kd-njs.yun.139.com/hcy/file/list failed before receiving a usable response: net::ERR_ABORTED".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn percent_encode_target_url_keeps_about_blank() {
+        assert_eq!(
+            percent_encode_target_url("about:blank").expect("about:blank should be valid"),
+            "about:blank"
         );
     }
 }

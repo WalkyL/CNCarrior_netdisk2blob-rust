@@ -12,6 +12,12 @@
 
 本次发布属于 Rust/Admin 资产变更，需要重新构建并替换 `gatewayd`。
 
+注意：
+
+- `.43` 这台测试机当前运行时会优先读取外置 admin 模板 `/home/walky/apps/ccbg/assets/admin/index.html`
+- 所以凡是涉及 Admin 前端 JS/HTML 的修复，不能只替换 `gatewayd` 二进制
+- 必须同时检查并同步外置 admin 页面，否则浏览器仍会拿到旧前端逻辑
+
 - 构建命令: `cargo build --release -p gatewayd`
 - 发布前远端 binary sha256: `606629d55f72211f343a59eaed985dac4b03a554d59d3b0854275856ee78bb6f`
 - 发布后远端 binary sha256: `fa5d855722b2a6922f08202207841c79d264f839aeb5193c806ef94b916fb174`
@@ -155,3 +161,22 @@ curl -sS -L -i --max-time 10 https://carrier-disk-gateway.agi2030.online/install
 
 1. 等本机默认 DNS 缓存刷新后，不带 `--resolve` 复测正式域名。
 2. 使用 Admin 登录态完成 `.43:61081` 浏览器人工验收。
+
+## 2026-05-31 增量修复记录
+
+- 已补发 `.43` 外置 Admin 模板 `/home/walky/apps/ccbg/assets/admin/index.html`，覆盖联通/电信/移动登录助手近期前端修复。
+- 已确认 `.43` 当前健康检查仍为 `200 OK`：
+
+```bash
+curl -sS -i --max-time 5 http://192.168.1.43:61080/healthz
+```
+
+- 已确认 `.43` Admin 根路径仍按预期跳转登录页：
+
+```bash
+curl -sS -i --max-time 5 http://192.168.1.43:61081/
+```
+
+- 本次增量包含两条关键运行时结论：
+  - 联通短信助手浮窗内点击 `Start SMS Login + Validate` 已恢复触发真实 `/api/browser-flows/session-run`
+  - 进入 `联通` tab 时不再自动弹出引导浮窗，只有用户显式点开或流程进入进行态时才开窗
