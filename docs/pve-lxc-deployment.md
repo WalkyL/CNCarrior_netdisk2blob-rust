@@ -51,11 +51,18 @@ sudo scripts/install.sh
 
 - 创建 `ccbg` system user/group
 - 安装 `/opt/ccbg/bin/gatewayd`
+- 安装 `/opt/ccbg/assets/admin/index.html`
 - 安装 `/etc/systemd/system/ccbg.service`
 - 首次写入 `/etc/ccbg/ccbg.env`
 - 保留已有 `/etc/ccbg/ccbg.env`，并把新样例写成 `.package-<timestamp>`
 - 升级前备份旧二进制到 `/opt/ccbg/backups/`
 - `systemctl enable --now ccbg.service`
+
+正式 release 约定:
+
+- `gatewayd` 与 Admin HTML 必须作为同一部署包交付
+- 运行时会优先读取二进制同前缀下的 `assets/admin/index.html`
+- 不应依赖测试机上人工散落的外置模板覆盖来完成正式发布
 
 ## 验收
 

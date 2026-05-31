@@ -28,11 +28,12 @@ if [ "$(id -u)" -ne 0 ]; then
 	exit 1
 fi
 
-install -d -m 0755 /etc/ccbg /etc/ccbg/config /etc/ccbg/scripts /overlay/ccbg /overlay/ccbg/provider-credentials /tmp/ccbg-spool
+install -d -m 0755 /etc/ccbg /etc/ccbg/config /etc/ccbg/scripts /usr/lib/ccbg/assets/admin /overlay/ccbg /overlay/ccbg/provider-credentials /tmp/ccbg-spool
 install -m 0755 "$PACKAGE_ROOT/bin/gatewayd" /usr/bin/gatewayd
 if [ -x "$PACKAGE_ROOT/bin/mcp-server" ]; then
 	install -m 0755 "$PACKAGE_ROOT/bin/mcp-server" /usr/bin/mcp-server
 fi
+install -m 0644 "$PACKAGE_ROOT/assets/admin/index.html" /usr/lib/ccbg/assets/admin/index.html
 cp -R "$PACKAGE_ROOT/config/." /etc/ccbg/config/
 install -m 0755 "$PACKAGE_ROOT/scripts/smoke.sh" /etc/ccbg/scripts/smoke.sh
 install -m 0755 "$PACKAGE_ROOT/init.d/ccbg" /etc/init.d/ccbg

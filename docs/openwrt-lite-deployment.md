@@ -36,6 +36,7 @@ scripts/build-openwrt-lite-package.sh --target aarch64-unknown-linux-musl
 
 - `/usr/bin/gatewayd`
 - `/usr/bin/mcp-server`
+- `/usr/lib/ccbg/assets/admin/index.html`
 - `/etc/init.d/ccbg`
 - `/etc/ccbg/openwrt-lite.env`
 - `/etc/ccbg/config/`
@@ -45,6 +46,12 @@ scripts/build-openwrt-lite-package.sh --target aarch64-unknown-linux-musl
 - `/tmp/ccbg-spool/`
 
 如果 `/etc/ccbg/openwrt-lite.env` 已存在，安装脚本会保留现有文件，并把新样例写成 `openwrt-lite.env.package-<timestamp>`。
+
+正式 release 约定:
+
+- `gatewayd` 与 Admin HTML 必须随同一个安装包发布
+- 运行时会优先读取二进制同前缀下的 `assets/admin/index.html`
+- 不应依赖宿主机额外手工散落的 HTML 覆盖来修正正式版本页面
 
 ## 默认配置
 

@@ -17,6 +17,7 @@
 - `.43` 这台测试机当前运行时会优先读取外置 admin 模板 `/home/walky/apps/ccbg/assets/admin/index.html`
 - 所以凡是涉及 Admin 前端 JS/HTML 的修复，不能只替换 `gatewayd` 二进制
 - 必须同时检查并同步外置 admin 页面，否则浏览器仍会拿到旧前端逻辑
+- 这属于测试机当前部署遗留，不应作为正式 release 约定；正式发布物必须把 `gatewayd` 与 Admin HTML 一起打包交付
 
 - 构建命令: `cargo build --release -p gatewayd`
 - 发布前远端 binary sha256: `606629d55f72211f343a59eaed985dac4b03a554d59d3b0854275856ee78bb6f`

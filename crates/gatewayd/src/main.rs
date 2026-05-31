@@ -12199,6 +12199,21 @@ async fn admin_logout(State(state): State<AppState>, headers: HeaderMap) -> Resp
 
 const ADMIN_INDEX_TEMPLATE: &str = include_str!("../assets/admin/index.html");
 
+fn admin_index_template_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(bin_dir) = current_exe.parent() {
+            candidates.push(bin_dir.join("assets/admin/index.html"));
+            if let Some(prefix_dir) = bin_dir.parent() {
+                candidates.push(prefix_dir.join("assets/admin/index.html"));
+            }
+        }
+    }
+    candidates.push(PathBuf::from("assets/admin/index.html"));
+    candidates.push(PathBuf::from("crates/gatewayd/assets/admin/index.html"));
+    candidates
+}
+
 fn admin_index_template_source() -> String {
     if let Some(path) = env_opt_or_file(
         "CCBG_ADMIN_INDEX_TEMPLATE",
@@ -12209,14 +12224,14 @@ fn admin_index_template_source() -> String {
             Err(error) => eprintln!("failed to read CCBG_ADMIN_INDEX_TEMPLATE {path}: {error}"),
         }
     }
-    for candidate in [
-        "assets/admin/index.html",
-        "crates/gatewayd/assets/admin/index.html",
-    ] {
-        match fs::read_to_string(candidate) {
+    for candidate in admin_index_template_candidates() {
+        match fs::read_to_string(&candidate) {
             Ok(contents) => return contents,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => eprintln!("failed to read admin template {candidate}: {error}"),
+            Err(error) => eprintln!(
+                "failed to read admin template {}: {error}",
+                candidate.display()
+            ),
         }
     }
     ADMIN_INDEX_TEMPLATE.to_string()

@@ -38,6 +38,7 @@ fi
 rm -rf "${DIST_DIR}"
 mkdir -p \
   "${DIST_DIR}/${PACKAGE_NAME}/bin" \
+  "${DIST_DIR}/${PACKAGE_NAME}/assets/admin" \
   "${DIST_DIR}/${PACKAGE_NAME}/config" \
   "${DIST_DIR}/${PACKAGE_NAME}/etc" \
   "${DIST_DIR}/${PACKAGE_NAME}/scripts" \
@@ -45,6 +46,7 @@ mkdir -p \
   "${DIST_DIR}/${PACKAGE_NAME}/docs"
 
 install -m 0755 "${BINARY}" "${DIST_DIR}/${PACKAGE_NAME}/bin/gatewayd"
+install -m 0644 "${ROOT_DIR}/crates/gatewayd/assets/admin/index.html" "${DIST_DIR}/${PACKAGE_NAME}/assets/admin/index.html"
 cp -R "${ROOT_DIR}/config/." "${DIST_DIR}/${PACKAGE_NAME}/config/"
 install -m 0644 "${ROOT_DIR}/deploy/lxc/ccbg.env" "${DIST_DIR}/${PACKAGE_NAME}/etc/ccbg.env"
 install -m 0644 "${ROOT_DIR}/deploy/lxc/ccbg.service" "${DIST_DIR}/${PACKAGE_NAME}/systemd/ccbg.service"

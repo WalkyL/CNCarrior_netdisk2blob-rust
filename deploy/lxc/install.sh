@@ -23,12 +23,13 @@ install_user() {
 }
 
 install_tree() {
-  install -d -m 0755 /opt/ccbg/bin /etc/ccbg /etc/ccbg/config /var/lib/ccbg /var/lib/ccbg/body-spool /var/lib/ccbg/provider-credentials /var/log/ccbg /opt/ccbg/backups
+  install -d -m 0755 /opt/ccbg/bin /opt/ccbg/assets/admin /etc/ccbg /etc/ccbg/config /var/lib/ccbg /var/lib/ccbg/body-spool /var/lib/ccbg/provider-credentials /var/log/ccbg /opt/ccbg/backups
   if [ -x /opt/ccbg/bin/gatewayd ]; then
     old_sha="$(sha256sum /opt/ccbg/bin/gatewayd | awk '{print $1}')"
     cp /opt/ccbg/bin/gatewayd "/opt/ccbg/backups/gatewayd.${old_sha}.${TIMESTAMP}"
   fi
   install -m 0755 "${PACKAGE_ROOT}/bin/gatewayd" /opt/ccbg/bin/gatewayd
+  install -m 0644 "${PACKAGE_ROOT}/assets/admin/index.html" /opt/ccbg/assets/admin/index.html
   cp -R "${PACKAGE_ROOT}/config/." /etc/ccbg/config/
   install -m 0644 "${PACKAGE_ROOT}/systemd/ccbg.service" /etc/systemd/system/ccbg.service
 
