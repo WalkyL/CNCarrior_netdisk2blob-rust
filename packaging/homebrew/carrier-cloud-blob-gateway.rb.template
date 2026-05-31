@@ -9,12 +9,12 @@ class CarrierCloudBlobGateway < Formula
 
   on_macos do
     on_intel do
-      url "https://github.com/walky/carrier-cloud-blob-gateway/releases/download/{{TAG}}/ccbg-macos-x86_64.tar.gz"
+      url "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/download/{{TAG}}/ccbg-macos-x86_64.tar.gz"
       sha256 "{{MACOS_X86_64_SHA256}}"
     end
 
     on_arm do
-      url "https://github.com/walky/carrier-cloud-blob-gateway/releases/download/{{TAG}}/ccbg-macos-arm64.tar.gz"
+      url "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/download/{{TAG}}/ccbg-macos-arm64.tar.gz"
       sha256 "{{MACOS_ARM64_SHA256}}"
     end
   end

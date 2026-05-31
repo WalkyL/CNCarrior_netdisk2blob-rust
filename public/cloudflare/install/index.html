@@ -41,21 +41,22 @@
           </p>
           <div class="actions">
             <a class="button primary" href="#install-catalog">查看命令</a>
-            <a class="button" href="https://github.com/walky/carrier-cloud-blob-gateway/releases/latest">GitHub Releases</a>
+            <a class="button" href="https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest">GitHub Releases</a>
           </div>
         </div>
         <aside class="install-console">
           <div class="console-title">
             <span>macOS</span>
-            <strong>Homebrew</strong>
+            <strong>Release package</strong>
           </div>
-          <pre><code>brew install walky/tap/carrier-cloud-blob-gateway
-brew services start carrier-cloud-blob-gateway</code></pre>
+          <pre><code>curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-macos-arm64.tar.gz
+tar -xzf ccbg-macos-arm64.tar.gz
+./ccbg-macos-arm64/deploy/macos/install.sh</code></pre>
           <div class="console-title secondary-title">
             <span>Windows</span>
             <strong>PowerShell</strong>
           </div>
-<pre><code>Invoke-WebRequest https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip
+<pre><code>Invoke-WebRequest https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip
 Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\ccbg-release
 .\ccbg-release\ccbg-windows-x86_64\deploy\windows\install.ps1</code></pre>
         </aside>
@@ -76,7 +77,7 @@ Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\ccbg-release
           </article>
           <article class="card">
             <h3>Windows / macOS</h3>
-            <p>Windows 使用 winget 或包内 PowerShell 安装脚本；macOS 使用 Homebrew 或包内 launchd 安装脚本。</p>
+            <p>Windows 使用包内 PowerShell 安装脚本；macOS 使用包内 launchd 安装脚本。</p>
           </article>
         </div>
       </section>

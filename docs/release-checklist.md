@@ -13,7 +13,7 @@
 ## 1. Release 产物
 
 - [x] Git 工作区干净
-- [x] 已有明确 release 候选提交：`2cf2634`
+- [x] 已有明确 release 候选提交：workflow dispatch 时的 `main` HEAD
 - [x] `gatewayd` 与 Admin HTML 作为同一发布物交付
 - [x] LXC 包包含 `assets/admin/index.html`
 - [x] OpenWRT lite 包包含 `assets/admin/index.html`
@@ -46,7 +46,7 @@
 - [x] `cargo test -p blob-core --quiet`
 - [x] `git diff --check`
 - [ ] 需要时补跑完整 workspace 级测试
-- [ ] `scripts/build-native-package.sh --skip-build --target x86_64-unknown-linux-gnu` 包结构 smoke 通过
+- [x] `scripts/build-native-package.sh --skip-build --target x86_64-unknown-linux-gnu` 包结构 smoke 通过
 
 ## 3. `.43` 自动 smoke
 

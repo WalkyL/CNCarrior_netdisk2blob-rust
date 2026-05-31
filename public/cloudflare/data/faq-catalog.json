@@ -18,7 +18,7 @@
         "保存后强制刷新 Providers 与 Dashboard 状态",
         "确认 provider health 与 credential card 状态一致"
       ],
-      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/auth-step-by-step.md"
+      "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/auth-step-by-step.md"
     },
     {
       "id": "limit-probe-cleanup-required",
@@ -34,7 +34,7 @@
         "在 Admin 点击 Mark Cleaned 清理标记",
         "重新跑一次小体积探测验证"
       ],
-      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/provider-probes.md"
+      "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/provider-probes.md"
     },
     {
       "id": "replication-failed-object-triage",
@@ -50,7 +50,7 @@
         "按 target/provider 过滤后重试",
         "检查 fallback/sync 策略是否与实际对象归属一致"
       ],
-      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/object-actions-api-reference.md"
+      "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/object-actions-api-reference.md"
     },
     {
       "id": "openwrt-memory-budget-risk",
@@ -66,7 +66,7 @@
         "优先升级到 256MB+",
         "保留 dry-run 与 smoke 校验流程"
       ],
-      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/openwrt-host-profile.md"
+      "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/openwrt-host-profile.md"
     },
     {
       "id": "fnos-experimental-install-path",
@@ -82,7 +82,7 @@
         "使用 LXC/Linux 包的 smoke 流程验证",
         "遇到权限问题先校验挂载目录与端口占用"
       ],
-      "doc_url": "https://github.com/walky/carrier-cloud-blob-gateway/blob/main/docs/pve-lxc-deployment.md"
+      "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/pve-lxc-deployment.md"
     }
   ]
 }

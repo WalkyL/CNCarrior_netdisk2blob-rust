@@ -5,7 +5,7 @@ Copyright (c) 2026 walky. All rights reserved.
 
 Canonical project name: carrier-cloud-blob-gateway
 Short name: CCBG
-Canonical repository: https://github.com/walky/carrier-cloud-blob-gateway
+Canonical repository: https://github.com/WalkyL/CNCarrior_netdisk2blob-rust
 Release fingerprint: ccbg-0.1.0-walky-20260526-e756003d846d2c46
 
 CCBG is a commercial-first source-available project. The core gateway,

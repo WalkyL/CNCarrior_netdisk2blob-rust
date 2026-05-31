@@ -4,7 +4,7 @@
 /*
   X-CCBG-Provenance: ccbg-0.1.0-walky-20260526-e756003d846d2c46
   X-CCBG-License: LicenseRef-CCBG-Public-Materials
-  X-CCBG-Canonical-Repo: https://github.com/walky/carrier-cloud-blob-gateway
+  X-CCBG-Canonical-Repo: https://github.com/WalkyL/CNCarrior_netdisk2blob-rust
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()

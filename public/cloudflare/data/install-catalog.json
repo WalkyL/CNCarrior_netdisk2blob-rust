@@ -2,7 +2,7 @@
   "schema_version": 1,
   "license": "LicenseRef-CCBG-Public-Materials",
   "release_fingerprint": "ccbg-0.1.0-walky-20260526-e756003d846d2c46",
-  "release_base_url": "https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download",
+  "release_base_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download",
   "support_note": "Official host packages are intended to run as a local resident gateway with a LAN admin surface.",
   "groups": [
     {
@@ -17,7 +17,7 @@
           "arch": "x86 / x64",
           "service_mode": "systemd",
           "package": "ccbg-lxc-package.tar.gz",
-          "command": "curl -fsSLO https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-lxc-package.tar.gz && tar -xzf ccbg-lxc-package.tar.gz && sudo ./ccbg-lxc-package/scripts/install.sh",
+          "command": "curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-lxc-package.tar.gz && tar -xzf ccbg-lxc-package.tar.gz && sudo ./ccbg-lxc-package/scripts/install.sh",
           "verify": "curl -fsS http://127.0.0.1:61080/healthz"
         },
         {
@@ -26,8 +26,8 @@
           "status": "official",
           "arch": "x86 / x64",
           "service_mode": "container",
-          "package": "ghcr.io/walky/carrier-cloud-blob-gateway:latest",
-          "command": "docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walky/carrier-cloud-blob-gateway:latest",
+          "package": "ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
+          "command": "docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
           "verify": "docker exec ccbg gatewayd --version"
         },
         {
@@ -36,8 +36,8 @@
           "status": "official",
           "arch": "x86 / x64",
           "service_mode": "container",
-          "package": "ghcr.io/walky/carrier-cloud-blob-gateway:latest",
-          "command": "podman run -d --name ccbg --replace --restart=unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walky/carrier-cloud-blob-gateway:latest",
+          "package": "ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
+          "command": "podman run -d --name ccbg --replace --restart=unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
           "verify": "podman exec ccbg gatewayd --version"
         },
         {
@@ -47,8 +47,7 @@
           "arch": "x86_64",
           "service_mode": "Scheduled Task resident process",
           "package": "ccbg-windows-x86_64.zip",
-          "command": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip; Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\\ccbg-release; .\\ccbg-release\\ccbg-windows-x86_64\\deploy\\windows\\install.ps1\"",
-          "fallback_command": "winget install AGI2030.CarrierCloudBlobGateway",
+          "command": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip; Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\\ccbg-release; .\\ccbg-release\\ccbg-windows-x86_64\\deploy\\windows\\install.ps1\"",
           "verify": "powershell -Command \"Invoke-WebRequest http://127.0.0.1:61080/healthz\""
         },
         {
@@ -58,8 +57,7 @@
           "arch": "x86_64",
           "service_mode": "launchd user agent",
           "package": "ccbg-macos-x86_64.tar.gz",
-          "command": "brew install walky/tap/carrier-cloud-blob-gateway && brew services start carrier-cloud-blob-gateway",
-          "fallback_command": "curl -fsSLO https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
+          "command": "curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
           "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd"
         },
         {
@@ -69,8 +67,7 @@
           "arch": "arm64",
           "service_mode": "launchd user agent",
           "package": "ccbg-macos-arm64.tar.gz",
-          "command": "brew install walky/tap/carrier-cloud-blob-gateway && brew services start carrier-cloud-blob-gateway",
-          "fallback_command": "curl -fsSLO https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
+          "command": "curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
           "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd"
         }
       ]
@@ -87,7 +84,7 @@
           "arch": "x86 / x64",
           "service_mode": "Docker or Linux host",
           "package": "reuse Docker or LXC package",
-          "command": "docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walky/carrier-cloud-blob-gateway:latest",
+          "command": "docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
           "verify": "curl -fsS http://127.0.0.1:61080/healthz"
         },
         {
@@ -97,7 +94,7 @@
           "arch": "arm64",
           "service_mode": "procd init script",
           "package": "ccbg-openwrt-lite.tar.gz",
-          "command": "curl -fsSLO https://github.com/walky/carrier-cloud-blob-gateway/releases/latest/download/ccbg-openwrt-lite.tar.gz && tar -xzf ccbg-openwrt-lite.tar.gz && ./ccbg-openwrt-lite/scripts/install.sh",
+          "command": "curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-openwrt-lite.tar.gz && tar -xzf ccbg-openwrt-lite.tar.gz && ./ccbg-openwrt-lite/scripts/install.sh",
           "verify": "/etc/init.d/ccbg status"
         }
       ]

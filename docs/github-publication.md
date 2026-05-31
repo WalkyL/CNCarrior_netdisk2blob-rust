@@ -58,11 +58,11 @@ URL 能返回 `200`。
 
 如果公开下载仓库和当前源码仓库不是同一个仓库，需要配置：
 
-- GitHub variable `CCBG_PUBLIC_RELEASE_REPO`，例如 `walky/carrier-cloud-blob-gateway`
+- GitHub variable `CCBG_PUBLIC_RELEASE_REPO`，例如 `WalkyL/carrier-cloud-blob-gateway`
 - GitHub secret `CCBG_PUBLIC_RELEASE_REPO_TOKEN`，需要能在该公开仓库创建/更新 release
 
-未配置镜像仓库时，workflow 只会发布到当前仓库；这适合内部验证，但不满足公网
-安装页已经写死到公开下载仓库的场景。
+未配置镜像仓库时，workflow 只会发布到当前仓库；如果公网安装页也指向当前源码仓库，
+这个默认行为就满足下载要求。
 
 当前公网安装 catalog 要求 latest release 至少包含:
 

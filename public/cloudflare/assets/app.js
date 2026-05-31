@@ -7,7 +7,7 @@ const CCBG_PROVENANCE = {
   release_date: '2026-05-26',
   release_fingerprint: 'ccbg-0.1.0-walky-20260526-e756003d846d2c46',
   fingerprint_sha256: 'e756003d846d2c460f892a20402d59539c8c6980ba011c62d17ab5ad962de6b6',
-  canonical_repo: 'https://github.com/walky/carrier-cloud-blob-gateway',
+  canonical_repo: 'https://github.com/WalkyL/CNCarrior_netdisk2blob-rust',
   license_id: 'LicenseRef-CCBG-Public-Materials'
 };
 

@@ -99,7 +99,7 @@ def build_payload(args: argparse.Namespace) -> dict:
         "tag": args.tag,
         "release_fingerprint": args.fingerprint or current_fingerprint(),
         "generated_at": now_iso(source_date_epoch),
-        "canonical_repo": "https://github.com/walky/carrier-cloud-blob-gateway",
+        "canonical_repo": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust",
         "git_commit": git_commit(),
         "git_dirty": git_dirty(),
         "github": github_context(),

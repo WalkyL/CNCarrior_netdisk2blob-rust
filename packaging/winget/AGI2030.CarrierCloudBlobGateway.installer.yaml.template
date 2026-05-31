@@ -10,7 +10,7 @@ NestedInstallerFiles:
     PortableCommandAlias: gatewayd
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/walky/carrier-cloud-blob-gateway/releases/download/{{TAG}}/ccbg-windows-x86_64.zip
+    InstallerUrl: https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/download/{{TAG}}/ccbg-windows-x86_64.zip
     InstallerSha256: "{{WINDOWS_X86_64_SHA256}}"
 ManifestType: installer
 ManifestVersion: 1.9.0
