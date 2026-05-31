@@ -25,15 +25,7 @@ permission, deploy the same public surface as a Worker with static Assets:
 
 ```bash
 cd ../..
-rm -rf target/cloudflare-public-assets
-mkdir -p target/cloudflare-public-assets
-rsync -a --delete \
-  --exclude 'functions' \
-  --exclude 'worker.js' \
-  --exclude 'wrangler.toml' \
-  --exclude 'wrangler.worker.toml' \
-  --exclude 'target' \
-  public/cloudflare/ target/cloudflare-public-assets/
+scripts/stage-cloudflare-public-assets.sh target/cloudflare-public-assets
 
 export CLOUDFLARE_API_TOKEN="$CF_API_TOKEN"
 export CLOUDFLARE_ACCOUNT_ID="$CF_ACCOUNT_ID"
@@ -44,6 +36,25 @@ wrangler deploy -c public/cloudflare/wrangler.worker.toml \
 
 This fallback serves `/`, `/faq/`, `/install/`, `/api/faq/catalog`, and
 `/api/faq/match`. Static data files under `/data/` are served as assets.
+
+## GitHub Actions Deployment
+
+The repository deployment path is branch-based:
+
+- pushing `test` deploys the Worker + Assets test target
+- pushing `main` deploys the production Worker + Assets target
+
+Required GitHub secrets:
+
+- `CLOUDFLARE_API_TOKEN` or `CF_API_TOKEN`
+- `CLOUDFLARE_ACCOUNT_ID` or `CF_ACCOUNT_ID`
+
+Optional GitHub variables:
+
+- `CCBG_CF_TEST_WORKER` defaults to `ccbg-public-test`
+- `CCBG_CF_TEST_DOMAIN` is optional; if it is unset, the test branch only updates the test Worker
+- `CCBG_CF_PROD_WORKER` defaults to `ccbg-public`
+- `CCBG_CF_PROD_DOMAIN` defaults to `carrier-disk-gateway.agi2030.online`
 
 ## Local Preview
 

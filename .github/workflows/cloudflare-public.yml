@@ -1,0 +1,103 @@
+name: cloudflare-public
+
+on:
+  push:
+    branches:
+      - test
+      - main
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Cloudflare target environment"
+        required: true
+        default: "test"
+        type: choice
+        options:
+          - test
+          - production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-public-${{ github.ref_name }}-${{ github.event.inputs.target || 'push' }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Cloudflare target
+        id: target
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ github.event.inputs.target || github.ref_name }}"
+          case "${requested}" in
+            main|production)
+              echo "environment=production" >> "$GITHUB_OUTPUT"
+              echo "worker_name=${{ vars.CCBG_CF_PROD_WORKER || 'ccbg-public' }}" >> "$GITHUB_OUTPUT"
+              echo "domain=${{ vars.CCBG_CF_PROD_DOMAIN || 'carrier-disk-gateway.agi2030.online' }}" >> "$GITHUB_OUTPUT"
+              ;;
+            test)
+              echo "environment=test" >> "$GITHUB_OUTPUT"
+              echo "worker_name=${{ vars.CCBG_CF_TEST_WORKER || 'ccbg-public-test' }}" >> "$GITHUB_OUTPUT"
+              echo "domain=${{ vars.CCBG_CF_TEST_DOMAIN }}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "unsupported Cloudflare deployment target: ${requested}" >&2
+              exit 2
+              ;;
+          esac
+
+      - name: Public material checks
+        run: |
+          python3 scripts/license-check.py --skip-cargo-metadata
+          python3 scripts/check-cloudflare-public-fingerprint.py
+          python3 -m json.tool public/cloudflare/manifest.json >/dev/null
+          python3 -m json.tool public/cloudflare/data/install-catalog.json >/dev/null
+          git diff --check
+
+      - name: Stage Worker assets
+        run: scripts/stage-cloudflare-public-assets.sh target/cloudflare-public-assets
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Deploy Worker + Assets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || secrets.CF_ACCOUNT_ID }}
+          CCBG_CF_WORKER_NAME: ${{ steps.target.outputs.worker_name }}
+          CCBG_CF_DOMAIN: ${{ steps.target.outputs.domain }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "missing CLOUDFLARE_API_TOKEN or CF_API_TOKEN GitHub secret" >&2
+            exit 1
+          fi
+          if [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "missing CLOUDFLARE_ACCOUNT_ID or CF_ACCOUNT_ID GitHub secret" >&2
+            exit 1
+          fi
+          args=(
+            deploy
+            -c public/cloudflare/wrangler.worker.toml
+            --name "${CCBG_CF_WORKER_NAME}"
+            --assets target/cloudflare-public-assets
+          )
+          if [ -n "${CCBG_CF_DOMAIN:-}" ]; then
+            args+=(--domain "${CCBG_CF_DOMAIN}")
+          fi
+          npx wrangler@latest "${args[@]}"
+
+      - name: Deployed fingerprint check
+        if: steps.target.outputs.domain != ''
+        run: |
+          python3 scripts/check-cloudflare-public-fingerprint.py \
+            --deployed-base-url "https://${{ steps.target.outputs.domain }}"

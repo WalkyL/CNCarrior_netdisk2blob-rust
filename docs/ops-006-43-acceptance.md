@@ -135,7 +135,7 @@ curl -sS -L -i --max-time 10 https://carrier-disk-gateway.agi2030.online/install
 
 未完成:
 
-- 使用 committed `public/cloudflare/wrangler.worker.toml` 复现部署时，应按 README 通过 CLI `--domain carrier-disk-gateway.agi2030.online` 绑定；不要在该 toml 里写 `routes`，否则 wrangler 会走 zone Workers routes 接口。
+- 使用 committed `public/cloudflare/wrangler.worker.toml` 复现部署时，应按 README 通过 CLI `--domain carrier-disk-gateway.agi2030.online` 绑定；不要在该 toml 里写 `routes`，否则 wrangler 会走 zone Workers routes 接口。后续正式流程改为 GitHub Actions：`test` 分支部署测试 Worker + Assets，`main` 分支部署生产 Worker + Assets。
 
 本地 Worker smoke:
 
