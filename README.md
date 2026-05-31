@@ -25,7 +25,7 @@
 - 将“核心网关能力”和“Agent 集成封装”解耦，确保能分别交付为 daemon、MCP 和 Skill。
 - 明确采用“单写主云盘 + 多异步同步目标”模型，避免多主写入导致的数据冲突。
 - 数据面正式目标兼容 S3 API，优先支持 Agent 常用的最小 S3 子集。
-- 一期宿主目标覆盖 `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`、`OpenWRT arm64`；`STM32` / `ESP32-S3` 只作为嵌入式 S3 客户端示例。
+- 一期宿主目标覆盖 `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`、`Windows x86_64`、`macOS x86_64/arm64`、`OpenWRT arm64`；`STM32` / `ESP32-S3` 只作为嵌入式 S3 客户端示例。
 - 先跑通本地 Ubuntu，后续平滑迁移到 PVE/LXC、软路由和 ARM Linux 设备。
 - 统一将监听端口约束在 `60000-65534` 区间，降低与系统常用端口冲突的概率。
 
@@ -86,22 +86,24 @@ carrier-cloud-blob-gateway/
 - [LICENSE](LICENSE)
 - [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)
 - [PUBLIC-MATERIALS-LICENSE.md](PUBLIC-MATERIALS-LICENSE.md)
-- [.github/workflows/ci.yml](.github/workflows/ci.yml)
+- [docs/github-publication.md](docs/github-publication.md)
+- [.github/workflows/release-macos.yml](.github/workflows/release-macos.yml)
 - [Dockerfile](deploy/Dockerfile)
 - [Containerfile](deploy/Containerfile)
 - [public/cloudflare](public/cloudflare)
 
 推荐优先阅读的运维文档:
 
-- [docs/auth-step-by-step.md](/home/walky/carrier-cloud-blob-gateway/docs/auth-step-by-step.md:1)
-- [docs/router-deployment-guide.md](/home/walky/carrier-cloud-blob-gateway/docs/router-deployment-guide.md:1)
-- [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)
-- [docs/object-actions-api-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-api-reference.md:1)
-- [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1)
-- [docs/unicom-go-live-checklist.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-go-live-checklist.md:1)
-- [docs/unicom-change-record-template.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-change-record-template.md:1)
-- [docs/unicom-phase-closeout-report.md](/home/walky/carrier-cloud-blob-gateway/docs/unicom-phase-closeout-report.md:1)
-- [docs/provider-completion-standard.md](/home/walky/carrier-cloud-blob-gateway/docs/provider-completion-standard.md:1)
+- [docs/auth-step-by-step.md](docs/auth-step-by-step.md)
+- [docs/router-deployment-guide.md](docs/router-deployment-guide.md)
+- [docs/object-actions-and-history.md](docs/object-actions-and-history.md)
+- [docs/object-actions-api-reference.md](docs/object-actions-api-reference.md)
+- [docs/notify-webhook-reference.md](docs/notify-webhook-reference.md)
+- [docs/unicom-go-live-checklist.md](docs/unicom-go-live-checklist.md)
+- [docs/unicom-change-record-template.md](docs/unicom-change-record-template.md)
+- [docs/unicom-phase-closeout-report.md](docs/unicom-phase-closeout-report.md)
+- [docs/provider-completion-standard.md](docs/provider-completion-standard.md)
+- [docs/github-publication.md](docs/github-publication.md)
 
 ## 快速启动
 
@@ -114,7 +116,7 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 
 当前默认监听地址为 `127.0.0.1:61080`，该端口规划为本地 S3 兼容数据面入口。
 
-如果宿主是软路由或 OpenWRT 类设备，先看 [docs/router-deployment-guide.md](/home/walky/carrier-cloud-blob-gateway/docs/router-deployment-guide.md:1)。推荐默认保持 `Admin Web`、`OAuth Callback`、`Metrics` 都只监听 `127.0.0.1`，仅按需要显式开放 `S3 API`。
+如果宿主是软路由或 OpenWRT 类设备，先看 [docs/router-deployment-guide.md](docs/router-deployment-guide.md)。推荐默认保持 `Admin Web`、`OAuth Callback`、`Metrics` 都只监听 `127.0.0.1`，仅按需要显式开放 `S3 API`。
 
 软路由场景建议同时把 `CCBG_DATA_PLANE_MAX_IN_FLIGHT` 控制在 `2~4`，让数据面在并发超限时直接返回 `503`，而不是在小内存宿主上继续堆积请求。
 如果客户端有突发请求峰值，还可以再打开 `CCBG_DATA_PLANE_MAX_REQUESTS_PER_SECOND`，做一个更保守的每秒请求阀门。
@@ -217,7 +219,7 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 - 复制失败告警现在支持 `CCBG_REPLICATION_FAILED_ALERT_THRESHOLD` 和 `CCBG_REPLICATION_FAILED_ALERT_MIN_AGE_MS` 两个生产化阈值，避免刚失败就立刻噪声告警
 - webhook 总会附带 `x-ccbg-notify-event-id` 与 `x-ccbg-notify-timestamp`
 - 若配置 `CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET`，还会附带 `x-ccbg-notify-signature-version=v1` 与 `x-ccbg-notify-signature`
-- 建议接收端按 `event_id + timestamp` 做幂等与时间窗校验；可直接参考 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 和 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)
+- 建议接收端按 `event_id + timestamp` 做幂等与时间窗校验；可直接参考 [docs/notify-webhook-reference.md](docs/notify-webhook-reference.md) 和 [scripts/notify-webhook-receiver-example.py](scripts/notify-webhook-receiver-example.py)
 
 当前 S3 兼容实现边界:
 

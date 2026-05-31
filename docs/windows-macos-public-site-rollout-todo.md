@@ -90,7 +90,7 @@
 **状态:** pending
 **目标:** CI 至少覆盖 catalog、Cloudflare public fingerprint、原生打包脚本 smoke。
 **Coding 指导:** 先做不依赖交叉编译工具链的 smoke；Windows/macOS 真机运行作为 release checklist gate。
-**验收方法:** GitHub Actions 和本地命令都能跑通。
+**验收方法:** 本地 release gate 能跑通；macOS GitHub workflow 能生成 `x86_64` 与 `arm64` 包。
 **验收标准:** `git diff --check`、public fingerprint、license check、native packaging smoke 全部通过。
 **依赖:** WS-002, PKG-001
 **不做事项:** 不在 CI 保存真实签名证书或 GitHub release token。

@@ -421,9 +421,9 @@
 **Coding 指导:** 复用 `deploy/Dockerfile` 与 `deploy/Containerfile`；最小健康检查。
 **验收方法:** CI job 拉起容器并跑 S3 基础请求。
 **验收标准:** 双镜像构建成功，启动后健康检查通过。
-**实现备注:** CI 新增 `container-smoke` matrix，分别用 Dockerfile/Docker 与 Containerfile/Podman 构建镜像；`scripts/container-smoke.py` 会用 stub provider、空 sync/fallback、`CCBG_ONEDRIVE_ENABLED=false` 启动容器，检查 `/healthz` 并执行 SigV4 `ListBuckets`。容器镜像现在复制 `config/` catalog，并为非 root `gateway` 用户准备可写 `data` 与 `body-spool` 目录。工作流支持 `workflow_dispatch`，可复用现有 GitHub PAT/Actions 手动触发模式。
-**实际验证命令:** `python3 -m py_compile scripts/container-smoke.py scripts/license-check.py scripts/catalog-lint.py`；`python3 scripts/container-smoke.py --help`；workflow YAML 解析检查；`git diff --check`。本机有 Podman 但无 Docker；Podman 真机构建已验证进入 `rust:1.94-bookworm` 拉取阶段，因首次拉取 builder 镜像超过本轮验证窗口中止，完整双运行时验收交由 GitHub Actions `container-smoke` 执行。
-**依赖:** CI workflow
+**实现备注:** 早期 CI 曾新增 `container-smoke` matrix，分别用 Dockerfile/Docker 与 Containerfile/Podman 构建镜像；2026-06-01 起通用 CI 已改为本地 release gate，后续容器 smoke 应通过 `scripts/container-smoke.py` 或发布机本地命令执行。`scripts/container-smoke.py` 会用 stub provider、空 sync/fallback、`CCBG_ONEDRIVE_ENABLED=false` 启动容器，检查 `/healthz` 并执行 SigV4 `ListBuckets`。容器镜像现在复制 `config/` catalog，并为非 root `gateway` 用户准备可写 `data` 与 `body-spool` 目录。
+**实际验证命令:** `python3 -m py_compile scripts/container-smoke.py scripts/license-check.py scripts/catalog-lint.py`；`python3 scripts/container-smoke.py --help`；`git diff --check`。本机有 Podman 但无 Docker；Podman 真机构建已验证进入 `rust:1.94-bookworm` 拉取阶段，因首次拉取 builder 镜像超过本轮验证窗口中止。
+**依赖:** 本地 release gate
 **不做事项:** 不在 CI 使用真实 provider 凭证。
 **风险:** runner 环境差异导致 flaky。
 
@@ -694,7 +694,7 @@
 **优先级:** P0
 **状态:** completed
 **目标:** 基于现有 `public/cloudflare/` 建立 `carrier-disk-gateway.agi2030.online` 项目站，作为公开介绍、下载和 FAQ 入口。
-**Coding 指导:** 参考 `llm-router.agi2030.online` 的信息结构，但保留当前 public-materials license/provenance 边界；站点内容覆盖产品介绍、能力矩阵、下载安装、FAQ、授权/个人源码审查、Provenance；域名与 Worker/Pages 配置明确绑定到 `agi2030.online`；兼容本机现有 Cloudflare 凭据文件和 GitHub Actions 部署。
+**Coding 指导:** 参考 `llm-router.agi2030.online` 的信息结构，但保留当前 public-materials license/provenance 边界；站点内容覆盖产品介绍、能力矩阵、下载安装、FAQ、授权/个人源码审查、Provenance；域名与 Worker/Pages 配置明确绑定到 `agi2030.online`；兼容本机现有 Cloudflare 凭据文件和 `scripts/deploy-cloudflare-public.sh` 本地部署。
 **验收方法:** 本地 `wrangler` 预览站点；部署后访问正式域名首页、FAQ、下载页与 `.well-known/ccbg-provenance.json`。
 **验收标准:** 站点可从正式自定义域访问；不再保留 OneDrive 作为首页默认能力；页面内容与当前授权边界一致。
 **依赖:** RELEASE-005

@@ -37,19 +37,22 @@ wrangler deploy -c public/cloudflare/wrangler.worker.toml \
 This fallback serves `/`, `/faq/`, `/install/`, `/api/faq/catalog`, and
 `/api/faq/match`. Static data files under `/data/` are served as assets.
 
-## GitHub Actions Deployment
+## Local Deployment
 
-The repository deployment path is branch-based:
+Cloudflare deployment is run from a local machine with Cloudflare credentials:
 
-- pushing `test` deploys the Worker + Assets test target
-- pushing `main` deploys the production Worker + Assets target
+```bash
+cd ../..
+scripts/deploy-cloudflare-public.sh test
+scripts/deploy-cloudflare-public.sh production
+```
 
-Required GitHub secrets:
+Required local environment variables:
 
 - `CLOUDFLARE_API_TOKEN` or `CF_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID` or `CF_ACCOUNT_ID`
 
-Optional GitHub variables:
+Optional local environment variables:
 
 - `CCBG_CF_TEST_WORKER` defaults to `ccbg-public-test`
 - `CCBG_CF_TEST_DOMAIN` is optional; if it is unset, the test branch only updates the test Worker
@@ -64,8 +67,7 @@ Optional GitHub variables:
 
 Routine production deploys update the existing Worker + Assets deployment and
 skip custom-domain rebinding. The custom domain should already point at the
-Worker. Run the public URL smoke checks from an allowed network after the
-GitHub deployment completes.
+Worker. Run the public URL smoke checks from an allowed network after deploy.
 
 ## Local Preview
 

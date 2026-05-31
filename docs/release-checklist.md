@@ -13,12 +13,13 @@
 ## 1. Release 产物
 
 - [x] Git 工作区干净
-- [x] 已有明确 release 候选提交：workflow dispatch 时的 `main` HEAD
+- [x] 已有明确 release 候选提交：本地 `main` HEAD 或明确 release tag
 - [x] `gatewayd` 与 Admin HTML 作为同一发布物交付
 - [x] LXC 包包含 `assets/admin/index.html`
 - [x] OpenWRT lite 包包含 `assets/admin/index.html`
 - [x] 容器镜像构建文件已显式复制 Admin HTML
-- [x] 已有 GitHub Actions local release 流程：`.github/workflows/release-public-local.yml`
+- [x] 已有本地 release 流程：`scripts/check-release-ready.sh` 与 `scripts/release-local.sh`
+- [x] macOS 包保留 GitHub workflow：`.github/workflows/release-macos.yml`
 - [ ] 生成本次正式 release 的 provenance 文件
 - [ ] 生成本次正式 release 的对外交付包与 SHA256
 - [ ] Windows `x86_64` 原生包包含 `gatewayd.exe` 与 `assets/admin/index.html`
@@ -27,7 +28,9 @@
 - [ ] Homebrew formula 模板已用正式 tag/SHA256 渲染
 - [ ] winget manifest 模板已用正式 tag/SHA256 渲染
 
-正式 GitHub release 必须至少包含下面这些公网安装页会引用的资产：
+正式对外 release 必须至少包含下面这些公网安装页会引用的资产。macOS 资产可由
+GitHub `release-macos` workflow 生成；其他资产由本地 release 脚本生成后按当前下载
+托管策略上传。
 
 - `ccbg-lxc-package.tar.gz`
 - `ccbg-windows-x86_64.zip`
@@ -40,6 +43,7 @@
 
 ## 2. 本地质量门
 
+- [ ] `scripts/check-release-ready.sh`
 - [x] `cargo check -p gatewayd --quiet`
 - [x] `cargo test -p gatewayd --quiet`
 - [x] `cargo test -p browser-cdp --quiet`
@@ -61,6 +65,8 @@
 
 ## 4. 公共站点 smoke
 
+- [ ] `scripts/deploy-cloudflare-public.sh test` 已部署测试站点
+- [ ] `scripts/deploy-cloudflare-public.sh production` 已部署生产站点
 - [ ] `https://carrier-disk-gateway.agi2030.online/` 首屏为深色安装优先入口
 - [x] `https://carrier-disk-gateway.agi2030.online/faq/` 返回 `200`
 - [x] `https://carrier-disk-gateway.agi2030.online/install/` 返回 `200`
@@ -140,6 +146,7 @@
 - [ ] `.43` 全量人工验收全部通过
 - [ ] release 产物与 SHA256 已生成
 - [ ] provenance 已生成
+- [ ] macOS GitHub workflow 已生成 `x86_64` 与 `arm64` 包
 - [ ] 回滚包 / 上一个稳定版本可用
 - [ ] 发布记录已落文档
 - [ ] Windows/macOS 后台常驻路径至少经过对应真机 smoke
@@ -158,3 +165,9 @@
 - 自动化 smoke 已基本通过
 - release 产物“一体化打包 Rust 程序 + Admin HTML”已落地
 - 当前唯一明确阻塞项是 `.43` 上的全量人工验收尚未完成
+
+截至 2026-06-01：
+
+- GitHub Actions 不再承担通用 CI、Linux/Windows/OpenWrt 发版或 Cloudflare 部署
+- macOS 包仍通过 GitHub `release-macos` workflow 构建
+- Linux/Windows/OpenWrt release gate 与 Cloudflare 部署改为本地脚本

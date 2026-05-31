@@ -135,7 +135,7 @@ curl -sS -L -i --max-time 10 https://carrier-disk-gateway.agi2030.online/install
 
 未完成:
 
-- 使用 committed `public/cloudflare/wrangler.worker.toml` 复现部署时，首次绑定 custom domain 可通过 CLI `--domain carrier-disk-gateway.agi2030.online` 完成；不要在该 toml 里写 `routes`，否则 wrangler 会走 zone Workers routes 接口。后续正式流程改为 GitHub Actions：`test` 分支部署测试 Worker + Assets，`main` 分支部署生产 Worker + Assets；日常生产部署只更新已有 Worker，不重复绑定域名。GitHub-hosted runner 访问生产域名可能被 Cloudflare 边缘安全策略返回 403，因此生产域名 smoke 默认不阻塞 workflow，发布后从允许访问的网络执行 URL 验收。
+- 使用 committed `public/cloudflare/wrangler.worker.toml` 复现部署时，首次绑定 custom domain 可通过 CLI `--domain carrier-disk-gateway.agi2030.online` 完成；不要在该 toml 里写 `routes`，否则 wrangler 会走 zone Workers routes 接口。后续正式流程改为本地脚本：`scripts/deploy-cloudflare-public.sh test` 部署测试 Worker + Assets，`scripts/deploy-cloudflare-public.sh production` 部署生产 Worker + Assets；日常生产部署只更新已有 Worker，不重复绑定域名。生产域名 smoke 从允许访问的网络执行，避免被 Cloudflare 边缘安全策略误判。
 
 本地 Worker smoke:
 
