@@ -55,6 +55,13 @@ Optional GitHub variables:
 - `CCBG_CF_TEST_DOMAIN` is optional; if it is unset, the test branch only updates the test Worker
 - `CCBG_CF_PROD_WORKER` defaults to `ccbg-public`
 - `CCBG_CF_PROD_DOMAIN` defaults to `carrier-disk-gateway.agi2030.online`
+- `CCBG_CF_BIND_DOMAIN_ON_DEPLOY` defaults to unset/false. Set it to `true`
+  only for the one-time custom-domain binding job with a token that has zone
+  route permissions.
+
+Routine production deploys update the existing Worker + Assets deployment and
+skip custom-domain rebinding. The custom domain should already point at the
+Worker.
 
 ## Local Preview
 

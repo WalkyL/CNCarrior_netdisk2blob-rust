@@ -92,12 +92,22 @@ jobs:
             --assets target/cloudflare-public-assets
           )
           if [ -n "${CCBG_CF_DOMAIN:-}" ]; then
-            args+=(--domain "${CCBG_CF_DOMAIN}")
+            if [ "${CCBG_CF_BIND_DOMAIN_ON_DEPLOY:-false}" = "true" ]; then
+              args+=(--domain "${CCBG_CF_DOMAIN}")
+            else
+              echo "Skipping domain binding for ${CCBG_CF_DOMAIN}; Worker custom domain is managed outside routine deploys."
+            fi
           fi
           npx wrangler@latest "${args[@]}"
 
-      - name: Deployed fingerprint check
+      - name: Deployed HTTP smoke
         if: steps.target.outputs.domain != ''
         run: |
-          python3 scripts/check-cloudflare-public-fingerprint.py \
-            --deployed-base-url "https://${{ steps.target.outputs.domain }}"
+          set -euo pipefail
+          base="https://${{ steps.target.outputs.domain }}"
+          curl -fsS "$base/" | grep -F '/assets/ccbg-icon.svg' >/dev/null
+          curl -fsS "$base/" | grep -F 'Windows、macOS、Linux 和常见备份工具可以通过 S3 或 SMB 访问' >/dev/null
+          curl -fsS "$base/install/" | grep -F '选择平台，一条命令启动本地网关' >/dev/null
+          curl -fsS "$base/faq/" | grep -F 'FAQ 目录与匹配 API' >/dev/null
+          curl -fsS "$base/assets/ccbg-icon.svg" | grep -F 'CCBG-Release-Fingerprint' >/dev/null
+          curl -fsS "$base/api/faq/catalog" | grep -F '"count"' >/dev/null
