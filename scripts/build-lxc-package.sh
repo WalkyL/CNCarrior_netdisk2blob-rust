@@ -6,30 +6,54 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/target/lxc-package"
 PACKAGE_NAME="${CCBG_LXC_PACKAGE_NAME:-ccbg-lxc-package}"
+TARGET="${CCBG_LXC_TARGET:-}"
 SKIP_BUILD=false
 
-for arg in "$@"; do
-  case "${arg}" in
+usage() {
+  echo "usage: scripts/build-lxc-package.sh [--target <rust-target>] [--skip-build]"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --target)
+      if [ "$#" -lt 2 ]; then
+        echo "--target requires a Rust target triple" >&2
+        exit 2
+      fi
+      TARGET="$2"
+      shift 2
+      ;;
     --skip-build)
       SKIP_BUILD=true
+      shift
       ;;
     -h|--help)
-      echo "usage: scripts/build-lxc-package.sh [--skip-build]"
+      usage
       exit 0
       ;;
     *)
-      echo "unknown argument: ${arg}" >&2
+      echo "unknown argument: $1" >&2
+      usage >&2
       exit 2
       ;;
   esac
 done
 
 if [ "${SKIP_BUILD}" != true ]; then
-  cargo build --release -p gatewayd
+  if [ -n "${TARGET}" ]; then
+    cargo build --release --target "${TARGET}" -p gatewayd
+  else
+    cargo build --release -p gatewayd
+  fi
 fi
 
-BINARY="${ROOT_DIR}/target/release/gatewayd"
-if [ ! -x "${BINARY}" ]; then
+if [ -n "${TARGET}" ]; then
+  BINARY="${ROOT_DIR}/target/${TARGET}/release/gatewayd"
+else
+  BINARY="${ROOT_DIR}/target/release/gatewayd"
+fi
+
+if [ ! -s "${BINARY}" ]; then
   echo "missing release binary: ${BINARY}" >&2
   echo "run without --skip-build or build gatewayd first" >&2
   exit 1
@@ -57,6 +81,7 @@ install -m 0644 "${ROOT_DIR}/docs/pve-lxc-deployment.md" "${DIST_DIR}/${PACKAGE_
 
 {
   echo "package=${PACKAGE_NAME}"
+  echo "rust_target=${TARGET:-host}"
   echo "built_at_unix=$(date +%s)"
   echo "gatewayd_sha256=$(sha256sum "${BINARY}" | awk '{print $1}')"
   git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true

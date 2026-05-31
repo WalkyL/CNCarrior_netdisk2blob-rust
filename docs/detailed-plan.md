@@ -59,7 +59,7 @@ STM32 更适合作为客户端消费本地 S3 API，而不是承载完整控制�
 
 - GitHub 公开仓库
 - 商业核心边界 + 公开材料许可 + 个人非商业源码审查申请
-- 本地 release gate；macOS 包保留 GitHub workflow
+- `.47` 本地 release gate；macOS 包为社区/实验交叉编译包
 
 ## 系统目标
 
@@ -266,10 +266,10 @@ gatewayd (S3 API :61080)
 - 为发布前提供本地质量门禁
 - 一期至少覆盖格式检查、workspace 测试、catalog lint 和公开站 fingerprint
 
-### `.github/workflows/release-macos.yml`
+### `.47` 发布构建主机
 
-- 仅负责 macOS `x86_64` / `arm64` 原生包
-- 不负责 Linux、Windows、OpenWrt、容器镜像或 Cloudflare 部署
+- 负责 Linux LXC、Windows、OpenWrt、macOS 社区/实验包、STM32 示例和 ESP32-S3 示例的构建入口
+- GitHub 只保留源码、分支、tag、issue 模板和 release 记录
 
 ### `mcp-server`
 
@@ -589,7 +589,7 @@ skills/
 
 - `LICENSE`
 - `scripts/check-release-ready.sh`
-- `.github/workflows/release-macos.yml`
+- `docs/ops-007-47-release-build-host.md`
 - Docker / Podman 构建入口
 - 明确区分“已实现”和“规划中”的文档
 

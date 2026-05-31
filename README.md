@@ -25,7 +25,7 @@
 - 将“核心网关能力”和“Agent 集成封装”解耦，确保能分别交付为 daemon、MCP 和 Skill。
 - 明确采用“单写主云盘 + 多异步同步目标”模型，避免多主写入导致的数据冲突。
 - 数据面正式目标兼容 S3 API，优先支持 Agent 常用的最小 S3 子集。
-- 一期宿主目标覆盖 `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`、`Windows x86_64`、`macOS x86_64/arm64`、`OpenWRT arm64`；`STM32` / `ESP32-S3` 只作为嵌入式 S3 客户端示例。
+- 一期宿主目标覆盖 `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`、`Windows x86_64`、`OpenWRT arm64`；`macOS x86_64/arm64` 暂时作为社区/实验交叉编译包；`STM32` / `ESP32-S3` 只作为嵌入式 S3 客户端示例。
 - 先跑通本地 Ubuntu，后续平滑迁移到 PVE/LXC、软路由和 ARM Linux 设备。
 - 统一将监听端口约束在 `60000-65534` 区间，降低与系统常用端口冲突的概率。
 
@@ -87,7 +87,6 @@ carrier-cloud-blob-gateway/
 - [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)
 - [PUBLIC-MATERIALS-LICENSE.md](PUBLIC-MATERIALS-LICENSE.md)
 - [docs/github-publication.md](docs/github-publication.md)
-- [.github/workflows/release-macos.yml](.github/workflows/release-macos.yml)
 - [Dockerfile](deploy/Dockerfile)
 - [Containerfile](deploy/Containerfile)
 - [public/cloudflare](public/cloudflare)
@@ -237,7 +236,9 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 一期平台兼容边界:
 
 - `PVE LXC x86/x64`、`Docker x86/x64`、`Podman x86/x64`: 完整宿主目标
+- `Windows x86_64`: 完整宿主目标
 - `OpenWRT arm64`: 轻量宿主目标，当前采用 `sqlite-host` 路线
+- `macOS x86_64/arm64`: 社区/实验交叉编译包，未签名、未公证、未做 macOS 真机 smoke
 - `STM32`: 嵌入式 S3 客户端示例，不承载完整 daemon
 - `ESP32-S3`: 嵌入式 S3 客户端示例；后续按 `tiny-state-client` 或 `relay-lite` 子集评估，详见 `docs/esp32-s3-profile.md`
 
@@ -299,6 +300,7 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 - OpenWRT Host 档位见 `docs/openwrt-host-profile.md`
 - 资源预算与算法模型见 `docs/resource-budget.md`
 - GitHub 发布规划见 `docs/github-publication.md`
+- `.47` 发布构建主机见 `docs/ops-007-47-release-build-host.md`
 - 端口策略见 `docs/ports.md`
 - provider 差异矩阵见 `docs/provider-matrix.md`
 - S3 兼容规划见 `docs/s3-compatibility.md`

@@ -19,7 +19,7 @@
 - [x] OpenWRT lite 包包含 `assets/admin/index.html`
 - [x] 容器镜像构建文件已显式复制 Admin HTML
 - [x] 已有本地 release 流程：`scripts/check-release-ready.sh` 与 `scripts/release-local.sh`
-- [x] macOS 包保留 GitHub workflow：`.github/workflows/release-macos.yml`
+- [x] 所有 release 编译入口收敛到 `.47`
 - [ ] 生成本次正式 release 的 provenance 文件
 - [ ] 生成本次正式 release 的对外交付包与 SHA256
 - [ ] Windows `x86_64` 原生包包含 `gatewayd.exe` 与 `assets/admin/index.html`
@@ -28,9 +28,8 @@
 - [ ] Homebrew formula 模板已用正式 tag/SHA256 渲染
 - [ ] winget manifest 模板已用正式 tag/SHA256 渲染
 
-正式对外 release 必须至少包含下面这些公网安装页会引用的资产。macOS 资产可由
-GitHub `release-macos` workflow 生成；其他资产由本地 release 脚本生成后按当前下载
-托管策略上传。
+正式对外 release 必须至少包含下面这些公网安装页会引用的资产。所有资产由 `.47`
+本地 release 脚本生成后按当前下载托管策略上传；macOS 为社区/实验交叉编译包。
 
 - `ccbg-lxc-package.tar.gz`
 - `ccbg-windows-x86_64.zip`
@@ -146,7 +145,7 @@ GitHub `release-macos` workflow 生成；其他资产由本地 release 脚本生
 - [ ] `.43` 全量人工验收全部通过
 - [ ] release 产物与 SHA256 已生成
 - [ ] provenance 已生成
-- [ ] macOS GitHub workflow 已生成 `x86_64` 与 `arm64` 包
+- [ ] `.47` 已生成 macOS `x86_64` 与 `arm64` 社区/实验包，或已记录 Darwin SDK/工具链缺口
 - [ ] 回滚包 / 上一个稳定版本可用
 - [ ] 发布记录已落文档
 - [ ] Windows/macOS 后台常驻路径至少经过对应真机 smoke
@@ -169,5 +168,6 @@ GitHub `release-macos` workflow 生成；其他资产由本地 release 脚本生
 截至 2026-06-01：
 
 - GitHub Actions 不再承担通用 CI、Linux/Windows/OpenWrt 发版或 Cloudflare 部署
-- macOS 包仍通过 GitHub `release-macos` workflow 构建
-- Linux/Windows/OpenWrt release gate 与 Cloudflare 部署改为本地脚本
+- GitHub Actions 不再承担 macOS 发版
+- Linux/Windows/OpenWrt/macOS release gate 与 Cloudflare 部署改为 `.47` 本地脚本
+- macOS 暂时降级为社区/实验交叉编译包

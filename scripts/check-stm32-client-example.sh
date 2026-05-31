@@ -7,10 +7,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE_DIR="${ROOT_DIR}/examples/stm32-client-only"
 OUT_DIR="${ROOT_DIR}/target/stm32-client-example"
 CC_BIN="${CC:-gcc}"
+read -r -a CC_CMD <<< "${CC_BIN}"
 
 mkdir -p "${OUT_DIR}"
 
-"${CC_BIN}" \
+"${CC_CMD[@]}" \
   -std=c99 \
   -Wall \
   -Wextra \

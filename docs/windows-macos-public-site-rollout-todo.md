@@ -1,6 +1,6 @@
 # Windows / macOS 与公网安装页 rollout TODO
 
-说明：本 TODO 用于把 `carrier-disk-gateway.agi2030.online` 调整为安装优先的公开入口，并把 Windows / macOS 纳入正式宿主支持。实现时继续遵守“组件可插拔、内存使用最小化”的项目原则：平台 catalog、安装命令、打包脚本和服务管理脚本都应可替换，不把供应商、平台或发布源写死到 Rust 核心里。
+说明：本 TODO 用于把 `carrier-disk-gateway.agi2030.online` 调整为安装优先的公开入口，并把 Windows 纳入正式宿主支持；macOS 暂时按社区/实验交叉编译包展示。实现时继续遵守“组件可插拔、内存使用最小化”的项目原则：平台 catalog、安装命令、打包脚本和服务管理脚本都应可替换，不把供应商、平台或发布源写死到 Rust 核心里。
 
 ## 角色分工
 
@@ -31,7 +31,7 @@
 **目标:** 新增 `install-catalog.json`，统一声明官方宿主、实验宿主和嵌入式客户端示例。
 **Coding 指导:** catalog 包含平台 id、状态、架构、安装命令、包名、服务模式和验收命令；页面只消费 catalog，不复制平台矩阵。
 **验收方法:** JSON 可由浏览器 `fetch` 读取；无敏感字段名；Cloudflare public boundary check 通过。
-**验收标准:** 官方宿主包含 PVE LXC `x86/x64`、Docker `x86/x64`、Podman `x86/x64`、Windows `x86_64`、macOS `x86_64`、macOS `arm64`；实验包含 fnOS、OpenWrt `arm64`；STM32、ESP32-S3 只作为嵌入式客户端示例展示。
+**验收标准:** 官方宿主包含 PVE LXC `x86/x64`、Docker `x86/x64`、Podman `x86/x64`、Windows `x86_64`；实验包含 fnOS、OpenWrt `arm64`、macOS `x86_64`、macOS `arm64`；STM32、ESP32-S3 只作为嵌入式客户端示例展示。
 **依赖:** 无
 **不做事项:** 不把 OneDrive 或运营商凭据样例写进 catalog。
 **风险:** catalog 与 release 脚本漂移，需要 CI 或文档 checklist 兜底。
@@ -90,7 +90,7 @@
 **状态:** pending
 **目标:** CI 至少覆盖 catalog、Cloudflare public fingerprint、原生打包脚本 smoke。
 **Coding 指导:** 先做不依赖交叉编译工具链的 smoke；Windows/macOS 真机运行作为 release checklist gate。
-**验收方法:** 本地 release gate 能跑通；macOS GitHub workflow 能生成 `x86_64` 与 `arm64` 包。
+**验收方法:** `.47` 本地 release gate 能跑通；按需打开 `CCBG_RELEASE_BUILD_MACOS=true` 时能生成 macOS `x86_64` 与 `arm64` 社区/实验包，或清晰记录 Darwin SDK/工具链缺口。
 **验收标准:** `git diff --check`、public fingerprint、license check、native packaging smoke 全部通过。
 **依赖:** WS-002, PKG-001
 **不做事项:** 不在 CI 保存真实签名证书或 GitHub release token。
@@ -103,7 +103,7 @@
 **目标:** 更新 compatibility matrix、GitHub publication 和 release checklist。
 **Coding 指导:** 明确“官方宿主 / 实验宿主 / 嵌入式客户端示例”三类，不把 STM32/ESP32-S3 描述为完整宿主或可安装平台。
 **验收方法:** 人工检查文档；release checklist 能直接指导 `.43` 与公网验收。
-**验收标准:** Windows/macOS 被列为官方宿主；fnOS/OpenWrt 是实验；release 二进制必须包含 Rust 程序和 Admin HTML。
+**验收标准:** Windows 被列为官方宿主；macOS、fnOS、OpenWrt 是实验；release 二进制必须包含 Rust 程序和 Admin HTML。
 **依赖:** WS-001, PKG-001
 **不做事项:** 不承诺未实现的包管理器上架已经完成。
 **风险:** 公开文案过度承诺会影响 release 可信度。

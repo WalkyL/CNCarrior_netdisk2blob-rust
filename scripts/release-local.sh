@@ -16,6 +16,7 @@ if [ -z "${TAG}" ]; then
 fi
 
 cd "${ROOT_DIR}"
+PYTHON_BIN="$(bash scripts/resolve-python.sh)"
 
 if [ "${CCBG_RELEASE_ALLOW_DIRTY:-false}" != "true" ] && [ -n "$(git status --porcelain)" ]; then
   echo "working tree is dirty; commit changes or set CCBG_RELEASE_ALLOW_DIRTY=true" >&2
@@ -27,6 +28,13 @@ if [ "${CCBG_RELEASE_SKIP_CHECKS:-false}" != "true" ]; then
 fi
 
 OUT_DIR="${ROOT_DIR}/target/release-local/${TAG}"
+LINUX_TARGET="${CCBG_RELEASE_LINUX_TARGET:-x86_64-unknown-linux-gnu}"
+WINDOWS_TARGET="${CCBG_RELEASE_WINDOWS_TARGET:-x86_64-pc-windows-gnu}"
+OPENWRT_TARGET="${CCBG_RELEASE_OPENWRT_TARGET:-aarch64-unknown-linux-musl}"
+MACOS_X86_TARGET="${CCBG_RELEASE_MACOS_X86_TARGET:-x86_64-apple-darwin}"
+MACOS_ARM64_TARGET="${CCBG_RELEASE_MACOS_ARM64_TARGET:-aarch64-apple-darwin}"
+HOST_TRIPLE="$(rustc -vV | awk '/^host: / {print $2}')"
+
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
 
@@ -41,30 +49,66 @@ copy_artifacts() {
   shopt -u nullglob
 }
 
-echo "building Linux LXC package"
-cargo build --release --locked -p gatewayd
-scripts/build-lxc-package.sh --skip-build
+build_gatewayd() {
+  local target="$1"
+  if [ "${target}" = "${HOST_TRIPLE}" ]; then
+    cargo build --release --locked --target "${target}" -p gatewayd
+  else
+    cargo zigbuild --release --locked --target "${target}" -p gatewayd
+  fi
+}
+
+build_gatewayd_and_mcp() {
+  local target="$1"
+  if [ "${target}" = "${HOST_TRIPLE}" ]; then
+    cargo build --release --locked --target "${target}" -p gatewayd -p mcp-server
+  else
+    cargo zigbuild --release --locked --target "${target}" -p gatewayd -p mcp-server
+  fi
+}
+
+echo "building Linux LXC package on .47 for ${LINUX_TARGET}"
+build_gatewayd "${LINUX_TARGET}"
+scripts/build-lxc-package.sh --skip-build --target "${LINUX_TARGET}"
 copy_artifacts "${ROOT_DIR}/target/lxc-package/ccbg-lxc-package.tar.gz"*
 
 if [ "${CCBG_RELEASE_BUILD_WINDOWS:-false}" = "true" ]; then
-  echo "building Windows package"
-  cargo zigbuild --release --locked --target x86_64-pc-windows-gnu -p gatewayd
+  echo "building Windows package on .47 for ${WINDOWS_TARGET}"
+  build_gatewayd "${WINDOWS_TARGET}"
   scripts/build-native-package.sh \
     --skip-build \
-    --target x86_64-pc-windows-gnu \
+    --target "${WINDOWS_TARGET}" \
     --package-name ccbg-windows-x86_64
   copy_artifacts "${ROOT_DIR}/target/native-packages/ccbg-windows-x86_64.zip"*
 fi
 
 if [ "${CCBG_RELEASE_BUILD_OPENWRT:-false}" = "true" ]; then
-  echo "building OpenWrt lite package"
-  cargo zigbuild --release --locked --target aarch64-unknown-linux-musl -p gatewayd -p mcp-server
-  scripts/build-openwrt-lite-package.sh --skip-build --target aarch64-unknown-linux-musl
+  echo "building OpenWrt lite package on .47 for ${OPENWRT_TARGET}"
+  build_gatewayd_and_mcp "${OPENWRT_TARGET}"
+  scripts/build-openwrt-lite-package.sh --skip-build --target "${OPENWRT_TARGET}"
   copy_artifacts "${ROOT_DIR}/target/openwrt-lite/ccbg-openwrt-lite.tar.gz"*
 fi
 
+if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ]; then
+  echo "building community macOS x86_64 package on .47 for ${MACOS_X86_TARGET}"
+  build_gatewayd "${MACOS_X86_TARGET}"
+  scripts/build-native-package.sh \
+    --skip-build \
+    --target "${MACOS_X86_TARGET}" \
+    --package-name ccbg-macos-x86_64
+  copy_artifacts "${ROOT_DIR}/target/native-packages/ccbg-macos-x86_64.tar.gz"*
+
+  echo "building community macOS arm64 package on .47 for ${MACOS_ARM64_TARGET}"
+  build_gatewayd "${MACOS_ARM64_TARGET}"
+  scripts/build-native-package.sh \
+    --skip-build \
+    --target "${MACOS_ARM64_TARGET}" \
+    --package-name ccbg-macos-arm64
+  copy_artifacts "${ROOT_DIR}/target/native-packages/ccbg-macos-arm64.tar.gz"*
+fi
+
 if [ -n "${CCBG_RELEASE_MACOS_ASSET_DIR:-}" ]; then
-  echo "copying macOS assets from ${CCBG_RELEASE_MACOS_ASSET_DIR}"
+  echo "copying external macOS assets from ${CCBG_RELEASE_MACOS_ASSET_DIR}"
   copy_artifacts \
     "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-x86_64.tar.gz"* \
     "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-arm64.tar.gz"*
@@ -78,7 +122,7 @@ fi
 )
 
 provenance_args=(
-  python3 scripts/generate-release-provenance.py
+  "${PYTHON_BIN}" scripts/generate-release-provenance.py
   --release-name "CCBG ${TAG}"
   --tag "${TAG}"
   --out-dir "${OUT_DIR}"

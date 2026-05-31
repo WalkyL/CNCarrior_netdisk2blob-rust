@@ -88,11 +88,11 @@ if [ "${SKIP_BUILD}" != true ]; then
   cargo build --release --target "${TARGET}" -p gatewayd
 fi
 
-if [ ! -x "${binary}" ] && [ "${SKIP_BUILD}" = true ] && [ -x "${ROOT_DIR}/target/release/${binary_name}" ]; then
+if [ ! -s "${binary}" ] && [ "${SKIP_BUILD}" = true ] && [ -s "${ROOT_DIR}/target/release/${binary_name}" ]; then
   binary="${ROOT_DIR}/target/release/${binary_name}"
 fi
 
-if [ ! -x "${binary}" ]; then
+if [ ! -s "${binary}" ]; then
   echo "missing release binary: ${binary}" >&2
   echo "run without --skip-build or build gatewayd for ${TARGET} first" >&2
   exit 1
@@ -147,6 +147,8 @@ esac
   find . -type f ! -name MANIFEST.sha256 -print0 | sort -z | xargs -0 sha256sum > MANIFEST.sha256
 )
 
+POWERSHELL_BIN="${POWERSHELL_BIN:-/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
+
 if [ "${platform}" = "windows" ] && command -v zip >/dev/null 2>&1; then
   artifact="${DIST_DIR}/${PACKAGE_NAME}.zip"
   rm -f "${artifact}"
@@ -154,6 +156,13 @@ if [ "${platform}" = "windows" ] && command -v zip >/dev/null 2>&1; then
     cd "${DIST_DIR}"
     zip -qr "${artifact}" "${PACKAGE_NAME}"
   )
+elif [ "${platform}" = "windows" ] && [ -x "${POWERSHELL_BIN}" ] && command -v cygpath >/dev/null 2>&1; then
+  artifact="${DIST_DIR}/${PACKAGE_NAME}.zip"
+  rm -f "${artifact}"
+  artifact_win="$(cygpath -w "${artifact}")"
+  package_root_win="$(cygpath -w "${package_root}")"
+  "${POWERSHELL_BIN}" -NoProfile -ExecutionPolicy Bypass -Command \
+    "Compress-Archive -Path '${package_root_win}' -DestinationPath '${artifact_win}' -Force" >/dev/null
 else
   artifact="${DIST_DIR}/${PACKAGE_NAME}.tar.gz"
   tar -C "${DIST_DIR}" -czf "${artifact}" "${PACKAGE_NAME}"

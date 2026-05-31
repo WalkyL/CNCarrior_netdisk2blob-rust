@@ -16,8 +16,8 @@
 | Docker `x86/x64` | 官方宿主 | 支持 | 使用 `deploy/Dockerfile` |
 | Podman `x86/x64` | 官方宿主 | 支持 | 使用 `deploy/Containerfile` 或 `deploy/Dockerfile` |
 | Windows `x86_64` | 官方宿主 | 支持 | 原生发布包，默认 Scheduled Task 后台常驻路径 |
-| macOS `x86_64` | 官方宿主 | 支持 | 原生发布包，默认 `launchd` user agent |
-| macOS `arm64` | 官方宿主 | 支持 | 原生发布包，默认 `launchd` user agent |
+| macOS `x86_64` | 社区/实验包 | 实验 | 由 `.47` Windows 主机交叉编译产出，未签名、未公证、未做 macOS 真机 smoke |
+| macOS `arm64` | 社区/实验包 | 实验 | 由 `.47` Windows 主机交叉编译产出，未签名、未公证、未做 macOS 真机 smoke |
 | fnOS | 实验宿主 | 实验 | 优先复用 Docker / Linux 路径，不承诺应用商店上架 |
 | OpenWRT `arm64` | 实验宿主 | 实验 | 优先 `daemon + stdio MCP`，管理界面按资源情况裁剪 |
 | STM32 | 嵌入式客户端示例 | 示例 | 不承载完整 daemon，只提供本地 S3 客户端参考实现 |
@@ -43,14 +43,12 @@
 - Docker `x86/x64`
 - Podman `x86/x64`
 - Windows `x86_64`
-- macOS `x86_64`
-- macOS `arm64`
 
 发布包要求:
 
 - Rust `gatewayd` 二进制和 `assets/admin/index.html` 必须在同一个 artifact 内。
-- Windows/macOS 原生包使用 [build-native-package.sh](../scripts/build-native-package.sh) 生成。
-- macOS 默认安装到用户级 `launchd`；Windows 默认安装为无额外依赖的后台常驻任务。
+- Windows 原生包使用 [build-native-package.sh](../scripts/build-native-package.sh) 生成。
+- Windows 默认安装为无额外依赖的后台常驻任务。
 
 ### 实验宿主
 
@@ -72,11 +70,13 @@
 
 - fnOS
 - OpenWRT `arm64`
+- macOS `x86_64` / `arm64`
 
 参考:
 
 - [openwrt-host-profile.md](openwrt-host-profile.md)
 - [resource-budget.md](resource-budget.md)
+- [ops-007-47-release-build-host.md](ops-007-47-release-build-host.md)
 
 ### 嵌入式客户端示例
 
@@ -149,5 +149,5 @@ STM32 一期边界的正确解释是:
 2. Docker 和 Podman 镜像都可成功构建并启动。
 3. OpenWRT `arm64` 能运行轻量化部署配置。
 4. Windows `x86_64` 原生包包含 `gatewayd.exe`、Admin HTML 和后台常驻安装脚本。
-5. macOS `x86_64` / `arm64` 原生包包含 `gatewayd`、Admin HTML 和 `launchd` 安装脚本。
+5. macOS `x86_64` / `arm64` 社区/实验包包含 `gatewayd`、Admin HTML 和 `launchd` 安装脚本；发布说明必须标明未签名、未公证、未做 macOS 真机 smoke。
 6. STM32 / ESP32-S3 明确为嵌入式客户端示例，不再被误认为完整宿主目标。

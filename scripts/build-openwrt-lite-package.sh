@@ -52,12 +52,12 @@ fi
 
 gatewayd_binary="${target_dir}/gatewayd"
 mcp_binary="${target_dir}/mcp-server"
-if [ ! -x "${gatewayd_binary}" ]; then
+if [ ! -s "${gatewayd_binary}" ]; then
   echo "missing release binary: ${gatewayd_binary}" >&2
   echo "run without --skip-build or build gatewayd first" >&2
   exit 1
 fi
-if [ ! -x "${mcp_binary}" ]; then
+if [ ! -s "${mcp_binary}" ]; then
   echo "missing release binary: ${mcp_binary}" >&2
   echo "run without --skip-build or build mcp-server first" >&2
   exit 1

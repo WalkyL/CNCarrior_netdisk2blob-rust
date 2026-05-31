@@ -16,6 +16,7 @@ if [ "${TARGET}" != "test" ] && [ "${TARGET}" != "production" ]; then
 fi
 
 cd "${ROOT_DIR}"
+PYTHON_BIN="$(bash scripts/resolve-python.sh)"
 
 export CLOUDFLARE_API_TOKEN="${CLOUDFLARE_API_TOKEN:-${CF_API_TOKEN:-}}"
 export CLOUDFLARE_ACCOUNT_ID="${CLOUDFLARE_ACCOUNT_ID:-${CF_ACCOUNT_ID:-}}"
@@ -57,6 +58,6 @@ fi
 "${deploy_args[@]}"
 
 if [ "${CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY:-false}" = "true" ] && [ -n "${CCBG_CF_DOMAIN}" ]; then
-  python3 scripts/check-cloudflare-public-fingerprint.py \
+  "${PYTHON_BIN}" scripts/check-cloudflare-public-fingerprint.py \
     --deployed-base-url "https://${CCBG_CF_DOMAIN}"
 fi
