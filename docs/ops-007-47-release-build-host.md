@@ -58,6 +58,10 @@ scripts/check-release-ready.sh
 CCBG_RELEASE_BUILD_WINDOWS=true CCBG_RELEASE_BUILD_OPENWRT=true scripts/release-local.sh <tag>
 ```
 
+If release assets must be uploaded to GitHub, `scripts/release-local.sh` resolves GitHub CLI
+through `scripts/resolve-gh.sh`; `.47` can use `C:\Program Files\GitHub CLI\gh.exe` even when
+Git Bash does not expose `gh` in `PATH`.
+
 Run macOS only when the Darwin SDK/toolchain exists on `.47`:
 
 ```bash

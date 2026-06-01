@@ -137,10 +137,11 @@ done < <(find "${OUT_DIR}" -maxdepth 1 -type f ! -name 'release-provenance.*' -p
 "${provenance_args[@]}"
 
 if [ "${CCBG_RELEASE_UPLOAD_GITHUB:-false}" = "true" ]; then
-  if gh release view "${TAG}" >/dev/null 2>&1; then
-    gh release upload "${TAG}" "${OUT_DIR}"/* --clobber
+  GH_BIN="$(bash scripts/resolve-gh.sh)"
+  if "${GH_BIN}" release view "${TAG}" >/dev/null 2>&1; then
+    "${GH_BIN}" release upload "${TAG}" "${OUT_DIR}"/* --clobber
   else
-    gh release create "${TAG}" "${OUT_DIR}"/* --title "${TAG}" --notes "CCBG local release ${TAG}"
+    "${GH_BIN}" release create "${TAG}" "${OUT_DIR}"/* --title "${TAG}" --notes "CCBG local release ${TAG}"
   fi
 fi
 

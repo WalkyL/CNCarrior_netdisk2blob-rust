@@ -102,6 +102,9 @@ scripts/release-local.sh v0.1.0
 CCBG_RELEASE_UPLOAD_GITHUB=true scripts/release-local.sh v0.1.0
 ```
 
+脚本会通过 `scripts/resolve-gh.sh` 查找 GitHub CLI；在 `.47` 上即使 Git Bash 默认
+`PATH` 没有裸 `gh`，也会使用 `C:\Program Files\GitHub CLI\gh.exe`。
+
 这个开关不是默认流程；只有公网安装 catalog 仍指向 GitHub release download URL 时
 才需要使用。
 
