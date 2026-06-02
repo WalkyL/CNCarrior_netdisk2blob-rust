@@ -21,7 +21,7 @@ jobs:
         include:
           - package: ccbg-macos-x86_64
             target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-14
           - package: ccbg-macos-arm64
             target: aarch64-apple-darwin
             runner: macos-14
