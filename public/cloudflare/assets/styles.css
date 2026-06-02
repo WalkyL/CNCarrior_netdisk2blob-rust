@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: LicenseRef-CCBG-Public-Materials */
 /* Copyright (c) 2026 walky */
-/* CCBG-Release-Fingerprint: ccbg-0.1.0-walky-20260526-e756003d846d2c46 */
+/* CCBG-Release-Fingerprint: ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67 */
 
 :root {
   color-scheme: dark;
@@ -281,10 +281,39 @@ pre {
   white-space: pre;
 }
 
+pre.command-pre {
+  position: relative;
+  padding-top: 3rem;
+}
+
 pre code {
   color: var(--green);
   font-size: 0.86rem;
   line-height: 1.55;
+}
+
+.command-copy-button {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.75rem;
+  min-height: 1.85rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.4rem;
+  background: #162338;
+  color: var(--text);
+  padding: 0.28rem 0.65rem;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
+.command-copy-button:hover:enabled {
+  border-color: var(--blue);
+  background: #1b3357;
+}
+
+.command-copy-button:disabled {
+  opacity: 0.9;
+  cursor: default;
 }
 
 .console-footer {

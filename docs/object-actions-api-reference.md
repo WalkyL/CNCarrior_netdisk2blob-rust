@@ -49,7 +49,7 @@
 运行策略说明:
 
 - 这个 API 始终对“当前 primary provider”执行动作
-- 本项目当前只允许运营商 provider 或 `stub` 作为 primary
+- 本项目当前只允许运营商 provider 作为 primary
 - 因此 OneDrive 虽然已经实现对象动作，但运行时仍定位为异步备份 / 可选 fallback 目标，而不是 primary provider
 
 所有 `rename/copy/move` 请求都支持可选审计字段:
@@ -437,7 +437,7 @@ POST /api/content-policies
   "recent_failures": [
     {
       "kind": "replication_job",
-      "provider": "stub",
+      "provider": "unicom",
       "action": "put",
       "target": "onedrive",
       "object": "root/alerts/failure.txt",

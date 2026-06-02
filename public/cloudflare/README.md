@@ -36,6 +36,7 @@ wrangler deploy -c public/cloudflare/wrangler.worker.toml \
 
 This fallback serves `/`, `/faq/`, `/install/`, `/api/faq/catalog`, and
 `/api/faq/match`. Static data files under `/data/` are served as assets.
+It now also proxies release binaries through `/downloads/latest/<asset-name>`.
 
 ## Local Deployment
 
@@ -64,6 +65,40 @@ Optional local environment variables:
 - `CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY` defaults to unset/false. Set it to `true`
   only when GitHub-hosted runners can access the production domain without
   Cloudflare WAF or edge security returning a false 403.
+- `CCBG_CF_RELEASE_R2_BUCKET` enables R2-backed release caching for both test
+  and production deployments.
+- `CCBG_CF_TEST_RELEASE_R2_BUCKET` and `CCBG_CF_PROD_RELEASE_R2_BUCKET`
+  override the shared bucket on a per-environment basis.
+- `PUBLIC_RELEASE_REPO` defaults to `WalkyL/CNCarrior_netdisk2blob-rust`.
+- `GITHUB_RELEASE_TOKEN` is optional. Set it when the release source is
+  private or when the Worker should resolve release assets through the GitHub
+  API with an authenticated token.
+
+Optional Cloudflare bindings for release caching:
+
+- `RELEASE_ASSETS`: optional R2 bucket binding. When present, the public site
+  serves `/downloads/latest/<asset-name>` from `latest/<asset-name>` in R2
+  before falling back to GitHub.
+
+To prefill the release cache manually:
+
+```bash
+scripts/sync-cloudflare-release-cache.sh your-r2-bucket
+```
+
+Current rollout as of 2026-06-02:
+
+- test Worker: `ccbg-public-test`
+- production Worker: `ccbg-public`
+- test release cache bucket: `ccbg-release-assets-test`
+- production release cache bucket: `ccbg-release-assets`
+- production download verification:
+  `HEAD /downloads/latest/ccbg-lxc-package.tar.gz` -> `200`, `x-ccbg-release-source=r2`
+  `HEAD /downloads/latest/ccbg-windows-x86_64.zip` -> `200`, `x-ccbg-release-source=r2`
+- install catalog exposes both LXC profiles:
+  `scripts/install.sh --s3-only` for S3 gateway only, and
+  `scripts/install.sh --enable-smb-sidecar` for SMB sidecar dependencies,
+  systemd units, Admin/control-plane enablement, and one reconcile pass.
 
 Routine production deploys update the existing Worker + Assets deployment and
 skip custom-domain rebinding. The custom domain should already point at the
@@ -92,6 +127,7 @@ curl -sS http://127.0.0.1:8788/api/faq/catalog | jq '.count'
 curl -sS -X POST http://127.0.0.1:8788/api/faq/match \
   -H 'content-type: application/json' \
   -d '{"query":"mobile token expired","provider":"mobile","context":"logs","limit":3}'
+curl -I http://127.0.0.1:8788/downloads/latest/ccbg-lxc-package.tar.gz
 ```
 
 ## Provenance
@@ -99,7 +135,7 @@ curl -sS -X POST http://127.0.0.1:8788/api/faq/match \
 The current public frontend fingerprint is:
 
 ```text
-ccbg-0.1.0-walky-20260526-e756003d846d2c46
+ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67
 ```
 
 The same fingerprint appears in HTML meta tags, `manifest.json`,

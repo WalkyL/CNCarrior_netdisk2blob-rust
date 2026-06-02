@@ -25,6 +25,8 @@ Copy-Item -Recurse -Force (Join-Path $PackageRoot "config\*") $ConfigDir
 
 $Runner = Join-Path $InstallDir "run-gatewayd.ps1"
 @"
+`$env:CCBG_ADMIN_MODE = "web"
+`$env:CCBG_ADMIN_BIND_ADDR = "0.0.0.0:61081"
 `$env:CCBG_ADMIN_ASSET_PATH = "$AssetDir\index.html"
 `$env:CCBG_CONFIG_DIR = "$ConfigDir"
 `$env:CCBG_DATA_DIR = "$DataDir"
@@ -41,3 +43,4 @@ Start-ScheduledTask -TaskName $TaskName
 
 Write-Host "installed $TaskName"
 Write-Host "health: Invoke-WebRequest http://127.0.0.1:61080/healthz"
+Write-Host "admin:  http://<this-host-ip>:61081/"

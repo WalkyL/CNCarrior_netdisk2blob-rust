@@ -7,7 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CCBG 安装与下载</title>
   <meta name="description" content="Carrier Cloud Blob Gateway supported platform install commands." />
-  <meta name="ccbg-provenance" content="ccbg-0.1.0-walky-20260526-e756003d846d2c46" />
+  <meta name="ccbg-provenance" content="ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67" />
   <link rel="icon" type="image/svg+xml" href="/assets/ccbg-icon.svg" />
   <link rel="apple-touch-icon" href="/assets/ccbg-icon.svg" />
   <link rel="manifest" href="/manifest.json" />
@@ -41,7 +41,7 @@
           </p>
           <div class="actions">
             <a class="button primary" href="#install-catalog">查看命令</a>
-            <a class="button" href="https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest">GitHub Releases</a>
+            <a class="button" href="https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest">查看 GitHub Release 列表</a>
           </div>
         </div>
         <aside class="install-console">
@@ -49,14 +49,14 @@
             <span>macOS</span>
             <strong>Release package</strong>
           </div>
-          <pre><code>curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-macos-arm64.tar.gz
+          <pre><code>curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz
 tar -xzf ccbg-macos-arm64.tar.gz
 ./ccbg-macos-arm64/deploy/macos/install.sh</code></pre>
           <div class="console-title secondary-title">
             <span>Windows</span>
             <strong>PowerShell</strong>
           </div>
-<pre><code>Invoke-WebRequest https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip
+<pre><code>Invoke-WebRequest https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip
 Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\ccbg-release
 .\ccbg-release\ccbg-windows-x86_64\deploy\windows\install.ps1</code></pre>
         </aside>
@@ -73,11 +73,15 @@ Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\ccbg-release
           <noscript>需要启用 JavaScript 才能展开完整平台 catalog。</noscript>
           <article class="card">
             <h3>PVE LXC / Linux</h3>
-            <p>推荐宿主：下载 `ccbg-lxc-package.tar.gz`，执行包内 `scripts/install.sh`。</p>
+            <p>推荐宿主：下载 `ccbg-lxc-package.tar.gz`，先用 `tar --no-same-owner -xzf` 解包。`scripts/install.sh --s3-only` 只启用 S3 gateway；`scripts/install.sh --enable-smb-sidecar` 会额外安装 rclone/samba/fuse3、启用 sidecar units，并在 Admin 中打开 SMB。</p>
+          </article>
+          <article class="card">
+            <h3>SMB sidecar profile</h3>
+            <p>如果安装时选择 SMB sidecar，安装脚本会先启动 CCBG 管理的 `smbd` 并监听 `0.0.0.0:445`。第一次使用时，进 Admin 添加一个 SMB 用户就会自动生成 `CCBGRoot` 默认共享；真实挂载这个共享时，PVE/LXC guest 还需要暴露 `/dev/fuse` 给 rclone mount。</p>
           </article>
           <article class="card">
             <h3>Windows / macOS</h3>
-            <p>Windows 使用包内 PowerShell 安装脚本；macOS 使用包内 launchd 安装脚本。</p>
+            <p>Windows 使用包内 PowerShell 安装脚本；macOS 使用包内 launchd 安装脚本。官方宿主包默认把 Admin Web 打开到 `0.0.0.0:61081`。</p>
           </article>
         </div>
       </section>

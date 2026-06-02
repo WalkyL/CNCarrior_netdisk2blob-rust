@@ -7,8 +7,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Carrier Cloud Blob Gateway</title>
   <meta name="description" content="把运营商云盘转换为 S3 挂载点和 SMB 服务器的本地网关。" />
-  <meta name="ccbg-provenance" content="ccbg-0.1.0-walky-20260526-e756003d846d2c46" />
-  <meta name="ccbg-fingerprint-sha256" content="e756003d846d2c460f892a20402d59539c8c6980ba011c62d17ab5ad962de6b6" />
+  <meta name="ccbg-provenance" content="ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67" />
+  <meta name="ccbg-fingerprint-sha256" content="22a2ea8c4f6acfc78abea9aa66961b9fb4c2156de18731705795cd1d4e3d5f37" />
   <meta name="ccbg-license" content="LicenseRef-CCBG-Public-Materials" />
   <meta name="ccbg-core-license" content="LicenseRef-CCBG-Commercial" />
   <link rel="icon" type="image/svg+xml" href="/assets/ccbg-icon.svg" />
@@ -46,7 +46,7 @@
           </p>
           <div class="actions">
             <a class="button primary" href="/install/">查看一键安装命令</a>
-            <a class="button" href="https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest">下载 release</a>
+            <a class="button" href="https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest">查看 GitHub Release 列表</a>
           </div>
           <div class="hero-strip" aria-label="关键能力">
             <span>S3 与 SMB</span>
@@ -61,11 +61,11 @@
             <span>推荐安装</span>
             <strong>PVE LXC / Linux</strong>
           </div>
-          <pre><code>curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-lxc-package.tar.gz
-tar -xzf ccbg-lxc-package.tar.gz
-sudo ./ccbg-lxc-package/scripts/install.sh</code></pre>
+          <pre><code>curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-lxc-package.tar.gz
+tar --no-same-owner -xzf ccbg-lxc-package.tar.gz
+sudo ./ccbg-lxc-package/scripts/install.sh --enable-smb-sidecar</code></pre>
           <div class="console-footer">
-            <span>安装后在局域网内提供 S3 与管理入口</span>
+            <span>61080 是 S3 API，61081 是 Admin；SMB profile 会先监听 445，进 Admin 加一个 SMB 用户即可自动生成默认 root 共享，PVE/LXC 挂载共享需暴露 /dev/fuse</span>
             <a href="/install/">全部平台</a>
           </div>
         </aside>
@@ -144,7 +144,7 @@ sudo ./ccbg-lxc-package/scripts/install.sh</code></pre>
           <article class="card">
             <h3>Release Provenance</h3>
             <p>公开站点、二进制、Admin 状态和发布记录应共享同一个 release fingerprint。</p>
-            <div class="provenance-box" id="footer-fingerprint">ccbg-0.1.0-walky-20260526-e756003d846d2c46</div>
+            <div class="provenance-box" id="footer-fingerprint">ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67</div>
           </article>
         </div>
       </section>

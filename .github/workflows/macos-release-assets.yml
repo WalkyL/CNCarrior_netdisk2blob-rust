@@ -1,0 +1,62 @@
+name: macOS release assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package
+        required: true
+        default: v0.1.1
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.package }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: ccbg-macos-x86_64
+            target: x86_64-apple-darwin
+            runner: macos-13
+          - package: ccbg-macos-arm64
+            target: aarch64-apple-darwin
+            runner: macos-14
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install GNU checksum tools
+        run: |
+          brew install coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Install Rust target
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Build gatewayd
+        run: cargo build --release --locked --target "${{ matrix.target }}" -p gatewayd
+
+      - name: Package macOS asset
+        run: |
+          scripts/build-native-package.sh \
+            --skip-build \
+            --target "${{ matrix.target }}" \
+            --package-name "${{ matrix.package }}"
+          sha256sum -c "target/native-packages/${{ matrix.package }}.tar.gz.sha256"
+
+      - name: Upload macOS asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}
+          path: |
+            target/native-packages/${{ matrix.package }}.tar.gz
+            target/native-packages/${{ matrix.package }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14

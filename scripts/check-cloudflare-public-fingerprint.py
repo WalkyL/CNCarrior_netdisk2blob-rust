@@ -23,7 +23,7 @@ REQUIRED_FINGERPRINT_FILES = [
     "_headers",
     "assets/app.js",
     "assets/app.js.map",
-    "release-notes/v0.1.0-public.md",
+    "release-notes/v0.1.1-public.md",
     "README.md",
 ]
 FORBIDDEN_SUFFIXES = {

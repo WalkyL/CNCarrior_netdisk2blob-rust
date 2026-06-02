@@ -18,7 +18,7 @@ OneDrive is a parking provider. It must stay disabled in default examples and pa
 - Enable only in the target test environment with explicit env overrides.
 - Add `onedrive` to `CCBG_SYNC_TARGETS` only after provider probe and write smoke pass.
 - Add `onedrive` to `CCBG_FALLBACK_READ_ORDER` only after read-after-sync smoke proves completed replicas are readable.
-- Keep `CCBG_PRIMARY_PROVIDER` on `unicom`, `telecom`, `mobile`, or `stub`; do not make OneDrive the primary provider without a separate design review.
+- Keep `CCBG_PRIMARY_PROVIDER` on `unicom`, `telecom`, or `mobile`; do not make OneDrive the primary provider without a separate design review.
 
 ## 3. Authentication Gate
 

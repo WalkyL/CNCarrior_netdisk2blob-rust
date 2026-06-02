@@ -10,21 +10,31 @@
 
 建议每次正式发布都复制一份，按实际结果勾选并留档。
 
+当前最短执行路径见 [public-release-sop.md](public-release-sop.md)。
+
 ## 1. Release 产物
 
 - [x] Git 工作区干净
 - [x] 已有明确 release 候选提交：本地 `main` HEAD 或明确 release tag
 - [x] `gatewayd` 与 Admin HTML 作为同一发布物交付
 - [x] LXC 包包含 `assets/admin/index.html`
+- [x] LXC 包安装脚本公开 `--s3-only` 与 `--enable-smb-sidecar` 两个 profile
+- [x] `--enable-smb-sidecar` profile 会安装 SMB 依赖、启用 sidecar systemd units，并打开 Admin/control-plane SMB 开关
 - [x] OpenWRT lite 包包含 `assets/admin/index.html`
 - [x] 容器镜像构建文件已显式复制 Admin HTML
 - [x] 已有本地 release 流程：`scripts/check-release-ready.sh` 与 `scripts/release-local.sh`
 - [x] 所有 release 编译入口收敛到 `.47`
+- [x] GitHub 默认只负责分支、tag、可选 Release 页面和发布记录；当前 macOS 发布资产走 GitHub Actions macOS-only 例外构建入口
+- [x] Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认走 `.47` 或受控局域网 runner
+- [x] 只打 tag 或只创建 GitHub Release 页面不算发版完成，必须让 `/downloads/latest/*` 指到新资产并通过 smoke
 - [ ] 生成本次正式 release 的 provenance 文件
 - [ ] 生成本次正式 release 的对外交付包与 SHA256
 - [ ] Windows `x86_64` 原生包包含 `gatewayd.exe` 与 `assets/admin/index.html`
 - [ ] macOS `x86_64` 原生包包含 `gatewayd` 与 `assets/admin/index.html`
 - [ ] macOS `arm64` 原生包包含 `gatewayd` 与 `assets/admin/index.html`
+- [x] LXC / Windows / macOS 官方宿主包默认把 Admin Web 打开到 `0.0.0.0:61081`
+- [x] LXC/OpenWrt 默认 primary provider 不再使用 `stub`；未注入真实凭据前显示 unavailable
+- [x] LXC 包构建会拒绝非 Linux ELF `gatewayd`，避免 Windows `gatewayd.exe` 被误打进 LXC 包
 - [ ] Homebrew formula 模板已用正式 tag/SHA256 渲染
 - [ ] winget manifest 模板已用正式 tag/SHA256 渲染
 
@@ -39,6 +49,13 @@
 - `ccbg-checksums.txt`
 - `release-provenance.json`
 - `release-provenance.md`
+
+LXC 包验收必须确认:
+
+- 包内 `etc/ccbg.env` 为 `CCBG_PRIMARY_PROVIDER=unicom`
+- 包内 `bin/gatewayd` 是 Linux ELF，不是 Windows PE/`gatewayd.exe`
+- `--enable-smb-sidecar` 安装后 `smbd` 监听 `0.0.0.0:445`
+- Admin 默认密码登录返回 `401`
 
 ## 2. 本地质量门
 
@@ -64,20 +81,30 @@
 
 ## 4. 公共站点 smoke
 
-- [ ] `scripts/deploy-cloudflare-public.sh test` 已部署测试站点
-- [ ] `scripts/deploy-cloudflare-public.sh production` 已部署生产站点
-- [ ] `https://carrier-disk-gateway.agi2030.online/` 首屏为深色安装优先入口
+- [x] `scripts/deploy-cloudflare-public.sh test` 已部署测试站点
+- [x] `scripts/deploy-cloudflare-public.sh production` 已部署生产站点
+- [x] `https://carrier-disk-gateway.agi2030.online/` 首屏为深色安装优先入口
 - [x] `https://carrier-disk-gateway.agi2030.online/faq/` 返回 `200`
 - [x] `https://carrier-disk-gateway.agi2030.online/install/` 返回 `200`
-- [ ] `https://carrier-disk-gateway.agi2030.online/data/install-catalog.json` 返回 `200`
+- [x] `https://carrier-disk-gateway.agi2030.online/data/install-catalog.json` 返回 `200`
 - [x] `https://carrier-disk-gateway.agi2030.online/api/faq/catalog` 返回 `200`
 - [x] `https://carrier-disk-gateway.agi2030.online/api/faq/match` 返回 `200`
+- [x] `https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-lxc-package.tar.gz` 返回 `200`
+- [x] `https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-windows-x86_64.zip` 返回 `200`
+
+截至 2026-06-02：
+
+- production Worker 已绑定 `RELEASE_ASSETS=ccbg-release-assets`
+- test Worker 已绑定 `RELEASE_ASSETS=ccbg-release-assets-test`
+- 生产下载代理响应头已显示 `x-ccbg-release-source=r2`
 
 ### 4.1 安装页人工验收
 
 - [ ] 首页顶部配色与 `llm-router.agi2030.online` 的深色运维风格一致
 - [ ] 首页首屏可见 LXC/Linux 推荐安装命令
+- [ ] 首页和 `/install/` 的安装命令旁有复制按钮
 - [ ] `/install/` 可见 Windows `winget`、macOS `brew`、PVE LXC、Docker、Podman 命令
+- [ ] `/install/` 可见 PVE LXC `S3 only` 与 `SMB sidecar` 两个安装选项
 - [ ] OpenWrt / fnOS 明确标为实验宿主
 - [ ] STM32 / ESP32-S3 明确标为嵌入式客户端示例，不进入可安装宿主列表
 - [ ] 页面没有要求输入任何运营商、网关或 LLM 凭据
@@ -145,7 +172,7 @@
 - [ ] `.43` 全量人工验收全部通过
 - [ ] release 产物与 SHA256 已生成
 - [ ] provenance 已生成
-- [ ] `.47` 已生成 macOS `x86_64` 与 `arm64` 社区/实验包，或已记录 Darwin SDK/工具链缺口
+- [ ] macOS `x86_64` 与 `arm64` 社区/实验包已由 GitHub Actions macOS-only workflow 生成，并已下载合并回 `.47` release 目录
 - [ ] 回滚包 / 上一个稳定版本可用
 - [ ] 发布记录已落文档
 - [ ] Windows/macOS 后台常驻路径至少经过对应真机 smoke
@@ -168,6 +195,7 @@
 截至 2026-06-01：
 
 - GitHub Actions 不再承担通用 CI、Linux/Windows/OpenWrt 发版或 Cloudflare 部署
-- GitHub Actions 不再承担 macOS 发版
-- Linux/Windows/OpenWrt/macOS release gate 与 Cloudflare 部署改为 `.47` 本地脚本
-- macOS 暂时降级为社区/实验交叉编译包
+- GitHub Actions 不再承担通用 CI、Linux/Windows/OpenWrt 发版或 Cloudflare 部署
+- 当前本机和局域网没有 macOS 构建器，macOS 发布资产走 GitHub Actions macOS-only 例外构建入口
+- Linux/Windows/OpenWrt release gate 与 Cloudflare 部署改为 `.47` 本地脚本；macOS 产物下载回 `.47` 后进入同一校验和 `/downloads/latest/*` 发布链路
+- macOS 暂时降级为社区/实验包

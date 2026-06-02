@@ -79,8 +79,8 @@ Copyright (c) 2026 walky
     .top-status-main > .top-status-runtime-side { min-width:0; display:contents; }
     .top-status-main > .top-status-runtime-side > #top-status-alerts { grid-column: span 1; }
     .top-status-main > .top-status-runtime-side > #top-status-prompts { grid-column: span 2; }
-    .top-status-main > .top-status-limits-card { grid-column: span 5; }
-    .top-status-main > .topbar-resources-card { grid-column: span 2; }
+    .top-status-main > .top-status-limits-card { grid-column: span 4; }
+    .top-status-main > .topbar-resources-card { grid-column: span 3; }
     .top-status-side > #top-status-object-ops { grid-column: span 4; }
     .top-status-side > #carrier-first-response-panel { grid-column: span 2; }
     .top-status-side > #carrier-io-speed-panel { grid-column: span 6; }
@@ -196,6 +196,22 @@ Copyright (c) 2026 walky
     .flash.error { border-color: rgba(153, 27, 27, 0.24); background: rgba(253, 231, 231, 0.96); color: #991b1b; }
     .hint { font-size: 14px; color: var(--muted); }
     .provider-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
+    .smb-runtime-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }
+    .smb-runtime-stat { border: 1px solid rgba(216, 208, 194, 0.9); border-radius: 12px; background: rgba(255, 255, 250, 0.95); padding: 10px 12px; }
+    .smb-runtime-stat-label { font-size: 11px; line-height: 1.2; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .smb-runtime-stat-value { margin-top: 4px; font-size: 16px; line-height: 1.15; color: var(--ink-strong); font-weight: 700; }
+    .smb-runtime-stat-sub { margin-top: 4px; font-size: 11px; line-height: 1.35; color: var(--muted); }
+    .smb-runtime-list { display:grid; gap: 10px; margin-top: 12px; }
+    .smb-runtime-row { border: 1px solid rgba(216, 208, 194, 0.88); border-radius: 12px; background: rgba(255, 255, 250, 0.95); padding: 10px 12px; }
+    .smb-runtime-row-head { display:flex; align-items:flex-start; justify-content:space-between; gap: 10px; flex-wrap: wrap; }
+    .smb-runtime-row-title { font-size: 14px; line-height: 1.2; color: var(--ink-strong); font-weight: 700; }
+    .smb-runtime-row-meta { margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--muted); }
+    .smb-runtime-row-badges { display:flex; gap: 6px; flex-wrap: wrap; }
+    .smb-runtime-badge { display:inline-flex; align-items:center; border-radius: 999px; padding: 4px 8px; font-size: 11px; line-height: 1; font-weight: 700; border: 1px solid rgba(216, 208, 194, 0.95); background: rgba(255, 251, 242, 0.96); color: var(--ink-strong); }
+    .smb-runtime-badge.ok { border-color: rgba(22, 101, 52, 0.28); color: var(--ok); background: rgba(229, 241, 239, 0.94); }
+    .smb-runtime-badge.warn { border-color: rgba(180, 83, 9, 0.28); color: var(--warn); background: rgba(255, 248, 235, 0.96); }
+    .smb-runtime-badge.error { border-color: rgba(153, 27, 27, 0.24); color: #991b1b; background: rgba(253, 231, 231, 0.96); }
+    .smb-runtime-empty { margin-top: 10px; font-size: 13px; line-height: 1.45; color: var(--muted); }
     .provider-card { background:#fffdf7; border:1px solid var(--border); border-radius: 16px; padding: 14px; }
     .provider-card.disabled { opacity: 0.58; }
     .provider-card h3 { margin: 0; font-size: 18px; }
@@ -500,7 +516,7 @@ Copyright (c) 2026 walky
     .topbar-memory-card,
     .topbar-spool-card { min-height: 0; }
     .topbar-telemetry-card { min-height: 0; }
-    .topbar-resources-card { min-width:0; display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:6px; padding:6px; align-items:stretch; }
+    .topbar-resources-card { min-width:0; display:grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap:6px; padding:6px; align-items:stretch; }
     .topbar-resources-card .topbar-memory-card,
     .topbar-resources-card .topbar-spool-card { border-radius: 12px; padding:7px 8px; gap:5px; background: transparent; }
     .topbar-resources-card .topbar-visual-copy { gap:2px; }
@@ -798,6 +814,8 @@ Copyright (c) 2026 walky
     button:hover, a.cta:hover { filter: brightness(1.05); }
     button.secondary { background:#1a2531; color:#d6e5f5; border:1px solid var(--border); }
     button.secondary:hover { background:#213042; }
+    .field-ai-help-btn { background:#121c28; border-color:#2c394a; color:#9ecbff; }
+    .field-ai-help-btn:hover { background:#16283a; color:#d7efff; }
     .header-showcase-shell { background:linear-gradient(180deg, rgba(17, 24, 34, 0.96) 0%, rgba(13, 17, 23, 0.96) 100%); border-color: var(--border); box-shadow:none; }
     .header-showcase-label { background:#132033; border-color:#29496d; color:#9ecbff; }
     .header-showcase-item { color:#c9d1d9; }
@@ -836,6 +854,42 @@ Copyright (c) 2026 walky
     .provider-card, .metric-card, .health-card, .scope-card, .alert-card, .fallback-row, .object-card, .preview-card, .comparison-card, .history-card, .onedrive-step, .onedrive-kv-card, .table-wrap { background: var(--panel-soft); border-color: var(--border); }
     .object-guide-card { background: transparent; border-color: var(--border); }
     .application-editor-card, .encryption-profile-editor-card, .content-policy-card { background: transparent; border-color: var(--border); }
+    .smb-runtime-stat,
+    .smb-runtime-row {
+      background: #0f1722;
+      border-color: #223043;
+      box-shadow: none;
+    }
+    .smb-runtime-stat-label,
+    .smb-runtime-stat-sub,
+    .smb-runtime-row-meta,
+    .smb-runtime-empty {
+      color: var(--muted);
+    }
+    .smb-runtime-stat-value,
+    .smb-runtime-row-title {
+      color: var(--ink-strong);
+    }
+    .smb-runtime-badge {
+      background: #121c28;
+      border-color: #2c394a;
+      color: #d6e5f5;
+    }
+    .smb-runtime-badge.ok {
+      background: rgba(22, 101, 52, 0.22);
+      border-color: rgba(99, 211, 156, 0.34);
+      color: var(--ok);
+    }
+    .smb-runtime-badge.warn {
+      background: rgba(180, 83, 9, 0.2);
+      border-color: rgba(240, 190, 111, 0.34);
+      color: var(--warn);
+    }
+    .smb-runtime-badge.error {
+      background: rgba(153, 27, 27, 0.22);
+      border-color: rgba(240, 140, 140, 0.34);
+      color: #f08c8c;
+    }
     .dashboard-inline-pill { background:#11161d; border-color: var(--border); color:#c9d7e5; }
     .dashboard-inline-pill strong { color: var(--ink-strong); }
     .dashboard-inline-note { background:#11161d; border-color: var(--border); color:#c9d7e5; }
@@ -1076,7 +1130,7 @@ Copyright (c) 2026 walky
             <div class="top-status-runtime-brief-text">
               <div class="top-status-runtime-row top-status-runtime-brief-head">
                 <div class="top-status-runtime-brief-label" id="top-status-runtime-label">Gateway Runtime</div>
-                <div class="top-status-runtime-brief-inline" id="top-status-runtime-version">v0.1.0</div>
+                <div class="top-status-runtime-brief-inline" id="top-status-runtime-version">v0.1.1</div>
               </div>
               <div class="top-status-runtime-line" id="top-status-runtime-started">Started …</div>
               <div class="top-status-runtime-line" id="top-status-runtime-uptime">Uptime …</div>
@@ -1132,6 +1186,7 @@ Copyright (c) 2026 walky
         </div>
         <div class="top-status-card topbar-resources-card" id="top-status-resources">
           <div id="runtime-memory-panel" class="memory-chart-card topbar-memory-card"></div>
+          <div id="smb-runtime-memory-panel" class="memory-chart-card topbar-memory-card"></div>
           <div id="runtime-spool-panel" class="spool-gauge-card topbar-spool-card"></div>
         </div>
       </div>
@@ -1952,7 +2007,22 @@ Copyright (c) 2026 walky
         </div>
       </div>
       <div id="smb-plugin-feedback" class="flash"></div>
-      <div class="policy-execution-note compact-execution-note">网关本体不内置 SMB 服务器。这里保存的是本地 SMB 用户、共享映射和插件默认参数，然后导出一套可运行的插件包，里面包含 `docker-compose.yml`、`smb.conf`、`rclone.conf` 和辅助脚本。</div>
+      <section class="card compact-tab-card policy-card" style="margin-top: 12px;">
+        <div class="compact-section-head">
+          <div class="compact-section-copy">
+            <h3>SMB Runtime</h3>
+            <p>Linux / LXC 发布包会自动托管 SMB sidecar。保存配置后，宿主机会自动拉起或收敛 `rclone mount` 和 `smbd`，这里直接看运行态和资源使用。</p>
+          </div>
+          <div class="actions compact-section-actions">
+            <button id="refresh-smb-runtime" class="secondary" type="button">刷新 SMB 运行态</button>
+          </div>
+        </div>
+        <div id="smb-runtime-summary" class="provider-note">等待网关返回 SMB sidecar 运行态…</div>
+        <div id="smb-runtime-stats" class="smb-runtime-grid"></div>
+        <div id="smb-runtime-shares" class="smb-runtime-list"></div>
+        <div id="smb-runtime-processes" class="smb-runtime-list"></div>
+      </section>
+      <div class="policy-execution-note compact-execution-note">这里保存的是 SMB 本地用户、共享映射和默认参数。对 Linux / LXC 一体化安装，网关旁路 helper 会自动按这份配置托管 SMB sidecar；如果你要部署到其它环境，仍然可以导出 `docker-compose.yml`、`smb.conf`、`rclone.conf` 和辅助脚本。</div>
       <div class="policy-compact-form">
         <div>
           <label><span class="field-label">监听地址<span class="field-help" tabindex="0" role="note" data-tooltip="SMB 服务监听的本机地址。通常用 0.0.0.0 表示监听所有网卡。" aria-label="SMB 服务监听的本机地址。通常用 0.0.0.0 表示监听所有网卡。">?</span></span></label>
@@ -1977,15 +2047,15 @@ Copyright (c) 2026 walky
       <div class="policy-compact-form" style="margin-top: 8px;">
         <div>
           <label><span class="field-label">挂载根目录<span class="field-help" tabindex="0" role="note" data-tooltip="插件侧把各个 S3 视图挂到本机文件系统时使用的根目录。" aria-label="插件侧把各个 S3 视图挂到本机文件系统时使用的根目录。">?</span></span></label>
-          <input id="smb-mount-root" type="text" placeholder="/srv/ccbg/mounts" />
+          <input id="smb-mount-root" type="text" placeholder="/mnt/ccbg/smb/mounts" />
         </div>
         <div>
           <label><span class="field-label">配置根目录<span class="field-help" tabindex="0" role="note" data-tooltip="导出的 Samba、rclone 等配置文件落盘目录。" aria-label="导出的 Samba、rclone 等配置文件落盘目录。">?</span></span></label>
-          <input id="smb-config-root" type="text" placeholder="/srv/ccbg/config" />
+          <input id="smb-config-root" type="text" placeholder="/var/lib/ccbg/smb-sidecar/config" />
         </div>
         <div>
           <label><span class="field-label">数据根目录<span class="field-help" tabindex="0" role="note" data-tooltip="插件运行时的数据目录，例如缓存或状态文件目录。" aria-label="插件运行时的数据目录，例如缓存或状态文件目录。">?</span></span></label>
-          <input id="smb-data-root" type="text" placeholder="/srv/ccbg/data" />
+          <input id="smb-data-root" type="text" placeholder="/var/lib/ccbg/smb-sidecar/data" />
         </div>
         <div>
           <label><span class="field-label">VFS 模块<span class="field-help" tabindex="0" role="note" data-tooltip="Samba 附加功能模块列表。默认值主要为了兼容 macOS 和常见桌面文件管理器，通常无需改动。" aria-label="Samba 附加功能模块列表。默认值主要为了兼容 macOS 和常见桌面文件管理器，通常无需改动。">?</span></span></label>
@@ -5008,6 +5078,8 @@ Copyright (c) 2026 walky
     };
     let applicationDrafts = [];
     let smbSidecarDraft = null;
+    const SMB_RUNTIME_MEMORY_SAMPLE_LIMIT = 60;
+    let smbRuntimeMemorySamples = [];
     let encryptionProfileDrafts = [];
     let managedEncryptionKeys = [];
     let contentPolicyDrafts = [];
@@ -8821,8 +8893,7 @@ Copyright (c) 2026 walky
         </div>
       `;
     }
-    function renderRuntimeMemoryPanel(runtime) {
-      const node = document.getElementById('runtime-memory-panel');
+    function renderRuntimeMemoryCard(node, runtime, options = {}) {
       if (!node) {
         return;
       }
@@ -8838,12 +8909,13 @@ Copyright (c) 2026 walky
       const rssFile = memory?.rss_file_bytes;
       const rssShmem = memory?.rss_shmem_bytes;
       const threads = memory?.threads;
+      const label = options.label || tr('runtime.memory.title', {}, 'Gateway Memory');
       node.title = `VmRSS: ${formatBytes(currentRss)} | VmHWM: ${formatBytes(vmHwm)} | VmSize: ${formatBytes(mappedBytes)} | VmData: ${formatBytes(vmData)} | RssAnon: ${formatBytes(rssAnon)} | RssFile: ${formatBytes(rssFile)} | RssShmem: ${formatBytes(rssShmem)} | Threads: ${formatCount(threads)}`;
       node.innerHTML = `
         <div class="topbar-visual-copy">
           <div class="topbar-visual-head">
             <span class="topbar-visual-accent"></span>
-            <div class="topbar-visual-label">${escapeHtml(tr('runtime.memory.title', {}, 'Gateway Memory'))}</div>
+            <div class="topbar-visual-label">${escapeHtml(label)}</div>
           </div>
           <div class="topbar-visual-value">${escapeHtml(formatBytes(currentRss))}</div>
           <div class="topbar-visual-sub">${escapeHtml(`${tr('runtime.memory.peak', {}, 'Peak')} ${formatBytes(peakRss)}`)}</div>
@@ -8864,6 +8936,9 @@ Copyright (c) 2026 walky
           <span><strong>${escapeHtml(tr('runtime.memory.samples', {}, 'Samples'))}</strong> ${escapeHtml(String(samples.length || 0))}</span>
         </div>
       `;
+    }
+    function renderRuntimeMemoryPanel(runtime) {
+      renderRuntimeMemoryCard(document.getElementById('runtime-memory-panel'), runtime);
     }
     function renderRuntimeSpoolPanel(runtime) {
       const node = document.getElementById('runtime-spool-panel');
@@ -9076,6 +9151,7 @@ Copyright (c) 2026 walky
         runtimeJsonNode.textContent = JSON.stringify(runtime || {}, null, 2);
       }
       renderRuntimeMemoryPanel(runtime);
+      renderSmbSidecarMemoryPanel(smbSidecarDraft?.runtime || null);
       renderRuntimeSpoolPanel(runtime);
     }
     function failedObjectProvider(item) {
@@ -15675,6 +15751,9 @@ Copyright (c) 2026 walky
       };
     }
     function normalizeSmbUserDraft(entry = {}, index = 0) {
+      const knownShareIds = Array.isArray(smbSidecarDraft?.shares)
+        ? smbSidecarDraft.shares.map(share => String(share.id || '').trim()).filter(Boolean)
+        : [];
       return {
         id: String(entry.id || `smb-user-${index + 1}`).trim(),
         label: String(entry.label || '').trim(),
@@ -15682,11 +15761,16 @@ Copyright (c) 2026 walky
         password: '',
         password_present: !!entry.password_present,
         enabled: entry.enabled !== false,
-        allowed_share_ids: Array.isArray(entry.allowed_share_ids) ? entry.allowed_share_ids : [],
+        allowed_share_ids: Array.isArray(entry.allowed_share_ids) && entry.allowed_share_ids.length
+          ? entry.allowed_share_ids
+          : knownShareIds,
         notes: String(entry.notes || '').trim(),
       };
     }
     function normalizeSmbShareDraft(entry = {}, index = 0) {
+      const knownUserIds = Array.isArray(smbSidecarDraft?.users)
+        ? smbSidecarDraft.users.map(user => String(user.id || '').trim()).filter(Boolean)
+        : [];
       return {
         id: String(entry.id || `smb-share-${index + 1}`).trim(),
         label: String(entry.label || '').trim(),
@@ -15698,10 +15782,65 @@ Copyright (c) 2026 walky
         read_only: !!entry.read_only,
         browseable: entry.browseable !== false,
         guest_ok: !!entry.guest_ok,
-        valid_user_ids: Array.isArray(entry.valid_user_ids) ? entry.valid_user_ids : [],
+        valid_user_ids: Array.isArray(entry.valid_user_ids) && entry.valid_user_ids.length
+          ? entry.valid_user_ids
+          : knownUserIds,
         create_mask: String(entry.create_mask || '0660').trim(),
         directory_mask: String(entry.directory_mask || '0770').trim(),
         notes: String(entry.notes || '').trim(),
+      };
+    }
+    function normalizeSmbRuntimeShare(entry = {}) {
+      return {
+        id: String(entry.id || '').trim(),
+        share_name: String(entry.share_name || '').trim(),
+        mount_path: String(entry.mount_path || '').trim(),
+        remote_path: String(entry.remote_path || '').trim(),
+        read_only: !!entry.read_only,
+        pid: Number.isFinite(Number(entry.pid)) ? Math.trunc(Number(entry.pid)) : null,
+        running: !!entry.running,
+        mounted: !!entry.mounted,
+        rss_bytes: Number.isFinite(Number(entry.rss_bytes)) ? Math.max(0, Math.trunc(Number(entry.rss_bytes))) : 0,
+        log_path: String(entry.log_path || '').trim(),
+      };
+    }
+    function normalizeSmbRuntimeProcess(entry = {}) {
+      return {
+        role: String(entry.role || '').trim(),
+        pid: Number.isFinite(Number(entry.pid)) ? Math.trunc(Number(entry.pid)) : null,
+        running: !!entry.running,
+        rss_bytes: Number.isFinite(Number(entry.rss_bytes)) ? Math.max(0, Math.trunc(Number(entry.rss_bytes))) : 0,
+        share_id: String(entry.share_id || '').trim(),
+        share_name: String(entry.share_name || '').trim(),
+        mount_path: String(entry.mount_path || '').trim(),
+        log_path: String(entry.log_path || '').trim(),
+      };
+    }
+    function normalizeSmbRuntime(entry = {}) {
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+      return {
+        schema_version: Number.isFinite(Number(entry.schema_version)) ? Math.trunc(Number(entry.schema_version)) : 0,
+        state: String(entry.state || 'unknown').trim() || 'unknown',
+        mode: String(entry.mode || '').trim(),
+        auto_managed: entry.auto_managed !== false,
+        listener: String(entry.listener || '').trim(),
+        listener_ready: !!entry.listener_ready,
+        enabled_share_count: Number.isFinite(Number(entry.enabled_share_count)) ? Math.max(0, Math.trunc(Number(entry.enabled_share_count))) : 0,
+        mounted_share_count: Number.isFinite(Number(entry.mounted_share_count)) ? Math.max(0, Math.trunc(Number(entry.mounted_share_count))) : 0,
+        process_count: Number.isFinite(Number(entry.process_count)) ? Math.max(0, Math.trunc(Number(entry.process_count))) : 0,
+        total_rss_bytes: Number.isFinite(Number(entry.total_rss_bytes)) ? Math.max(0, Math.trunc(Number(entry.total_rss_bytes))) : 0,
+        last_error: String(entry.last_error || '').trim(),
+        share_states: (Array.isArray(entry.share_states) ? entry.share_states : []).map(normalizeSmbRuntimeShare),
+        processes: (Array.isArray(entry.processes) ? entry.processes : []).map(normalizeSmbRuntimeProcess),
+        runtime_root: String(entry.runtime_root || '').trim(),
+        mount_root: String(entry.mount_root || '').trim(),
+        config_root: String(entry.config_root || '').trim(),
+        data_root: String(entry.data_root || '').trim(),
+        desired_hash: String(entry.desired_hash || '').trim(),
+        last_success_at_unix_ms: Number.isFinite(Number(entry.last_success_at_unix_ms)) ? Math.trunc(Number(entry.last_success_at_unix_ms)) : null,
+        status_updated_at_unix_ms: Number.isFinite(Number(entry.status_updated_at_unix_ms)) ? Math.trunc(Number(entry.status_updated_at_unix_ms)) : null,
       };
     }
     function normalizeSmbSidecarDraft(entry = {}) {
@@ -15712,9 +15851,9 @@ Copyright (c) 2026 walky
         plugin_image: String(entry.plugin_image || entry.sidecar_image || 'dperson/samba:latest').trim(),
         sidecar_image: String(entry.sidecar_image || entry.plugin_image || 'dperson/samba:latest').trim(),
         rclone_image: String(entry.rclone_image || 'rclone/rclone:latest').trim(),
-        mount_root: String(entry.mount_root || '/srv/ccbg/mounts').trim(),
-        config_root: String(entry.config_root || '/srv/ccbg/config').trim(),
-        data_root: String(entry.data_root || '/srv/ccbg/data').trim(),
+        mount_root: String(entry.mount_root || '/mnt/ccbg/smb/mounts').trim(),
+        config_root: String(entry.config_root || '/var/lib/ccbg/smb-sidecar/config').trim(),
+        data_root: String(entry.data_root || '/var/lib/ccbg/smb-sidecar/data').trim(),
         workgroup: String(entry.workgroup || 'WORKGROUP').trim(),
         create_mask: String(entry.create_mask || '0660').trim(),
         directory_mask: String(entry.directory_mask || '0770').trim(),
@@ -15726,6 +15865,7 @@ Copyright (c) 2026 walky
         updated_at_unix_ms: Number.isFinite(Number(entry.updated_at_unix_ms))
           ? Math.trunc(Number(entry.updated_at_unix_ms))
           : null,
+        runtime: normalizeSmbRuntime(entry.runtime),
       };
     }
     function normalizeEncryptionProfileDraft(entry = {}, index = 0) {
@@ -16039,10 +16179,261 @@ Copyright (c) 2026 walky
     function loadSmbSidecar(payload) {
       smbSidecarDraft = normalizeSmbSidecarDraft(payload || {});
       renderSmbSidecarEditor();
+      renderSmbSidecarRuntime();
       const raw = document.getElementById('smb-plugin-json');
       if (raw) {
         raw.textContent = JSON.stringify(payload || {}, null, 2);
       }
+    }
+    function loadSmbSidecarRuntime(payload) {
+      const runtime = normalizeSmbRuntime(payload?.runtime);
+      if (!smbSidecarDraft) {
+        smbSidecarDraft = {
+          enabled: payload?.enabled !== false,
+          runtime,
+          users: [],
+          shares: [],
+        };
+      } else {
+        smbSidecarDraft = {
+          ...smbSidecarDraft,
+          runtime,
+        };
+      }
+      renderSmbSidecarRuntime();
+      const raw = document.getElementById('smb-plugin-json');
+      if (raw && payload) {
+        raw.textContent = JSON.stringify(payload || {}, null, 2);
+      }
+    }
+    function smbRuntimeTone(state) {
+      const normalized = String(state || '').trim().toLowerCase();
+      if (normalized === 'running') {
+        return 'ok';
+      }
+      if (normalized === 'degraded' || normalized === 'idle' || normalized === 'stopped') {
+        return 'warn';
+      }
+      if (normalized === 'error') {
+        return 'error';
+      }
+      return 'warn';
+    }
+    function renderSmbRuntimeBadge(label, tone = 'warn') {
+      return `<span class="smb-runtime-badge ${escapeHtmlAttr(tone)}">${escapeHtml(label)}</span>`;
+    }
+    function pushSmbRuntimeMemorySample(runtime) {
+      if (!runtime) {
+        smbRuntimeMemorySamples = [];
+        return smbRuntimeMemorySamples;
+      }
+      const currentRss = Number(runtime.total_rss_bytes || 0);
+      const capturedAt = Number(runtime.status_updated_at_unix_ms || Date.now());
+      if (!Number.isFinite(currentRss) || !Number.isFinite(capturedAt)) {
+        return smbRuntimeMemorySamples;
+      }
+      const nextSample = {
+        captured_at_unix_ms: Math.trunc(capturedAt),
+        rss_bytes: Math.max(0, Math.trunc(currentRss)),
+      };
+      const lastSample = smbRuntimeMemorySamples[smbRuntimeMemorySamples.length - 1];
+      if (lastSample?.captured_at_unix_ms === nextSample.captured_at_unix_ms) {
+        smbRuntimeMemorySamples[smbRuntimeMemorySamples.length - 1] = nextSample;
+      } else {
+        smbRuntimeMemorySamples.push(nextSample);
+      }
+      if (smbRuntimeMemorySamples.length > SMB_RUNTIME_MEMORY_SAMPLE_LIMIT) {
+        smbRuntimeMemorySamples = smbRuntimeMemorySamples.slice(-SMB_RUNTIME_MEMORY_SAMPLE_LIMIT);
+      }
+      return smbRuntimeMemorySamples;
+    }
+    function sumSmbRuntimeProcessRss(processes, predicate) {
+      return (processes || []).reduce((total, process) => {
+        if (!predicate(process)) {
+          return total;
+        }
+        return total + Math.max(0, Number(process?.rss_bytes || 0));
+      }, 0);
+    }
+    function renderSmbSidecarMemoryPanel(runtime) {
+      const node = document.getElementById('smb-runtime-memory-panel');
+      if (!node) {
+        return;
+      }
+      if (!runtime) {
+        smbRuntimeMemorySamples = [];
+        node.title = 'SMB sidecar runtime is not available yet.';
+        node.innerHTML = `
+          <div class="topbar-visual-copy">
+            <div class="topbar-visual-head">
+              <span class="topbar-visual-accent"></span>
+              <div class="topbar-visual-label">${escapeHtml('SMB Sidecar Memory')}</div>
+            </div>
+            <div class="topbar-visual-value">${escapeHtml(formatBytes(0))}</div>
+            <div class="topbar-visual-sub">${escapeHtml('Waiting for sidecar runtime')}</div>
+          </div>
+          <div class="topbar-visual-figure">
+            <div class="topbar-memory-placeholder">${escapeHtml('Waiting for SMB sidecar runtime')}</div>
+          </div>
+        `;
+        return;
+      }
+      const samples = pushSmbRuntimeMemorySample(runtime);
+      const processes = Array.isArray(runtime.processes) ? runtime.processes : [];
+      const currentRss = Math.max(0, Number(runtime.total_rss_bytes || 0));
+      const smbdRss = sumSmbRuntimeProcessRss(processes, process => String(process?.role || '').toLowerCase().includes('smbd'));
+      const rcloneRss = sumSmbRuntimeProcessRss(processes, process => String(process?.role || '').toLowerCase().includes('rclone'));
+      const peakRss = Math.max(currentRss, ...samples.map(sample => Number(sample.rss_bytes || 0)));
+      const chart = buildMemoryTrendSvg(samples, { compact: true });
+      node.title = `SMB sidecar RSS: ${formatBytes(currentRss)} | smbd: ${formatBytes(smbdRss)} | rclone: ${formatBytes(rcloneRss)} | Peak: ${formatBytes(peakRss)} | Processes: ${formatCount(processes.length)}`;
+      node.innerHTML = `
+        <div class="topbar-visual-copy">
+          <div class="topbar-visual-head">
+            <span class="topbar-visual-accent"></span>
+            <div class="topbar-visual-label">${escapeHtml('SMB Sidecar Memory')}</div>
+          </div>
+          <div class="topbar-visual-value">${escapeHtml(formatBytes(currentRss))}</div>
+          <div class="topbar-visual-sub">${escapeHtml(`Peak ${formatBytes(peakRss)}`)}</div>
+        </div>
+        <div class="topbar-visual-figure">
+          ${chart || `<div class="topbar-memory-placeholder">${escapeHtml('Waiting for another sample')}</div>`}
+        </div>
+        <div class="topbar-resource-meta">
+          <span><strong>Peak</strong> ${escapeHtml(formatBytes(peakRss))}</span>
+          <span><strong>smbd</strong> ${escapeHtml(formatBytes(smbdRss))}</span>
+          <span><strong>rclone</strong> ${escapeHtml(formatBytes(rcloneRss))}</span>
+          <span><strong>Processes</strong> ${escapeHtml(formatCount(processes.length))}</span>
+          <span><strong>Samples</strong> ${escapeHtml(String(samples.length || 0))}</span>
+        </div>
+      `;
+    }
+    function renderSmbSidecarRuntime() {
+      const summaryNode = document.getElementById('smb-runtime-summary');
+      const statsNode = document.getElementById('smb-runtime-stats');
+      const sharesNode = document.getElementById('smb-runtime-shares');
+      const processesNode = document.getElementById('smb-runtime-processes');
+      if (!summaryNode || !statsNode || !sharesNode || !processesNode) {
+        return;
+      }
+      const runtime = smbSidecarDraft?.runtime;
+      if (!runtime) {
+        summaryNode.textContent = '当前还没有 SMB sidecar 运行态。Linux / LXC 一体化安装包在首次保存并应用 SMB 配置后，会在这里显示 listener、挂载和资源占用。';
+        statsNode.innerHTML = '';
+        sharesNode.innerHTML = '<div class="smb-runtime-empty">还没有 sidecar 状态文件。</div>';
+        processesNode.innerHTML = '';
+        renderSmbSidecarMemoryPanel(null);
+        return;
+      }
+      renderSmbSidecarMemoryPanel(runtime);
+      const tone = smbRuntimeTone(runtime.state);
+      const summaryParts = [
+        `状态 ${runtime.state || 'unknown'}`,
+        runtime.listener ? `监听 ${runtime.listener}` : '监听 n/a',
+        runtime.listener_ready ? 'listener 就绪' : 'listener 未就绪',
+        runtime.status_updated_at_unix_ms ? `状态更新时间 ${formatTimestamp(runtime.status_updated_at_unix_ms)}` : null,
+        runtime.last_success_at_unix_ms ? `最近成功收敛 ${formatTimestamp(runtime.last_success_at_unix_ms)}` : null,
+      ].filter(Boolean);
+      if (runtime.last_error) {
+        summaryParts.push(`最近错误 ${runtime.last_error}`);
+      }
+      summaryNode.className = tone === 'ok' ? 'flash status-ok' : (tone === 'error' ? 'flash status-error' : 'flash status-warn');
+      summaryNode.textContent = summaryParts.join(' | ');
+      const statCards = [
+        {
+          label: 'State',
+          value: runtime.state || 'unknown',
+          sub: runtime.auto_managed ? 'auto-managed by LXC helper' : (runtime.mode || 'manual'),
+        },
+        {
+          label: 'Listener',
+          value: runtime.listener || 'n/a',
+          sub: runtime.listener_ready ? 'accepting local connections' : 'not accepting connections',
+        },
+        {
+          label: 'Shares',
+          value: `${runtime.mounted_share_count}/${runtime.enabled_share_count}`,
+          sub: 'mounted / enabled',
+        },
+        {
+          label: 'Processes',
+          value: String(runtime.process_count || 0),
+          sub: `${(runtime.processes || []).length} tracked`,
+        },
+        {
+          label: 'RSS',
+          value: formatBytes(runtime.total_rss_bytes || 0),
+          sub: 'sum of tracked helper processes',
+        },
+        {
+          label: 'Paths',
+          value: runtime.runtime_root || runtime.data_root || 'n/a',
+          sub: runtime.mount_root || runtime.config_root || 'n/a',
+        },
+      ];
+      statsNode.innerHTML = statCards.map(card => `
+        <div class="smb-runtime-stat">
+          <div class="smb-runtime-stat-label">${escapeHtml(card.label)}</div>
+          <div class="smb-runtime-stat-value">${escapeHtml(card.value)}</div>
+          <div class="smb-runtime-stat-sub">${escapeHtml(card.sub)}</div>
+        </div>
+      `).join('');
+
+      const shares = Array.isArray(runtime.share_states) ? runtime.share_states : [];
+      sharesNode.innerHTML = shares.length
+        ? shares.map(share => {
+          const shareTone = share.mounted && share.running ? 'ok' : (share.running ? 'warn' : 'error');
+          const title = share.share_name || share.id || 'SMB share';
+          const meta = [
+            share.remote_path ? `remote=${share.remote_path}` : null,
+            share.mount_path ? `mount=${share.mount_path}` : null,
+            share.pid ? `pid=${share.pid}` : 'pid=n/a',
+            `rss=${formatBytes(share.rss_bytes || 0)}`,
+            share.log_path ? `log=${share.log_path}` : null,
+          ].filter(Boolean).join(' | ');
+          return `
+            <div class="smb-runtime-row">
+              <div class="smb-runtime-row-head">
+                <div>
+                  <div class="smb-runtime-row-title">${escapeHtml(title)}</div>
+                  <div class="smb-runtime-row-meta">${escapeHtml(meta)}</div>
+                </div>
+                <div class="smb-runtime-row-badges">
+                  ${renderSmbRuntimeBadge(share.read_only ? 'read-only' : 'read-write', 'warn')}
+                  ${renderSmbRuntimeBadge(share.running ? 'rclone running' : 'rclone stopped', share.running ? 'ok' : 'error')}
+                  ${renderSmbRuntimeBadge(share.mounted ? 'mounted' : 'not mounted', shareTone)}
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('')
+        : '<div class="smb-runtime-empty">当前没有已跟踪的 SMB share runtime。</div>';
+
+      const processes = Array.isArray(runtime.processes) ? runtime.processes : [];
+      processesNode.innerHTML = processes.length
+        ? processes.map(process => {
+          const processTone = process.running ? 'ok' : 'error';
+          const meta = [
+            process.pid ? `pid=${process.pid}` : 'pid=n/a',
+            `rss=${formatBytes(process.rss_bytes || 0)}`,
+            process.share_name ? `share=${process.share_name}` : null,
+            process.mount_path ? `mount=${process.mount_path}` : null,
+            process.log_path ? `log=${process.log_path}` : null,
+          ].filter(Boolean).join(' | ');
+          return `
+            <div class="smb-runtime-row">
+              <div class="smb-runtime-row-head">
+                <div>
+                  <div class="smb-runtime-row-title">${escapeHtml(process.role || 'process')}</div>
+                  <div class="smb-runtime-row-meta">${escapeHtml(meta)}</div>
+                </div>
+                <div class="smb-runtime-row-badges">
+                  ${renderSmbRuntimeBadge(process.running ? 'running' : 'stopped', processTone)}
+                </div>
+              </div>
+            </div>
+          `;
+        }).join('')
+        : '<div class="smb-runtime-empty">当前没有已跟踪的 SMB helper 进程。</div>';
     }
     function loadContentPolicies(payload) {
       contentPolicyDrafts = (Array.isArray(payload) ? payload : []).map(normalizeContentPolicyDraft);
@@ -16229,9 +16620,9 @@ Copyright (c) 2026 walky
       assign('smb-port', String(smbSidecarDraft.port || 445));
       assign('smb-workgroup', smbSidecarDraft.workgroup || 'WORKGROUP');
       assign('smb-enabled', smbSidecarDraft.enabled ? 'true' : 'false');
-      assign('smb-mount-root', smbSidecarDraft.mount_root || '/srv/ccbg/mounts');
-      assign('smb-config-root', smbSidecarDraft.config_root || '/srv/ccbg/config');
-      assign('smb-data-root', smbSidecarDraft.data_root || '/srv/ccbg/data');
+      assign('smb-mount-root', smbSidecarDraft.mount_root || '/mnt/ccbg/smb/mounts');
+      assign('smb-config-root', smbSidecarDraft.config_root || '/var/lib/ccbg/smb-sidecar/config');
+      assign('smb-data-root', smbSidecarDraft.data_root || '/var/lib/ccbg/smb-sidecar/data');
       assign('smb-vfs-objects', (smbSidecarDraft.vfs_objects || []).join(', '));
       assign('smb-plugin-image', smbSidecarDraft.plugin_image || smbSidecarDraft.sidecar_image || 'dperson/samba:latest');
       assign('smb-rclone-image', smbSidecarDraft.rclone_image || 'rclone/rclone:latest');
@@ -16296,9 +16687,9 @@ Copyright (c) 2026 walky
         plugin_image: document.getElementById('smb-plugin-image')?.value?.trim() || 'dperson/samba:latest',
         sidecar_image: document.getElementById('smb-plugin-image')?.value?.trim() || 'dperson/samba:latest',
         rclone_image: document.getElementById('smb-rclone-image')?.value?.trim() || 'rclone/rclone:latest',
-        mount_root: document.getElementById('smb-mount-root')?.value?.trim() || '/srv/ccbg/mounts',
-        config_root: document.getElementById('smb-config-root')?.value?.trim() || '/srv/ccbg/config',
-        data_root: document.getElementById('smb-data-root')?.value?.trim() || '/srv/ccbg/data',
+        mount_root: document.getElementById('smb-mount-root')?.value?.trim() || '/mnt/ccbg/smb/mounts',
+        config_root: document.getElementById('smb-config-root')?.value?.trim() || '/var/lib/ccbg/smb-sidecar/config',
+        data_root: document.getElementById('smb-data-root')?.value?.trim() || '/var/lib/ccbg/smb-sidecar/data',
         workgroup: document.getElementById('smb-workgroup')?.value?.trim() || 'WORKGROUP',
         create_mask: document.getElementById('smb-create-mask')?.value?.trim() || '0660',
         directory_mask: document.getElementById('smb-directory-mask')?.value?.trim() || '0770',
@@ -16326,7 +16717,7 @@ Copyright (c) 2026 walky
           body: JSON.stringify({ smb }),
         });
         loadSmbSidecar(payload);
-        setSmbSidecarFeedback('Saved SMB plugin configuration.', 'ok');
+        setSmbSidecarFeedback('Saved SMB configuration. If you add a user before creating shares, CCBG creates a default CCBGRoot share automatically. Linux / LXC installs auto-reconcile the sidecar.', 'ok');
         await refreshStatus({ lightweight: true });
       } catch (error) {
         setSmbSidecarFeedback(error.message || String(error), 'warn');
@@ -18218,6 +18609,11 @@ Copyright (c) 2026 walky
           }
           await refreshAuthCapturePrompts();
         } else {
+          try {
+            loadSmbSidecarRuntime(await fetchJson('/api/smb'));
+          } catch (_error) {
+            renderSmbSidecarMemoryPanel(smbSidecarDraft?.runtime || null);
+          }
           renderAuthCaptureBrowserEndpoints();
           renderOnedriveSetupCard();
           if (!unicomAssistantActive) {
@@ -19130,6 +19526,7 @@ Copyright (c) 2026 walky
     });
     document.getElementById('save-smb-plugin').addEventListener('click', saveSmbSidecar);
     document.getElementById('export-smb-plugin').addEventListener('click', exportSmbSidecar);
+    document.getElementById('refresh-smb-runtime').addEventListener('click', () => refreshStatus({ lightweight: true }));
     document.getElementById('add-smb-user').addEventListener('click', () => {
       smbSidecarDraft = normalizeSmbSidecarDraft(smbSidecarDraft || {});
       smbSidecarDraft.users.push(normalizeSmbUserDraft({}, smbSidecarDraft.users.length));

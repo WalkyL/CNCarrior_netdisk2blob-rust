@@ -89,8 +89,19 @@ if [ "${CCBG_RELEASE_BUILD_OPENWRT:-false}" = "true" ]; then
   copy_artifacts "${ROOT_DIR}/target/openwrt-lite/ccbg-openwrt-lite.tar.gz"*
 fi
 
+if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ] && [ "${CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD:-false}" != "true" ]; then
+  cat >&2 <<'EOF'
+macOS release artifacts are not built on the local/LAN release host right now.
+Use the GitHub Actions macOS-only release build, download its artifacts, and
+pass them back with CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets.
+Set CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD=true only after a documented local/LAN
+macOS builder or Darwin cross toolchain exists.
+EOF
+  exit 1
+fi
+
 if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ]; then
-  echo "building community macOS x86_64 package on .47 for ${MACOS_X86_TARGET}"
+  echo "building community macOS x86_64 package locally for ${MACOS_X86_TARGET}"
   build_gatewayd "${MACOS_X86_TARGET}"
   scripts/build-native-package.sh \
     --skip-build \
@@ -98,7 +109,7 @@ if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ]; then
     --package-name ccbg-macos-x86_64
   copy_artifacts "${ROOT_DIR}/target/native-packages/ccbg-macos-x86_64.tar.gz"*
 
-  echo "building community macOS arm64 package on .47 for ${MACOS_ARM64_TARGET}"
+  echo "building community macOS arm64 package locally for ${MACOS_ARM64_TARGET}"
   build_gatewayd "${MACOS_ARM64_TARGET}"
   scripts/build-native-package.sh \
     --skip-build \

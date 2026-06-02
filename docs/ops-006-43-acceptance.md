@@ -181,3 +181,32 @@ curl -sS -i --max-time 5 http://192.168.1.43:61081/
 - 本次增量包含两条关键运行时结论：
   - 联通短信助手浮窗内点击 `Start SMS Login + Validate` 已恢复触发真实 `/api/browser-flows/session-run`
   - 进入 `联通` tab 时不再自动弹出引导浮窗，只有用户显式点开或流程进入进行态时才开窗
+
+## 2026-06-02 Cloudflare release cache rollout
+
+- 已执行 `scripts/deploy-cloudflare-public.sh test` 与
+  `scripts/deploy-cloudflare-public.sh production`，不再只是 Worker + Assets fallback，
+  而是带 release R2 cache 的正式流程。
+- 新增并启用两个 Cloudflare R2 bucket：
+  - test: `ccbg-release-assets-test`
+  - production: `ccbg-release-assets`
+- `scripts/deploy-cloudflare-public.sh` 现已支持：
+  - 按环境注入 `RELEASE_ASSETS` 绑定
+  - 在部署前自动执行 `scripts/sync-cloudflare-release-cache.sh`
+  - 将当前本地 release 包上传到 `latest/<asset-name>`
+- 本次同步入桶的 release 包：
+  - `ccbg-lxc-package.tar.gz`
+  - `ccbg-windows-x86_64.zip`
+  - `ccbg-macos-x86_64.tar.gz`
+  - `ccbg-macos-arm64.tar.gz`
+  - `ccbg-openwrt-lite.tar.gz`
+- 同日已补传 GitHub `v0.1.0` release 缺失资产，保留 GitHub 回源兜底。
+- 最新 Worker 版本：
+  - test: `f0cae355-6350-4fce-8f52-0cebd56815a5`
+  - production: `f35f821a-e15e-4ebc-80d1-efcdfac91cf8`
+- 线上验证：
+  - `GET https://carrier-disk-gateway.agi2030.online/` -> `200`
+  - `GET https://carrier-disk-gateway.agi2030.online/data/install-catalog.json` -> `200`
+  - `release_base_url=https://carrier-disk-gateway.agi2030.online/downloads/latest`
+  - `HEAD /downloads/latest/ccbg-lxc-package.tar.gz` -> `200`, `x-ccbg-release-source=r2`
+  - `HEAD /downloads/latest/ccbg-windows-x86_64.zip` -> `200`, `x-ccbg-release-source=r2`

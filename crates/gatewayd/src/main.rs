@@ -213,9 +213,9 @@ const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust";
 const CCBG_RELEASE_CHANNEL: &str = "commercial-core";
 const CCBG_RELEASE_DATE: &str = "2026-05-26";
-const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.0-walky-20260526-e756003d846d2c46";
+const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67";
 const DEFAULT_RELEASE_FINGERPRINT_SHA256: &str =
-    "e756003d846d2c460f892a20402d59539c8c6980ba011c62d17ab5ad962de6b6";
+    "22a2ea8c4f6acfc78abea9aa66961b9fb4c2156de18731705795cd1d4e3d5f37";
 
 #[derive(Clone)]
 struct AppState {
@@ -1260,15 +1260,15 @@ fn default_smb_rclone_image() -> String {
 }
 
 fn default_smb_mount_root() -> String {
-    "/srv/ccbg/mounts".to_string()
+    "/mnt/ccbg/smb/mounts".to_string()
 }
 
 fn default_smb_config_root() -> String {
-    "/srv/ccbg/config".to_string()
+    "/var/lib/ccbg/smb-sidecar/config".to_string()
 }
 
 fn default_smb_data_root() -> String {
-    "/srv/ccbg/data".to_string()
+    "/var/lib/ccbg/smb-sidecar/data".to_string()
 }
 
 fn default_smb_workgroup() -> String {
@@ -1494,6 +1494,95 @@ struct SmbSidecarSummaryPayload {
     users: Vec<SmbUserPayload>,
     shares: Vec<SmbSharePayload>,
     updated_at_unix_ms: u64,
+    runtime: Option<SmbSidecarRuntimePayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SmbSidecarRuntimePayload {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    auto_managed: bool,
+    #[serde(default)]
+    listener: Option<String>,
+    #[serde(default)]
+    listener_ready: bool,
+    #[serde(default)]
+    enabled_share_count: usize,
+    #[serde(default)]
+    mounted_share_count: usize,
+    #[serde(default)]
+    process_count: usize,
+    #[serde(default)]
+    total_rss_bytes: u64,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    share_states: Vec<SmbSidecarRuntimeSharePayload>,
+    #[serde(default)]
+    processes: Vec<SmbSidecarRuntimeProcessPayload>,
+    #[serde(default)]
+    runtime_root: Option<String>,
+    #[serde(default)]
+    mount_root: Option<String>,
+    #[serde(default)]
+    config_root: Option<String>,
+    #[serde(default)]
+    data_root: Option<String>,
+    #[serde(default)]
+    desired_hash: Option<String>,
+    #[serde(default)]
+    last_success_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    status_updated_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SmbSidecarRuntimeSharePayload {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    share_name: String,
+    #[serde(default)]
+    mount_path: String,
+    #[serde(default)]
+    remote_path: String,
+    #[serde(default)]
+    read_only: bool,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    running: bool,
+    #[serde(default)]
+    mounted: bool,
+    #[serde(default)]
+    rss_bytes: u64,
+    #[serde(default)]
+    log_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SmbSidecarRuntimeProcessPayload {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    running: bool,
+    #[serde(default)]
+    rss_bytes: u64,
+    #[serde(default)]
+    share_id: Option<String>,
+    #[serde(default)]
+    share_name: Option<String>,
+    #[serde(default)]
+    mount_path: Option<String>,
+    #[serde(default)]
+    log_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -22135,13 +22224,14 @@ fn load_control_plane_state(
                     .collect(),
             )
             .context("invalid saved encryption profiles in control plane file")?;
-            validate_managed_encryption_key_refs_for_dir(
-                credentials_dir,
-                &state.encryption_profiles,
-            )
-            .context("saved encryption profiles reference unknown managed encryption keys")?;
             state.content_policies = normalize_content_policies(state.content_policies)
                 .context("invalid saved content policies in control plane file")?;
+            state.encryption_profiles = drop_unreferenced_encryption_profiles_with_missing_keys(
+                credentials_dir,
+                state.encryption_profiles,
+                &state.content_policies,
+            )
+            .context("saved encryption profiles reference unknown managed encryption keys")?;
             validate_content_policy_encryption_profile_refs(
                 &state.content_policies,
                 &state.encryption_profiles,
@@ -25875,13 +25965,50 @@ fn normalize_smb_share_inputs(shares: Vec<SmbShareInput>) -> Result<Vec<SmbShare
     Ok(normalized)
 }
 
+fn default_smb_root_share(users: &[SmbUser], application_id: &str) -> SmbShare {
+    SmbShare {
+        id: "root".to_string(),
+        label: Some("Root".to_string()),
+        share_name: "CCBGRoot".to_string(),
+        application_id: application_id.to_string(),
+        bucket: "root".to_string(),
+        prefix: String::new(),
+        enabled: true,
+        read_only: false,
+        browseable: true,
+        guest_ok: false,
+        valid_user_ids: users
+            .iter()
+            .filter(|user| user.enabled)
+            .map(|user| user.id.clone())
+            .collect(),
+        create_mask: default_smb_share_create_mask(),
+        directory_mask: default_smb_share_directory_mask(),
+        notes: Some("Auto-created default root share for first-run SMB setup".to_string()),
+    }
+}
+
 fn normalize_smb_sidecar_with_existing(
     input: SmbSidecarConfigInput,
     existing: &SmbSidecarConfig,
     applications: &[DataPlaneApplication],
 ) -> Result<SmbSidecarConfig, BlobError> {
     let users = normalize_smb_user_inputs(input.users, &existing.users)?;
-    let shares = normalize_smb_share_inputs(input.shares)?;
+    let mut shares = normalize_smb_share_inputs(input.shares)?;
+    if input.enabled && shares.is_empty() && users.iter().any(|user| user.enabled) {
+        let application_id = applications
+            .iter()
+            .find(|application| application.enabled)
+            .or_else(|| applications.first())
+            .map(|application| application.id.as_str())
+            .ok_or_else(|| {
+                BlobError::Configuration(
+                    "SMB needs at least one S3 application before auto-creating the default root share"
+                        .to_string(),
+                )
+            })?;
+        shares.push(default_smb_root_share(&users, application_id));
+    }
     let application_ids = applications
         .iter()
         .map(|app| app.id.as_str())
@@ -26001,7 +26128,24 @@ fn smb_share_payload(share: &SmbShare) -> SmbSharePayload {
     }
 }
 
-fn smb_sidecar_payload(config: &SmbSidecarConfig) -> SmbSidecarSummaryPayload {
+fn smb_sidecar_runtime_status_path(control_plane_file: &str) -> PathBuf {
+    FsPath::new(control_plane_file)
+        .parent()
+        .unwrap_or_else(|| FsPath::new("."))
+        .join("smb-sidecar")
+        .join("status.json")
+}
+
+fn read_smb_sidecar_runtime_payload(control_plane_file: &str) -> Option<SmbSidecarRuntimePayload> {
+    let path = smb_sidecar_runtime_status_path(control_plane_file);
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn smb_sidecar_payload(
+    config: &SmbSidecarConfig,
+    runtime: Option<SmbSidecarRuntimePayload>,
+) -> SmbSidecarSummaryPayload {
     SmbSidecarSummaryPayload {
         enabled: config.enabled,
         bind_addr: config.bind_addr.clone(),
@@ -26021,6 +26165,7 @@ fn smb_sidecar_payload(config: &SmbSidecarConfig) -> SmbSidecarSummaryPayload {
         users: config.users.iter().map(smb_user_payload).collect(),
         shares: config.shares.iter().map(smb_share_payload).collect(),
         updated_at_unix_ms: config.updated_at_unix_ms,
+        runtime,
     }
 }
 
@@ -26122,7 +26267,8 @@ fn current_smb_sidecar_config(state: &AppState) -> SmbSidecarConfig {
 }
 
 fn current_smb_sidecar_payload(state: &AppState) -> SmbSidecarSummaryPayload {
-    smb_sidecar_payload(&current_smb_sidecar_config(state))
+    let runtime = read_smb_sidecar_runtime_payload(&state.config.control_plane_file);
+    smb_sidecar_payload(&current_smb_sidecar_config(state), runtime)
 }
 
 fn smb_application_map(state: &AppState) -> HashMap<String, DataPlaneApplication> {
@@ -26482,7 +26628,7 @@ fn build_smb_export_bundle(
         gateway_version: env!("CARGO_PKG_VERSION").to_string(),
         provenance: release_provenance_payload(),
         bundle_name,
-        summary: smb_sidecar_payload(config),
+        summary: smb_sidecar_payload(config, None),
         files,
     })
 }
@@ -27292,6 +27438,51 @@ fn validate_content_policy_encryption_profile_refs(
         }
     }
     Ok(())
+}
+
+fn drop_unreferenced_encryption_profiles_with_missing_keys(
+    credentials_dir: &str,
+    profiles: Vec<EncryptionProfile>,
+    policies: &[ContentPolicyRule],
+) -> Result<Vec<EncryptionProfile>, BlobError> {
+    let referenced_profile_ids = policies
+        .iter()
+        .filter_map(|policy| policy.encryption_profile_id.as_deref())
+        .collect::<HashSet<_>>();
+    let mut retained = Vec::with_capacity(profiles.len());
+
+    for profile in profiles {
+        if profile.key_source_kind != EncryptionKeySourceKind::GatewayManaged {
+            retained.push(profile);
+            continue;
+        }
+        let key_id = profile.key_source_ref.trim();
+        if key_id.is_empty() {
+            return Err(BlobError::Configuration(format!(
+                "encryption profile {} key_source_ref must not be empty",
+                profile.id
+            )));
+        }
+        match load_managed_encryption_key_record_from_credentials_dir(credentials_dir, key_id) {
+            Ok(_) => retained.push(profile),
+            Err(BlobError::NotFound(_)) if !referenced_profile_ids.contains(profile.id.as_str()) => {
+                tracing::warn!(
+                    profile_id = profile.id.as_str(),
+                    key_id,
+                    "dropping unreferenced encryption profile with missing managed key while loading control plane"
+                );
+            }
+            Err(BlobError::NotFound(_)) => {
+                return Err(BlobError::Configuration(format!(
+                    "encryption profile {} references unknown managed encryption key {}",
+                    profile.id, key_id
+                )));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Ok(retained)
 }
 
 fn normalize_string_list(values: &[String]) -> Vec<String> {
@@ -32527,7 +32718,7 @@ mod tests {
     #[test]
     fn gateway_version_text_exposes_release_provenance() {
         let text = gateway_version_text();
-        assert!(text.contains("gatewayd 0.1.0"));
+        assert!(text.contains("gatewayd 0.1.1"));
         assert!(text.contains(DEFAULT_RELEASE_FINGERPRINT));
         assert!(text.contains(CCBG_LICENSE_ID));
         assert!(text.contains(CCBG_CANONICAL_REPO));
@@ -48749,9 +48940,9 @@ mod tests {
                     plugin_image: Some("custom/samba-plugin:test".to_string()),
                     sidecar_image: Some("legacy/samba-sidecar:test".to_string()),
                     rclone_image: Some("rclone/rclone:latest".to_string()),
-                    mount_root: Some("/srv/ccbg/mounts".to_string()),
-                    config_root: Some("/srv/ccbg/config".to_string()),
-                    data_root: Some("/srv/ccbg/data".to_string()),
+                    mount_root: Some("/mnt/ccbg/smb/mounts".to_string()),
+                    config_root: Some("/var/lib/ccbg/smb-sidecar/config".to_string()),
+                    data_root: Some("/var/lib/ccbg/smb-sidecar/data".to_string()),
                     workgroup: Some("WORKGROUP".to_string()),
                     server_string: Some("CCBG SMB".to_string()),
                     create_mask: Some("0660".to_string()),
@@ -48806,6 +48997,74 @@ mod tests {
             .await
             .expect("smb plugin config should load");
         assert_eq!(current.shares[0].share_name, "FamilyMedia");
+
+        let runtime_status_path = FsPath::new(&state.config.control_plane_file)
+            .parent()
+            .expect("control plane should have parent")
+            .join("smb-sidecar")
+            .join("status.json");
+        if runtime_status_path.exists() {
+            fs::remove_file(&runtime_status_path).expect("stale runtime status should remove");
+        }
+        let Json(current_without_runtime) = get_smb_sidecar_config(State(state.clone()))
+            .await
+            .expect("smb plugin config should load without runtime");
+        assert!(current_without_runtime.runtime.is_none());
+        fs::create_dir_all(
+            runtime_status_path
+                .parent()
+                .expect("runtime status parent should exist"),
+        )
+        .expect("runtime status dir should create");
+        fs::write(
+            &runtime_status_path,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "state": "running",
+                "mode": "host_process",
+                "auto_managed": true,
+                "listener": "0.0.0.0:445",
+                "listener_ready": true,
+                "enabled_share_count": 1,
+                "mounted_share_count": 1,
+                "process_count": 2,
+                "total_rss_bytes": 12_345_678u64,
+                "share_states": [
+                    {
+                        "id": "family-media",
+                        "share_name": "FamilyMedia",
+                        "mount_path": "/mnt/ccbg/smb/mounts/family-media",
+                        "remote_path": "root/media/family",
+                        "read_only": false,
+                        "pid": 2345,
+                        "running": true,
+                        "mounted": true,
+                        "rss_bytes": 2_048u64,
+                    }
+                ],
+                "processes": [
+                    {
+                        "role": "smbd",
+                        "pid": 1234,
+                        "running": true,
+                        "rss_bytes": 10_240u64,
+                    }
+                ],
+                "status_updated_at_unix_ms": 123456789u64,
+            }))
+            .expect("runtime status should serialize"),
+        )
+        .expect("runtime status should write");
+
+        let Json(with_runtime) = get_smb_sidecar_config(State(state.clone()))
+            .await
+            .expect("smb plugin config should load runtime");
+        let runtime = with_runtime
+            .runtime
+            .expect("runtime payload should be present");
+        assert_eq!(runtime.state, "running");
+        assert!(runtime.listener_ready);
+        assert_eq!(runtime.mounted_share_count, 1);
 
         let bundle = build_smb_export_bundle(&state, &current_smb_sidecar_config(&state))
             .expect("bundle should build");

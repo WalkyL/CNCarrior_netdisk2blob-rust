@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "license": "LicenseRef-CCBG-Public-Materials",
-  "release_fingerprint": "ccbg-0.1.0-walky-20260526-e756003d846d2c46",
-  "release_base_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download",
-  "support_note": "Official host packages are intended to run as a local resident gateway with a LAN admin surface.",
+  "release_fingerprint": "ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67",
+  "release_base_url": "https://carrier-disk-gateway.agi2030.online/downloads/latest",
+  "support_note": "Official host packages are intended to run as a local resident gateway with S3 on 61080 and Admin Web on 61081.",
   "groups": [
     {
       "id": "official-hosts",
@@ -11,14 +11,28 @@
       "summary": "推荐用于长期运行，默认按后台常驻网关部署。",
       "items": [
         {
-          "id": "pve-lxc",
-          "name": "PVE LXC",
+          "id": "pve-lxc-s3-only",
+          "name": "PVE LXC (S3 only)",
           "status": "official",
           "arch": "x86 / x64",
           "service_mode": "systemd",
           "package": "ccbg-lxc-package.tar.gz",
-          "command": "curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-lxc-package.tar.gz && tar -xzf ccbg-lxc-package.tar.gz && sudo ./ccbg-lxc-package/scripts/install.sh",
-          "verify": "curl -fsS http://127.0.0.1:61080/healthz"
+          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-lxc-package.tar.gz && tar --no-same-owner -xzf ccbg-lxc-package.tar.gz && sudo ./ccbg-lxc-package/scripts/install.sh --s3-only",
+          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-lxc-package.tar.gz && tar --no-same-owner -xzf ccbg-lxc-package.tar.gz && sudo ./ccbg-lxc-package/scripts/install.sh --s3-only && sudo ./ccbg-lxc-package/scripts/smoke.sh",
+          "upgrade_note": "默认 profile。只安装并启动 S3 gateway，不启用 SMB sidecar units。",
+          "verify": "curl -fsS http://127.0.0.1:61080/healthz && echo 'Admin Web: http://<lxc-ip>:61081/'"
+        },
+        {
+          "id": "pve-lxc-smb-sidecar",
+          "name": "PVE LXC + SMB sidecar",
+          "status": "official",
+          "arch": "x86 / x64",
+          "service_mode": "systemd + rclone + smbd",
+          "package": "ccbg-lxc-package.tar.gz",
+          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-lxc-package.tar.gz && tar --no-same-owner -xzf ccbg-lxc-package.tar.gz && sudo ./ccbg-lxc-package/scripts/install.sh --enable-smb-sidecar",
+          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-lxc-package.tar.gz && tar --no-same-owner -xzf ccbg-lxc-package.tar.gz && sudo ./ccbg-lxc-package/scripts/install.sh --enable-smb-sidecar && sudo ./ccbg-lxc-package/scripts/smoke.sh",
+          "upgrade_note": "安装 rclone/samba/fuse3，启用 ccbg-smb-sidecar path/timer/service，并在 Admin/control-plane 中打开 SMB。安装后先启动 smbd 监听 0.0.0.0:445；第一次使用时进 Admin 添加一个 SMB 用户即可自动生成 CCBGRoot 默认共享。真实挂载 CCBGRoot 时，PVE/LXC guest 需要暴露 /dev/fuse 给 rclone mount。",
+          "verify": "sudo systemctl status ccbg-smb-sidecar.path ccbg-smb-sidecar.timer --no-pager && sudo cat /var/lib/ccbg/smb-sidecar/status.json"
         },
         {
           "id": "docker",
@@ -28,6 +42,8 @@
           "service_mode": "container",
           "package": "ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
           "command": "docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
+          "upgrade": "docker pull ghcr.io/walkyl/carrier-cloud-blob-gateway:latest && docker stop ccbg && docker rm ccbg && docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
+          "upgrade_note": "升级时复用原来的 ccbg-data volume，控制面和运行态数据会继续保留。",
           "verify": "docker exec ccbg gatewayd --version"
         },
         {
@@ -38,6 +54,8 @@
           "service_mode": "container",
           "package": "ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
           "command": "podman run -d --name ccbg --replace --restart=unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
+          "upgrade": "podman pull ghcr.io/walkyl/carrier-cloud-blob-gateway:latest && podman run -d --name ccbg --replace --restart=unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
+          "upgrade_note": "Podman 路径直接用 --replace 覆盖旧容器，同时保留 ccbg-data volume。",
           "verify": "podman exec ccbg gatewayd --version"
         },
         {
@@ -47,8 +65,10 @@
           "arch": "x86_64",
           "service_mode": "Scheduled Task resident process",
           "package": "ccbg-windows-x86_64.zip",
-          "command": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip; Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\\ccbg-release; .\\ccbg-release\\ccbg-windows-x86_64\\deploy\\windows\\install.ps1\"",
-          "verify": "powershell -Command \"Invoke-WebRequest http://127.0.0.1:61080/healthz\""
+          "command": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip; Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\\ccbg-release; .\\ccbg-release\\ccbg-windows-x86_64\\deploy\\windows\\install.ps1\"",
+          "upgrade": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip; Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\\ccbg-release; .\\ccbg-release\\ccbg-windows-x86_64\\deploy\\windows\\install.ps1\"",
+          "upgrade_note": "Windows 直接重新下载 zip 并重复执行 install.ps1；脚本会覆盖 gatewayd.exe、Admin 资源并重新注册同名计划任务。",
+          "verify": "powershell -Command \"Invoke-WebRequest http://127.0.0.1:61080/healthz; Write-Host 'Admin Web: http://<this-host-ip>:61081/'\""
         },
         {
           "id": "macos-x86_64",
@@ -57,8 +77,10 @@
           "arch": "x86_64",
           "service_mode": "launchd user agent",
           "package": "ccbg-macos-x86_64.tar.gz",
-          "command": "curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
-          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd"
+          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
+          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
+          "upgrade_note": "macOS 通过重复执行包内 install.sh 原地更新二进制和 launchd agent；脚本会先 bootout 再 bootstrap。",
+          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd && echo 'Admin Web: http://<this-host-ip>:61081/'"
         },
         {
           "id": "macos-arm64",
@@ -67,8 +89,10 @@
           "arch": "arm64",
           "service_mode": "launchd user agent",
           "package": "ccbg-macos-arm64.tar.gz",
-          "command": "curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
-          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd"
+          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
+          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
+          "upgrade_note": "Apple Silicon 路径与 Intel 相同：重新解包并重复执行 install.sh 即可完成覆盖升级。",
+          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd && echo 'Admin Web: http://<this-host-ip>:61081/'"
         }
       ]
     },
@@ -85,6 +109,8 @@
           "service_mode": "Docker or Linux host",
           "package": "reuse Docker or LXC package",
           "command": "docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
+          "upgrade": "docker pull ghcr.io/walkyl/carrier-cloud-blob-gateway:latest && docker stop ccbg && docker rm ccbg && docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
+          "upgrade_note": "fnOS 目前复用 Docker / Linux host 路径，升级时同样保留 ccbg-data volume。",
           "verify": "curl -fsS http://127.0.0.1:61080/healthz"
         },
         {
@@ -94,7 +120,9 @@
           "arch": "arm64",
           "service_mode": "procd init script",
           "package": "ccbg-openwrt-lite.tar.gz",
-          "command": "curl -fsSLO https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest/download/ccbg-openwrt-lite.tar.gz && tar -xzf ccbg-openwrt-lite.tar.gz && ./ccbg-openwrt-lite/scripts/install.sh",
+          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-openwrt-lite.tar.gz && tar -xzf ccbg-openwrt-lite.tar.gz && ./ccbg-openwrt-lite/scripts/install.sh",
+          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-openwrt-lite.tar.gz && tar -xzf ccbg-openwrt-lite.tar.gz && ./ccbg-openwrt-lite/scripts/install.sh && /etc/init.d/ccbg restart",
+          "upgrade_note": "OpenWrt lite 会保留现有 /etc/ccbg/openwrt-lite.env，并把新样例写成 openwrt-lite.env.package-<timestamp>。",
           "verify": "/etc/init.d/ccbg status"
         }
       ]

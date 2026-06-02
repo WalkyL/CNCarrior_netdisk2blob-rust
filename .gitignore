@@ -8,6 +8,7 @@ data/
 /.env.local
 /.idea
 /.vscode
+.wrangler/
 *.log
 __pycache__/
 *.pyc

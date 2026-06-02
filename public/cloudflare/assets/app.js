@@ -2,16 +2,17 @@
 // Copyright (c) 2026 walky
 const CCBG_PROVENANCE = {
   service: 'carrier-cloud-blob-gateway-public',
-  version: '0.1.0',
+  version: '0.1.1',
   release_channel: 'public-materials',
   release_date: '2026-05-26',
-  release_fingerprint: 'ccbg-0.1.0-walky-20260526-e756003d846d2c46',
-  fingerprint_sha256: 'e756003d846d2c460f892a20402d59539c8c6980ba011c62d17ab5ad962de6b6',
+  release_fingerprint: 'ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67',
+  fingerprint_sha256: '22a2ea8c4f6acfc78abea9aa66961b9fb4c2156de18731705795cd1d4e3d5f37',
   canonical_repo: 'https://github.com/WalkyL/CNCarrior_netdisk2blob-rust',
   license_id: 'LicenseRef-CCBG-Public-Materials'
 };
 
 const SOURCE_REVIEW_DAYS = 90;
+const COPY_RESET_DELAY_MS = 1600;
 
 function setText(id, value) {
   const node = document.getElementById(id);
@@ -31,6 +32,52 @@ function createNode(tagName, className, text) {
   return node;
 }
 
+async function copyCommandText(text) {
+  const value = String(text || '');
+  if (!value) {
+    return false;
+  }
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(value);
+    return true;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  document.body.removeChild(textarea);
+  return copied;
+}
+
+function attachCopyButton(pre, command) {
+  if (!pre || pre.dataset.copyReady === 'true') {
+    return;
+  }
+  pre.dataset.copyReady = 'true';
+  pre.classList.add('command-pre');
+  const button = createNode('button', 'command-copy-button', 'Copy');
+  button.type = 'button';
+  button.addEventListener('click', async () => {
+    const original = button.textContent || 'Copy';
+    button.disabled = true;
+    try {
+      const copied = await copyCommandText(command);
+      button.textContent = copied ? 'Copied' : 'Copy failed';
+    } catch (_error) {
+      button.textContent = 'Copy failed';
+    }
+    window.setTimeout(() => {
+      button.textContent = original;
+      button.disabled = false;
+    }, COPY_RESET_DELAY_MS);
+  });
+  pre.appendChild(button);
+}
+
 function renderCommand(label, command) {
   if (!command) {
     return null;
@@ -41,6 +88,7 @@ function renderCommand(label, command) {
   const code = document.createElement('code');
   code.textContent = command;
   pre.appendChild(code);
+  attachCopyButton(pre, command);
   wrapper.appendChild(pre);
   return wrapper;
 }
@@ -61,10 +109,17 @@ function renderPlatformCard(item) {
   card.appendChild(title);
   card.appendChild(meta);
   card.appendChild(packageLine);
+  if (item.upgrade_note) {
+    card.appendChild(createNode('p', 'section-lead', item.upgrade_note));
+  }
 
   const command = renderCommand('install', item.command);
   if (command) {
     card.appendChild(command);
+  }
+  const upgrade = renderCommand('upgrade', item.upgrade);
+  if (upgrade) {
+    card.appendChild(upgrade);
   }
   const fallback = renderCommand('fallback', item.fallback_command);
   if (fallback) {
@@ -135,6 +190,16 @@ async function loadInstallCatalog() {
   }
 }
 
+function enhanceStaticInstallCommands() {
+  document.querySelectorAll('.install-console pre').forEach((pre) => {
+    const code = pre.querySelector('code');
+    if (!code) {
+      return;
+    }
+    attachCopyButton(pre, code.textContent || '');
+  });
+}
+
 function renderStaticFields() {
   setText('source-review-days', String(SOURCE_REVIEW_DAYS));
   setText('footer-fingerprint', CCBG_PROVENANCE.release_fingerprint);
@@ -142,6 +207,7 @@ function renderStaticFields() {
 
 window.CCBG_PROVENANCE = CCBG_PROVENANCE;
 renderStaticFields();
+enhanceStaticInstallCommands();
 loadInstallCatalog();
 
 //# sourceMappingURL=app.js.map

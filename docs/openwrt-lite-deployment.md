@@ -57,7 +57,7 @@ scripts/build-openwrt-lite-package.sh --target aarch64-unknown-linux-musl
 
 [openwrt-lite.env](../config/openwrt-lite.env) 的默认值用于离线 smoke:
 
-- `CCBG_PRIMARY_PROVIDER=stub`
+- `CCBG_PRIMARY_PROVIDER=unicom`
 - `CCBG_ADMIN_MODE=terminal`
 - `CCBG_DATA_PLANE_MAX_IN_FLIGHT=2`
 - `CCBG_DATA_PLANE_MAX_REQUESTS_PER_SECOND=8`

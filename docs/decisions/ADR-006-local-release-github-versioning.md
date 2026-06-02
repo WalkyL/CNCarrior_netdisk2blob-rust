@@ -26,15 +26,16 @@ macOS 构建和 GitHub Release 汇总放在同一个 GitHub Actions release work
 ## Decision
 
 GitHub 对 CCBG 只承担版本管理职责：源码、分支、tag、issue 模板和 release 记录。
-通用 CI、Linux/Windows/OpenWrt/macOS 组包、Cloudflare 公开站部署不再由 GitHub
-Actions 自动触发。
+通用 CI、Linux/Windows/OpenWrt 组包、Cloudflare 公开站部署不再由 GitHub Actions 自动触发。
 
-`192.168.1.47` 是 CCBG 唯一发布构建主机。Linux LXC、OpenWrt、Windows、macOS、
-STM32 示例、ESP32-S3 示例，以及后续新增的嵌入式或固件构建，都必须从 `.47` 的
-项目工作区执行。`.46` 不再保留项目代码，也不再运行 CCBG 编译任务。
+`192.168.1.47` 是 CCBG 默认发布构建主机。Linux LXC、OpenWrt、Windows、STM32 示例、
+ESP32-S3 示例，以及后续新增的嵌入式或固件构建，都必须从 `.47` 的项目工作区执行。
+`.46` 不再保留项目代码，也不再运行 CCBG 编译任务。
 
-macOS `x86_64` / `arm64` 暂时降级为社区/实验交叉编译包，由 `.47` Windows 主机
-产出；这些包未签名、未公证、未经过 macOS 真机 smoke，不按官方宿主承诺。
+当前本机和局域网没有 macOS 构建器。macOS `x86_64` / `arm64` 暂时降级为社区/实验包，
+由 GitHub Actions macOS-only 例外构建产出；这些包未签名、未公证、未经过本项目控制
+的 macOS 真机 smoke，不按官方宿主承诺。产物必须下载回 `.47`，进入同一 checksum、
+R2/GitHub fallback 和 `/downloads/latest/*` smoke 链路。
 
 本地流程改为：
 
@@ -49,18 +50,19 @@ macOS `x86_64` / `arm64` 暂时降级为社区/实验交叉编译包，由 `.47`
 优点是入口集中、产物能自动汇总。缺点是把内网构建、GitHub-hosted macOS、GHCR、
 Cloudflare 部署和公网 smoke 绑定在一起，任何一环的环境差异都会影响整条发布链。
 
-### 继续保留 GitHub macOS workflow
+### 使用 GitHub macOS-only workflow
 
-优点是能使用真实 macOS runner。缺点是 GitHub hosted macOS runner 有 credit 限制，
-并且会重新把构建职责放回 GitHub Actions；与“GitHub 只做版本管理”的边界冲突。
+优点是能使用真实 macOS runner。缺点是 GitHub hosted macOS runner 有 credit 限制。
+当前接受这个方案作为 macOS-only 例外，因为本机和局域网没有 macOS 构建器。边界是：
+只构建 macOS 资产，不承担 Linux/Windows/OpenWrt、Cloudflare 部署或通用 release gate。
 
 ## Consequences
 
 - 推送 `main` 或 `test` 不会自动部署。
 - release 前必须显式运行本地质量门并留存结果。
 - Cloudflare 部署使用 `.47` Cloudflare 凭据，发布人需要确认当前 shell 环境。
-- macOS 包是社区/实验交叉编译包；需要 macOS SDK 和 Darwin 目标工具链，失败时作为
-  `.47` 工具链缺口处理，不切回 GitHub Actions。
+- macOS 包是社区/实验包；当前由 GitHub Actions macOS-only 例外构建产出，并下载回
+  `.47` 进入统一发布链路。
 - 如果公网安装 catalog 继续指向 GitHub release download URL，发布人必须手动保证
   对应资产已上传到 GitHub Release。
 - 新增任何构建主机前，必须先在项目文档里记录机器、目录、凭据边界和清理方案。

@@ -16,8 +16,8 @@
 | Docker `x86/x64` | 官方宿主 | 支持 | 使用 `deploy/Dockerfile` |
 | Podman `x86/x64` | 官方宿主 | 支持 | 使用 `deploy/Containerfile` 或 `deploy/Dockerfile` |
 | Windows `x86_64` | 官方宿主 | 支持 | 原生发布包，默认 Scheduled Task 后台常驻路径 |
-| macOS `x86_64` | 社区/实验包 | 实验 | 由 `.47` Windows 主机交叉编译产出，未签名、未公证、未做 macOS 真机 smoke |
-| macOS `arm64` | 社区/实验包 | 实验 | 由 `.47` Windows 主机交叉编译产出，未签名、未公证、未做 macOS 真机 smoke |
+| macOS `x86_64` | 社区/实验包 | 实验 | 当前由 GitHub Actions macOS-only 例外构建产出，未签名、未公证、未做本项目控制的 macOS 真机 smoke |
+| macOS `arm64` | 社区/实验包 | 实验 | 当前由 GitHub Actions macOS-only 例外构建产出，未签名、未公证、未做本项目控制的 macOS 真机 smoke |
 | fnOS | 实验宿主 | 实验 | 优先复用 Docker / Linux 路径，不承诺应用商店上架 |
 | OpenWRT `arm64` | 实验宿主 | 实验 | 优先 `daemon + stdio MCP`，管理界面按资源情况裁剪 |
 | STM32 | 嵌入式客户端示例 | 示例 | 不承载完整 daemon，只提供本地 S3 客户端参考实现 |

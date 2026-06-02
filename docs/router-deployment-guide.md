@@ -84,7 +84,7 @@ RUST_LOG=warn
 
 建议:
 
-- `primary provider` 用联通/电信/移动其一，或测试期使用 `stub`
+- `primary provider` 用联通/电信/移动其一；未注入凭据前会显示 unavailable
 - `CCBG_SYNC_TARGETS` 默认留空；如需异步备份，优先选择已完成探测和回归的运营商 provider
 - `CCBG_FALLBACK_READ_ORDER` 默认留空；只有明确需要读侧 fallback 时才填写
 - 保持 `CCBG_ONEDRIVE_ENABLED=false` 与 `CCBG_ONEDRIVE_REPLICATION_ENABLED=false`

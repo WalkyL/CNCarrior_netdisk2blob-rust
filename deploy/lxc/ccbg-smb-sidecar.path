@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+# Copyright (c) 2026 walky
+
+[Unit]
+Description=Watch CCBG control plane for SMB sidecar changes
+
+[Path]
+PathModified=/var/lib/ccbg/control-plane.json
+PathChanged=/etc/ccbg/ccbg.env
+Unit=ccbg-smb-sidecar-sync.service
+
+[Install]
+WantedBy=multi-user.target

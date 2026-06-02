@@ -2,6 +2,10 @@
 // Copyright (c) 2026 walky
 
 import catalog from "./data/faq-catalog.json";
+import {
+  buildLatestReleasePageUrl,
+  proxyLatestReleaseAssetByName
+} from "./functions/_lib/releases.js";
 
 const FAQ_CATALOG = Array.isArray(catalog?.items) ? catalog.items : [];
 const FAQ_CATALOG_VERSION = String(catalog?.version || "unknown");
@@ -157,8 +161,31 @@ function handleFaqCatalog(request) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if ((request.method === "GET" || request.method === "HEAD") && (url.pathname === "/downloads/latest" || url.pathname === "/downloads/latest/")) {
+      return Response.redirect(buildLatestReleasePageUrl(env), 302);
+    }
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname.startsWith("/downloads/latest/")) {
+      let assetName = "";
+      try {
+        assetName = decodeURIComponent(url.pathname.slice("/downloads/latest/".length));
+      } catch (_error) {
+        return new Response("invalid release asset name", {
+          status: 400,
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "cache-control": "no-store"
+          }
+        });
+      }
+      return proxyLatestReleaseAssetByName({
+        request,
+        env,
+        ctx,
+        assetName
+      });
+    }
     if (url.pathname === "/api/faq/catalog") {
       return handleFaqCatalog(request);
     }

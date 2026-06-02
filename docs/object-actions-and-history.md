@@ -58,7 +58,7 @@
 运行策略上需要额外注意:
 
 - `POST /api/object-actions` 始终作用于“当前 primary provider”
-- 本项目当前只允许运营商 provider 或 `stub` 作为 primary
+- 本项目当前只允许运营商 provider 作为 primary
 - 因此 OneDrive 虽然已具备 provider 侧对象动作实现，但运行时定位仍是异步备份 / 可选 fallback 目标，而不是主写后端
 
 ## 2. 动作语义

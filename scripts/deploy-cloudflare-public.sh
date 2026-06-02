@@ -34,19 +34,28 @@ case "${TARGET}" in
   test)
     CCBG_CF_WORKER_NAME="${CCBG_CF_TEST_WORKER:-ccbg-public-test}"
     CCBG_CF_DOMAIN="${CCBG_CF_TEST_DOMAIN:-}"
+    CCBG_CF_RELEASE_R2_BUCKET="${CCBG_CF_TEST_RELEASE_R2_BUCKET:-${CCBG_CF_RELEASE_R2_BUCKET:-}}"
     ;;
   production)
     CCBG_CF_WORKER_NAME="${CCBG_CF_PROD_WORKER:-ccbg-public}"
     CCBG_CF_DOMAIN="${CCBG_CF_PROD_DOMAIN:-carrier-disk-gateway.agi2030.online}"
+    CCBG_CF_RELEASE_R2_BUCKET="${CCBG_CF_PROD_RELEASE_R2_BUCKET:-${CCBG_CF_RELEASE_R2_BUCKET:-}}"
     ;;
 esac
 
 OUT_DIR="${ROOT_DIR}/target/cloudflare-public-assets"
 scripts/stage-cloudflare-public-assets.sh "${OUT_DIR}"
 
+WRANGLER_CONFIG="${ROOT_DIR}/target/wrangler-ccbg-public-${TARGET}.toml"
+scripts/render-cloudflare-worker-config.sh "${WRANGLER_CONFIG}" "${CCBG_CF_RELEASE_R2_BUCKET}"
+
+if [ -n "${CCBG_CF_RELEASE_R2_BUCKET}" ]; then
+  scripts/sync-cloudflare-release-cache.sh "${CCBG_CF_RELEASE_R2_BUCKET}"
+fi
+
 deploy_args=(
   npx wrangler@latest deploy
-  -c public/cloudflare/wrangler.worker.toml
+  -c "${WRANGLER_CONFIG}"
   --name "${CCBG_CF_WORKER_NAME}"
   --assets "${OUT_DIR}"
 )

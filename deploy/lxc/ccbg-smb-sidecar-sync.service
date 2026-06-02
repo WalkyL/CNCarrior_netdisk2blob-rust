@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: LicenseRef-CCBG-Commercial
+# Copyright (c) 2026 walky
+
+[Unit]
+Description=Reconcile CCBG SMB sidecar runtime
+After=network-online.target ccbg.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+KillMode=process
+ExecStart=/opt/ccbg/scripts/ccbg-smb-sidecar.sh sync

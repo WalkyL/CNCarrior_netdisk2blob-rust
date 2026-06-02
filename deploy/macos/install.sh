@@ -36,3 +36,4 @@ launchctl kickstart -k "gui/${UID}/${LABEL}"
 
 echo "installed ${LABEL}"
 echo "health: curl -fsS http://127.0.0.1:61080/healthz"
+echo "admin:  http://<this-host-ip>:61081/"
