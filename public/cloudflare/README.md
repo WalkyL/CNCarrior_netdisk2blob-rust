@@ -135,7 +135,7 @@ curl -I http://127.0.0.1:8788/downloads/latest/ccbg-lxc-package.tar.gz
 The current public frontend fingerprint is:
 
 ```text
-ccbg-0.1.1-walky-20260603-d23489d4ca1fbe67
+ccbg-0.1.2-walky-20260603-bda37a712441fe32
 ```
 
 The same fingerprint appears in HTML meta tags, `manifest.json`,

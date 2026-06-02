@@ -104,6 +104,38 @@ def pid_exists(pid: int | None) -> bool:
         return False
 
 
+def normalize_pid(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def local_ipv4_interface_specs() -> list[str]:
+    specs = ["127.0.0.1/8"]
+    try:
+        result = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show", "scope", "global", "up"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return specs
+
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        try:
+            cidr = parts[parts.index("inet") + 1]
+        except (ValueError, IndexError):
+            continue
+        if cidr.startswith("127."):
+            continue
+        specs.append(cidr)
+    return list(dict.fromkeys(specs))
+
+
 def terminate_pid(pid: int | None) -> None:
     if not pid_exists(pid):
         return
@@ -511,8 +543,11 @@ def generate_smb_conf(model: dict[str, Any]) -> str:
         "   max log size = 10000",
         f"   smb ports = {model['port']}",
     ]
-    bind_addr = model["bind_addr"]
-    if bind_addr not in ("0.0.0.0", "::", ""):
+    bind_addr = str(model["bind_addr"]).strip()
+    if bind_addr in ("0.0.0.0", "*"):
+        global_lines.append(f"   interfaces = {' '.join(local_ipv4_interface_specs())}")
+        global_lines.append("   bind interfaces only = yes")
+    elif bind_addr not in ("::", ""):
         global_lines.append(f"   interfaces = {bind_addr}")
         global_lines.append("   bind interfaces only = yes")
 
@@ -590,10 +625,7 @@ def process_rss_bytes(pid: int | None) -> int:
 def find_process_pid(processes: list[dict[str, Any]], role: str) -> int | None:
     for entry in processes:
         if str(entry.get("role") or "") == role:
-            try:
-                pid = int(entry.get("pid") or 0)
-            except (TypeError, ValueError):
-                pid = 0
+            pid = normalize_pid(entry.get("pid"))
             return pid or None
     return None
 
@@ -620,12 +652,13 @@ def find_smbd_pid_for_model(model: dict[str, Any] | None) -> int | None:
 
 
 def build_process_payload(role: str, pid: int | None, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-    exists = pid_exists(pid)
+    normalized_pid = normalize_pid(pid)
+    exists = pid_exists(normalized_pid)
     payload = {
         "role": role,
-        "pid": pid if exists else None,
+        "pid": normalized_pid if exists else None,
         "running": exists,
-        "rss_bytes": process_rss_bytes(pid) if exists else 0,
+        "rss_bytes": process_rss_bytes(normalized_pid) if exists else 0,
     }
     if extra:
         payload.update(extra)
@@ -643,10 +676,7 @@ def stop_previous_runtime(paths: dict[str, pathlib.Path]) -> None:
     processes = previous.get("processes") or []
 
     for process in processes:
-        try:
-            pid = int(process.get("pid") or 0)
-        except (TypeError, ValueError):
-            pid = 0
+        pid = normalize_pid(process.get("pid"))
         terminate_pid(pid)
 
     for share in share_states:
@@ -860,10 +890,7 @@ def wait_for_listener(bind_addr: str, port: int, timeout_seconds: float) -> bool
 def refresh_share_states(shares: list[dict[str, Any]]) -> list[dict[str, Any]]:
     refreshed = []
     for share in shares:
-        try:
-            pid = int(share.get("pid") or 0)
-        except (TypeError, ValueError):
-            pid = 0
+        pid = normalize_pid(share.get("pid"))
         mount_path = pathlib.Path(str(share.get("mount_path") or ""))
         refreshed.append(
             {
@@ -911,10 +938,7 @@ def build_runtime_payload(
             "mount_path": share.get("mount_path"),
             "log_path": share.get("log_path"),
         }
-        try:
-            pid = int(share.get("pid") or 0)
-        except (TypeError, ValueError):
-            pid = 0
+        pid = normalize_pid(share.get("pid"))
         refreshed_processes.append(build_process_payload(f"rclone:{share.get('id')}", pid, extra))
 
     total_rss_bytes = sum(int(entry.get("rss_bytes") or 0) for entry in refreshed_processes)
@@ -1038,7 +1062,7 @@ def sync_runtime() -> int:
             processes.append(
                 build_process_payload(
                     f"rclone:{share['id']}",
-                    int(share["pid"]),
+                    normalize_pid(share.get("pid")),
                     {
                         "share_id": share["id"],
                         "share_name": share["share_name"],
