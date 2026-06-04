@@ -212,6 +212,21 @@ Copyright (c) 2026 walky
     .smb-runtime-badge.warn { border-color: rgba(180, 83, 9, 0.28); color: var(--warn); background: rgba(255, 248, 235, 0.96); }
     .smb-runtime-badge.error { border-color: rgba(153, 27, 27, 0.24); color: #991b1b; background: rgba(253, 231, 231, 0.96); }
     .smb-runtime-empty { margin-top: 10px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+    .smb-runtime-guidance { margin-top: 12px; border: 1px solid rgba(180, 83, 9, 0.28); border-radius: 12px; background: rgba(255, 248, 235, 0.96); padding: 12px; color: var(--ink-strong); }
+    .smb-runtime-guidance-head { display:flex; align-items:flex-start; justify-content:space-between; gap: 10px; flex-wrap: wrap; }
+    .smb-runtime-guidance-copy { min-width: 0; max-width: 92ch; }
+    .smb-runtime-guidance-copy strong { display:block; font-size: 14px; line-height: 1.25; color: var(--ink-strong); }
+    .smb-runtime-guidance-copy p { margin: 6px 0 0; font-size: 13px; line-height: 1.5; color: var(--ink-strong); }
+    .smb-runtime-guidance-steps { margin: 10px 0 0 18px; padding: 0; font-size: 13px; line-height: 1.5; color: var(--ink-strong); }
+    .smb-runtime-guidance-steps li + li { margin-top: 4px; }
+    .smb-runtime-guidance-actions { display:flex; align-items:center; gap: 8px; flex-wrap: wrap; }
+    .smb-runtime-guidance-actions button { padding: 7px 10px; font-size: 12px; }
+    .smb-runtime-command-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; margin-top: 12px; }
+    .smb-runtime-command { border: 1px solid rgba(216, 208, 194, 0.92); border-radius: 12px; background: rgba(255, 255, 250, 0.95); padding: 10px 12px; }
+    .smb-runtime-command-head { display:flex; align-items:flex-start; justify-content:space-between; gap: 10px; flex-wrap: wrap; }
+    .smb-runtime-command-title { font-size: 13px; line-height: 1.25; color: var(--ink-strong); font-weight: 700; }
+    .smb-runtime-command-note { margin-top: 4px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+    .smb-runtime-command pre { margin: 8px 0 0; padding: 12px; border-radius: 10px; background: #f3eee3; color: #352718; font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
     .provider-card { background:#fffdf7; border:1px solid var(--border); border-radius: 16px; padding: 14px; }
     .provider-card.disabled { opacity: 0.58; }
     .provider-card h3 { margin: 0; font-size: 18px; }
@@ -810,7 +825,7 @@ Copyright (c) 2026 walky
     h1, h2 { color: var(--accent); }
     p, label, .hint, .provider-note, .health-meta, .scope-meta, .health-notes, .object-meta { color: var(--muted); }
     .card { background: rgba(21, 29, 41, 0.96); border-color: var(--border); box-shadow: 0 18px 40px rgba(3, 8, 14, 0.34); }
-    button, a.cta { background: var(--accent-strong); color:#f5fffb; }
+    button, a.cta { background: var(--accent-strong); color:#06271f; }
     button:hover, a.cta:hover { filter: brightness(1.05); }
     button.secondary { background:#1a2531; color:#d6e5f5; border:1px solid var(--border); }
     button.secondary:hover { background:#213042; }
@@ -878,17 +893,43 @@ Copyright (c) 2026 walky
     .smb-runtime-badge.ok {
       background: rgba(22, 101, 52, 0.22);
       border-color: rgba(99, 211, 156, 0.34);
-      color: var(--ok);
+      color: #b9f0d0;
     }
     .smb-runtime-badge.warn {
       background: rgba(180, 83, 9, 0.2);
       border-color: rgba(240, 190, 111, 0.34);
-      color: var(--warn);
+      color: #f5d59b;
     }
     .smb-runtime-badge.error {
       background: rgba(153, 27, 27, 0.22);
       border-color: rgba(240, 140, 140, 0.34);
-      color: #f08c8c;
+      color: #f4b4b4;
+    }
+    .smb-runtime-guidance {
+      background: rgba(60, 41, 16, 0.74);
+      border-color: rgba(240, 190, 111, 0.45);
+      color: #f5d59b;
+    }
+    .smb-runtime-guidance-copy strong,
+    .smb-runtime-guidance-copy p,
+    .smb-runtime-guidance-steps {
+      color: #f5d59b;
+    }
+    .smb-runtime-command {
+      background: #111a24;
+      border-color: #223043;
+      color: var(--ink-strong);
+    }
+    .smb-runtime-command-title {
+      color: var(--ink-strong);
+    }
+    .smb-runtime-command-note {
+      color: var(--muted);
+    }
+    .smb-runtime-command pre {
+      background: #0c131d;
+      border: 1px solid var(--border);
+      color: #d8ecff;
     }
     .dashboard-inline-pill { background:#11161d; border-color: var(--border); color:#c9d7e5; }
     .dashboard-inline-pill strong { color: var(--ink-strong); }
@@ -1130,7 +1171,7 @@ Copyright (c) 2026 walky
             <div class="top-status-runtime-brief-text">
               <div class="top-status-runtime-row top-status-runtime-brief-head">
                 <div class="top-status-runtime-brief-label" id="top-status-runtime-label">Gateway Runtime</div>
-                <div class="top-status-runtime-brief-inline" id="top-status-runtime-version">v0.1.2</div>
+                <div class="top-status-runtime-brief-inline" id="top-status-runtime-version">v0.1.3</div>
               </div>
               <div class="top-status-runtime-line" id="top-status-runtime-started">Started …</div>
               <div class="top-status-runtime-line" id="top-status-runtime-uptime">Uptime …</div>
@@ -2018,6 +2059,7 @@ Copyright (c) 2026 walky
           </div>
         </div>
         <div id="smb-runtime-summary" class="provider-note">等待网关返回 SMB sidecar 运行态…</div>
+        <div id="smb-runtime-guidance" hidden></div>
         <div id="smb-runtime-stats" class="smb-runtime-grid"></div>
         <div id="smb-runtime-shares" class="smb-runtime-list"></div>
         <div id="smb-runtime-processes" class="smb-runtime-list"></div>
@@ -15802,6 +15844,7 @@ Copyright (c) 2026 walky
         mounted: !!entry.mounted,
         rss_bytes: Number.isFinite(Number(entry.rss_bytes)) ? Math.max(0, Math.trunc(Number(entry.rss_bytes))) : 0,
         log_path: String(entry.log_path || '').trim(),
+        last_error: String(entry.last_error || '').trim(),
       };
     }
     function normalizeSmbRuntimeProcess(entry = {}) {
@@ -16222,6 +16265,123 @@ Copyright (c) 2026 walky
     function renderSmbRuntimeBadge(label, tone = 'warn') {
       return `<span class="smb-runtime-badge ${escapeHtmlAttr(tone)}">${escapeHtml(label)}</span>`;
     }
+    function smbRuntimeFuseErrorMessages(runtime) {
+      if (!runtime) {
+        return [];
+      }
+      const seen = new Set();
+      const messages = [];
+      const candidates = [runtime.last_error].concat(
+        Array.isArray(runtime.share_states) ? runtime.share_states.map(share => share?.last_error) : [],
+      );
+      candidates.forEach(candidate => {
+        const message = String(candidate || '').trim();
+        if (!message) {
+          return;
+        }
+        const lower = message.toLowerCase();
+        if (!lower.includes('/dev/fuse') && !lower.includes('fuse')) {
+          return;
+        }
+        if (seen.has(message)) {
+          return;
+        }
+        seen.add(message);
+        messages.push(message);
+      });
+      return messages;
+    }
+    function smbRuntimeNeedsFuseGuidance(runtime) {
+      return smbRuntimeFuseErrorMessages(runtime).length > 0;
+    }
+    function smbFuseGuidanceHostCommand() {
+      return [
+        '# 在 PVE 宿主机 shell 里运行',
+        '# 先找到 CCBG 这个容器的 CTID',
+        'pct list',
+        '',
+        '# 把 <CTID> 改成上一步看到的容器 ID',
+        'pct stop <CTID>',
+        "cat >> /etc/pve/lxc/<CTID>.conf <<'EOF'",
+        'features: fuse=1,nesting=1',
+        'lxc.cgroup2.devices.allow: c 10:229 rwm',
+        'lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0',
+        'EOF',
+        'pct start <CTID>',
+      ].join('\n');
+    }
+    function smbFuseGuidanceGuestCommand() {
+      return [
+        '# 在 CCBG 容器里运行，确认 /dev/fuse 已经透传进来',
+        'ls -l /dev/fuse',
+        '',
+        '# 让 SMB sidecar 立刻重新收敛一次',
+        'sudo systemctl start ccbg-smb-sidecar-sync.service',
+        '',
+        '# 查看结果；修好后 mounted_share_count 应等于 enabled_share_count',
+        'sudo cat /var/lib/ccbg/smb-sidecar/status.json',
+      ].join('\n');
+    }
+    async function copySmbRuntimeGuidance(kind) {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        throw new Error('Clipboard API is not available in this browser.');
+      }
+      const text = kind === 'guest' ? smbFuseGuidanceGuestCommand() : smbFuseGuidanceHostCommand();
+      await navigator.clipboard.writeText(text);
+      setSmbSidecarFeedback(kind === 'guest' ? '已复制容器内检查命令。' : '已复制 PVE 宿主机 FUSE 配置命令。', 'ok');
+    }
+    function renderSmbFuseGuidance(runtime) {
+      if (!smbRuntimeNeedsFuseGuidance(runtime)) {
+        return '';
+      }
+      const fuseErrors = smbRuntimeFuseErrorMessages(runtime);
+      const hostCommand = smbFuseGuidanceHostCommand();
+      const guestCommand = smbFuseGuidanceGuestCommand();
+      const successHint = runtime.enabled_share_count > 0
+        ? `修好后，这里的 Shares 应从 ${runtime.mounted_share_count}/${runtime.enabled_share_count} 回到 ${runtime.enabled_share_count}/${runtime.enabled_share_count}，整体状态回到 running。`
+        : '修好后，再保存一个 SMB 用户或 share，sidecar 就可以继续把云盘内容挂进容器。';
+      return `
+        <div class="smb-runtime-guidance">
+          <div class="smb-runtime-guidance-head">
+            <div class="smb-runtime-guidance-copy">
+              <strong>还缺少 FUSE，445 监听已经起来，但云盘 share 还挂不进来。</strong>
+              <p>FUSE 是 Linux 的“用户态文件系统”接口。CCBG 的 SMB sidecar 会先用 <code>rclone mount</code> 把云盘内容挂成本地目录，再由 <code>smbd</code> 共享出去。没有 <code>/dev/fuse</code> 时，SMB 监听可以就绪，但 <code>CCBGRoot</code> 这类真实 share 不能挂载，所以这里会保持 <code>degraded</code>。</p>
+              <ol class="smb-runtime-guidance-steps">
+                <li>这一步不能在 Admin 页面里自动完成，因为它需要在 PVE / LXC 宿主层给容器透传 <code>/dev/fuse</code>。</li>
+                <li>先在 PVE 宿主机执行下面这组命令，给容器打开 FUSE。</li>
+                <li>容器重启后，再在 CCBG 容器里执行第二组命令，让 sidecar 立即重新收敛并检查结果。</li>
+              </ol>
+              <p>${escapeHtml(successHint)}</p>
+              ${fuseErrors.length ? `<p>当前错误：${escapeHtml(fuseErrors[0])}</p>` : ''}
+            </div>
+            <div class="smb-runtime-guidance-actions">
+              <button class="secondary" type="button" onclick="copySmbRuntimeGuidance('host').catch(error => setSmbSidecarFeedback(error.message || String(error), 'warn'))">复制宿主机命令</button>
+              <button class="secondary" type="button" onclick="copySmbRuntimeGuidance('guest').catch(error => setSmbSidecarFeedback(error.message || String(error), 'warn'))">复制容器内命令</button>
+            </div>
+          </div>
+          <div class="smb-runtime-command-grid">
+            <div class="smb-runtime-command">
+              <div class="smb-runtime-command-head">
+                <div>
+                  <div class="smb-runtime-command-title">PVE 宿主机：给 LXC 透传 /dev/fuse</div>
+                  <div class="smb-runtime-command-note">把 <code>&lt;CTID&gt;</code> 改成你的容器 ID。如果配置文件里已经有这三行，不要重复追加。</div>
+                </div>
+              </div>
+              <pre>${escapeHtml(hostCommand)}</pre>
+            </div>
+            <div class="smb-runtime-command">
+              <div class="smb-runtime-command-head">
+                <div>
+                  <div class="smb-runtime-command-title">CCBG 容器内：重新收敛并看结果</div>
+                  <div class="smb-runtime-command-note">看到 <code>/dev/fuse</code>，并且 <code>mounted_share_count</code> 等于 <code>enabled_share_count</code>，说明真实 share 已经挂上。</div>
+                </div>
+              </div>
+              <pre>${escapeHtml(guestCommand)}</pre>
+            </div>
+          </div>
+        </div>
+      `;
+    }
     function pushSmbRuntimeMemorySample(runtime) {
       if (!runtime) {
         smbRuntimeMemorySamples = [];
@@ -16309,15 +16469,18 @@ Copyright (c) 2026 walky
     }
     function renderSmbSidecarRuntime() {
       const summaryNode = document.getElementById('smb-runtime-summary');
+      const guidanceNode = document.getElementById('smb-runtime-guidance');
       const statsNode = document.getElementById('smb-runtime-stats');
       const sharesNode = document.getElementById('smb-runtime-shares');
       const processesNode = document.getElementById('smb-runtime-processes');
-      if (!summaryNode || !statsNode || !sharesNode || !processesNode) {
+      if (!summaryNode || !guidanceNode || !statsNode || !sharesNode || !processesNode) {
         return;
       }
       const runtime = smbSidecarDraft?.runtime;
       if (!runtime) {
         summaryNode.textContent = '当前还没有 SMB sidecar 运行态。Linux / LXC 一体化安装包在首次保存并应用 SMB 配置后，会在这里显示 listener、挂载和资源占用。';
+        guidanceNode.hidden = true;
+        guidanceNode.innerHTML = '';
         statsNode.innerHTML = '';
         sharesNode.innerHTML = '<div class="smb-runtime-empty">还没有 sidecar 状态文件。</div>';
         processesNode.innerHTML = '';
@@ -16338,6 +16501,8 @@ Copyright (c) 2026 walky
       }
       summaryNode.className = tone === 'ok' ? 'flash status-ok' : (tone === 'error' ? 'flash status-error' : 'flash status-warn');
       summaryNode.textContent = summaryParts.join(' | ');
+      guidanceNode.innerHTML = renderSmbFuseGuidance(runtime);
+      guidanceNode.hidden = !guidanceNode.innerHTML;
       const statCards = [
         {
           label: 'State',

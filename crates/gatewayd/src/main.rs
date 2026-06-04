@@ -84,6 +84,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305,
     aead::{AeadInPlace, generic_array::GenericArray},
 };
+use chrono::{DateTime, Utc};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures_util::stream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -213,9 +214,9 @@ const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust";
 const CCBG_RELEASE_CHANNEL: &str = "commercial-core";
 const CCBG_RELEASE_DATE: &str = "2026-06-03";
-const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.2-walky-20260603-bda37a712441fe32";
+const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.3-walky-20260604-prep";
 const DEFAULT_RELEASE_FINGERPRINT_SHA256: &str =
-    "03bae8a844f520528d9c677ca8c43773fc3b0a27d03ec7f9a32abf5cf57c258d";
+    "470c967d46bc7bd43a06f2e655d1a911e5394e0fdbeac1858514576aae40edcb";
 
 #[derive(Clone)]
 struct AppState {
@@ -2409,12 +2410,14 @@ impl ProviderIoStatsState {
     }
 
     fn snapshot_provider(&self, provider: &str) -> ProviderIoObservationsPayload {
-        self.inner
-            .lock()
-            .expect("provider io stats poisoned")
-            .get(provider)
-            .cloned()
-            .unwrap_or_default()
+        let now_unix_ms = current_unix_ms();
+        let mut inner = self.inner.lock().expect("provider io stats poisoned");
+        let Some(observations) = inner.get_mut(provider) else {
+            return ProviderIoObservationsPayload::default();
+        };
+        prune_provider_io_operation_snapshot(&mut observations.read, now_unix_ms);
+        prune_provider_io_operation_snapshot(&mut observations.write, now_unix_ms);
+        observations.clone()
     }
 }
 
@@ -2554,6 +2557,14 @@ fn prune_provider_io_samples(samples: &mut VecDeque<ProviderIoThroughputSample>,
     }) {
         samples.pop_front();
     }
+}
+
+fn prune_provider_io_operation_snapshot(
+    operation: &mut ProviderIoOperationPayload,
+    now_unix_ms: u64,
+) {
+    prune_provider_io_samples(&mut operation.recent_throughput_samples, now_unix_ms);
+    recompute_provider_io_rolling(operation);
 }
 
 fn recompute_provider_io_rolling(operation: &mut ProviderIoOperationPayload) {
@@ -6102,7 +6113,32 @@ struct ListObjectsV2Query {
     max_keys: Option<usize>,
     #[serde(rename = "continuation-token")]
     continuation_token: Option<String>,
+    #[serde(rename = "start-after")]
+    start_after: Option<String>,
     delimiter: Option<String>,
+}
+
+#[derive(Debug)]
+struct ListObjectsV2Page {
+    objects: Vec<blob_core::ObjectInfo>,
+    common_prefixes: Vec<String>,
+    next_continuation_token: Option<String>,
+    is_truncated: bool,
+}
+
+#[derive(Debug)]
+enum ListObjectsV2Entry {
+    Object(blob_core::ObjectInfo),
+    CommonPrefix(String),
+}
+
+impl ListObjectsV2Entry {
+    fn sort_key(&self) -> &str {
+        match self {
+            Self::Object(object) => object.key.as_str(),
+            Self::CommonPrefix(prefix) => prefix.as_str(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -28725,34 +28761,71 @@ async fn list_objects_v2_with_bucket(
         }
     }
 
-    if query.continuation_token.is_some() {
-        return Err(S3Error::not_implemented(
-            "continuation-token is not supported yet.",
-        ));
-    }
-
     let max_keys = query.max_keys.unwrap_or(1000).min(1000);
-    let read =
-        list_bucket_objects_with_fallback(&state, &bucket, query.prefix.as_deref(), max_keys)
-            .await
-            .map_err(|error| map_bucket_error(error, &bucket))?;
-    record_data_plane_fallback_read(&state, read.source);
-    let objects = filter_objects_for_application(read.value, &application);
+    let marker = query
+        .continuation_token
+        .as_deref()
+        .or(query.start_after.as_deref());
+    let mut backend_limit = max_keys.saturating_add(1).max(2).min(1000);
+    let page = loop {
+        let read = list_bucket_objects_with_fallback(
+            &state,
+            &bucket,
+            query.prefix.as_deref(),
+            backend_limit,
+        )
+        .await
+        .map_err(|error| map_bucket_error(error, &bucket))?;
+        let source = read.source;
+        record_data_plane_fallback_read(&state, source);
+        let objects = filter_objects_for_application(read.value, &application);
+        let page = list_objects_v2_projection(
+            objects,
+            query.prefix.as_deref().unwrap_or(""),
+            query.delimiter.as_deref(),
+            marker,
+            max_keys,
+        );
+        let needs_retry = marker.is_some()
+            && page.objects.is_empty()
+            && page.common_prefixes.is_empty()
+            && page.next_continuation_token.is_none()
+            && backend_limit < 10_000;
+        if needs_retry {
+            backend_limit = (backend_limit.saturating_mul(4)).min(10_000);
+            continue;
+        }
+        break (page, source);
+    };
+    let (page, read_source) = page;
 
     let mut body = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
     body.push_str(&format!(
-        "<ListBucketResult xmlns=\"{S3_NS}\"><Name>{}</Name><Prefix>{}</Prefix><KeyCount>{}</KeyCount><MaxKeys>{}</MaxKeys><IsTruncated>false</IsTruncated>",
+        "<ListBucketResult xmlns=\"{S3_NS}\"><Name>{}</Name><Prefix>{}</Prefix><KeyCount>{}</KeyCount><MaxKeys>{}</MaxKeys><IsTruncated>{}</IsTruncated>",
         xml_escape(&bucket),
         xml_escape(query.prefix.as_deref().unwrap_or("")),
-        objects.len(),
-        max_keys
+        page.objects.len() + page.common_prefixes.len(),
+        max_keys,
+        if page.is_truncated { "true" } else { "false" }
     ));
 
     if let Some(delimiter) = &query.delimiter {
         body.push_str(&format!("<Delimiter>{}</Delimiter>", xml_escape(delimiter)));
     }
+    if let Some(token) = query.continuation_token.as_deref() {
+        body.push_str(&format!(
+            "<ContinuationToken>{}</ContinuationToken>",
+            xml_escape(token),
+        ));
+    }
+    if let Some(token) = page.next_continuation_token.as_deref() {
+        body.push_str(&format!(
+            "<NextContinuationToken>{}</NextContinuationToken>",
+            xml_escape(token),
+        ));
+    }
 
-    for object in objects {
+    for object in page.objects {
         body.push_str(&format!(
             "<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>{}</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass></Contents>",
             xml_escape(&object.key),
@@ -28761,12 +28834,102 @@ async fn list_objects_v2_with_bucket(
             object.size,
         ));
     }
+    for prefix in page.common_prefixes {
+        body.push_str(&format!(
+            "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
+            xml_escape(&prefix),
+        ));
+    }
 
     body.push_str("</ListBucketResult>");
     record_data_plane_bytes_out(&state, body.len() as u64);
     let mut response = xml_response(StatusCode::OK, body);
-    apply_read_source_headers(response.headers_mut(), read.source);
+    apply_read_source_headers(response.headers_mut(), read_source);
     Ok(response)
+}
+
+fn list_objects_v2_projection(
+    objects: Vec<blob_core::ObjectInfo>,
+    prefix: &str,
+    delimiter: Option<&str>,
+    marker: Option<&str>,
+    max_keys: usize,
+) -> ListObjectsV2Page {
+    let Some(delimiter) = delimiter.filter(|value| !value.is_empty()) else {
+        let mut objects = objects;
+        objects.sort_by(|left, right| left.key.cmp(&right.key));
+        if let Some(marker) = marker {
+            objects.retain(|object| object.key.as_str() > marker);
+        }
+        let is_truncated = objects.len() > max_keys;
+        let next_continuation_token = if is_truncated {
+            objects
+                .get(max_keys.saturating_sub(1))
+                .map(|object| object.key.clone())
+        } else {
+            None
+        };
+        objects.truncate(max_keys);
+        return ListObjectsV2Page {
+            objects,
+            common_prefixes: Vec::new(),
+            next_continuation_token,
+            is_truncated,
+        };
+    };
+
+    let normalized_prefix = prefix.to_string();
+    let mut entries = Vec::<ListObjectsV2Entry>::new();
+    let mut common_prefixes = BTreeSet::new();
+
+    for object in objects {
+        if !object.key.starts_with(&normalized_prefix) {
+            continue;
+        }
+        let remainder = &object.key[normalized_prefix.len()..];
+        if remainder.is_empty() {
+            entries.push(ListObjectsV2Entry::Object(object));
+            continue;
+        }
+        if let Some(position) = remainder.find(delimiter) {
+            let boundary = normalized_prefix.len() + position + delimiter.len();
+            common_prefixes.insert(object.key[..boundary].to_string());
+        } else {
+            entries.push(ListObjectsV2Entry::Object(object));
+        }
+    }
+    for prefix in common_prefixes {
+        entries.push(ListObjectsV2Entry::CommonPrefix(prefix));
+    }
+    entries.sort_by(|left, right| left.sort_key().cmp(right.sort_key()));
+    if let Some(marker) = marker {
+        entries.retain(|entry| entry.sort_key() > marker);
+    }
+
+    let is_truncated = entries.len() > max_keys;
+    let next_continuation_token = if is_truncated {
+        entries
+            .get(max_keys.saturating_sub(1))
+            .map(|entry| entry.sort_key().to_string())
+    } else {
+        None
+    };
+
+    let mut projected_objects = Vec::new();
+    let mut projected_prefixes = Vec::new();
+    for entry in entries.into_iter().take(max_keys) {
+        match entry {
+            ListObjectsV2Entry::Object(object) => projected_objects.push(object),
+            ListObjectsV2Entry::CommonPrefix(prefix) => projected_prefixes.push(prefix),
+        }
+    }
+
+    ListObjectsV2Page {
+        objects: projected_objects,
+        common_prefixes: projected_prefixes,
+        next_continuation_token,
+        is_truncated,
+    }
 }
 
 async fn head_object(
@@ -28810,16 +28973,16 @@ async fn head_object(
         )
         .expect("content type should be valid"),
     );
-    if let Some(etag) = object.etag.as_deref() {
+    if let Some(etag) = object_http_etag(&object) {
         headers.insert(
             ETAG,
-            HeaderValue::from_str(&quoted_etag(Some(etag))).expect("etag should be valid"),
+            HeaderValue::from_str(&quoted_etag(Some(etag.as_str()))).expect("etag should be valid"),
         );
     }
-    if let Some(last_modified) = object.last_modified.as_deref() {
+    if let Some(last_modified) = http_last_modified(object.last_modified.as_deref()) {
         headers.insert(
             LAST_MODIFIED,
-            HeaderValue::from_str(last_modified).expect("last-modified should be valid"),
+            HeaderValue::from_str(&last_modified).expect("last-modified should be valid"),
         );
     }
     apply_read_source_headers(&mut headers, read.source);
@@ -29600,10 +29763,16 @@ async fn get_object(
         )
         .expect("content type should be valid"),
     );
-    if let Some(etag) = response_object.etag.as_deref() {
+    if let Some(etag) = object_http_etag(&response_object) {
         response_headers.insert(
             ETAG,
-            HeaderValue::from_str(&quoted_etag(Some(etag))).expect("etag should be valid"),
+            HeaderValue::from_str(&quoted_etag(Some(etag.as_str()))).expect("etag should be valid"),
+        );
+    }
+    if let Some(last_modified) = http_last_modified(response_object.last_modified.as_deref()) {
+        response_headers.insert(
+            LAST_MODIFIED,
+            HeaderValue::from_str(&last_modified).expect("last-modified should be valid"),
         );
     }
     response_headers.insert(
@@ -30006,6 +30175,7 @@ fn parse_list_objects_v2_query(query: Option<&str>) -> ListObjectsV2Query {
             "prefix" => parsed.prefix = Some(value.to_string()),
             "delimiter" => parsed.delimiter = Some(value.to_string()),
             "continuation-token" => parsed.continuation_token = Some(value.to_string()),
+            "start-after" => parsed.start_after = Some(value.to_string()),
             "max-keys" => {
                 if let Ok(value) = value.parse::<usize>() {
                     parsed.max_keys = Some(value);
@@ -31199,6 +31369,32 @@ fn quoted_etag(etag: Option<&str>) -> String {
     format!("\"{}\"", etag.unwrap_or(""))
 }
 
+fn object_http_etag(object: &blob_core::ObjectInfo) -> Option<String> {
+    object.etag.clone().or_else(|| {
+        let fingerprint = format!(
+            "{}\n{}\n{}",
+            object.key,
+            object.size,
+            object.last_modified.as_deref().unwrap_or("")
+        );
+        Some(hex::encode(Sha256::digest(fingerprint.as_bytes())))
+    })
+}
+
+fn http_last_modified(last_modified: Option<&str>) -> Option<String> {
+    let raw = last_modified?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let parsed = DateTime::parse_from_rfc3339(raw).ok()?;
+    Some(
+        parsed
+            .with_timezone(&Utc)
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string(),
+    )
+}
+
 fn xml_response(status: StatusCode, body: String) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
@@ -31236,6 +31432,29 @@ mod tests {
             ))
             .display()
             .to_string()
+    }
+
+    #[test]
+    fn http_last_modified_formats_rfc3339_as_http_date() {
+        assert_eq!(
+            http_last_modified(Some("2026-06-04T20:53:22.000Z")).as_deref(),
+            Some("Thu, 04 Jun 2026 20:53:22 GMT")
+        );
+        assert_eq!(http_last_modified(Some("not-a-date")), None);
+    }
+
+    #[test]
+    fn object_http_etag_falls_back_when_backend_omits_one() {
+        let object = blob_core::ObjectInfo {
+            key: "smoke/direct-side.txt".to_string(),
+            size: 10,
+            etag: None,
+            content_type: Some("text/plain".to_string()),
+            last_modified: Some("2026-06-04T20:53:22.000Z".to_string()),
+        };
+        let etag = object_http_etag(&object).expect("fallback etag should exist");
+        assert!(!etag.is_empty());
+        assert_eq!(etag.len(), 64);
     }
 
     struct FailingBackend {
@@ -32718,7 +32937,7 @@ mod tests {
     #[test]
     fn gateway_version_text_exposes_release_provenance() {
         let text = gateway_version_text();
-        assert!(text.contains("gatewayd 0.1.2"));
+        assert!(text.contains("gatewayd 0.1.3"));
         assert!(text.contains(DEFAULT_RELEASE_FINGERPRINT));
         assert!(text.contains(CCBG_LICENSE_ID));
         assert!(text.contains(CCBG_CANONICAL_REPO));
@@ -44694,6 +44913,277 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_objects_v2_with_delimiter_returns_common_prefixes_for_top_level_children() {
+        let state = test_state();
+        let backend = backend_for_test(&state, ProviderId::Stub);
+        for key in [
+            "stock-rag-bridge-rust/data/ingest_jobs.ndjson",
+            "stock-rag-bridge-rust/output/result.json",
+            "family/readme.txt",
+        ] {
+            backend
+                .put_object(PutObjectRequest {
+                    container: "root".to_string(),
+                    key: key.to_string(),
+                    body: Bytes::from_static(b"x").into(),
+                    size: Some(1),
+                    content_type: Some("text/plain".to_string()),
+                    preferred_upload_part_size_bytes: None,
+                })
+                .await
+                .expect("seed object");
+        }
+
+        let uri: Uri = "/root?list-type=2&delimiter=%2F"
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let response = list_objects_v2(
+            State(state),
+            Path("root".to_string()),
+            Query(ListObjectsV2Query {
+                list_type: Some("2".to_string()),
+                delimiter: Some("/".to_string()),
+                ..Default::default()
+            }),
+            Method::GET,
+            OriginalUri(uri),
+            headers,
+        )
+        .await
+        .expect("list should succeed");
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let xml = String::from_utf8(body.to_vec()).expect("xml should be utf-8");
+        assert!(xml.contains("<CommonPrefixes><Prefix>family/</Prefix></CommonPrefixes>"));
+        assert!(
+            xml.contains(
+                "<CommonPrefixes><Prefix>stock-rag-bridge-rust/</Prefix></CommonPrefixes>"
+            )
+        );
+        assert!(!xml.contains("<Key>stock-rag-bridge-rust/data/ingest_jobs.ndjson</Key>"));
+        assert!(!xml.contains("<Key>family/readme.txt</Key>"));
+    }
+
+    #[tokio::test]
+    async fn list_objects_v2_with_delimiter_returns_only_direct_children_for_nested_prefix() {
+        let state = test_state();
+        let backend = backend_for_test(&state, ProviderId::Stub);
+        for key in [
+            "stock-rag-bridge-rust/tasktest-20260604/source_shards/base_info_f10/month=2026-06/bucket=01/part-1.ndjson",
+            "stock-rag-bridge-rust/tasktest-20260604/source_shards/base_info_f10/month=2026-07/bucket=02/part-2.ndjson",
+            "stock-rag-bridge-rust/tasktest-20260604/source_shards/company_profile_f10/month=2026-06/bucket=01/part-3.ndjson",
+        ] {
+            backend
+                .put_object(PutObjectRequest {
+                    container: "root".to_string(),
+                    key: key.to_string(),
+                    body: Bytes::from_static(b"x").into(),
+                    size: Some(1),
+                    content_type: Some("text/plain".to_string()),
+                    preferred_upload_part_size_bytes: None,
+                })
+                .await
+                .expect("seed object");
+        }
+
+        let prefix = "stock-rag-bridge-rust/tasktest-20260604/source_shards/";
+        let uri: Uri = format!("/root?list-type=2&prefix={prefix}&delimiter=%2F")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let response = list_objects_v2(
+            State(state),
+            Path("root".to_string()),
+            Query(ListObjectsV2Query {
+                list_type: Some("2".to_string()),
+                prefix: Some(prefix.to_string()),
+                delimiter: Some("/".to_string()),
+                ..Default::default()
+            }),
+            Method::GET,
+            OriginalUri(uri),
+            headers,
+        )
+        .await
+        .expect("nested list should succeed");
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let xml = String::from_utf8(body.to_vec()).expect("xml should be utf-8");
+        assert!(
+            xml.contains(
+                "<CommonPrefixes><Prefix>stock-rag-bridge-rust/tasktest-20260604/source_shards/base_info_f10/</Prefix></CommonPrefixes>"
+            )
+        );
+        assert!(
+            xml.contains(
+                "<CommonPrefixes><Prefix>stock-rag-bridge-rust/tasktest-20260604/source_shards/company_profile_f10/</Prefix></CommonPrefixes>"
+            )
+        );
+        assert!(!xml.contains("<Key>stock-rag-bridge-rust/tasktest-20260604/source_shards/base_info_f10/month=2026-06/bucket=01/part-1.ndjson</Key>"));
+    }
+
+    #[tokio::test]
+    async fn list_objects_v2_without_delimiter_supports_continuation_token() {
+        let state = test_state();
+        let backend = backend_for_test(&state, ProviderId::Stub);
+        for key in ["docs/a.txt", "docs/b.txt", "docs/c.txt"] {
+            backend
+                .put_object(PutObjectRequest {
+                    container: "root".to_string(),
+                    key: key.to_string(),
+                    body: Bytes::from_static(b"x").into(),
+                    size: Some(1),
+                    content_type: Some("text/plain".to_string()),
+                    preferred_upload_part_size_bytes: None,
+                })
+                .await
+                .expect("seed object");
+        }
+
+        let first_uri: Uri = "/root?list-type=2&prefix=docs/&max-keys=2"
+            .parse()
+            .expect("uri should parse");
+        let first_headers = signed_headers(&state.config, &Method::GET, &first_uri, &[], &[]);
+        let first_response = list_objects_v2(
+            State(state.clone()),
+            Path("root".to_string()),
+            Query(ListObjectsV2Query {
+                list_type: Some("2".to_string()),
+                prefix: Some("docs/".to_string()),
+                max_keys: Some(2),
+                ..Default::default()
+            }),
+            Method::GET,
+            OriginalUri(first_uri),
+            first_headers,
+        )
+        .await
+        .expect("first page should succeed");
+        let first_body = to_bytes(first_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let first_xml = String::from_utf8(first_body.to_vec()).expect("xml should be utf-8");
+        assert!(first_xml.contains("<IsTruncated>true</IsTruncated>"));
+        assert!(first_xml.contains("<NextContinuationToken>docs/b.txt</NextContinuationToken>"));
+        assert!(first_xml.contains("<Key>docs/a.txt</Key>"));
+        assert!(first_xml.contains("<Key>docs/b.txt</Key>"));
+        assert!(!first_xml.contains("<Key>docs/c.txt</Key>"));
+
+        let next_uri: Uri =
+            "/root?list-type=2&prefix=docs/&max-keys=2&continuation-token=docs%2Fb.txt"
+                .parse()
+                .expect("uri should parse");
+        let next_headers = signed_headers(&state.config, &Method::GET, &next_uri, &[], &[]);
+        let next_response = list_objects_v2(
+            State(state),
+            Path("root".to_string()),
+            Query(ListObjectsV2Query {
+                list_type: Some("2".to_string()),
+                prefix: Some("docs/".to_string()),
+                max_keys: Some(2),
+                continuation_token: Some("docs/b.txt".to_string()),
+                ..Default::default()
+            }),
+            Method::GET,
+            OriginalUri(next_uri),
+            next_headers,
+        )
+        .await
+        .expect("second page should succeed");
+        let next_body = to_bytes(next_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let next_xml = String::from_utf8(next_body.to_vec()).expect("xml should be utf-8");
+        assert!(next_xml.contains("<ContinuationToken>docs/b.txt</ContinuationToken>"));
+        assert!(next_xml.contains("<Key>docs/c.txt</Key>"));
+        assert!(next_xml.contains("<IsTruncated>false</IsTruncated>"));
+    }
+
+    #[tokio::test]
+    async fn list_objects_v2_with_delimiter_supports_continuation_token() {
+        let state = test_state();
+        let backend = backend_for_test(&state, ProviderId::Stub);
+        for key in [
+            "alpha/a.txt",
+            "bravo/b.txt",
+            "charlie/c.txt",
+        ] {
+            backend
+                .put_object(PutObjectRequest {
+                    container: "root".to_string(),
+                    key: key.to_string(),
+                    body: Bytes::from_static(b"x").into(),
+                    size: Some(1),
+                    content_type: Some("text/plain".to_string()),
+                    preferred_upload_part_size_bytes: None,
+                })
+                .await
+                .expect("seed object");
+        }
+
+        let first_uri: Uri = "/root?list-type=2&delimiter=%2F&max-keys=2"
+            .parse()
+            .expect("uri should parse");
+        let first_headers = signed_headers(&state.config, &Method::GET, &first_uri, &[], &[]);
+        let first_response = list_objects_v2(
+            State(state.clone()),
+            Path("root".to_string()),
+            Query(ListObjectsV2Query {
+                list_type: Some("2".to_string()),
+                delimiter: Some("/".to_string()),
+                max_keys: Some(2),
+                ..Default::default()
+            }),
+            Method::GET,
+            OriginalUri(first_uri),
+            first_headers,
+        )
+        .await
+        .expect("first page should succeed");
+        let first_body = to_bytes(first_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let first_xml = String::from_utf8(first_body.to_vec()).expect("xml should be utf-8");
+        assert!(first_xml.contains("<CommonPrefixes><Prefix>alpha/</Prefix></CommonPrefixes>"));
+        assert!(first_xml.contains("<CommonPrefixes><Prefix>bravo/</Prefix></CommonPrefixes>"));
+        assert!(first_xml.contains("<IsTruncated>true</IsTruncated>"));
+        assert!(first_xml.contains("<NextContinuationToken>bravo/</NextContinuationToken>"));
+
+        let next_uri: Uri = "/root?list-type=2&delimiter=%2F&max-keys=2&continuation-token=bravo%2F"
+            .parse()
+            .expect("uri should parse");
+        let next_headers = signed_headers(&state.config, &Method::GET, &next_uri, &[], &[]);
+        let next_response = list_objects_v2(
+            State(state),
+            Path("root".to_string()),
+            Query(ListObjectsV2Query {
+                list_type: Some("2".to_string()),
+                delimiter: Some("/".to_string()),
+                max_keys: Some(2),
+                continuation_token: Some("bravo/".to_string()),
+                ..Default::default()
+            }),
+            Method::GET,
+            OriginalUri(next_uri),
+            next_headers,
+        )
+        .await
+        .expect("second page should succeed");
+        let next_body = to_bytes(next_response.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let next_xml = String::from_utf8(next_body.to_vec()).expect("xml should be utf-8");
+        assert!(next_xml.contains("<ContinuationToken>bravo/</ContinuationToken>"));
+        assert!(next_xml.contains("<CommonPrefixes><Prefix>charlie/</Prefix></CommonPrefixes>"));
+        assert!(next_xml.contains("<IsTruncated>false</IsTruncated>"));
+    }
+
+    #[tokio::test]
     async fn list_objects_v2_uses_persisted_home_provider_after_restart() {
         let mut state = test_state();
         let telecom_backend: DynBackend = Arc::new(StubBackend::new());
@@ -46285,6 +46775,31 @@ mod tests {
         assert_eq!(write.last_large_success_bytes, Some(16 * 1024 * 1024));
         assert!(write.last_large_success_bytes_per_sec.is_some());
         assert!(write.last_large_success_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn provider_io_stats_snapshot_prunes_expired_rolling_samples() {
+        let stats = ProviderIoStatsState::new();
+        let old_sample_at = current_unix_ms().saturating_sub(PROVIDER_IO_ROLLING_WINDOW_MS + 1);
+        {
+            let mut inner = stats.inner.lock().expect("provider io stats poisoned");
+            let observations = inner.entry("mobile".to_string()).or_default();
+            update_provider_io_throughput(
+                &mut observations.write,
+                old_sample_at,
+                16 * 1024 * 1024,
+                2_000,
+            );
+        }
+
+        let snapshot = stats.snapshot_provider("mobile");
+        let write = snapshot.write;
+        assert_eq!(write.rolling_sample_count, 0);
+        assert_eq!(write.rolling_window_started_at_unix_ms, None);
+        assert_eq!(write.rolling_bytes_per_sec, None);
+        assert_eq!(write.last_large_success_bytes, Some(16 * 1024 * 1024));
+        assert!(write.last_large_success_bytes_per_sec.is_some());
+        assert_eq!(write.last_large_success_at_unix_ms, Some(old_sample_at));
     }
 
     #[test]
@@ -49860,6 +50375,7 @@ mod tests {
                 max_keys: None,
                 delimiter: None,
                 continuation_token: None,
+                start_after: None,
             }),
             Method::GET,
             OriginalUri(list_uri),

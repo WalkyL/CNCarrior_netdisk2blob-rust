@@ -1,6 +1,6 @@
 [package]
 name = "gatewayd"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 license-file = "../../COMMERCIAL-LICENSE.md"
 
@@ -20,6 +20,7 @@ base64 = { workspace = true }
 blob-core = { path = "../blob-core" }
 browser-cdp = { path = "../browser-cdp" }
 chacha20poly1305 = { workspace = true }
+chrono = { workspace = true }
 flate2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
