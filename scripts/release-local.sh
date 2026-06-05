@@ -18,6 +18,23 @@ fi
 cd "${ROOT_DIR}"
 PYTHON_BIN="$(bash scripts/resolve-python.sh)"
 
+resolve_release_fingerprint() {
+  if [ -n "${CCBG_RELEASE_FINGERPRINT:-}" ]; then
+    printf '%s\n' "${CCBG_RELEASE_FINGERPRINT}"
+    return 0
+  fi
+  "${PYTHON_BIN}" - <<'PY'
+from pathlib import Path
+import re
+
+text = Path("crates/gatewayd/src/main.rs").read_text(encoding="utf-8", errors="replace")
+match = re.search(r'const DEFAULT_RELEASE_FINGERPRINT: &str = "([^"]+)";', text)
+if not match:
+    raise SystemExit("failed to locate DEFAULT_RELEASE_FINGERPRINT in crates/gatewayd/src/main.rs")
+print(match.group(1))
+PY
+}
+
 if [ "${CCBG_RELEASE_ALLOW_DIRTY:-false}" != "true" ] && [ -n "$(git status --porcelain)" ]; then
   echo "working tree is dirty; commit changes or set CCBG_RELEASE_ALLOW_DIRTY=true" >&2
   exit 1
@@ -136,6 +153,7 @@ provenance_args=(
   "${PYTHON_BIN}" scripts/generate-release-provenance.py
   --release-name "CCBG ${TAG}"
   --tag "${TAG}"
+  --fingerprint "$(resolve_release_fingerprint)"
   --out-dir "${OUT_DIR}"
   --build-step "scripts/check-release-ready.sh"
   --build-step "scripts/release-local.sh ${TAG}"

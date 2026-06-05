@@ -50,6 +50,16 @@ def run_cmd(cmd, env=None, cwd=None, timeout=60):
     )
 
 
+def gateway_binary_path(root: Path) -> Path:
+    candidates = [root / "target" / "debug" / "gatewayd"]
+    if os.name == "nt":
+        candidates.insert(0, root / "target" / "debug" / "gatewayd.exe")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
 class SigV4Client:
     def __init__(self, endpoint: str, access_key: str, secret_key: str, region: str = "us-east-1"):
         self.endpoint = endpoint.rstrip("/")
@@ -709,7 +719,7 @@ def main():
             build = run_cmd(["cargo", "build", "-p", "gatewayd"], cwd=root, timeout=1800)
             if build.returncode != 0:
                 raise RuntimeError(f"cargo build failed:\n{build.stdout}\n{build.stderr}")
-        bin_path = root / "target" / "debug" / "gatewayd"
+        bin_path = gateway_binary_path(root)
         if not bin_path.exists():
             raise RuntimeError(f"gatewayd binary not found: {bin_path}")
 

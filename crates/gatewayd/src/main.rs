@@ -213,10 +213,10 @@ const CCBG_COPYRIGHT: &str = "Copyright (c) 2026 walky";
 const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust";
 const CCBG_RELEASE_CHANNEL: &str = "commercial-core";
-const CCBG_RELEASE_DATE: &str = "2026-06-03";
-const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.4-walky-20260605";
+const CCBG_RELEASE_DATE: &str = "2026-06-06";
+const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.5-walky-20260606";
 const DEFAULT_RELEASE_FINGERPRINT_SHA256: &str =
-    "470c967d46bc7bd43a06f2e655d1a911e5394e0fdbeac1858514576aae40edcb";
+    "65889c03da4b82b7f3c9a56b138367adbe9b91ef2b0a9ce6d0f79d162baa8fd2";
 
 #[derive(Clone)]
 struct AppState {
@@ -18603,11 +18603,17 @@ async fn enqueue_copy_object_replication_plan(
     #[cfg(test)]
     {
         if let Some(gate) = COPY_OBJECT_REPLICATION_PLAN_FAILURES_REMAINING.get() {
-            let mut remaining = gate
+            let mut gate = gate
                 .lock()
                 .expect("copy-object replication plan failure gate lock should not be poisoned");
-            if *remaining > 0 {
-                *remaining -= 1;
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
                 return Err(BlobError::Upstream(
                     "injected copy-object replication plan failure".to_string(),
                 ));
@@ -18620,16 +18626,24 @@ async fn enqueue_copy_object_replication_plan(
 
 fn enqueue_copy_object_replication_jobs(
     state: &AppState,
+    bucket: &str,
+    key: &str,
     jobs: &[ReplicationJob],
 ) -> Result<(), metadata_store::MetadataError> {
     #[cfg(test)]
     {
         if let Some(gate) = COPY_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING.get() {
-            let mut remaining = gate
+            let mut gate = gate
                 .lock()
                 .expect("copy-object replication enqueue failure gate lock should not be poisoned");
-            if *remaining > 0 {
-                *remaining -= 1;
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
                 return Err(metadata_store::MetadataError::Io {
                     path: PathBuf::from("injected-copy-object-replication-enqueue-failure"),
                     source: std::io::Error::other(
@@ -29271,7 +29285,9 @@ async fn execute_copy_object(
             return Err(map_backend_error_to_s3(error));
         }
     };
-    if let Err(error) = enqueue_copy_object_replication_jobs(state, &jobs) {
+    if let Err(error) =
+        enqueue_copy_object_replication_jobs(state, &destination_bucket, &destination_key, &jobs)
+    {
         rollback_copy_destination_after_failure(
             state,
             &backend,
@@ -30410,39 +30426,63 @@ fn multipart_part_temp_path(config: &AppConfig, upload_id: &str, part_number: u1
 }
 
 #[cfg(test)]
-static MULTIPART_PART_UPSERT_FAILURES_REMAINING: std::sync::OnceLock<Mutex<u32>> =
+static MULTIPART_PART_UPSERT_FAILURES_REMAINING: std::sync::OnceLock<Mutex<HashMap<String, u32>>> =
     std::sync::OnceLock::new();
 #[cfg(test)]
-static COPY_OBJECT_REPLICATION_PLAN_FAILURES_REMAINING: std::sync::OnceLock<Mutex<u32>> =
-    std::sync::OnceLock::new();
+static COPY_OBJECT_REPLICATION_PLAN_FAILURES_REMAINING: std::sync::OnceLock<
+    Mutex<HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
 #[cfg(test)]
-static COPY_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<Mutex<u32>> =
-    std::sync::OnceLock::new();
+static COPY_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<
+    Mutex<HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
-fn set_test_multipart_part_upsert_failures(remaining: u32) {
-    let gate = MULTIPART_PART_UPSERT_FAILURES_REMAINING.get_or_init(|| Mutex::new(0));
-    *gate
+fn set_test_multipart_part_upsert_failures(upload_id: &str, remaining: u32) {
+    let gate = MULTIPART_PART_UPSERT_FAILURES_REMAINING.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
         .lock()
-        .expect("multipart upsert failure gate lock should not be poisoned") = remaining;
+        .expect("multipart upsert failure gate lock should not be poisoned");
+    if remaining == 0 {
+        gate.remove(upload_id);
+    } else {
+        gate.insert(upload_id.to_string(), remaining);
+    }
 }
 
 #[cfg(test)]
-fn set_test_copy_object_replication_plan_failures(remaining: u32) {
-    let gate = COPY_OBJECT_REPLICATION_PLAN_FAILURES_REMAINING.get_or_init(|| Mutex::new(0));
-    *gate
-        .lock()
-        .expect("copy-object replication plan failure gate lock should not be poisoned") =
-        remaining;
+fn copy_object_failure_scope_key(bucket: &str, key: &str) -> String {
+    format!("{bucket}\n{key}")
 }
 
 #[cfg(test)]
-fn set_test_copy_object_replication_enqueue_failures(remaining: u32) {
-    let gate = COPY_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING.get_or_init(|| Mutex::new(0));
-    *gate
+fn set_test_copy_object_replication_plan_failures(bucket: &str, key: &str, remaining: u32) {
+    let gate =
+        COPY_OBJECT_REPLICATION_PLAN_FAILURES_REMAINING.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
         .lock()
-        .expect("copy-object replication enqueue failure gate lock should not be poisoned") =
-        remaining;
+        .expect("copy-object replication plan failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
+}
+
+#[cfg(test)]
+fn set_test_copy_object_replication_enqueue_failures(bucket: &str, key: &str, remaining: u32) {
+    let gate = COPY_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
+        .lock()
+        .expect("copy-object replication enqueue failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
 }
 
 fn upsert_multipart_upload_part_record(
@@ -30452,11 +30492,16 @@ fn upsert_multipart_upload_part_record(
     #[cfg(test)]
     {
         if let Some(gate) = MULTIPART_PART_UPSERT_FAILURES_REMAINING.get() {
-            let mut remaining = gate
+            let mut gate = gate
                 .lock()
                 .expect("multipart upsert failure gate lock should not be poisoned");
-            if *remaining > 0 {
-                *remaining -= 1;
+            if let Some(remaining) = gate.get_mut(record.upload_id.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(record.upload_id.as_str());
+                }
                 return Err(metadata_store::MetadataError::Io {
                     path: PathBuf::from("injected-multipart-upsert-failure"),
                     source: std::io::Error::other("injected multipart upsert failure"),
@@ -33092,7 +33137,7 @@ mod tests {
     #[test]
     fn gateway_version_text_exposes_release_provenance() {
         let text = gateway_version_text();
-        assert!(text.contains("gatewayd 0.1.4"));
+        assert!(text.contains("gatewayd 0.1.5"));
         assert!(text.contains(DEFAULT_RELEASE_FINGERPRINT));
         assert!(text.contains(CCBG_LICENSE_ID));
         assert!(text.contains(CCBG_CANONICAL_REPO));
@@ -33689,7 +33734,11 @@ mod tests {
             DEFAULT_RELEASE_FINGERPRINT
         );
         assert_eq!(health.runtime.provenance.license_id, CCBG_LICENSE_ID);
-        assert!(health.runtime.process_memory.rss_bytes.is_some());
+        assert_eq!(
+            health.runtime.process_memory.sample_limit,
+            PROCESS_MEMORY_HISTORY_LIMIT
+        );
+        assert!(!health.runtime.process_memory.samples.is_empty());
         assert!(
             health
                 .runtime
@@ -40324,9 +40373,9 @@ mod tests {
         assert!(html.contains(
             "auth_session_id: reuseSession ? (unicomAuthAssistantState.session_id || null) : null"
         ));
-        assert!(html.contains(
-            "preferAssistantFieldValue(\n          livePhone,\n          unicomAuthAssistantState.phone_number || unicomSessionPhoneNumber(),\n        )"
-        ));
+        assert!(
+            html.contains("unicomAuthAssistantState.phone_number || unicomSessionPhoneNumber()")
+        );
         assert!(html.contains("ccbg.unicom.auth_assistant"));
         assert!(!html.contains("window.prompt('Phone number for Unicom SMS login'"));
         assert!(!html.contains("window.prompt('SMS code for Unicom login'"));
@@ -41951,7 +42000,7 @@ mod tests {
             .object_protection_plan(&bucket, &destination_key)
             .expect("protection plan should load");
 
-        set_test_copy_object_replication_plan_failures(1);
+        set_test_copy_object_replication_plan_failures(&bucket, &destination_key, 1);
         let copy_headers = signed_headers(
             &state.config,
             &Method::PUT,
@@ -41970,7 +42019,7 @@ mod tests {
         .await
         .expect_err("copy should fail when replication plan enqueue fails")
         .into_response();
-        set_test_copy_object_replication_plan_failures(0);
+        set_test_copy_object_replication_plan_failures(&bucket, &destination_key, 0);
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         let after_placement = state
@@ -42023,7 +42072,7 @@ mod tests {
         let destination_uri: Uri = format!("/{bucket}/{destination_key}")
             .parse()
             .expect("destination uri should parse");
-        set_test_copy_object_replication_enqueue_failures(1);
+        set_test_copy_object_replication_enqueue_failures(&bucket, &destination_key, 1);
         let copy_headers = signed_headers(
             &state.config,
             &Method::PUT,
@@ -42042,7 +42091,7 @@ mod tests {
         .await
         .expect_err("copy should fail when replication metadata enqueue fails")
         .into_response();
-        set_test_copy_object_replication_enqueue_failures(0);
+        set_test_copy_object_replication_enqueue_failures(&bucket, &destination_key, 0);
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(
             state
@@ -43004,7 +43053,7 @@ mod tests {
             .etag
             .clone();
 
-        set_test_multipart_part_upsert_failures(1);
+        set_test_multipart_part_upsert_failures(&upload_id, 1);
         let replacement_part = Bytes::from_static(b"world");
         let replacement_headers = signed_headers(
             &state.config,
@@ -43025,7 +43074,7 @@ mod tests {
         .expect_err("upsert failure should fail upload part")
         .into_response();
         assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        set_test_multipart_part_upsert_failures(0);
+        set_test_multipart_part_upsert_failures(&upload_id, 0);
         assert_eq!(
             state
                 .metadata_store

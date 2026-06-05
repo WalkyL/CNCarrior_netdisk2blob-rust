@@ -680,10 +680,7 @@ impl MobileBlobAdapter {
             Value::String(upload.content_hash.clone()),
         );
         body.insert("parallelUpload".to_string(), Value::Bool(false));
-        body.insert(
-            "partInfos".to_string(),
-            Value::Array(part_infos),
-        );
+        body.insert("partInfos".to_string(), Value::Array(part_infos));
         body.insert(
             "parentFileId".to_string(),
             Value::String(parent_file_id.to_string()),
@@ -813,7 +810,9 @@ impl MobileBlobAdapter {
             )));
         }
         let data = response.data.ok_or_else(|| {
-            BlobError::Upstream("China Mobile file/getUploadUrl returned no data payload".to_string())
+            BlobError::Upstream(
+                "China Mobile file/getUploadUrl returned no data payload".to_string(),
+            )
         })?;
         Ok(data.part_infos)
     }
@@ -4337,9 +4336,7 @@ mod tests {
             .expect("tail partInfos");
         assert_eq!(tail_parts.len(), 1);
         assert_eq!(
-            tail_parts[0]
-                .get("partNumber")
-                .and_then(Value::as_u64),
+            tail_parts[0].get("partNumber").and_then(Value::as_u64),
             Some(101)
         );
 
