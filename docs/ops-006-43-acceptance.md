@@ -12,6 +12,16 @@
 
 本次发布属于 Rust/Admin 资产变更，需要重新构建并替换 `gatewayd`。
 
+后续如果 release 文案涉及“中国移动大文件能力”，不要只引用 `.43` 的登录/页面验收结果，
+还必须联动查看 `.49` 的隔离实测留档：
+
+- [ops-008-49-lxc-smb-stub-removal.md](ops-008-49-lxc-smb-stub-removal.md)
+
+截至 2026-06-05，当前最新已验证事实是：
+
+- `.49` 的 16 GiB 中国移动隔离实测仍返回 `04010319 / Insufficient Rights`
+- 因此 release 文案不能把“中国移动已登录”或“小文件可写”表述成“超大文件已验证通过”
+
 注意：
 
 - `.43` 这台测试机当前运行时会优先读取外置 admin 模板 `/home/walky/apps/ccbg/assets/admin/index.html`

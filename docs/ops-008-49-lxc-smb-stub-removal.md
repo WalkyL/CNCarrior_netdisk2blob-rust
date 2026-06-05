@@ -110,3 +110,56 @@ Results:
 - Cloudflare public fingerprint check passed.
 - `git diff --check` had no whitespace errors.
 - LXC package tarball checksum and package `MANIFEST.sha256` passed.
+
+## 2026-06-05 China Mobile 16 GiB Follow-up
+
+This follow-up did not replace the main `.49` systemd service. It used isolated temporary gateway
+processes on loopback-only ports so the main service stayed healthy on `:61080/:61081`.
+
+Main-service guardrails that stayed green during the test:
+
+```bash
+systemctl is-active ccbg
+curl -fsS http://127.0.0.1:61080/healthz
+```
+
+Temporary isolated Mobile instance:
+
+```text
+gateway=127.0.0.1:63290
+admin=127.0.0.1:63291
+auth_callback=127.0.0.1:63292
+metrics=127.0.0.1:63293
+binary=/tmp/gatewayd-mobile-test-3
+log=/tmp/ccbg-mobile-test-3.log
+```
+
+Validated code state:
+
+- kept the China Mobile batching fix
+  - `file/create` sends at most the first `100` `partInfos`
+  - `parallelUpload=false`
+  - remaining upload URLs are fetched through `file/getUploadUrl`
+- removed the later route-policy host override experiment because it caused upstream `503`
+  responses and did not improve the large-upload result
+
+Probe command:
+
+```bash
+python3 /tmp/streaming_signed_put.py 127.0.0.1 63290 root mobile-16g-probe-20260606-v6.bin 17179869184 ccbg change-me
+```
+
+Observed result:
+
+```text
+HTTP 500 from gateway
+China Mobile file/create rejected the request: code=04010319 message=Insufficient Rights
+```
+
+Conclusion:
+
+- the batching fix is valid and should stay
+- but `.49` still has no verified evidence that the current China Mobile account/session can upload
+  `16 GiB`
+- release/Admin/docs copy must continue to describe China Mobile large-file support conservatively
+  until a newer limit-probe or isolated live test proves otherwise
