@@ -212,6 +212,7 @@ CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY=true scripts/deploy-cloudflare-public.sh producti
 3.1 官方宿主包（LXC / Windows / macOS）默认把 Admin Web 打开到 `0.0.0.0:61081`；OpenWrt lite 不跟随这个默认值。
 4. OpenWrt lite 包还必须包含 `mcp-server`。
 5. 文档要明确区分“已实现”和“规划中”。
+5.1 中国移动大文件能力必须按最新实测来写。若没有更新的 limit-probe 或隔离实测证据，继续沿用当前已验证事实：`.49` 在 2026-06-05 的 16 GiB 隔离实测仍返回 `04010319 / Insufficient Rights`。
 6. 若公网安装页走 Cloudflare `/downloads/latest/...`，也必须保证以下两者至少其一完整可用：
    Cloudflare R2 `latest/<asset-name>` 缓存，或 GitHub latest release 对应资产。
    当前正式流程优先同步 R2，并保留 GitHub release 资产作为回源兜底。

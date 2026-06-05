@@ -15,6 +15,7 @@
 - 当前本机和局域网没有 macOS 构建器；发布时 macOS 资产走 GitHub Actions macOS-only 例外构建入口。
 - 只打 tag 或只创建 GitHub Release 页面不算发版完成。
 - 必须确认 `/downloads/latest/*` 已指向本轮新资产，并通过下载 smoke，才算发版完成。
+- provider 能力文案也属于 release 的一部分。没有新的 limit-probe 或隔离实测证据时，不得把中国移动的 `04010319 / Insufficient Rights` 已知限制写成“超大文件已验证通过”。
 
 更完整的背景、边界和历史记录见：
 
@@ -48,6 +49,18 @@ scripts/check-release-ready.sh
 ```
 
 如果这一步不过，不继续发公网版本。
+
+同时检查本轮对外文案：
+
+- Admin
+- `docs/provider-matrix.md`
+- `docs/auth-step-by-step.md`
+- 如有单独发布说明，也要同步
+
+如果中国移动没有新的大文件放行证据，继续沿用当前已验证结论：
+
+- `.49` 于 2026-06-05 的 16 GiB 隔离实测仍返回 `code=04010319`
+- `message=Insufficient Rights`
 
 ## 3. 生成 release 包
 
@@ -203,3 +216,5 @@ scripts/sync-cloudflare-release-cache.sh ccbg-release-assets
 
 - [ops-006-43-acceptance.md](ops-006-43-acceptance.md)
 - [release-checklist.md](release-checklist.md)
+
+如果本轮对中国移动大文件能力有任何新的正向表述，留档里必须附带对应的探测命令、绝对日期和原始结果，不接受“代码已修”“登录已通”“AList 可以”这类间接推断。
