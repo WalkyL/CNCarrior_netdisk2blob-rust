@@ -143,23 +143,61 @@ def check_source_spdx(root: Path) -> list[Finding]:
 
 
 def check_public_materials(root: Path) -> list[Finding]:
+    def check_public_tree(tree_root: Path) -> list[Finding]:
+        local_findings: list[Finding] = []
+        for path in iter_repo_files(tree_root):
+            relative = rel(tree_root, path)
+            reported = f"public/cloudflare/{relative}"
+            if path.name == "app.js.map":
+                text = first_text_window(path)
+                if PUBLIC_LICENSE not in text or "release_fingerprint=" not in text:
+                    local_findings.append(Finding(reported, "source map lacks public license/fingerprint"))
+                continue
+            if path.suffix == ".json":
+                text = read_text(path)
+                if PUBLIC_LICENSE not in text:
+                    local_findings.append(Finding(reported, f"missing {PUBLIC_LICENSE}"))
+                if "release_fingerprint" not in text:
+                    local_findings.append(Finding(reported, "missing release_fingerprint"))
+        return local_findings
+
     findings: list[Finding] = []
     public_root = root / "public" / "cloudflare"
     if not public_root.exists():
         return findings
-    for path in iter_repo_files(public_root):
-        relative = rel(root, path)
-        if path.name == "app.js.map":
-            text = first_text_window(path)
-            if PUBLIC_LICENSE not in text or "release_fingerprint=" not in text:
-                findings.append(Finding(relative, "source map lacks public license/fingerprint"))
-            continue
-        if path.suffix == ".json":
-            text = read_text(path)
-            if PUBLIC_LICENSE not in text:
-                findings.append(Finding(relative, f"missing {PUBLIC_LICENSE}"))
-            if "release_fingerprint" not in text:
-                findings.append(Finding(relative, "missing release_fingerprint"))
+
+    renderer = root / "scripts" / "render-cloudflare-public-release-metadata.py"
+    if not renderer.exists():
+        return check_public_tree(public_root)
+
+    with tempfile.TemporaryDirectory(prefix="ccbg-license-public-") as raw:
+        staged_root = Path(raw) / "public-cloudflare"
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(renderer),
+                    "--input-dir",
+                    str(public_root),
+                    "--output-dir",
+                    str(staged_root),
+                ],
+                cwd=root,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except subprocess.CalledProcessError as error:
+            findings.append(
+                Finding(
+                    "public/cloudflare",
+                    "failed to render public materials for license validation: "
+                    f"{error.stderr.strip() or error.stdout.strip() or error.returncode}",
+                )
+            )
+            return findings
+        findings.extend(check_public_tree(staged_root))
     return findings
 
 

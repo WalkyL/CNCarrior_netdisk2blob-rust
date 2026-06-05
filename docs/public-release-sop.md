@@ -69,7 +69,7 @@ scripts/check-release-ready.sh
 ```bash
 CCBG_RELEASE_BUILD_WINDOWS=true \
 CCBG_RELEASE_BUILD_OPENWRT=true \
-scripts/release-local.sh v0.1.5
+scripts/release-local.sh v0.1.6
 ```
 
 Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认都在 `.47` 或受控局域网 runner 上
@@ -79,7 +79,7 @@ Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认都在 `.47` 或�
 
 ```bash
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \
-scripts/release-local.sh v0.1.5
+scripts/release-local.sh v0.1.6
 ```
 
 至少确认以下文件已经生成：
@@ -102,7 +102,7 @@ Cloudflare 现在优先读 R2，但仍保留 GitHub latest release 作为回源�
 如果 `scripts/release-local.sh` 这轮没有带 `CCBG_RELEASE_UPLOAD_GITHUB=true`，手工补传：
 
 ```bash
-gh release upload v0.1.5 \
+gh release upload v0.1.6 \
   target/lxc-package/ccbg-lxc-package.tar.gz \
   target/native-packages/ccbg-windows-x86_64.zip \
   target/native-packages/ccbg-macos-x86_64.tar.gz \
@@ -114,7 +114,7 @@ gh release upload v0.1.5 \
 快速确认：
 
 ```bash
-gh release view v0.1.5 --repo WalkyL/CNCarrior_netdisk2blob-rust --json assets
+gh release view v0.1.6 --repo WalkyL/CNCarrior_netdisk2blob-rust --json assets
 ```
 
 ## 5. 部署 test
