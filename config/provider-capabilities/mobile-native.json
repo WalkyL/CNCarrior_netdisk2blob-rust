@@ -45,6 +45,16 @@
       ]
     },
     {
+      "id": "file_get_upload_url",
+      "method": "POST",
+      "url": "https://personal-kd-njs.yun.139.com/hcy/file/getUploadUrl",
+      "signature_strategy": "mcloud_md5_v1",
+      "body_defaults": {},
+      "notes": [
+        "fileId, uploadId, partInfos, and commonAccountInfo are injected at runtime to fetch upload URLs for parts beyond the initial file/create batch."
+      ]
+    },
+    {
       "id": "file_get_download_url",
       "method": "POST",
       "url": "https://personal-kd-njs.yun.139.com/hcy/file/getDownloadUrl",

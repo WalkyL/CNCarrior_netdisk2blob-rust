@@ -221,6 +221,8 @@ struct MobileUploadPlan {
     part_infos: Vec<MobileUploadPartInfo>,
 }
 
+const MOBILE_FILE_CREATE_INITIAL_PART_INFOS_LIMIT: usize = 100;
+
 #[derive(Debug)]
 struct MobileFolderPlan {
     file_id: String,
@@ -453,7 +455,6 @@ impl MobileBlobAdapter {
                 BlobError::Configuration(format!("invalid China Mobile Referer header: {error}"))
             })?,
         ));
-
         if let Some(profile) = self.config.browser_profile.as_ref() {
             for (name, value) in profile.forwarded_headers(&[
                 "accept",
@@ -663,6 +664,10 @@ impl MobileBlobAdapter {
         content_type: &str,
         upload: &MobileUploadDescriptor,
     ) -> Value {
+        let mut part_infos = Self::upload_part_infos(upload.size, upload.part_size_bytes);
+        if part_infos.len() > MOBILE_FILE_CREATE_INITIAL_PART_INFOS_LIMIT {
+            part_infos.truncate(MOBILE_FILE_CREATE_INITIAL_PART_INFOS_LIMIT);
+        }
         let mut body = capability.body_defaults.clone();
         body.insert("name".to_string(), Value::String(file_name.to_string()));
         body.insert("size".to_string(), Value::Number(upload.size.into()));
@@ -674,9 +679,10 @@ impl MobileBlobAdapter {
             "contentHash".to_string(),
             Value::String(upload.content_hash.clone()),
         );
+        body.insert("parallelUpload".to_string(), Value::Bool(false));
         body.insert(
             "partInfos".to_string(),
-            Value::Array(Self::upload_part_infos(upload.size, upload.part_size_bytes)),
+            Value::Array(part_infos),
         );
         body.insert(
             "parentFileId".to_string(),
@@ -764,6 +770,77 @@ impl MobileBlobAdapter {
             },
             part_infos: data.part_infos,
         })
+    }
+
+    async fn get_mobile_upload_urls(
+        &self,
+        plan: &MobileUploadPlan,
+        part_infos: Vec<Value>,
+    ) -> Result<Vec<MobileUploadPartInfo>, BlobError> {
+        if part_infos.is_empty() {
+            return Ok(Vec::new());
+        }
+        let upload_id = plan.upload_id.clone().ok_or_else(|| {
+            BlobError::Upstream(
+                "China Mobile file/getUploadUrl requires an uploadId for non-rapid uploads"
+                    .to_string(),
+            )
+        })?;
+        let mut body = Value::Object(Map::new());
+        let object = body.as_object_mut().expect("mobile getUploadUrl body");
+        object.insert("fileId".to_string(), Value::String(plan.file_id.clone()));
+        object.insert("uploadId".to_string(), Value::String(upload_id));
+        object.insert("partInfos".to_string(), Value::Array(part_infos));
+        object.insert(
+            "commonAccountInfo".to_string(),
+            json!({
+                "account": mobile_account_from_authorization(self.authorization_header().ok().as_deref()),
+                "accountType": 1
+            }),
+        );
+        let response = self
+            .send_capability_json::<MobileFileCreateResponse>(
+                "file_get_upload_url",
+                &body,
+                "China Mobile file/getUploadUrl",
+            )
+            .await?;
+        if !response.success {
+            return Err(BlobError::Upstream(format!(
+                "China Mobile file/getUploadUrl rejected the request: code={} message={}",
+                response.code.unwrap_or_else(|| "unknown".to_string()),
+                response.message.unwrap_or_else(|| "unknown".to_string())
+            )));
+        }
+        let data = response.data.ok_or_else(|| {
+            BlobError::Upstream("China Mobile file/getUploadUrl returned no data payload".to_string())
+        })?;
+        Ok(data.part_infos)
+    }
+
+    async fn expand_mobile_upload_plan(
+        &self,
+        plan: &mut MobileUploadPlan,
+        upload: &MobileUploadDescriptor,
+    ) -> Result<(), BlobError> {
+        if plan.rapid_upload {
+            return Ok(());
+        }
+        let expected_parts = Self::upload_part_infos(upload.size, upload.part_size_bytes);
+        if plan.part_infos.len() >= expected_parts.len() {
+            return Ok(());
+        }
+        let mut next_index = plan.part_infos.len();
+        while next_index < expected_parts.len() {
+            let end = (next_index + MOBILE_FILE_CREATE_INITIAL_PART_INFOS_LIMIT)
+                .min(expected_parts.len());
+            let more = self
+                .get_mobile_upload_urls(plan, expected_parts[next_index..end].to_vec())
+                .await?;
+            plan.part_infos.extend(more);
+            next_index = end;
+        }
+        Ok(())
     }
 
     async fn create_mobile_folder(
@@ -2037,7 +2114,7 @@ impl BlobBackend for MobileBlobAdapter {
 
         let create_started_at = Instant::now();
         let (first_response_latency_ms, etag) = if let Some(upload) = streaming_upload {
-            let plan = self
+            let mut plan = self
                 .create_mobile_upload(
                     file_name.as_str(),
                     parent_file_id.as_str(),
@@ -2045,6 +2122,7 @@ impl BlobBackend for MobileBlobAdapter {
                     &upload,
                 )
                 .await?;
+            self.expand_mobile_upload_plan(&mut plan, &upload).await?;
             let create_latency_ms = elapsed_millis(create_started_at);
             if plan.rapid_upload {
                 self.drain_streaming_body(body, upload.size).await?;
@@ -2070,13 +2148,15 @@ impl BlobBackend for MobileBlobAdapter {
             let upload = self
                 .prepare_upload_body(body, size, preferred_upload_part_size_bytes)
                 .await?;
-            let plan = self
+            let mut plan = self
                 .create_mobile_upload(
                     file_name.as_str(),
                     parent_file_id.as_str(),
                     content_type.as_str(),
                     &upload.descriptor,
                 )
+                .await?;
+            self.expand_mobile_upload_plan(&mut plan, &upload.descriptor)
                 .await?;
             let create_latency_ms = elapsed_millis(create_started_at);
             if plan.rapid_upload {
@@ -3338,6 +3418,7 @@ mod tests {
         base_url: String,
         items_by_parent: BTreeMap<String, Vec<Value>>,
         create_requests: Arc<Mutex<Vec<Value>>>,
+        get_upload_url_requests: Arc<Mutex<Vec<Value>>>,
         complete_requests: Arc<Mutex<Vec<Value>>>,
         upload_parts: Arc<Mutex<Vec<(u32, Bytes)>>>,
         rapid_upload: bool,
@@ -3410,6 +3491,48 @@ mod tests {
         }))
     }
 
+    async fn mock_file_get_upload_url(
+        State(state): State<Arc<MockMobileUploadState>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        state
+            .get_upload_url_requests
+            .lock()
+            .expect("getUploadUrl requests poisoned")
+            .push(body.clone());
+
+        let requested_parts = body
+            .get("partInfos")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let response_parts = requested_parts
+            .into_iter()
+            .map(|part| {
+                let part_number =
+                    part.get("partNumber").and_then(Value::as_u64).unwrap_or(1) as u32;
+                let part_size = part.get("partSize").and_then(Value::as_u64).unwrap_or(0);
+                json!({
+                    "partNumber": part_number,
+                    "partSize": part_size,
+                    "uploadUrl": format!("{}/upload/{}", state.base_url, part_number)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        Json(json!({
+            "success": true,
+            "code": "0000",
+            "message": "ok",
+            "data": {
+                "fileId": body.get("fileId").cloned().unwrap_or(Value::String("file-uploaded".to_string())),
+                "uploadId": body.get("uploadId").cloned().unwrap_or(Value::String("upload-001".to_string())),
+                "rapidUpload": false,
+                "partInfos": response_parts
+            }
+        }))
+    }
+
     async fn mock_file_complete_upload(
         State(state): State<Arc<MockMobileUploadState>>,
         Json(body): Json<Value>,
@@ -3478,6 +3601,13 @@ mod tests {
                         "id": "file_complete",
                         "method": "POST",
                         "url": format!("{base_url}/hcy/file/complete"),
+                        "signature_strategy": "mcloud_md5_v1",
+                        "body_defaults": {}
+                    },
+                    {
+                        "id": "file_get_upload_url",
+                        "method": "POST",
+                        "url": format!("{base_url}/hcy/file/getUploadUrl"),
                         "signature_strategy": "mcloud_md5_v1",
                         "body_defaults": {}
                     }
@@ -3834,6 +3964,7 @@ mod tests {
                 vec![sample_folder_item("folder-root", "root")],
             )]),
             create_requests: Arc::new(Mutex::new(Vec::new())),
+            get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
             upload_parts: Arc::new(Mutex::new(Vec::new())),
             rapid_upload: false,
@@ -3841,6 +3972,7 @@ mod tests {
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
             .route("/hcy/file/create", post(mock_file_create_upload))
+            .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
             .route("/hcy/file/complete", post(mock_file_complete_upload))
             .route("/upload/{part_number}", put(mock_upload_part))
             .with_state(Arc::new(upload_state.clone()));
@@ -3892,6 +4024,12 @@ mod tests {
             .map(|part| part.get("partSize").and_then(Value::as_u64).unwrap_or(0))
             .collect::<Vec<_>>();
         assert_eq!(part_sizes, vec![5, 5, 1]);
+        assert_eq!(
+            create_requests[0]
+                .get("parallelUpload")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
 
         let mut uploaded_parts = upload_state
             .upload_parts
@@ -3949,6 +4087,7 @@ mod tests {
                 vec![sample_folder_item("folder-root", "root")],
             )]),
             create_requests: Arc::new(Mutex::new(Vec::new())),
+            get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
             upload_parts: Arc::new(Mutex::new(Vec::new())),
             rapid_upload: false,
@@ -3956,6 +4095,7 @@ mod tests {
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
             .route("/hcy/file/create", post(mock_file_create_upload))
+            .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
             .route("/hcy/file/complete", post(mock_file_complete_upload))
             .route("/upload/{part_number}", put(mock_upload_part))
             .with_state(Arc::new(upload_state.clone()));
@@ -4050,6 +4190,7 @@ mod tests {
                 vec![sample_folder_item("folder-root", "root")],
             )]),
             create_requests: Arc::new(Mutex::new(Vec::new())),
+            get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
             upload_parts: Arc::new(Mutex::new(Vec::new())),
             rapid_upload: true,
@@ -4057,6 +4198,7 @@ mod tests {
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
             .route("/hcy/file/create", post(mock_file_create_upload))
+            .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
             .route("/hcy/file/complete", post(mock_file_complete_upload))
             .route("/upload/{part_number}", put(mock_upload_part))
             .with_state(Arc::new(upload_state.clone()));
@@ -4111,6 +4253,102 @@ mod tests {
         let spool_stats = spool_stats.lock().expect("spool stats poisoned");
         assert_eq!(spool_stats.peak_files, 0);
         assert_eq!(spool_stats.peak_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn put_object_fetches_mobile_upload_urls_in_batches_after_first_100_parts() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile batched upload server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile batched upload local addr");
+        let base_url = format!("http://{address}");
+
+        let upload_state = MockMobileUploadState {
+            base_url: base_url.clone(),
+            items_by_parent: BTreeMap::from([(
+                "/".to_string(),
+                vec![sample_folder_item("folder-root", "root")],
+            )]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
+            get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
+            complete_requests: Arc::new(Mutex::new(Vec::new())),
+            upload_parts: Arc::new(Mutex::new(Vec::new())),
+            rapid_upload: false,
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_upload))
+            .route("/hcy/file/create", post(mock_file_create_upload))
+            .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
+            .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/upload/{part_number}", put(mock_upload_part))
+            .with_state(Arc::new(upload_state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile batched upload server");
+        });
+
+        let catalog = write_mobile_upload_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.upload_part_size_bytes = 1;
+        config.upload_max_part_count = 1000;
+        config.root_prefix = None;
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let data = vec![b'x'; 101];
+        let request = PutObjectRequest {
+            container: MOBILE_ROOT_CONTAINER.to_string(),
+            key: "batched.bin".to_string(),
+            body: ObjectBody::from_stream(stream::iter([Ok(Bytes::from(data.clone()))]))
+                .with_known_content_sha256_hex(
+                    "d6d9c0c9f4e55c37b0076d7d9b72858778c1f83f4f7d7d3d4f6f8bc9c1d5cfa3",
+                ),
+            size: Some(101),
+            content_type: Some("application/octet-stream".to_string()),
+            preferred_upload_part_size_bytes: Some(1),
+        };
+        adapter.put_object(request).await.expect("put object");
+
+        let create_requests = upload_state
+            .create_requests
+            .lock()
+            .expect("create requests poisoned")
+            .clone();
+        assert_eq!(create_requests.len(), 1);
+        let initial_parts = create_requests[0]
+            .get("partInfos")
+            .and_then(Value::as_array)
+            .expect("initial partInfos");
+        assert_eq!(initial_parts.len(), 100);
+
+        let get_upload_url_requests = upload_state
+            .get_upload_url_requests
+            .lock()
+            .expect("getUploadUrl requests poisoned")
+            .clone();
+        assert_eq!(get_upload_url_requests.len(), 1);
+        let tail_parts = get_upload_url_requests[0]
+            .get("partInfos")
+            .and_then(Value::as_array)
+            .expect("tail partInfos");
+        assert_eq!(tail_parts.len(), 1);
+        assert_eq!(
+            tail_parts[0]
+                .get("partNumber")
+                .and_then(Value::as_u64),
+            Some(101)
+        );
+
+        let uploaded_parts = upload_state
+            .upload_parts
+            .lock()
+            .expect("upload parts poisoned")
+            .clone();
+        assert_eq!(uploaded_parts.len(), 101);
     }
 
     #[tokio::test]
