@@ -2313,7 +2313,7 @@ Copyright (c) 2026 walky
           <button id="stop-limit-probe" class="secondary" type="button" disabled>停止体积探测</button>
         </div>
       </div>
-      <div id="limit-probe-capabilities" class="provider-note">正在加载云盘能力限制…</div>
+      <div id="limit-probe-capabilities" class="provider-note">正在加载云盘能力限制… 中国移动当前已支持真实上传链路，但 `.49` 在 2026-06-05 的 16 GiB 实测仍返回 `04010319 / Insufficient Rights`，所以体积探测结果才是准确信号，不要把“已登录”直接当成“大文件已放开”。</div>
       <div id="limit-probe-feedback" class="flash"></div>
       <div id="limit-probe-summary" class="hint">还没有执行过体积探测。</div>
       <div id="limit-probe-log" class="limit-probe-log" data-empty="探测日志为空。"></div>
@@ -2489,7 +2489,7 @@ Copyright (c) 2026 walky
     </section>
     <section class="card" style="margin-top: 16px;">
       <h2>中国移动</h2>
-      <p>在这里填写中国移动的认证材料。最省事的方式通常是直接用上面的助手：如果当前 CDP 标签页已经登录，它会直接抓实时会话；如果未登录，它会先引导短信登录，再替你完成抓取。</p>
+      <p>在这里填写中国移动的认证材料。最省事的方式通常是直接用上面的助手：如果当前 CDP 标签页已经登录，它会直接抓实时会话；如果未登录，它会先引导短信登录，再替你完成抓取。注意：抓到会话只代表网关已经能复用登录态，不代表中国移动大文件上传已经完全放开；`.49` 在 2026-06-05 的 16 GiB 隔离实测仍被上游返回 `04010319 / Insufficient Rights`。</p>
       <div id="provider-credentials-feedback-mobile" class="flash"></div>
       <div id="provider-credentials-card-mobile"></div>
     </section>

@@ -771,12 +771,18 @@ CCBG_TELECOM_IP_FAMILY=ipv4
 
 ### 当前代码支持到什么程度
 
-当前 `provider-mobile` 也是 scaffold:
+当前 `provider-mobile` 已经不是 scaffold，而是可工作的原生 provider:
 
-- 已有配置结构
-- 已有 token / token file / cookie header 入口
-- 当前 health 检查只验证“token 是否存在”
-- 真实上游接口映射还没有完成
+- 已支持 `file/list`、`file/create`、`file/complete`、`file/getDownloadUrl`
+- 已支持托管根目录下的真实列举、真实下载、真实上传
+- 已支持 native `delete/rename/move`，以及受能力开关约束的 `copy`
+- 中国移动上传链路已经按上游约束改成“`file/create` 首批最多 100 个分片，剩余分片再通过 `file/getUploadUrl` 取上传地址”
+- 但大文件能力仍不能夸大: `.49` 在 2026-06-05 对 `16 GiB` 做过隔离实测，最终仍被上游返回 `code=04010319`、`message=Insufficient Rights`
+
+这意味着:
+
+- 日常列举、下载、小到中等体积上传可以继续按当前能力使用
+- 中国移动超大文件上传目前仍要视你的账号和上游权限而定，不能默认认为已经和 AList 一样放开
 
 ### 中国移动云盘 Step by Step
 
@@ -831,6 +837,8 @@ curl -s http://127.0.0.1:61080/__ccbg/providers
 
 - `backend=mobile-cloud-drive`
 - `auth_source=file`
+
+如果你要验证中国移动大文件能力，先在 Admin 里的“云盘体积探测”跑一轮，或在隔离实例上单独做探测；不要把“已经登录成功”直接等同于“已经支持任意大文件上传”。
 
 ## OneDrive
 
