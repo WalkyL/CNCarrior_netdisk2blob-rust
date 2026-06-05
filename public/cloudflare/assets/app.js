@@ -2,12 +2,12 @@
 // Copyright (c) 2026 walky
 const CCBG_PROVENANCE = {
   service: 'carrier-cloud-blob-gateway-public',
-  version: '0.1.2',
+  version: '__CCBG_PUBLIC_VERSION__',
   release_channel: 'public-materials',
-  release_date: '2026-06-03',
-  release_fingerprint: 'ccbg-0.1.2-walky-20260603-bda37a712441fe32',
-  fingerprint_sha256: '03bae8a844f520528d9c677ca8c43773fc3b0a27d03ec7f9a32abf5cf57c258d',
-  canonical_repo: 'https://github.com/WalkyL/CNCarrior_netdisk2blob-rust',
+  release_date: '__CCBG_PUBLIC_RELEASE_DATE__',
+  release_fingerprint: '__CCBG_PUBLIC_RELEASE_FINGERPRINT__',
+  fingerprint_sha256: '__CCBG_PUBLIC_FINGERPRINT_SHA256__',
+  canonical_repo: '__CCBG_PUBLIC_CANONICAL_REPO__',
   license_id: 'LicenseRef-CCBG-Public-Materials'
 };
 

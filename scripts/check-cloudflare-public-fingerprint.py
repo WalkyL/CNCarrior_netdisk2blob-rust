@@ -7,25 +7,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
+import subprocess
 import urllib.request
 from pathlib import Path
 
+from ccbg_release_metadata import public_materials_provenance_payload
+
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_DIR = ROOT / "public" / "cloudflare"
 DEFAULT_OUT = ROOT / "target" / "cloudflare-public-fingerprint"
-PROVENANCE_MD = ROOT / "PROVENANCE.md"
-REQUIRED_FINGERPRINT_FILES = [
-    "index.html",
-    "manifest.json",
-    ".well-known/ccbg-provenance.json",
-    "_headers",
-    "assets/app.js",
-    "assets/app.js.map",
-    "release-notes/v0.1.2-public.md",
-    "README.md",
-]
 FORBIDDEN_SUFFIXES = {
     ".rs",
     ".rlib",
@@ -50,26 +40,39 @@ def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
-def public_files() -> list[Path]:
-    return sorted(path for path in PUBLIC_DIR.rglob("*") if path.is_file())
+def stage_public_dir(out_dir: Path) -> Path:
+    staged = out_dir / "staged-public"
+    subprocess.run(
+        ["bash", "scripts/stage-cloudflare-public-assets.sh", str(staged)],
+        cwd=ROOT,
+        check=True,
+    )
+    return staged
 
 
-def load_provenance() -> dict:
-    return json.loads((PUBLIC_DIR / ".well-known" / "ccbg-provenance.json").read_text(encoding="utf-8"))
+def public_files(public_dir: Path) -> list[Path]:
+    return sorted(path for path in public_dir.rglob("*") if path.is_file())
 
 
-def root_provenance_pair() -> tuple[str, str]:
-    text = PROVENANCE_MD.read_text(encoding="utf-8", errors="replace")
-    fingerprint_match = re.search(r"ccbg-[0-9][^\s`]+", text)
-    sha_match = re.search(r"\b[a-f0-9]{64}\b", text)
-    if not fingerprint_match or not sha_match:
-        raise SystemExit("failed to parse fingerprint and SHA-256 from PROVENANCE.md")
-    return fingerprint_match.group(0), sha_match.group(0)
+def load_provenance(public_dir: Path) -> dict:
+    return json.loads((public_dir / ".well-known" / "ccbg-provenance.json").read_text(encoding="utf-8"))
 
 
-def validate_public_boundary(files: list[Path]) -> None:
+def required_fingerprint_files() -> list[str]:
+    version = public_materials_provenance_payload()["version"]
+    return [
+        "index.html",
+        "manifest.json",
+        ".well-known/ccbg-provenance.json",
+        "_headers",
+        "assets/app.js",
+        "assets/app.js.map",
+        f"release-notes/v{version}-public.md",
+        "README.md",
+    ]
+def validate_public_boundary(public_dir: Path, files: list[Path]) -> None:
     for path in files:
-        relative = path.relative_to(PUBLIC_DIR).as_posix()
+        relative = path.relative_to(public_dir).as_posix()
         lowered = relative.lower()
         if path.suffix.lower() in FORBIDDEN_SUFFIXES:
             raise SystemExit(f"forbidden private/core-like artifact in public Cloudflare directory: {relative}")
@@ -78,30 +81,35 @@ def validate_public_boundary(files: list[Path]) -> None:
                 raise SystemExit(f"forbidden sensitive filename in public Cloudflare directory: {relative}")
 
 
-def validate_fingerprint(fingerprint: str, fingerprint_sha256: str) -> None:
-    root_fingerprint, root_sha256 = root_provenance_pair()
-    if fingerprint != root_fingerprint:
-        raise SystemExit("public fingerprint does not match PROVENANCE.md")
-    if fingerprint_sha256 != root_sha256:
-        raise SystemExit("public fingerprint SHA does not match PROVENANCE.md")
-    for relative in REQUIRED_FINGERPRINT_FILES:
-        path = PUBLIC_DIR / relative
+def validate_fingerprint(public_dir: Path, fingerprint: str, fingerprint_sha256: str) -> None:
+    expected = public_materials_provenance_payload()
+    if fingerprint != expected["release_fingerprint"]:
+        raise SystemExit("public fingerprint does not match current release metadata")
+    if fingerprint_sha256 != expected["fingerprint_sha256"]:
+        raise SystemExit("public fingerprint SHA does not match current release metadata")
+    for relative in required_fingerprint_files():
+        path = public_dir / relative
         if not path.is_file():
             raise SystemExit(f"required public fingerprint file missing: {relative}")
         text = path.read_text(encoding="utf-8", errors="replace")
         if fingerprint not in text:
             raise SystemExit(f"release fingerprint missing from {relative}")
-    provenance = load_provenance()
+    provenance = load_provenance(public_dir)
     if provenance.get("release_fingerprint") != fingerprint:
         raise SystemExit("provenance endpoint release_fingerprint mismatch")
     if provenance.get("fingerprint_sha256") != fingerprint_sha256:
         raise SystemExit("provenance endpoint fingerprint_sha256 mismatch")
+    if provenance.get("version") != expected["version"]:
+        raise SystemExit("provenance endpoint version mismatch")
+    headers_text = (public_dir / "_headers").read_text(encoding="utf-8", errors="replace")
+    if f"X-CCBG-Version: {expected['version']}" not in headers_text:
+        raise SystemExit("_headers is missing the current X-CCBG-Version header")
 
 
-def build_manifest(files: list[Path], fingerprint: str, fingerprint_sha256: str) -> dict:
+def build_manifest(public_dir: Path, files: list[Path], fingerprint: str, fingerprint_sha256: str) -> dict:
     entries = []
     for path in files:
-        relative = path.relative_to(PUBLIC_DIR).as_posix()
+        relative = path.relative_to(public_dir).as_posix()
         entries.append(
             {
                 "path": relative,
@@ -138,17 +146,19 @@ def validate_remote(base_url: str, manifest: dict) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate and validate Cloudflare public fingerprint manifest.")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT), help="output directory")
+    parser.add_argument("--public-dir", default=None, help="optional rendered public asset directory to validate")
     parser.add_argument("--deployed-base-url", default=None, help="optional deployed Cloudflare base URL to compare")
     args = parser.parse_args()
-    provenance = load_provenance()
-    fingerprint = str(provenance["release_fingerprint"])
-    fingerprint_sha256 = str(provenance["fingerprint_sha256"])
-    files = public_files()
-    validate_public_boundary(files)
-    validate_fingerprint(fingerprint, fingerprint_sha256)
-    manifest = build_manifest(files, fingerprint, fingerprint_sha256)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    public_dir = Path(args.public_dir) if args.public_dir else stage_public_dir(out_dir)
+    provenance = load_provenance(public_dir)
+    fingerprint = str(provenance["release_fingerprint"])
+    fingerprint_sha256 = str(provenance["fingerprint_sha256"])
+    files = public_files(public_dir)
+    validate_public_boundary(public_dir, files)
+    validate_fingerprint(public_dir, fingerprint, fingerprint_sha256)
+    manifest = build_manifest(public_dir, files, fingerprint, fingerprint_sha256)
     output = out_dir / "public-cloudflare-fingerprint-manifest.json"
     output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if args.deployed_base_url:

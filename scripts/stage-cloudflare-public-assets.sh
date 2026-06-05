@@ -9,27 +9,8 @@ OUT_DIR="${1:-${ROOT_DIR}/target/cloudflare-public-assets}"
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
 
-if command -v rsync >/dev/null 2>&1; then
-  rsync -a --delete \
-    --exclude 'functions' \
-    --exclude 'worker.js' \
-    --exclude 'wrangler.toml' \
-    --exclude 'wrangler.worker.toml' \
-    --exclude '.wrangler' \
-    --exclude 'target' \
-    "${ROOT_DIR}/public/cloudflare/" "${OUT_DIR}/"
-else
-  shopt -s dotglob nullglob
-  SRC_DIR="${ROOT_DIR}/public/cloudflare"
-  for path in "${SRC_DIR}"/*; do
-    name="$(basename "${path}")"
-    case "${name}" in
-      functions|worker.js|wrangler.toml|wrangler.worker.toml|.wrangler|target)
-        continue
-        ;;
-    esac
-    cp -R "${path}" "${OUT_DIR}/"
-  done
-fi
+python "${ROOT_DIR}/scripts/render-cloudflare-public-release-metadata.py" \
+  --input-dir "${ROOT_DIR}/public/cloudflare" \
+  --output-dir "${OUT_DIR}"
 
 echo "${OUT_DIR}"

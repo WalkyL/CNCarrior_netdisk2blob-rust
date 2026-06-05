@@ -2,9 +2,10 @@
 # Copyright (c) 2026 walky
 
 /*
-  X-CCBG-Provenance: ccbg-0.1.2-walky-20260603-bda37a712441fe32
+  X-CCBG-Provenance: __CCBG_PUBLIC_RELEASE_FINGERPRINT__
+  X-CCBG-Version: __CCBG_PUBLIC_VERSION__
   X-CCBG-License: LicenseRef-CCBG-Public-Materials
-  X-CCBG-Canonical-Repo: https://github.com/WalkyL/CNCarrior_netdisk2blob-rust
+  X-CCBG-Canonical-Repo: __CCBG_PUBLIC_CANONICAL_REPO__
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
@@ -12,11 +13,13 @@
 /.well-known/ccbg-provenance.json
   Content-Type: application/json; charset=utf-8
   Cache-Control: public, max-age=300
-  X-CCBG-Provenance: ccbg-0.1.2-walky-20260603-bda37a712441fe32
+  X-CCBG-Provenance: __CCBG_PUBLIC_RELEASE_FINGERPRINT__
+  X-CCBG-Version: __CCBG_PUBLIC_VERSION__
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
-  X-CCBG-Provenance: ccbg-0.1.2-walky-20260603-bda37a712441fe32
+  X-CCBG-Provenance: __CCBG_PUBLIC_RELEASE_FINGERPRINT__
+  X-CCBG-Version: __CCBG_PUBLIC_VERSION__
 
 /api/faq/*
   Content-Type: application/json; charset=utf-8
@@ -24,4 +27,5 @@
   Access-Control-Allow-Origin: *
   Access-Control-Allow-Methods: GET, POST, OPTIONS
   Access-Control-Allow-Headers: content-type
-  X-CCBG-Provenance: ccbg-0.1.2-walky-20260603-bda37a712441fe32
+  X-CCBG-Provenance: __CCBG_PUBLIC_RELEASE_FINGERPRINT__
+  X-CCBG-Version: __CCBG_PUBLIC_VERSION__
