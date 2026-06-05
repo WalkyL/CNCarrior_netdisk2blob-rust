@@ -312,6 +312,12 @@ pub type ObjectBodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, BlobError>> 
 
 pub struct ObjectBody {
     inner: ObjectBodyStream,
+    known_content_sha256_hex: Option<String>,
+}
+
+pub struct BufferedObjectBodyReader {
+    stream: ObjectBodyStream,
+    pending: Bytes,
 }
 
 #[derive(Clone)]
@@ -336,6 +342,7 @@ impl ObjectBody {
     pub fn from_bytes(bytes: Bytes) -> Self {
         Self {
             inner: Box::pin(futures_util::stream::once(async move { Ok(bytes) })),
+            known_content_sha256_hex: None,
         }
     }
 
@@ -345,7 +352,17 @@ impl ObjectBody {
     {
         Self {
             inner: Box::pin(stream),
+            known_content_sha256_hex: None,
         }
+    }
+
+    pub fn with_known_content_sha256_hex(mut self, sha256_hex: impl Into<String>) -> Self {
+        self.known_content_sha256_hex = Some(sha256_hex.into());
+        self
+    }
+
+    pub fn known_content_sha256_hex(&self) -> Option<&str> {
+        self.known_content_sha256_hex.as_deref()
     }
 
     pub async fn collect(self) -> Result<Bytes, BlobError> {
@@ -363,20 +380,83 @@ impl ObjectBody {
     }
 
     pub fn observe_first_progress(self, observer: StreamFirstProgressObserver) -> Self {
-        Self::from_stream(futures_util::stream::unfold(
-            (self.into_stream(), observer),
-            |(mut inner, observer)| async move {
-                inner.next().await.map(|item| {
-                    let item = item.map(|chunk| {
-                        if !chunk.is_empty() {
-                            observer.notify();
-                        }
-                        chunk
-                    });
-                    (item, (inner, observer))
-                })
-            },
-        ))
+        let ObjectBody {
+            inner,
+            known_content_sha256_hex,
+        } = self;
+        Self {
+            inner: Box::pin(futures_util::stream::unfold(
+                (inner, observer),
+                |(mut inner, observer)| async move {
+                    inner.next().await.map(|item| {
+                        let item = item.map(|chunk| {
+                            if !chunk.is_empty() {
+                                observer.notify();
+                            }
+                            chunk
+                        });
+                        (item, (inner, observer))
+                    })
+                },
+            )),
+            known_content_sha256_hex,
+        }
+    }
+}
+
+impl BufferedObjectBodyReader {
+    pub fn new(body: ObjectBody) -> Self {
+        Self {
+            stream: body.into_stream(),
+            pending: Bytes::new(),
+        }
+    }
+
+    pub async fn read_part(
+        &mut self,
+        target_len: u64,
+        eof_context: &str,
+    ) -> Result<Vec<u8>, BlobError> {
+        if target_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut remaining = target_len;
+        let mut buffer = Vec::with_capacity(target_len.min(usize::MAX as u64) as usize);
+        while remaining > 0 {
+            if self.pending.is_empty() {
+                self.pending = self.stream.next().await.transpose()?.ok_or_else(|| {
+                    BlobError::BodyStream(format!(
+                        "{eof_context} ended early while reading {target_len} bytes"
+                    ))
+                })?;
+                if self.pending.is_empty() {
+                    continue;
+                }
+            }
+            let take = remaining.min(self.pending.len() as u64) as usize;
+            let chunk = self.pending.split_to(take);
+            buffer.extend_from_slice(&chunk);
+            remaining = remaining.saturating_sub(take as u64);
+        }
+        Ok(buffer)
+    }
+
+    pub async fn ensure_exhausted(&mut self, context: &str) -> Result<(), BlobError> {
+        if !self.pending.is_empty() {
+            return Err(BlobError::BodyStream(format!(
+                "{context} produced more bytes than declared"
+            )));
+        }
+        while let Some(chunk) = self.stream.next().await {
+            let chunk = chunk?;
+            if !chunk.is_empty() {
+                return Err(BlobError::BodyStream(format!(
+                    "{context} produced more bytes than declared"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

@@ -20,9 +20,9 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use blob_core::{
     BackendCapabilities, BlobBackend, BlobError, BodySpoolLease, BrowserRequestProfile,
-    ContainerInfo, CopyObjectRequest, HealthStatus, ListObjectsRequest, MoveObjectRequest,
-    ObjectBody, ObjectInfo, ObjectPayload, OutboundIpFamily, PutObjectRequest, PutObjectResult,
-    RenameObjectRequest, ServiceHealth, SharedBodySpoolObserver, StorageCapacity,
+    BufferedObjectBodyReader, ContainerInfo, CopyObjectRequest, HealthStatus, ListObjectsRequest,
+    MoveObjectRequest, ObjectBody, ObjectInfo, ObjectPayload, OutboundIpFamily, PutObjectRequest,
+    PutObjectResult, RenameObjectRequest, ServiceHealth, SharedBodySpoolObserver, StorageCapacity,
     StorageScopeHealth, StorageScopeKind, StreamFirstProgressObserver, TokenSource,
 };
 use ecb::Encryptor;
@@ -52,6 +52,7 @@ const DEFAULT_ROOT_FOLDER_ID: &str = "-11";
 const DEFAULT_FAMILY_ROOT_FOLDER_ID: &str = "home";
 const DEFAULT_PAGE_SIZE: usize = 60;
 const DEFAULT_UPLOAD_PART_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_UPLOAD_MAX_PART_COUNT: u64 = 1_000;
 const DEFAULT_UPLOAD_CONTROL_BASE_URL: &str = "https://upload.cloud.189.cn";
 const TELECOM_BATCH_POLL_INTERVAL_MS: u64 = 500;
 const URI_COMPONENT_ENCODE_SET: &AsciiSet = &CONTROLS
@@ -100,6 +101,8 @@ pub struct TelecomConfig {
     pub root_prefix: Option<String>,
     #[serde(default)]
     pub upload_part_size_bytes: u64,
+    #[serde(default)]
+    pub upload_max_part_count: u64,
     #[serde(default)]
     pub max_single_upload_bytes: Option<u64>,
     #[serde(default)]
@@ -250,14 +253,19 @@ struct TimedObjectBody {
 }
 
 #[derive(Debug)]
-struct PreparedTelecomUpload {
-    spool_file: NamedTempFile,
+struct TelecomUploadDescriptor {
     size: u64,
     file_md5_upper: String,
     slice_md5_upper: String,
     part_md5_upper: Vec<String>,
     part_md5_base64: Vec<String>,
     part_size_bytes: u64,
+}
+
+#[derive(Debug)]
+struct PreparedTelecomUpload {
+    descriptor: TelecomUploadDescriptor,
+    spool_file: NamedTempFile,
     _spool_lease: Option<Box<dyn BodySpoolLease>>,
 }
 
@@ -545,6 +553,31 @@ impl TelecomBlobAdapter {
         } else {
             self.config.upload_part_size_bytes
         }
+    }
+
+    fn upload_max_part_count(&self) -> u64 {
+        if self.config.upload_max_part_count == 0 {
+            DEFAULT_UPLOAD_MAX_PART_COUNT
+        } else {
+            self.config.upload_max_part_count
+        }
+    }
+
+    fn effective_upload_part_size_bytes(
+        &self,
+        size: u64,
+        preferred_part_size_bytes: Option<u64>,
+    ) -> u64 {
+        let configured = preferred_part_size_bytes
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| self.upload_part_size_bytes());
+        if size == 0 {
+            return configured.max(1);
+        }
+        round_up_to_multiple(
+            configured.max(size.div_ceil(self.upload_max_part_count())),
+            configured.max(1),
+        )
     }
 
     fn configured_family_id(&self) -> Option<&str> {
@@ -1721,10 +1754,9 @@ impl TelecomBlobAdapter {
         })?;
         let mut file = TokioFile::from_std(async_file);
         let mut stream = body.into_stream();
-        let part_size_bytes = preferred_part_size_bytes
-            .filter(|value| *value > 0)
-            .unwrap_or_else(|| self.upload_part_size_bytes())
-            .max(1);
+        let target_size = declared_size.unwrap_or(0);
+        let part_size_bytes =
+            self.effective_upload_part_size_bytes(target_size, preferred_part_size_bytes);
         let mut total_len = 0u64;
         let mut file_hasher = Md5::new();
         let mut part_hasher = Md5::new();
@@ -1787,13 +1819,15 @@ impl TelecomBlobAdapter {
         };
 
         Ok(PreparedTelecomUpload {
+            descriptor: TelecomUploadDescriptor {
+                size: total_len,
+                file_md5_upper,
+                slice_md5_upper,
+                part_md5_upper,
+                part_md5_base64,
+                part_size_bytes,
+            },
             spool_file,
-            size: total_len,
-            file_md5_upper,
-            slice_md5_upper,
-            part_md5_upper,
-            part_md5_base64,
-            part_size_bytes,
             _spool_lease: spool_lease,
         })
     }
@@ -1977,17 +2011,26 @@ impl TelecomBlobAdapter {
         bootstrap: &TelecomUploadBootstrap,
         parent_folder_id: &str,
         file_name: &str,
-        upload: &PreparedTelecomUpload,
+        file_size_bytes: u64,
+        part_size_bytes: u64,
+        part_count: usize,
+        file_md5_upper: Option<&str>,
+        slice_md5_upper: Option<&str>,
     ) -> Result<TelecomUploadPlan, BlobError> {
         let mut fields = vec![
             ("parentFolderId".to_string(), parent_folder_id.to_string()),
             ("fileName".to_string(), encode_uri_component(file_name)),
-            ("fileSize".to_string(), upload.size.to_string()),
-            ("sliceSize".to_string(), upload.part_size_bytes.to_string()),
+            ("fileSize".to_string(), file_size_bytes.to_string()),
+            ("sliceSize".to_string(), part_size_bytes.to_string()),
         ];
-        if upload.part_md5_upper.len() == 1 {
-            fields.push(("fileMd5".to_string(), upload.file_md5_upper.clone()));
-            fields.push(("sliceMd5".to_string(), upload.slice_md5_upper.clone()));
+        if part_count == 1 {
+            if let (Some(file_md5_upper), Some(slice_md5_upper)) = (file_md5_upper, slice_md5_upper)
+            {
+                fields.push(("fileMd5".to_string(), file_md5_upper.to_string()));
+                fields.push(("sliceMd5".to_string(), slice_md5_upper.to_string()));
+            } else {
+                fields.push(("lazyCheck".to_string(), "1".to_string()));
+            }
         } else {
             fields.push(("lazyCheck".to_string(), "1".to_string()));
         }
@@ -2080,8 +2123,10 @@ impl TelecomBlobAdapter {
         request_url: &str,
         request_header: &str,
     ) -> Result<(), BlobError> {
-        let offset = (part_number.saturating_sub(1) as u64).saturating_mul(upload.part_size_bytes);
-        let part_len = (upload.size.saturating_sub(offset)).min(upload.part_size_bytes);
+        let offset = (part_number.saturating_sub(1) as u64)
+            .saturating_mul(upload.descriptor.part_size_bytes);
+        let part_len =
+            (upload.descriptor.size.saturating_sub(offset)).min(upload.descriptor.part_size_bytes);
         let file = upload.spool_file.reopen().map_err(|error| {
             BlobError::Upstream(format!(
                 "failed to reopen China Telecom upload spool file for reading: {error}"
@@ -2152,6 +2197,35 @@ impl TelecomBlobAdapter {
         Ok(())
     }
 
+    async fn upload_part_bytes(
+        &self,
+        request_url: &str,
+        request_header: &str,
+        part_number: usize,
+        part_bytes: Vec<u8>,
+    ) -> Result<(), BlobError> {
+        let mut request =
+            self.client
+                .request(Method::PUT, request_url)
+                .timeout(Duration::from_secs(
+                    self.config.request_timeout_secs.max(180),
+                ));
+        for (name, value) in parse_upload_request_headers(request_header)? {
+            request = request.header(name, value);
+        }
+        let response = request
+            .body(reqwest::Body::from(part_bytes))
+            .send()
+            .await
+            .map_err(|error| {
+                BlobError::Upstream(format!("upload part {part_number} failed: {error}"))
+            })?;
+        if !response.status().is_success() {
+            return Err(response_to_error(response, &format!("upload part {part_number}")).await);
+        }
+        Ok(())
+    }
+
     async fn upload_multi_parts(
         &self,
         scope: TelecomContainerScope,
@@ -2161,7 +2235,7 @@ impl TelecomBlobAdapter {
         upload_started_at: Instant,
     ) -> Result<Option<u64>, BlobError> {
         let first_upload_progress_ms = Arc::new(AtomicU64::new(0));
-        for (index, part_md5_base64) in upload.part_md5_base64.iter().enumerate() {
+        for (index, part_md5_base64) in upload.descriptor.part_md5_base64.iter().enumerate() {
             let part_number = index + 1;
             let (request_url, request_header) = self
                 .get_multi_upload_url(
@@ -2189,12 +2263,99 @@ impl TelecomBlobAdapter {
         })
     }
 
+    async fn upload_multi_parts_streaming(
+        &self,
+        scope: TelecomContainerScope,
+        bootstrap: &TelecomUploadBootstrap,
+        plan: &TelecomUploadPlan,
+        body: ObjectBody,
+        size: u64,
+        part_size_bytes: u64,
+        upload_started_at: Instant,
+    ) -> Result<(Option<u64>, TelecomUploadDescriptor), BlobError> {
+        let first_upload_progress_ms = Arc::new(AtomicU64::new(0));
+        let progress_observer = StreamFirstProgressObserver::new({
+            let first_upload_progress_ms = Arc::clone(&first_upload_progress_ms);
+            move || {
+                first_upload_progress_ms
+                    .store(elapsed_millis(upload_started_at).max(1), Ordering::SeqCst);
+            }
+        });
+        let mut reader =
+            BufferedObjectBodyReader::new(body.observe_first_progress(progress_observer));
+        let mut file_hasher = Md5::new();
+        let mut part_md5_upper = Vec::new();
+        let mut part_md5_base64 = Vec::new();
+        let mut part_offset = 0u64;
+
+        while part_offset < size {
+            let part_number = part_md5_upper.len() + 1;
+            let part_len = (size - part_offset).min(part_size_bytes);
+            let part_bytes = reader
+                .read_part(
+                    part_len,
+                    &format!("China Telecom request body for part {part_number}"),
+                )
+                .await?;
+            file_hasher.update(&part_bytes);
+            let digest = Md5::digest(part_bytes.as_slice());
+            let digest_upper = hex_upper(digest.as_slice());
+            let digest_base64 = BASE64_STANDARD.encode(digest.as_slice());
+            if !plan.file_data_exists {
+                let (request_url, request_header) = self
+                    .get_multi_upload_url(
+                        scope,
+                        bootstrap,
+                        plan.upload_host.as_str(),
+                        plan.upload_file_id.as_str(),
+                        part_number,
+                        digest_base64.as_str(),
+                    )
+                    .await?;
+                self.upload_part_bytes(
+                    request_url.as_str(),
+                    request_header.as_str(),
+                    part_number,
+                    part_bytes,
+                )
+                .await?;
+            }
+            part_md5_upper.push(digest_upper);
+            part_md5_base64.push(digest_base64);
+            part_offset = part_offset.saturating_add(part_len);
+        }
+
+        reader
+            .ensure_exhausted("China Telecom request body")
+            .await?;
+        let file_md5_upper = hex_upper(file_hasher.finalize().as_slice());
+        let slice_md5_upper = if part_md5_upper.len() <= 1 {
+            file_md5_upper.clone()
+        } else {
+            hex_upper(Md5::digest(part_md5_upper.join("\n").as_bytes()).as_slice())
+        };
+        Ok((
+            match first_upload_progress_ms.load(Ordering::SeqCst) {
+                0 => None,
+                value => Some(value),
+            },
+            TelecomUploadDescriptor {
+                size,
+                file_md5_upper,
+                slice_md5_upper,
+                part_md5_upper,
+                part_md5_base64,
+                part_size_bytes,
+            },
+        ))
+    }
+
     async fn check_trans_second(
         &self,
         scope: TelecomContainerScope,
         bootstrap: &TelecomUploadBootstrap,
         plan: &mut TelecomUploadPlan,
-        upload: &PreparedTelecomUpload,
+        upload: &TelecomUploadDescriptor,
     ) -> Result<(), BlobError> {
         let mut fields = vec![
             ("fileMd5".to_string(), upload.file_md5_upper.clone()),
@@ -2228,7 +2389,7 @@ impl TelecomBlobAdapter {
         scope: TelecomContainerScope,
         bootstrap: &TelecomUploadBootstrap,
         plan: &TelecomUploadPlan,
-        upload: &PreparedTelecomUpload,
+        upload: &TelecomUploadDescriptor,
     ) -> Result<String, BlobError> {
         let mut fields = vec![
             ("uploadFileId".to_string(), plan.upload_file_id.clone()),
@@ -2807,18 +2968,66 @@ impl BlobBackend for TelecomBlobAdapter {
     }
 
     async fn put_object(&self, request: PutObjectRequest) -> Result<PutObjectResult, BlobError> {
-        let scope = self.container_scope(&request.container)?;
+        let PutObjectRequest {
+            container,
+            key,
+            body,
+            size,
+            content_type: _,
+            preferred_upload_part_size_bytes,
+        } = request;
+        let scope = self.container_scope(&container)?;
         let (parent_folder_id, file_name) = self
-            .ensure_managed_parent_folder_id(scope, &request.container, &request.key)
-            .await?;
-        let upload = self
-            .prepare_upload_body(
-                request.body,
-                request.size,
-                request.preferred_upload_part_size_bytes,
-            )
+            .ensure_managed_parent_folder_id(scope, &container, &key)
             .await?;
         let bootstrap = self.fetch_upload_bootstrap().await?;
+        if let Some(size) = size {
+            let part_size_bytes =
+                self.effective_upload_part_size_bytes(size, preferred_upload_part_size_bytes);
+            if size > part_size_bytes {
+                let first_response_started_at = Instant::now();
+                let mut plan = self
+                    .init_multi_upload(
+                        scope,
+                        &bootstrap,
+                        parent_folder_id.as_str(),
+                        file_name.as_str(),
+                        size,
+                        part_size_bytes,
+                        size.div_ceil(part_size_bytes) as usize,
+                        None,
+                        None,
+                    )
+                    .await?;
+                let _create_latency_ms = elapsed_millis(first_response_started_at);
+                let upload_started_at = Instant::now();
+                let (first_response_latency_ms, upload_descriptor) = self
+                    .upload_multi_parts_streaming(
+                        scope,
+                        &bootstrap,
+                        &plan,
+                        body,
+                        size,
+                        part_size_bytes,
+                        upload_started_at,
+                    )
+                    .await?;
+                let first_response_latency_ms =
+                    first_response_latency_ms.or(Some(elapsed_millis(upload_started_at).max(1)));
+                self.check_trans_second(scope, &bootstrap, &mut plan, &upload_descriptor)
+                    .await?;
+                let etag = self
+                    .commit_multi_upload(scope, &bootstrap, &plan, &upload_descriptor)
+                    .await?;
+                return Ok(PutObjectResult {
+                    etag: Some(etag),
+                    first_response_latency_ms,
+                });
+            }
+        }
+        let upload = self
+            .prepare_upload_body(body, size, preferred_upload_part_size_bytes)
+            .await?;
         let first_response_started_at = Instant::now();
         let mut plan = self
             .init_multi_upload(
@@ -2826,7 +3035,11 @@ impl BlobBackend for TelecomBlobAdapter {
                 &bootstrap,
                 parent_folder_id.as_str(),
                 file_name.as_str(),
-                &upload,
+                upload.descriptor.size,
+                upload.descriptor.part_size_bytes,
+                upload.descriptor.part_md5_upper.len(),
+                Some(upload.descriptor.file_md5_upper.as_str()),
+                Some(upload.descriptor.slice_md5_upper.as_str()),
             )
             .await?;
         let create_latency_ms = elapsed_millis(first_response_started_at);
@@ -2836,10 +3049,10 @@ impl BlobBackend for TelecomBlobAdapter {
                 .upload_multi_parts(scope, &bootstrap, &plan, &upload, upload_started_at)
                 .await?
                 .or(Some(elapsed_millis(upload_started_at).max(1)));
-            self.check_trans_second(scope, &bootstrap, &mut plan, &upload)
+            self.check_trans_second(scope, &bootstrap, &mut plan, &upload.descriptor)
                 .await?;
             let etag = self
-                .commit_multi_upload(scope, &bootstrap, &plan, &upload)
+                .commit_multi_upload(scope, &bootstrap, &plan, &upload.descriptor)
                 .await?;
             return Ok(PutObjectResult {
                 etag: Some(etag),
@@ -2847,7 +3060,7 @@ impl BlobBackend for TelecomBlobAdapter {
             });
         }
         let etag = self
-            .commit_multi_upload(scope, &bootstrap, &plan, &upload)
+            .commit_multi_upload(scope, &bootstrap, &plan, &upload.descriptor)
             .await?;
         Ok(PutObjectResult {
             etag: Some(etag),
@@ -3436,6 +3649,13 @@ fn truncate_for_error(body: &str, max_len: usize) -> String {
         let truncated = body.chars().take(max_len).collect::<String>();
         format!("{truncated}...")
     }
+}
+
+fn round_up_to_multiple(value: u64, quantum: u64) -> u64 {
+    if quantum <= 1 {
+        return value.max(1);
+    }
+    value.div_ceil(quantum).saturating_mul(quantum).max(quantum)
 }
 
 fn deserialize_optional_string_like<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -4829,6 +5049,7 @@ AwIDAQAB\n\
             page_size: 2,
             root_prefix: None,
             upload_part_size_bytes: 0,
+            upload_max_part_count: 0,
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
@@ -4973,6 +5194,7 @@ AwIDAQAB\n\
             page_size: 2,
             root_prefix: None,
             upload_part_size_bytes: 0,
+            upload_max_part_count: 0,
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
@@ -5005,6 +5227,7 @@ AwIDAQAB\n\
             page_size: 2,
             root_prefix: Some(root_prefix.to_string()),
             upload_part_size_bytes: 0,
+            upload_max_part_count: 0,
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
@@ -5035,6 +5258,7 @@ AwIDAQAB\n\
             page_size: 20,
             root_prefix: Some("ccbg-tests".to_string()),
             upload_part_size_bytes: 5,
+            upload_max_part_count: 0,
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
@@ -5065,6 +5289,7 @@ AwIDAQAB\n\
             page_size: 20,
             root_prefix: Some("ccbg-tests".to_string()),
             upload_part_size_bytes: 5,
+            upload_max_part_count: 0,
             max_single_upload_bytes: None,
             max_single_download_bytes: None,
             body_spool_dir: None,
@@ -6126,8 +6351,23 @@ AwIDAQAB\n\
         );
     }
 
+    #[test]
+    fn effective_upload_part_size_respects_max_part_count() {
+        let adapter = mock_telecom_adapter(
+            "http://127.0.0.1:1",
+            "browser-id-123",
+            "JSESSIONID=abc; COOKIE_LOGIN_USER=def",
+            None,
+        );
+        let size = 16 * 1024 * 1024 * 1024u64;
+        let part_size = adapter.effective_upload_part_size_bytes(size, None);
+        let part_count = size.div_ceil(part_size);
+        assert!(part_count <= crate::DEFAULT_UPLOAD_MAX_PART_COUNT);
+        assert!(part_size > adapter.upload_part_size_bytes());
+    }
+
     #[tokio::test]
-    async fn put_object_streams_to_spool_and_uploads_telecom_parts() {
+    async fn put_object_streams_request_body_and_uploads_telecom_parts() {
         let server = MockUploadServer::start().await;
         let spool_stats = Arc::new(Mutex::new(MockSpoolStats::default()));
         let adapter = mock_upload_adapter(&server.base_url, Arc::clone(&spool_stats));
@@ -6201,8 +6441,8 @@ AwIDAQAB\n\
         let spool_stats = spool_stats.lock().expect("spool stats poisoned");
         assert_eq!(spool_stats.active_files, 0);
         assert_eq!(spool_stats.active_bytes, 0);
-        assert_eq!(spool_stats.peak_files, 1);
-        assert_eq!(spool_stats.peak_bytes, 11);
+        assert_eq!(spool_stats.peak_files, 0);
+        assert_eq!(spool_stats.peak_bytes, 0);
     }
 
     #[tokio::test]

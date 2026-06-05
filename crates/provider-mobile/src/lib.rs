@@ -16,9 +16,9 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use blob_core::{
     BackendCapabilities, BlobBackend, BlobError, BodySpoolLease, BrowserRequestProfile,
-    ContainerInfo, CopyObjectRequest, HealthStatus, ListObjectsRequest, MoveObjectRequest,
-    ObjectBody, ObjectInfo, ObjectPayload, OutboundIpFamily, PutObjectRequest, PutObjectResult,
-    RenameObjectRequest, ServiceHealth, SharedBodySpoolObserver, StorageCapacity,
+    BufferedObjectBodyReader, ContainerInfo, CopyObjectRequest, HealthStatus, ListObjectsRequest,
+    MoveObjectRequest, ObjectBody, ObjectInfo, ObjectPayload, OutboundIpFamily, PutObjectRequest,
+    PutObjectResult, RenameObjectRequest, ServiceHealth, SharedBodySpoolObserver, StorageCapacity,
     StorageScopeHealth, StorageScopeKind, StreamFirstProgressObserver, TokenSource,
 };
 use futures_util::StreamExt;
@@ -200,11 +200,16 @@ struct MobileMetadataActionResponse {
 }
 
 #[derive(Debug)]
-struct PreparedMobileUpload {
-    spool_file: NamedTempFile,
+struct MobileUploadDescriptor {
     size: u64,
     content_hash: String,
     part_size_bytes: u64,
+}
+
+#[derive(Debug)]
+struct PreparedMobileUpload {
+    descriptor: MobileUploadDescriptor,
+    spool_file: NamedTempFile,
     _spool_lease: Option<Box<dyn BodySpoolLease>>,
 }
 
@@ -340,7 +345,7 @@ impl MobileBlobAdapter {
             return configured;
         }
         let min_part_size_for_count = size.div_ceil(self.upload_max_part_count());
-        configured.max(min_part_size_for_count)
+        round_up_to_multiple(configured.max(min_part_size_for_count), configured)
     }
 
     fn normalized_root_prefix(&self) -> Option<String> {
@@ -610,10 +615,12 @@ impl MobileBlobAdapter {
         }
         .max(1);
         Ok(PreparedMobileUpload {
+            descriptor: MobileUploadDescriptor {
+                size: total_len,
+                content_hash: hex::encode(hasher.finalize()),
+                part_size_bytes,
+            },
             spool_file,
-            size: total_len,
-            content_hash: hex::encode(hasher.finalize()),
-            part_size_bytes,
             _spool_lease: spool_lease,
         })
     }
@@ -654,7 +661,7 @@ impl MobileBlobAdapter {
         file_name: &str,
         parent_file_id: &str,
         content_type: &str,
-        upload: &PreparedMobileUpload,
+        upload: &MobileUploadDescriptor,
     ) -> Value {
         let mut body = capability.body_defaults.clone();
         body.insert("name".to_string(), Value::String(file_name.to_string()));
@@ -715,7 +722,7 @@ impl MobileBlobAdapter {
         file_name: &str,
         parent_file_id: &str,
         content_type: &str,
-        upload: &PreparedMobileUpload,
+        upload: &MobileUploadDescriptor,
     ) -> Result<MobileUploadPlan, BlobError> {
         let capability = self.native_capability("file_create")?;
         let body = self.build_file_create_body(
@@ -797,7 +804,7 @@ impl MobileBlobAdapter {
         if plan.rapid_upload {
             return Ok(None);
         }
-        if plan.part_infos.is_empty() && upload.size > 0 {
+        if plan.part_infos.is_empty() && upload.descriptor.size > 0 {
             return Err(BlobError::Upstream(
                 "China Mobile upload plan returned no part upload instructions".to_string(),
             ));
@@ -814,9 +821,10 @@ impl MobileBlobAdapter {
             let part_number = part._part_number.unwrap_or((index + 1) as u32);
             let part_size = part.part_size.unwrap_or_else(|| {
                 upload
+                    .descriptor
                     .size
                     .saturating_sub(part_offset)
-                    .min(upload.part_size_bytes)
+                    .min(upload.descriptor.part_size_bytes)
             });
             let async_file = upload.spool_file.reopen().map_err(|error| {
                 BlobError::Upstream(format!(
@@ -876,34 +884,15 @@ impl MobileBlobAdapter {
                     },
                 ))
             };
-            let response = self
-                .client
-                .request(Method::PUT, upload_url.as_str())
-                .header("content-length", part_size.to_string())
-                .body(part_body)
-                .timeout(self.timeout())
-                .send()
-                .await
-                .map_err(|error| {
-                    BlobError::Upstream(format!("China Mobile part upload failed: {error}"))
-                })?;
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response
-                    .text()
-                    .await
-                    .unwrap_or_else(|error| format!("<failed to read body: {error}>"));
-                return Err(BlobError::Upstream(format!(
-                    "China Mobile part upload failed with HTTP {status}: {body}"
-                )));
-            }
+            self.upload_mobile_part_bytes(upload_url.as_str(), part_size, part_body)
+                .await?;
             part_offset = part_offset.saturating_add(part_size);
         }
 
-        if part_offset < upload.size {
+        if part_offset < upload.descriptor.size {
             return Err(BlobError::Upstream(format!(
                 "China Mobile upload plan covered only {part_offset} of {} bytes",
-                upload.size
+                upload.descriptor.size
             )));
         }
         Ok(match first_upload_progress_ms.load(Ordering::SeqCst) {
@@ -912,10 +901,127 @@ impl MobileBlobAdapter {
         })
     }
 
+    async fn upload_mobile_part_bytes(
+        &self,
+        upload_url: &str,
+        part_size: u64,
+        part_body: reqwest::Body,
+    ) -> Result<(), BlobError> {
+        let response = self
+            .client
+            .request(Method::PUT, upload_url)
+            .header("content-length", part_size.to_string())
+            .body(part_body)
+            .timeout(self.timeout())
+            .send()
+            .await
+            .map_err(|error| {
+                BlobError::Upstream(format!("China Mobile part upload failed: {error}"))
+            })?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("<failed to read body: {error}>"));
+            return Err(BlobError::Upstream(format!(
+                "China Mobile part upload failed with HTTP {status}: {body}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn upload_mobile_parts_streaming(
+        &self,
+        upload_started_at: Instant,
+        body: ObjectBody,
+        upload: &MobileUploadDescriptor,
+        plan: &MobileUploadPlan,
+    ) -> Result<Option<u64>, BlobError> {
+        if plan.rapid_upload {
+            return Ok(None);
+        }
+        if plan.part_infos.is_empty() && upload.size > 0 {
+            return Err(BlobError::Upstream(
+                "China Mobile upload plan returned no part upload instructions".to_string(),
+            ));
+        }
+
+        let first_upload_progress_ms = Arc::new(AtomicU64::new(0));
+        let progress_observer = StreamFirstProgressObserver::new({
+            let first_upload_progress_ms = Arc::clone(&first_upload_progress_ms);
+            move || {
+                first_upload_progress_ms
+                    .store(elapsed_millis(upload_started_at).max(1), Ordering::SeqCst);
+            }
+        });
+        let mut reader =
+            BufferedObjectBodyReader::new(body.observe_first_progress(progress_observer));
+        let mut part_offset = 0u64;
+
+        for (index, part) in plan.part_infos.iter().enumerate() {
+            let upload_url = ensure_present_string(
+                part.upload_url.clone(),
+                "China Mobile upload part uploadUrl",
+            )?;
+            let part_number = part._part_number.unwrap_or((index + 1) as u32);
+            let part_size = part.part_size.unwrap_or_else(|| {
+                upload
+                    .size
+                    .saturating_sub(part_offset)
+                    .min(upload.part_size_bytes)
+            });
+            let part_bytes = reader
+                .read_part(
+                    part_size,
+                    &format!("China Mobile request body for part {part_number}"),
+                )
+                .await?;
+            self.upload_mobile_part_bytes(
+                upload_url.as_str(),
+                part_size,
+                reqwest::Body::from(part_bytes),
+            )
+            .await?;
+            part_offset = part_offset.saturating_add(part_size);
+        }
+
+        if part_offset < upload.size {
+            return Err(BlobError::BodyStream(format!(
+                "China Mobile request body ended after {part_offset} of {} bytes",
+                upload.size
+            )));
+        }
+        reader.ensure_exhausted("China Mobile request body").await?;
+        Ok(match first_upload_progress_ms.load(Ordering::SeqCst) {
+            0 => None,
+            value => Some(value),
+        })
+    }
+
+    async fn drain_streaming_body(
+        &self,
+        body: ObjectBody,
+        expected_size: u64,
+    ) -> Result<(), BlobError> {
+        let mut stream = body.into_stream();
+        let mut observed = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            observed = observed.saturating_add(chunk.len() as u64);
+        }
+        if observed != expected_size {
+            return Err(BlobError::BodyStream(format!(
+                "China Mobile request body size mismatch: expected {expected_size} bytes, observed {observed}"
+            )));
+        }
+        Ok(())
+    }
+
     async fn complete_mobile_upload(
         &self,
         plan: &MobileUploadPlan,
-        upload: &PreparedMobileUpload,
+        upload: &MobileUploadDescriptor,
     ) -> Result<MobileFileCompleteData, BlobError> {
         let upload_id = plan.upload_id.clone().ok_or_else(|| {
             BlobError::Upstream(
@@ -1894,48 +2000,109 @@ impl BlobBackend for MobileBlobAdapter {
     }
 
     async fn put_object(&self, request: PutObjectRequest) -> Result<PutObjectResult, BlobError> {
+        let PutObjectRequest {
+            container,
+            key,
+            body,
+            size,
+            content_type,
+            preferred_upload_part_size_bytes,
+        } = request;
+        let known_content_sha256_hex = body.known_content_sha256_hex().map(ToString::to_string);
+
         let (parent_file_id, file_name) = self
-            .ensure_managed_parent_folder_id(&request.container, &request.key)
+            .ensure_managed_parent_folder_id(&container, &key)
             .await?;
-        let content_type = request
-            .content_type
-            .clone()
+        let content_type = content_type
             .or_else(|| guess_content_type(file_name.as_str()).map(str::to_string))
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let upload = self
-            .prepare_upload_body(
-                request.body,
-                request.size,
-                request.preferred_upload_part_size_bytes,
-            )
-            .await?;
+
+        let streaming_upload = match (size, known_content_sha256_hex) {
+            (Some(size), Some(content_hash)) => Some(MobileUploadDescriptor {
+                size,
+                content_hash,
+                part_size_bytes: preferred_upload_part_size_bytes
+                    .filter(|value| *value > 0)
+                    .map(|preferred| {
+                        round_up_to_multiple(
+                            preferred.max(size.div_ceil(self.upload_max_part_count())),
+                            preferred,
+                        )
+                    })
+                    .unwrap_or_else(|| self.effective_upload_part_size_bytes(size))
+                    .max(1),
+            }),
+            _ => None,
+        };
+
         let create_started_at = Instant::now();
-        let plan = self
-            .create_mobile_upload(
-                file_name.as_str(),
-                parent_file_id.as_str(),
-                content_type.as_str(),
-                &upload,
+        let (first_response_latency_ms, etag) = if let Some(upload) = streaming_upload {
+            let plan = self
+                .create_mobile_upload(
+                    file_name.as_str(),
+                    parent_file_id.as_str(),
+                    content_type.as_str(),
+                    &upload,
+                )
+                .await?;
+            let create_latency_ms = elapsed_millis(create_started_at);
+            if plan.rapid_upload {
+                self.drain_streaming_body(body, upload.size).await?;
+                return Ok(PutObjectResult {
+                    etag: Some(plan.file_id),
+                    first_response_latency_ms: Some(create_latency_ms),
+                });
+            }
+            let upload_started_at = Instant::now();
+            let first_response_latency_ms = self
+                .upload_mobile_parts_streaming(upload_started_at, body, &upload, &plan)
+                .await?
+                .or(Some(elapsed_millis(upload_started_at).max(1)));
+            let completed = self.complete_mobile_upload(&plan, &upload).await?;
+            (
+                first_response_latency_ms,
+                completed
+                    .content_hash
+                    .or(Some(upload.content_hash.clone()))
+                    .or(Some(plan.file_id.clone())),
             )
-            .await?;
-        let create_latency_ms = elapsed_millis(create_started_at);
-        if plan.rapid_upload {
-            return Ok(PutObjectResult {
-                etag: Some(plan.file_id),
-                first_response_latency_ms: Some(create_latency_ms),
-            });
-        }
-        let upload_started_at = Instant::now();
-        let first_response_latency_ms = self
-            .upload_mobile_parts(upload_started_at, &upload, &plan)
-            .await?
-            .or(Some(elapsed_millis(upload_started_at).max(1)));
-        let completed = self.complete_mobile_upload(&plan, &upload).await?;
+        } else {
+            let upload = self
+                .prepare_upload_body(body, size, preferred_upload_part_size_bytes)
+                .await?;
+            let plan = self
+                .create_mobile_upload(
+                    file_name.as_str(),
+                    parent_file_id.as_str(),
+                    content_type.as_str(),
+                    &upload.descriptor,
+                )
+                .await?;
+            let create_latency_ms = elapsed_millis(create_started_at);
+            if plan.rapid_upload {
+                return Ok(PutObjectResult {
+                    etag: Some(plan.file_id),
+                    first_response_latency_ms: Some(create_latency_ms),
+                });
+            }
+            let upload_started_at = Instant::now();
+            let first_response_latency_ms = self
+                .upload_mobile_parts(upload_started_at, &upload, &plan)
+                .await?
+                .or(Some(elapsed_millis(upload_started_at).max(1)));
+            let completed = self
+                .complete_mobile_upload(&plan, &upload.descriptor)
+                .await?;
+            (
+                first_response_latency_ms,
+                completed
+                    .content_hash
+                    .or(Some(upload.descriptor.content_hash.clone()))
+                    .or(Some(plan.file_id.clone())),
+            )
+        };
         Ok(PutObjectResult {
-            etag: completed
-                .content_hash
-                .or(Some(upload.content_hash.clone()))
-                .or(Some(plan.file_id)),
+            etag,
             first_response_latency_ms,
         })
     }
@@ -2309,6 +2476,13 @@ fn trim_objects_to_limit(objects: &mut BTreeMap<String, ObjectInfo>, limit: usiz
     for key in to_remove {
         objects.remove(key.as_str());
     }
+}
+
+fn round_up_to_multiple(value: u64, quantum: u64) -> u64 {
+    if quantum <= 1 {
+        return value.max(1);
+    }
+    value.div_ceil(quantum).saturating_mul(quantum).max(quantum)
 }
 
 fn normalize_timestamp(raw: &str) -> String {
@@ -2987,7 +3161,7 @@ mod tests {
         let size = 2 * 1024 * 1024 * 1024u64;
         let part_size = adapter.effective_upload_part_size_bytes(size);
         let parts = MobileBlobAdapter::upload_part_infos(size, part_size);
-        assert_eq!(parts.len() as u64, DEFAULT_MOBILE_UPLOAD_MAX_PART_COUNT);
+        assert!(parts.len() as u64 <= DEFAULT_MOBILE_UPLOAD_MAX_PART_COUNT);
         assert!(part_size > adapter.upload_part_size_bytes());
     }
 
@@ -3759,6 +3933,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_object_streams_mobile_parts_without_local_spool_when_hash_is_known() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile streaming upload server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile streaming upload local addr");
+        let base_url = format!("http://{address}");
+
+        let upload_state = MockMobileUploadState {
+            base_url: base_url.clone(),
+            items_by_parent: BTreeMap::from([(
+                "/".to_string(),
+                vec![sample_folder_item("folder-root", "root")],
+            )]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
+            complete_requests: Arc::new(Mutex::new(Vec::new())),
+            upload_parts: Arc::new(Mutex::new(Vec::new())),
+            rapid_upload: false,
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_upload))
+            .route("/hcy/file/create", post(mock_file_create_upload))
+            .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/upload/{part_number}", put(mock_upload_part))
+            .with_state(Arc::new(upload_state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile streaming upload server");
+        });
+
+        let catalog = write_mobile_upload_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        let spool_stats = Arc::new(Mutex::new(MockSpoolStats::default()));
+        config.upload_part_size_bytes = 5;
+        config.root_prefix = None;
+        config.body_spool_observer = Some(Arc::new(MockSpoolObserver {
+            stats: Arc::clone(&spool_stats),
+        }));
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let request = PutObjectRequest {
+            container: MOBILE_ROOT_CONTAINER.to_string(),
+            key: "probe-streaming.bin".to_string(),
+            body: ObjectBody::from_stream(stream::iter([
+                Ok(Bytes::from_static(b"hello ")),
+                Ok(Bytes::from_static(b"world")),
+            ]))
+            .with_known_content_sha256_hex(
+                "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
+            ),
+            size: Some(11),
+            content_type: Some("application/octet-stream".to_string()),
+            preferred_upload_part_size_bytes: None,
+        };
+        let result = adapter.put_object(request).await.expect("put object");
+        assert!(result.first_response_latency_ms.is_some());
+        assert!(result.etag.is_some());
+
+        let mut uploaded_parts = upload_state
+            .upload_parts
+            .lock()
+            .expect("upload parts poisoned")
+            .clone();
+        uploaded_parts.sort_by_key(|(part_number, _)| *part_number);
+        let uploaded_bodies = uploaded_parts
+            .into_iter()
+            .map(|(_, body)| body)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uploaded_bodies,
+            vec![
+                Bytes::from_static(b"hello"),
+                Bytes::from_static(b" worl"),
+                Bytes::from_static(b"d"),
+            ]
+        );
+
+        let create_requests = upload_state
+            .create_requests
+            .lock()
+            .expect("create requests poisoned")
+            .clone();
+        assert_eq!(
+            create_requests[0]
+                .get("contentHash")
+                .and_then(Value::as_str),
+            Some("b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9")
+        );
+
+        let spool_stats = spool_stats.lock().expect("spool stats poisoned");
+        assert_eq!(spool_stats.active_files, 0);
+        assert_eq!(spool_stats.active_bytes, 0);
+        assert_eq!(spool_stats.peak_files, 0);
+        assert_eq!(spool_stats.peak_bytes, 0);
+    }
+
+    #[tokio::test]
     async fn put_object_treats_rapid_upload_as_success_without_complete() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -3793,7 +4068,11 @@ mod tests {
 
         let catalog = write_mobile_upload_capability_catalog(base_url.as_str());
         let mut config = sample_config();
+        let spool_stats = Arc::new(Mutex::new(MockSpoolStats::default()));
         config.root_prefix = None;
+        config.body_spool_observer = Some(Arc::new(MockSpoolObserver {
+            stats: Arc::clone(&spool_stats),
+        }));
         config.native_capability_catalog_path =
             Some(catalog.path().to_str().expect("catalog path").to_string());
         let adapter = MobileBlobAdapter::new(config).expect("adapter");
@@ -3801,7 +4080,12 @@ mod tests {
         let request = PutObjectRequest {
             container: MOBILE_ROOT_CONTAINER.to_string(),
             key: "rapid.bin".to_string(),
-            body: ObjectBody::from_bytes(Bytes::from_static(b"rapid-upload-probe")),
+            body: ObjectBody::from_stream(stream::iter([Ok(Bytes::from_static(
+                b"rapid-upload-probe",
+            ))]))
+            .with_known_content_sha256_hex(
+                "7cd968ab8a84b09209d3ab462881a18ebf5f88b924c78411d5d4ade42588be48",
+            ),
             size: Some(18),
             content_type: Some("application/octet-stream".to_string()),
             preferred_upload_part_size_bytes: None,
@@ -3822,6 +4106,11 @@ mod tests {
             .lock()
             .expect("complete requests poisoned");
         assert!(complete_requests.is_empty());
+        drop(complete_requests);
+
+        let spool_stats = spool_stats.lock().expect("spool stats poisoned");
+        assert_eq!(spool_stats.peak_files, 0);
+        assert_eq!(spool_stats.peak_bytes, 0);
     }
 
     #[tokio::test]

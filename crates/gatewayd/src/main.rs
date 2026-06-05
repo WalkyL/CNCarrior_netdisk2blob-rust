@@ -214,7 +214,7 @@ const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust";
 const CCBG_RELEASE_CHANNEL: &str = "commercial-core";
 const CCBG_RELEASE_DATE: &str = "2026-06-03";
-const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.3-walky-20260604-prep";
+const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.4-walky-20260605";
 const DEFAULT_RELEASE_FINGERPRINT_SHA256: &str =
     "470c967d46bc7bd43a06f2e655d1a911e5394e0fdbeac1858514576aae40edcb";
 
@@ -16399,6 +16399,7 @@ fn build_backend(
                     "CCBG_TELECOM_UPLOAD_PART_SIZE_BYTES",
                     10 * 1024 * 1024,
                 ),
+                upload_max_part_count: env_u64("CCBG_TELECOM_UPLOAD_MAX_PART_COUNT", 1_000),
                 max_single_upload_bytes: env_byte_size_limit(
                     "CCBG_TELECOM_MAX_SINGLE_UPLOAD_BYTES",
                 )?,
@@ -17085,11 +17086,10 @@ async fn list_objects_from_home_providers(
     Ok(objects)
 }
 
-fn request_body_limit_bytes(config: &AppConfig) -> usize {
-    match usize::try_from(config.max_spooled_object_bytes) {
-        Ok(limit) if limit > 0 => config.max_in_memory_object_bytes.max(limit),
-        _ => config.max_in_memory_object_bytes,
-    }
+fn request_body_limit_bytes(_config: &AppConfig) -> usize {
+    // Route-level body caps must not block large streaming uploads before per-handler
+    // auth, size, and backend-path checks run.
+    usize::MAX
 }
 
 fn ensure_object_within_in_memory_limit(config: &AppConfig, size: u64) -> Result<(), S3Error> {
@@ -17166,21 +17166,127 @@ impl SpooledRequestBody {
     }
 }
 
+#[derive(Clone, Debug)]
+struct StreamingPayloadHashValidation {
+    expected_sha256_hex: String,
+    observed_sha256_hex: Arc<Mutex<Option<String>>>,
+}
+
+impl StreamingPayloadHashValidation {
+    fn new(expected_sha256_hex: impl Into<String>) -> Self {
+        Self {
+            expected_sha256_hex: expected_sha256_hex.into(),
+            observed_sha256_hex: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn finish(&self, observed_sha256_hex: String) {
+        *self
+            .observed_sha256_hex
+            .lock()
+            .expect("streaming payload hash validation state poisoned") = Some(observed_sha256_hex);
+    }
+
+    fn ensure_matched(&self) -> Result<(), S3Error> {
+        let observed_sha256_hex = self
+            .observed_sha256_hex
+            .lock()
+            .expect("streaming payload hash validation state poisoned")
+            .clone()
+            .ok_or_else(|| {
+                S3Error::internal_error(
+                    "streaming signed upload finished before request-body hash validation completed",
+                )
+            })?;
+        if observed_sha256_hex == self.expected_sha256_hex {
+            Ok(())
+        } else {
+            Err(S3Error::signature_mismatch(
+                "x-amz-content-sha256 does not match the request body.",
+            ))
+        }
+    }
+}
+
 enum PreparedPutRequestBody {
-    Plain(ObjectBody),
+    Plain {
+        body: ObjectBody,
+        validation: Option<StreamingPayloadHashValidation>,
+    },
     Spooled(SpooledRequestBody),
 }
 
 impl PreparedPutRequestBody {
-    fn into_object_body(self, state: &AppState, provider: &str) -> ObjectBody {
+    fn plain(body: ObjectBody) -> Self {
+        Self::Plain {
+            body,
+            validation: None,
+        }
+    }
+
+    fn validated(body: ObjectBody, validation: StreamingPayloadHashValidation) -> Self {
+        Self::Plain {
+            body,
+            validation: Some(validation),
+        }
+    }
+
+    fn into_parts(
+        self,
+        state: &AppState,
+        provider: &str,
+    ) -> (ObjectBody, Option<StreamingPayloadHashValidation>) {
         match self {
-            Self::Plain(body) => body,
+            Self::Plain { body, validation } => (body, validation),
             Self::Spooled(mut body) => {
                 body.attach_provider_tracking(&state.provider_resource_stats, provider);
-                body.into_object_body(state.config.spooled_body_chunk_bytes)
+                (
+                    body.into_object_body(state.config.spooled_body_chunk_bytes),
+                    None,
+                )
             }
         }
     }
+}
+
+fn streaming_verified_request_body(
+    state: &AppState,
+    body: Body,
+    expected_sha256_hex: &str,
+) -> (ObjectBody, StreamingPayloadHashValidation) {
+    let validation = StreamingPayloadHashValidation::new(expected_sha256_hex.to_string());
+    let stream_validation = validation.clone();
+    let data_plane_stats = state.data_plane_stats.clone();
+    let stream = stream::try_unfold(
+        (
+            body.into_data_stream(),
+            Sha256::new(),
+            stream_validation,
+            data_plane_stats,
+        ),
+        |(mut body_stream, mut hasher, validation, data_plane_stats)| async move {
+            match body_stream.next().await {
+                Some(chunk) => {
+                    let chunk = chunk.map_err(|error| BlobError::BodyStream(error.to_string()))?;
+                    hasher.update(&chunk);
+                    data_plane_stats.record_bytes_in(chunk.len() as u64);
+                    Ok(Some((
+                        chunk,
+                        (body_stream, hasher, validation, data_plane_stats),
+                    )))
+                }
+                None => {
+                    validation.finish(hex::encode(hasher.finalize()));
+                    Ok(None)
+                }
+            }
+        },
+    );
+    (
+        ObjectBody::from_stream(stream)
+            .with_known_content_sha256_hex(expected_sha256_hex.to_string()),
+        validation,
+    )
 }
 
 struct PutEncryptionPlan {
@@ -27501,7 +27607,9 @@ fn drop_unreferenced_encryption_profiles_with_missing_keys(
         }
         match load_managed_encryption_key_record_from_credentials_dir(credentials_dir, key_id) {
             Ok(_) => retained.push(profile),
-            Err(BlobError::NotFound(_)) if !referenced_profile_ids.contains(profile.id.as_str()) => {
+            Err(BlobError::NotFound(_))
+                if !referenced_profile_ids.contains(profile.id.as_str()) =>
+            {
                 tracing::warn!(
                     profile_id = profile.id.as_str(),
                     key_id,
@@ -29422,7 +29530,7 @@ async fn execute_put_upload(
     let _write_operation = state
         .provider_resource_stats
         .start_operation(home_provider.as_str(), ProviderResourceOperationKind::Write);
-    let source_body = request_body.into_object_body(state, home_provider.as_str());
+    let (source_body, payload_validation) = request_body.into_parts(state, home_provider.as_str());
     let upload_body = match encryption_plan.as_ref() {
         Some(plan) => encrypt_upload(source_body, plan.request.clone(), plan.key_encryption_key)
             .map(|encrypted| encrypted.body)
@@ -29463,6 +29571,32 @@ async fn execute_put_upload(
             );
             map_backend_error_to_s3(error)
         })?;
+    if let Some(validation) = payload_validation {
+        if let Err(error) = validation.ensure_matched() {
+            state.provider_io_stats.record_failure(
+                home_provider.as_str(),
+                ProviderIoOperationKind::Write,
+                &error.message,
+            );
+            restore_previous_object_write_state(
+                state,
+                &bucket,
+                &key,
+                previous_placement,
+                previous_logical.clone(),
+            );
+            if let Err(cleanup_error) = home_backend.delete_object(&bucket, &key).await {
+                warn!(
+                    bucket = %bucket,
+                    key = %key,
+                    provider = home_provider.as_str(),
+                    error = %cleanup_error,
+                    "failed to delete uploaded object after request-body hash mismatch"
+                );
+            }
+            return Err(error);
+        }
+    }
     state.provider_io_stats.record_success_with_response(
         home_provider.as_str(),
         ProviderIoOperationKind::Write,
@@ -29897,7 +30031,7 @@ async fn put_object(
                 "UNSIGNED-PAYLOAD uploads must include a valid Content-Length header.",
             )
         })?;
-        let request_body = PreparedPutRequestBody::Plain(ObjectBody::from_stream(
+        let request_body = PreparedPutRequestBody::plain(ObjectBody::from_stream(
             body.into_data_stream()
                 .map_ok({
                     let data_plane_stats = state.data_plane_stats.clone();
@@ -29938,8 +30072,29 @@ async fn put_object(
             (
                 application,
                 body.len() as u64,
-                PreparedPutRequestBody::Plain(body.into()),
+                PreparedPutRequestBody::plain(body.into()),
                 ProviderWritePathKind::InMemory,
+            )
+        } else if let Some(body_len) = content_length {
+            let application = authorize_s3_with_verified_payload_hash(
+                &state,
+                &method,
+                &uri,
+                &headers,
+                &payload_hash,
+            )?;
+            ensure_s3_application_permission(
+                &application,
+                S3ActionKind::WriteObject,
+                Some(&bucket),
+                Some(&key),
+            )?;
+            let (body, validation) = streaming_verified_request_body(&state, body, &payload_hash);
+            (
+                application,
+                body_len,
+                PreparedPutRequestBody::validated(body, validation),
+                ProviderWritePathKind::Streaming,
             )
         } else {
             let spooled = spool_signed_request_body(&state, body, content_length).await?;
@@ -30745,7 +30900,7 @@ async fn complete_multipart_upload(
         application,
         plaintext_size,
         session.content_type,
-        PreparedPutRequestBody::Plain(multipart_body),
+        PreparedPutRequestBody::plain(multipart_body),
         ProviderWritePathKind::Spooled,
     )
     .await?;
@@ -32937,7 +33092,7 @@ mod tests {
     #[test]
     fn gateway_version_text_exposes_release_provenance() {
         let text = gateway_version_text();
-        assert!(text.contains("gatewayd 0.1.3"));
+        assert!(text.contains("gatewayd 0.1.4"));
         assert!(text.contains(DEFAULT_RELEASE_FINGERPRINT));
         assert!(text.contains(CCBG_LICENSE_ID));
         assert!(text.contains(CCBG_CANONICAL_REPO));
@@ -42231,7 +42386,7 @@ mod tests {
     async fn signed_payload_put_can_bypass_in_memory_limit_for_streaming_backend() {
         let mut state = test_state();
         Arc::make_mut(&mut state.config).max_in_memory_object_bytes = 8;
-        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 64;
+        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 12;
         Arc::make_mut(&mut state.config).spooled_body_chunk_bytes = 4;
         let telecom_backend: DynBackend =
             Arc::new(StreamingWriteStubBackend::new("telecom-stream"));
@@ -42272,6 +42427,11 @@ mod tests {
             .body(Body::from(body.clone()))
             .expect("request should build");
         request.headers_mut().extend(headers);
+        request.headers_mut().insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&body.len().to_string())
+                .expect("content length header should be valid"),
+        );
 
         let response = app
             .oneshot(request)
@@ -42284,11 +42444,11 @@ mod tests {
         assert_eq!(resource_snapshot.write.peak_in_flight, 1);
         assert_eq!(resource_snapshot.spool.active_files, 0);
         assert_eq!(resource_snapshot.spool.active_bytes, 0);
-        assert_eq!(resource_snapshot.spool.peak_files, 1);
-        assert_eq!(resource_snapshot.spool.peak_bytes, body.len() as u64);
-        assert_eq!(resource_snapshot.write_paths.spooled_count, 1);
+        assert_eq!(resource_snapshot.spool.peak_files, 0);
+        assert_eq!(resource_snapshot.spool.peak_bytes, 0);
+        assert_eq!(resource_snapshot.write_paths.spooled_count, 0);
         assert_eq!(resource_snapshot.write_paths.in_memory_count, 0);
-        assert_eq!(resource_snapshot.write_paths.streaming_count, 0);
+        assert_eq!(resource_snapshot.write_paths.streaming_count, 1);
 
         let placement = state
             .metadata_store
@@ -42311,6 +42471,94 @@ mod tests {
                 .as_ref(),
             body.as_ref()
         );
+    }
+
+    #[tokio::test]
+    async fn signed_payload_streaming_put_rolls_back_on_payload_hash_mismatch() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).max_in_memory_object_bytes = 8;
+        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 12;
+        let telecom_backend: DynBackend =
+            Arc::new(StreamingWriteStubBackend::new("telecom-stream"));
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend.clone());
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.high_speed_providers = vec![ProviderId::Telecom];
+            control_plane.write_targets = vec![ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferHighSpeed;
+        }
+
+        let app = Router::new()
+            .route("/{bucket}/{*key}", axum::routing::put(put_object))
+            .with_state(state.clone())
+            .layer(DefaultBodyLimit::max(request_body_limit_bytes(
+                &state.config,
+            )));
+
+        let bucket = "placeholder".to_string();
+        let key = "notes/stream-signed-mismatch.txt".to_string();
+        let body = Bytes::from_static(b"0123456789abcdef");
+        let signed_for = Bytes::from_static(b"fedcba9876543210");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &signed_for,
+            &[("content-type", "text/plain")],
+        );
+        let mut request = Request::builder()
+            .method(Method::PUT)
+            .uri(uri)
+            .body(Body::from(body.clone()))
+            .expect("request should build");
+        request.headers_mut().extend(headers);
+        request.headers_mut().insert(
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&body.len().to_string())
+                .expect("content length header should be valid"),
+        );
+
+        let response = app
+            .oneshot(request)
+            .await
+            .expect("router should return response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be valid utf-8");
+        assert!(response_body.contains("<Code>SignatureDoesNotMatch</Code>"));
+        assert!(response_body.contains("x-amz-content-sha256 does not match the request body."));
+
+        let resource_snapshot = state.provider_resource_stats.snapshot_provider("telecom");
+        assert_eq!(resource_snapshot.spool.peak_files, 0);
+        assert_eq!(resource_snapshot.write_paths.spooled_count, 0);
+        assert_eq!(resource_snapshot.write_paths.streaming_count, 1);
+
+        assert!(
+            state
+                .metadata_store
+                .object_placement(&bucket, &key)
+                .expect("placement query should succeed")
+                .is_none()
+        );
+        assert!(
+            load_logical_object_record(&state, &bucket, &key)
+                .expect("logical record query should succeed")
+                .is_none()
+        );
+        assert!(matches!(
+            telecom_backend.get_object(&bucket, &key).await,
+            Err(BlobError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
@@ -45108,11 +45356,7 @@ mod tests {
     async fn list_objects_v2_with_delimiter_supports_continuation_token() {
         let state = test_state();
         let backend = backend_for_test(&state, ProviderId::Stub);
-        for key in [
-            "alpha/a.txt",
-            "bravo/b.txt",
-            "charlie/c.txt",
-        ] {
+        for key in ["alpha/a.txt", "bravo/b.txt", "charlie/c.txt"] {
             backend
                 .put_object(PutObjectRequest {
                     container: "root".to_string(),
@@ -45154,9 +45398,10 @@ mod tests {
         assert!(first_xml.contains("<IsTruncated>true</IsTruncated>"));
         assert!(first_xml.contains("<NextContinuationToken>bravo/</NextContinuationToken>"));
 
-        let next_uri: Uri = "/root?list-type=2&delimiter=%2F&max-keys=2&continuation-token=bravo%2F"
-            .parse()
-            .expect("uri should parse");
+        let next_uri: Uri =
+            "/root?list-type=2&delimiter=%2F&max-keys=2&continuation-token=bravo%2F"
+                .parse()
+                .expect("uri should parse");
         let next_headers = signed_headers(&state.config, &Method::GET, &next_uri, &[], &[]);
         let next_response = list_objects_v2(
             State(state),
