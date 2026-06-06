@@ -73,7 +73,7 @@ CCBG_CHECK_NATIVE_PACKAGE_SMOKE=true scripts/check-release-ready.sh
 ## 本地发布物
 
 ```bash
-scripts/release-local.sh v0.1.6
+scripts/release-local.sh v0.1.7
 ```
 
 在 `.47` 上默认生成 LXC 包、`ccbg-checksums.txt`、`release-provenance.json` 和
@@ -88,7 +88,7 @@ Windows 和 OpenWrt 需要对应交叉编译工具链，按需打开：
 ```bash
 CCBG_RELEASE_BUILD_WINDOWS=true \
 CCBG_RELEASE_BUILD_OPENWRT=true \
-scripts/release-local.sh v0.1.6
+scripts/release-local.sh v0.1.7
 ```
 
 macOS `x86_64` / `arm64` 当前由 GitHub Actions macOS-only workflow 产出，并按社区/
@@ -97,7 +97,7 @@ macOS `x86_64` / `arm64` 当前由 GitHub Actions macOS-only workflow 产出，�
 
 ```bash
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \
-scripts/release-local.sh v0.1.6
+scripts/release-local.sh v0.1.7
 ```
 
 `CCBG_RELEASE_BUILD_MACOS=true` 现在不会默认在 `.47` 构建 macOS 包；除非已有文档记录的
@@ -107,7 +107,7 @@ scripts/release-local.sh v0.1.6
 如果确实需要把本地生成的资产上传到同一个 GitHub Release，显式打开：
 
 ```bash
-CCBG_RELEASE_UPLOAD_GITHUB=true scripts/release-local.sh v0.1.6
+CCBG_RELEASE_UPLOAD_GITHUB=true scripts/release-local.sh v0.1.7
 ```
 
 脚本会通过 `scripts/resolve-gh.sh` 查找 GitHub CLI；在 `.47` 上即使 Git Bash 默认

@@ -1170,7 +1170,7 @@ Copyright (c) 2026 walky
             <div class="top-status-runtime-brief-text">
               <div class="top-status-runtime-row top-status-runtime-brief-head">
                 <div class="top-status-runtime-brief-label" id="top-status-runtime-label">Gateway Runtime</div>
-                <div class="top-status-runtime-brief-inline" id="top-status-runtime-version">v0.1.6</div>
+                <div class="top-status-runtime-brief-inline" id="top-status-runtime-version">v0.1.7</div>
               </div>
               <div class="top-status-runtime-line" id="top-status-runtime-started">Started …</div>
               <div class="top-status-runtime-line" id="top-status-runtime-uptime">Uptime …</div>
@@ -12691,6 +12691,36 @@ Copyright (c) 2026 walky
       const latest = runtime?.upload_surface_latest || runtime?.upload_surface_after || runtime?.upload_surface_before;
       return latest && typeof latest === 'object' ? latest : null;
     }
+    function telecomUploadProbeCurrentUrl(runtime) {
+      return String(runtime?.current_url || '').trim();
+    }
+    function telecomUploadProbeOnPersonalPage(runtime) {
+      const currentUrl = telecomUploadProbeCurrentUrl(runtime).toLowerCase();
+      return currentUrl.startsWith('https://cloud.189.cn/web/main/file');
+    }
+    function telecomUploadProbeNeedsPageGuidance(runtime, summary) {
+      if (!telecomUploadProbeOnPersonalPage(runtime)) {
+        return true;
+      }
+      return summary?.installed !== true;
+    }
+    function telecomUploadProbePageGuidance(catalog, flowId, runtime, summary) {
+      const currentUrl = telecomUploadProbeCurrentUrl(runtime) || 'n/a';
+      const expectedUrl = 'https://cloud.189.cn/web/main/file/folder/-11';
+      const hookState = summary?.installed === true ? 'installed' : 'not installed';
+      return tr('auth.telecom.feedback.upload_probe_wrong_page', {
+        current_url: currentUrl,
+        expected_url: expectedUrl,
+        hook_state: hookState,
+      }, `Telecom upload probe is not attached to the personal file-list page yet. Current URL=${currentUrl}; expected ${expectedUrl}; hook=${hookState}. Open or keep a logged-in Telecom web tab in CDP, then click Probe Upload Surface again.`);
+    }
+    function telecomUploadProbeReadTargetSelector(catalog, flowId) {
+      const currentUrl = telecomUploadProbeCurrentUrl(telecomAuthAssistantState.session?.runtime || {});
+      if (currentUrl.toLowerCase().startsWith('https://cloud.189.cn/web/')) {
+        return `url:${currentUrl}`;
+      }
+      return browserFlowCatalogDefaultTargetSelector(catalog, flowId);
+    }
     function formatTelecomValidationSummary(runtime, options = {}) {
       const before = String(runtime?.send_code_text_before || '').trim();
       const after = String(runtime?.send_code_text_after || '').trim();
@@ -14569,8 +14599,9 @@ Copyright (c) 2026 walky
         const result = await runTelecomBrowserFlow(prepareUploadProbeFlowId, {}, {
           catalogPayload: catalog,
           browserEndpoints: browserFlowPreferredBrowserEndpoints(catalog, prepareUploadProbeFlowId, {
-            preserveConfiguredSelector: true,
+            preserveConfiguredSelector: false,
           }),
+          reuseSession: false,
         });
         if (!result) {
           return;
@@ -14580,6 +14611,10 @@ Copyright (c) 2026 walky
         const latestSurface = telecomUploadProbeLatestSurface(runtime);
         const controlCount = Array.isArray(latestSurface?.upload_controls) ? latestSurface.upload_controls.length : 0;
         const inputCount = Array.isArray(latestSurface?.file_inputs) ? latestSurface.file_inputs.length : 0;
+        if (telecomUploadProbeNeedsPageGuidance(runtime, summary)) {
+          setTelecomAuthAssistantFeedback(telecomUploadProbePageGuidance(catalog, prepareUploadProbeFlowId, runtime, summary), 'warn');
+          return;
+        }
         setTelecomAuthAssistantFeedback(tr('auth.telecom.feedback.upload_probe_done', {
           installed: summary.installed ? tr('common.yes', {}, 'yes') : tr('common.no', {}, 'no'),
           controls: controlCount,
@@ -14601,8 +14636,10 @@ Copyright (c) 2026 walky
         const result = await runTelecomBrowserFlow(captureUploadProbeStateFlowId, {}, {
           catalogPayload: catalog,
           browserEndpoints: browserFlowPreferredBrowserEndpoints(catalog, captureUploadProbeStateFlowId, {
-            preserveConfiguredSelector: true,
+            targetSelector: telecomUploadProbeReadTargetSelector(catalog, captureUploadProbeStateFlowId),
+            preserveConfiguredSelector: false,
           }),
+          reuseSession: false,
         });
         if (!result) {
           return;
@@ -14610,6 +14647,12 @@ Copyright (c) 2026 walky
         const runtime = telecomAuthAssistantState.session?.runtime || result.runtime || {};
         const summary = telecomUploadProbeSummary(runtime);
         const latestCandidate = runtime?.upload_probe_last_candidate_event || null;
+        if (summary.installed !== true) {
+          setTelecomAuthAssistantFeedback(tr('auth.telecom.feedback.probe_state_not_installed', {
+            current_url: telecomUploadProbeCurrentUrl(runtime) || 'n/a',
+          }, `No Telecom upload probe hook is installed on the selected live page yet. Current URL=${telecomUploadProbeCurrentUrl(runtime) || 'n/a'}. Click Probe Upload Surface first, then perform the upload action in that same CDP tab and read the state again.`), 'warn');
+          return;
+        }
         if (latestCandidate?.url) {
           setTelecomAuthAssistantFeedback(tr('auth.telecom.feedback.probe_state_last', {
             method: latestCandidate.method || 'UNKNOWN',

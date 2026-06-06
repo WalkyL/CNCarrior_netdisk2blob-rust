@@ -213,10 +213,10 @@ const CCBG_COPYRIGHT: &str = "Copyright (c) 2026 walky";
 const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust";
 const CCBG_RELEASE_CHANNEL: &str = "commercial-core";
-const CCBG_RELEASE_DATE: &str = "2026-06-06";
-const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.6-walky-20260606";
+const CCBG_RELEASE_DATE: &str = "2026-06-07";
+const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.7-walky-20260607";
 const DEFAULT_RELEASE_FINGERPRINT_SHA256: &str =
-    "884b3ace20f26e68cbbbbdf24967f0509372f35b706c11636ea3b44e3dca912c";
+    "8ba68a05c66276c9cffd3e79374130836818997140d6471375ec51e5e8114884";
 
 #[derive(Clone)]
 struct AppState {
@@ -33139,7 +33139,7 @@ mod tests {
     #[test]
     fn gateway_version_text_exposes_release_provenance() {
         let text = gateway_version_text();
-        assert!(text.contains("gatewayd 0.1.6"));
+        assert!(text.contains("gatewayd 0.1.7"));
         assert!(text.contains(DEFAULT_RELEASE_FINGERPRINT));
         assert!(text.contains(CCBG_LICENSE_ID));
         assert!(text.contains(CCBG_CANONICAL_REPO));
@@ -40336,7 +40336,7 @@ mod tests {
         assert!(html.contains("'Provider Size Probe': '云盘体积探测'"));
         assert!(html.contains("id=\"top-status-limits-details\""));
         assert!(html.contains("class=\"top-status-limit-item\""));
-        assert!(html.contains("class=\"top-status-limit-item-metrics\""));
+        assert!(html.contains("class=\"top-status-limit-item-inline-metrics\""));
         assert!(html.contains("class=\"top-status-limit-item-badge\""));
         assert!(html.contains("class=\"topbar-latency-table\""));
         assert!(html.contains("topbar.limits.detail.latest"));

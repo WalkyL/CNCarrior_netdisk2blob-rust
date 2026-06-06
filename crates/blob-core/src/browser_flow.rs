@@ -3341,9 +3341,14 @@ mod tests {
                 &BrowserFlowBindingContext::default(),
             )
             .expect("telecom prepare upload probe flow should bind");
-        assert_eq!(
-            prepare_plan.flow.prerequisite_flow_id.as_deref(),
-            Some("telecom_capture_current_session")
+        assert_eq!(prepare_plan.flow.start_page, "web_any");
+        assert!(prepare_plan.flow.prerequisite_flow_id.is_none());
+        assert!(
+            prepare_plan
+                .flow
+                .steps
+                .iter()
+                .any(|step| step.id() == "open-personal-space")
         );
         assert!(
             prepare_plan
