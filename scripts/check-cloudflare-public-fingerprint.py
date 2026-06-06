@@ -67,6 +67,8 @@ def required_fingerprint_files() -> list[str]:
         "_headers",
         "assets/app.js",
         "assets/app.js.map",
+        "data/faq-catalog.json",
+        "data/install-catalog.json",
         f"release-notes/v{version}-public.md",
         "README.md",
     ]

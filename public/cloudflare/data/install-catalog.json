@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "license": "LicenseRef-CCBG-Public-Materials",
-  "release_fingerprint": "ccbg-0.1.2-walky-20260603-bda37a712441fe32",
+  "release_fingerprint": "__CCBG_PUBLIC_RELEASE_FINGERPRINT__",
   "release_base_url": "https://carrier-disk-gateway.agi2030.online/downloads/latest",
   "support_note": "Official host packages are intended to run as a local resident gateway with S3 on 61080 and Admin Web on 61081.",
   "groups": [
