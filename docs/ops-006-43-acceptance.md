@@ -276,3 +276,89 @@ Verification caveat:
   `assets/app.js`, and `manifest.json` matched the staged asset SHA-256.
 - HTML pages should not be compared byte-for-byte on the production domain when Cloudflare
   injects challenge JavaScript; validate status, headers, and visible content instead.
+
+## 2026-06-07 v0.1.7 formal public release
+
+Release identity:
+
+- Tag: `v0.1.7`
+- Release commit: `2365723306b1315df3abfb99c212e02a0a075d24`
+- GitHub Release: `https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/tag/v0.1.7`
+- Runtime fingerprint: `ccbg-0.1.7-walky-20260607`
+- Runtime fingerprint SHA-256: `8ba68a05c66276c9cffd3e79374130836818997140d6471375ec51e5e8114884`
+- macOS-only GitHub Actions run: `27069966519`
+- macOS assets were downloaded back to `.47` and merged into `target/release-local/v0.1.7`.
+
+Local release gate:
+
+- `bash scripts/check-release-ready.sh` passed on `.47`.
+- `python scripts/check-cloudflare-public-fingerprint.py` now also requires
+  `data/install-catalog.json` and `data/faq-catalog.json` to contain the current release
+  fingerprint, after the first production smoke caught stale `0.1.2` catalog metadata.
+- Existing Rust warnings were observed but did not block the release gate.
+
+Release artifacts:
+
+```text
+517aff8fd15fff743bce80377c09fb6f132e7486ba0907b3925f0ba5b648d3c7 *ccbg-lxc-package.tar.gz
+adf85db00eb6df3b5dde15390a8ba8e736432e32f32279ced611028a6dcaeb29 *ccbg-lxc-package.tar.gz.sha256
+4144bd70101943f63ec726e164a5d5d2c1d88c28360e7001ff86769b7db59fe3 *ccbg-macos-arm64.tar.gz
+e159a21a6912a00a55fc74daf1e7ab893a953bd5c3321858b67c22fdbed3b49e *ccbg-macos-arm64.tar.gz.sha256
+ae19c345d5c697a9d56fe4b939ca40a6e143ac677f3f040bb3b4ba1bde612958 *ccbg-macos-x86_64.tar.gz
+733dea4d871664a093de1f4a5fa5b8120eadebcd5c8bc96f31cb57b19969f19b *ccbg-macos-x86_64.tar.gz.sha256
+9cfef5e6143af5dcde6bdebc6843a19839811c0b05a58ffa3a13ddd20524174a *ccbg-openwrt-lite.tar.gz
+c424bf3a7d628144f66db68bc9be0cb96f03706fb065851983144d5608a5ffd2 *ccbg-openwrt-lite.tar.gz.sha256
+021d2a9aa052d3e3b0bfcfcc8aef76fb78e6abd64850cbcbf4fbf1fbabf8f257 *ccbg-windows-x86_64.zip
+11c6712a4f18e08dcdd58c27c56c657ae1706a5d99fcd67086fba828a92bfd30 *ccbg-windows-x86_64.zip.sha256
+```
+
+Cloudflare deployment:
+
+- test R2 bucket: `ccbg-release-assets-test`
+- production R2 bucket: `ccbg-release-assets`
+- test Worker version ID: `e7291bbb-138f-4e8f-896f-ca208c6bb31f`
+- production Worker version ID: `6f1813dd-d191-4fe8-8704-426f4aaaf731`
+
+Production smoke:
+
+- `HEAD /` -> `200`, `x-ccbg-version=0.1.7`,
+  `x-ccbg-provenance=ccbg-0.1.7-walky-20260607`
+- `HEAD /install/` -> `200`, `x-ccbg-version=0.1.7`,
+  `x-ccbg-provenance=ccbg-0.1.7-walky-20260607`
+- `HEAD /data/install-catalog.json` -> `200`, `x-ccbg-version=0.1.7`,
+  `x-ccbg-provenance=ccbg-0.1.7-walky-20260607`
+- `HEAD /data/faq-catalog.json` -> `200`, `x-ccbg-version=0.1.7`,
+  `x-ccbg-provenance=ccbg-0.1.7-walky-20260607`
+- `GET /.well-known/ccbg-provenance.json` returned version `0.1.7` and fingerprint
+  `ccbg-0.1.7-walky-20260607`.
+- `GET /data/install-catalog.json` and `GET /data/faq-catalog.json` both returned
+  `release_fingerprint=ccbg-0.1.7-walky-20260607`.
+- `HEAD /downloads/latest/ccbg-lxc-package.tar.gz` -> `200`,
+  `content-length=8080537`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-windows-x86_64.zip` -> `200`,
+  `content-length=9528699`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-macos-x86_64.tar.gz` -> `200`,
+  `content-length=8764792`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-macos-arm64.tar.gz` -> `200`,
+  `content-length=8322637`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-openwrt-lite.tar.gz` -> `200`,
+  `content-length=9499350`, `x-ccbg-release-source=r2`
+- Full `curl` download and SHA check succeeded for `ccbg-lxc-package.tar.gz`.
+  Repeated full downloads of the larger Windows zip were too slow on the test link and timed out,
+  so final large-asset verification used HEAD length/source plus GitHub Release digest/local SHA.
+
+`.49` post-release update:
+
+- Deployed `target/release-local/v0.1.7/ccbg-lxc-package.tar.gz` to `192.168.1.49`
+  with `./ccbg-lxc-package/scripts/install.sh --enable-smb-sidecar`.
+- `/opt/ccbg/bin/gatewayd --version` returned `gatewayd 0.1.7` and fingerprint
+  `ccbg-0.1.7-walky-20260607`.
+- `ccbg.service` was active.
+- `curl http://127.0.0.1:61080/healthz` returned `mobile-cloud-drive` healthy.
+- Admin root returned `302` to `/login`, as expected without an Admin session.
+- SMB sidecar status was `running`, listener `0.0.0.0:445`, `listener_ready=true`,
+  `enabled_share_count=1`, `mounted_share_count=1`, and `last_error=null`.
+- `/dev/fuse` existed and `findmnt /mnt/ccbg/smb/mounts/root` showed a live
+  `fuse.rclone` mount.
+- Package `scripts/smoke.sh` exited non-zero because an authenticated Admin route returned `401`;
+  manual health/runtime checks above were used for the post-upgrade acceptance.

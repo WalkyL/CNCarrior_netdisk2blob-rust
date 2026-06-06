@@ -12,6 +12,15 @@
 
 当前最短执行路径见 [public-release-sop.md](public-release-sop.md)。
 
+最近完成的正式发版：
+
+- `v0.1.7` 于 2026-06-07 完成公网发布，release tag 指向
+  `2365723306b1315df3abfb99c212e02a0a075d24`。
+- `/downloads/latest/*` 已切到 Cloudflare R2 的 v0.1.7 资产，生产 Worker version ID 为
+  `6f1813dd-d191-4fe8-8704-426f4aaaf731`。
+- 完整验收记录见 [ops-006-43-acceptance.md](ops-006-43-acceptance.md) 的
+  `2026-06-07 v0.1.7 formal public release` 小节。
+
 ## 1. Release 产物
 
 - [x] Git 工作区干净
