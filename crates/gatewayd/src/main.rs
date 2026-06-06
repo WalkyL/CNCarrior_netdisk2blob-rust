@@ -11808,6 +11808,8 @@ fn provider_credential_lease_summary_from_health(
         ProviderId::Unicom => {
             joined_notes.contains("HTTP 401")
                 || joined_notes.contains("RSP_CODE=9999")
+                || joined_notes.contains("RSP_CODE=1001")
+                || joined_notes.contains("无效登录信息")
                 || joined_notes.contains("missing environment variable: CCBG_UNICOM_TOKEN")
                 || joined_notes.contains("inline token is empty")
         }
