@@ -37,6 +37,7 @@ use tempfile::{Builder as TempFileBuilder, NamedTempFile};
 use tokio::{
     fs::File as TokioFile,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom},
+    time::sleep,
 };
 
 const MOBILE_ROOT_CONTAINER: &str = "root";
@@ -128,6 +129,8 @@ struct MobileFileCreateData {
     upload_id: Option<String>,
     #[serde(rename = "rapidUpload", default)]
     rapid_upload: Option<bool>,
+    #[serde(default, alias = "exist")]
+    exists: Option<bool>,
     #[serde(
         rename = "partInfos",
         default,
@@ -599,12 +602,12 @@ impl MobileBlobAdapter {
                 lease.update_tracked_bytes(total_len);
             }
         }
-        if let Some(expected) = declared_size {
-            if expected != total_len {
-                return Err(BlobError::BodyStream(format!(
-                    "object body size mismatch: declared {expected} bytes, received {total_len}"
-                )));
-            }
+        if let Some(expected) = declared_size
+            && expected != total_len
+        {
+            return Err(BlobError::BodyStream(format!(
+                "object body size mismatch: declared {expected} bytes, received {total_len}"
+            )));
         }
         file.flush()
             .await
@@ -727,46 +730,92 @@ impl MobileBlobAdapter {
         content_type: &str,
         upload: &MobileUploadDescriptor,
     ) -> Result<MobileUploadPlan, BlobError> {
-        let capability = self.native_capability("file_create")?;
-        let body = self.build_file_create_body(
-            capability,
-            file_name,
-            parent_file_id,
-            content_type,
-            upload,
-        );
-        let response = self
-            .send_capability_json::<MobileFileCreateResponse>(
-                "file_create",
-                &body,
-                "China Mobile file/create",
-            )
+        let deleted_before_create = self
+            .delete_child_files_by_name(parent_file_id, file_name)
             .await?;
-        if !response.success {
-            return Err(BlobError::Upstream(format!(
-                "China Mobile file/create rejected the request: code={} message={}",
-                response.code.unwrap_or_else(|| "unknown".to_string()),
-                response.message.unwrap_or_else(|| "unknown".to_string())
-            )));
+        let mut retry_after_delete = false;
+        let mut create_retry_count = 0u8;
+        loop {
+            let capability = self.native_capability("file_create")?;
+            let body = self.build_file_create_body(
+                capability,
+                file_name,
+                parent_file_id,
+                content_type,
+                upload,
+            );
+            let response = self
+                .send_capability_json::<MobileFileCreateResponse>(
+                    "file_create",
+                    &body,
+                    "China Mobile file/create",
+                )
+                .await?;
+            if !response.success {
+                if deleted_before_create > 0
+                    && create_retry_count < 3
+                    && response.code.as_deref() == Some("04000010")
+                {
+                    create_retry_count += 1;
+                    sleep(Duration::from_millis(250 * u64::from(create_retry_count))).await;
+                    continue;
+                }
+                return Err(BlobError::Upstream(format!(
+                    "China Mobile file/create rejected the request: code={} message={}",
+                    response.code.unwrap_or_else(|| "unknown".to_string()),
+                    response.message.unwrap_or_else(|| "unknown".to_string())
+                )));
+            }
+            let data = response.data.ok_or_else(|| {
+                BlobError::Upstream("China Mobile file/create returned no data payload".to_string())
+            })?;
+            let rapid_upload = data.rapid_upload.unwrap_or(false);
+            let upload_id = data
+                .upload_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            if !rapid_upload && upload_id.is_none() && data.exists.unwrap_or(false) {
+                if retry_after_delete {
+                    if create_retry_count < 3 {
+                        create_retry_count += 1;
+                        sleep(Duration::from_millis(250 * u64::from(create_retry_count))).await;
+                        continue;
+                    }
+                    return Err(BlobError::Upstream(
+                        "China Mobile file/create reported an existing object without an uploadId even after deleting the old object and retrying".to_string(),
+                    ));
+                }
+                if self
+                    .delete_child_files_by_name(parent_file_id, file_name)
+                    .await?
+                    > 0
+                {
+                    retry_after_delete = true;
+                    continue;
+                }
+                if create_retry_count < 3 {
+                    create_retry_count += 1;
+                    sleep(Duration::from_millis(250 * u64::from(create_retry_count))).await;
+                    continue;
+                }
+            }
+            return Ok(MobileUploadPlan {
+                file_id: ensure_present_string(data.file_id, "China Mobile file/create fileId")?,
+                rapid_upload,
+                upload_id: if rapid_upload {
+                    upload_id
+                } else {
+                    Some(upload_id.ok_or_else(|| {
+                        BlobError::Upstream(
+                            "China Mobile file/create uploadId was missing".to_string(),
+                        )
+                    })?)
+                },
+                part_infos: data.part_infos,
+            });
         }
-        let data = response.data.ok_or_else(|| {
-            BlobError::Upstream("China Mobile file/create returned no data payload".to_string())
-        })?;
-        Ok(MobileUploadPlan {
-            file_id: ensure_present_string(data.file_id, "China Mobile file/create fileId")?,
-            rapid_upload: data.rapid_upload.unwrap_or(false),
-            upload_id: if data.rapid_upload.unwrap_or(false) {
-                data.upload_id
-                    .map(|value| value.trim().to_string())
-                    .filter(|value| !value.is_empty())
-            } else {
-                Some(ensure_present_string(
-                    data.upload_id,
-                    "China Mobile file/create uploadId",
-                )?)
-            },
-            part_infos: data.part_infos,
-        })
     }
 
     async fn get_mobile_upload_urls(
@@ -1176,6 +1225,61 @@ impl MobileBlobAdapter {
                 None => return Ok(None),
             }
         }
+    }
+
+    async fn find_child_file_ids(
+        &self,
+        parent_file_id: &str,
+        file_name: &str,
+    ) -> Result<Vec<String>, BlobError> {
+        let expected_name = file_name.trim();
+        if expected_name.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut page_cursor = None;
+        let mut file_ids = Vec::new();
+        loop {
+            let page = self
+                .list_page(parent_file_id, page_cursor.as_deref())
+                .await?;
+            for item in page.items {
+                if !item.is_folder() && item.display_name() == Some(expected_name) {
+                    file_ids.push(
+                        item.file_id()
+                            .ok_or_else(|| {
+                                BlobError::Upstream(
+                                    "China Mobile file/list returned a file without an id"
+                                        .to_string(),
+                                )
+                            })?
+                            .to_string(),
+                    );
+                }
+            }
+            match page
+                .next_page_cursor
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(cursor) => page_cursor = Some(cursor.to_string()),
+                None => return Ok(file_ids),
+            }
+        }
+    }
+
+    async fn delete_child_files_by_name(
+        &self,
+        parent_file_id: &str,
+        file_name: &str,
+    ) -> Result<usize, BlobError> {
+        let file_ids = self.find_child_file_ids(parent_file_id, file_name).await?;
+        let count = file_ids.len();
+        for file_id in file_ids {
+            self.delete_file_id(file_id.as_str()).await?;
+        }
+        Ok(count)
     }
 
     async fn ensure_folder(
@@ -3419,8 +3523,11 @@ mod tests {
         create_requests: Arc<Mutex<Vec<Value>>>,
         get_upload_url_requests: Arc<Mutex<Vec<Value>>>,
         complete_requests: Arc<Mutex<Vec<Value>>>,
+        delete_requests: Arc<Mutex<Vec<Value>>>,
         upload_parts: Arc<Mutex<Vec<(u32, Bytes)>>>,
         rapid_upload: bool,
+        create_existing_without_upload_id_once: bool,
+        create_call_count: Arc<Mutex<u32>>,
     }
 
     async fn mock_file_list_upload(
@@ -3456,6 +3563,13 @@ mod tests {
             .lock()
             .expect("create requests poisoned")
             .push(body.clone());
+        let mut create_call_count = state
+            .create_call_count
+            .lock()
+            .expect("create call count poisoned");
+        *create_call_count += 1;
+        let current_create_call = *create_call_count;
+        drop(create_call_count);
 
         let requested_parts = body
             .get("partInfos")
@@ -3476,6 +3590,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let rapid_upload = state.rapid_upload;
+        let existing_without_upload_id =
+            state.create_existing_without_upload_id_once && current_create_call == 1;
 
         Json(json!({
             "success": true,
@@ -3483,8 +3599,9 @@ mod tests {
             "message": "ok",
             "data": {
                 "fileId": "file-uploaded",
-                "uploadId": if rapid_upload { Value::Null } else { Value::String("upload-001".to_string()) },
+                "uploadId": if rapid_upload || existing_without_upload_id { Value::Null } else { Value::String("upload-001".to_string()) },
                 "rapidUpload": rapid_upload,
+                "exist": existing_without_upload_id,
                 "partInfos": if rapid_upload { Value::Array(Vec::new()) } else { Value::Array(response_parts) }
             }
         }))
@@ -3553,6 +3670,22 @@ mod tests {
         }))
     }
 
+    async fn mock_file_delete_upload(
+        State(state): State<Arc<MockMobileUploadState>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        state
+            .delete_requests
+            .lock()
+            .expect("delete requests poisoned")
+            .push(body);
+        Json(json!({
+            "success": true,
+            "code": "0000",
+            "message": "ok"
+        }))
+    }
+
     async fn mock_upload_part(
         State(state): State<Arc<MockMobileUploadState>>,
         Path(part_number): Path<u32>,
@@ -3607,6 +3740,13 @@ mod tests {
                         "id": "file_get_upload_url",
                         "method": "POST",
                         "url": format!("{base_url}/hcy/file/getUploadUrl"),
+                        "signature_strategy": "mcloud_md5_v1",
+                        "body_defaults": {}
+                    },
+                    {
+                        "id": "file_batch_delete",
+                        "method": "POST",
+                        "url": format!("{base_url}/hcy/file/batchDelete"),
                         "signature_strategy": "mcloud_md5_v1",
                         "body_defaults": {}
                     }
@@ -3965,14 +4105,18 @@ mod tests {
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
             upload_parts: Arc::new(Mutex::new(Vec::new())),
             rapid_upload: false,
+            create_existing_without_upload_id_once: false,
+            create_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
             .route("/hcy/file/create", post(mock_file_create_upload))
             .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
             .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_upload))
             .route("/upload/{part_number}", put(mock_upload_part))
             .with_state(Arc::new(upload_state.clone()));
         tokio::spawn(async move {
@@ -4088,14 +4232,18 @@ mod tests {
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
             upload_parts: Arc::new(Mutex::new(Vec::new())),
             rapid_upload: false,
+            create_existing_without_upload_id_once: false,
+            create_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
             .route("/hcy/file/create", post(mock_file_create_upload))
             .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
             .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_upload))
             .route("/upload/{part_number}", put(mock_upload_part))
             .with_state(Arc::new(upload_state.clone()));
         tokio::spawn(async move {
@@ -4191,14 +4339,18 @@ mod tests {
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
             upload_parts: Arc::new(Mutex::new(Vec::new())),
             rapid_upload: true,
+            create_existing_without_upload_id_once: false,
+            create_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
             .route("/hcy/file/create", post(mock_file_create_upload))
             .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
             .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_upload))
             .route("/upload/{part_number}", put(mock_upload_part))
             .with_state(Arc::new(upload_state.clone()));
         tokio::spawn(async move {
@@ -4273,14 +4425,18 @@ mod tests {
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
             upload_parts: Arc::new(Mutex::new(Vec::new())),
             rapid_upload: false,
+            create_existing_without_upload_id_once: false,
+            create_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
             .route("/hcy/file/create", post(mock_file_create_upload))
             .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
             .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_upload))
             .route("/upload/{part_number}", put(mock_upload_part))
             .with_state(Arc::new(upload_state.clone()));
         tokio::spawn(async move {
@@ -4346,6 +4502,189 @@ mod tests {
             .expect("upload parts poisoned")
             .clone();
         assert_eq!(uploaded_parts.len(), 101);
+    }
+
+    #[tokio::test]
+    async fn put_object_retries_after_existing_object_blocks_mobile_create_upload_id() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile overwrite upload server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile overwrite upload local addr");
+        let base_url = format!("http://{address}");
+
+        let upload_state = MockMobileUploadState {
+            base_url: base_url.clone(),
+            items_by_parent: BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![sample_file_item("file-existing", "probe-overwrite.bin", 11)],
+                ),
+            ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
+            get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
+            complete_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            upload_parts: Arc::new(Mutex::new(Vec::new())),
+            rapid_upload: false,
+            create_existing_without_upload_id_once: true,
+            create_call_count: Arc::new(Mutex::new(0)),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_upload))
+            .route("/hcy/file/create", post(mock_file_create_upload))
+            .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
+            .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_upload))
+            .route("/upload/{part_number}", put(mock_upload_part))
+            .with_state(Arc::new(upload_state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile overwrite upload server");
+        });
+
+        let catalog = write_mobile_upload_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.upload_part_size_bytes = 5;
+        config.root_prefix = None;
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let request = PutObjectRequest {
+            container: MOBILE_ROOT_CONTAINER.to_string(),
+            key: "probe-overwrite.bin".to_string(),
+            body: ObjectBody::from_stream(stream::iter([
+                Ok(Bytes::from_static(b"hello ")),
+                Ok(Bytes::from_static(b"world")),
+            ])),
+            size: Some(11),
+            content_type: Some("application/octet-stream".to_string()),
+            preferred_upload_part_size_bytes: None,
+        };
+        let result = adapter.put_object(request).await.expect("put object");
+        assert!(result.first_response_latency_ms.is_some());
+        assert!(result.etag.is_some());
+
+        let create_requests = upload_state
+            .create_requests
+            .lock()
+            .expect("create requests poisoned")
+            .clone();
+        assert_eq!(create_requests.len(), 2);
+
+        let delete_requests = upload_state
+            .delete_requests
+            .lock()
+            .expect("delete requests poisoned")
+            .clone();
+        assert_eq!(
+            delete_requests,
+            vec![
+                json!({ "fileIds": ["file-existing"] }),
+                json!({ "fileIds": ["file-existing"] })
+            ]
+        );
+
+        let complete_requests = upload_state
+            .complete_requests
+            .lock()
+            .expect("complete requests poisoned")
+            .clone();
+        assert_eq!(complete_requests.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn put_object_deletes_existing_same_name_files_before_mobile_create() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile proactive overwrite server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile proactive overwrite local addr");
+        let base_url = format!("http://{address}");
+
+        let upload_state = MockMobileUploadState {
+            base_url: base_url.clone(),
+            items_by_parent: BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![
+                        sample_file_item("file-existing-a", "probe-overwrite.bin", 11),
+                        sample_file_item("file-existing-b", "probe-overwrite.bin", 11),
+                    ],
+                ),
+            ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
+            get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
+            complete_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            upload_parts: Arc::new(Mutex::new(Vec::new())),
+            rapid_upload: false,
+            create_existing_without_upload_id_once: false,
+            create_call_count: Arc::new(Mutex::new(0)),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_upload))
+            .route("/hcy/file/create", post(mock_file_create_upload))
+            .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
+            .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_upload))
+            .route("/upload/{part_number}", put(mock_upload_part))
+            .with_state(Arc::new(upload_state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile proactive overwrite server");
+        });
+
+        let catalog = write_mobile_upload_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.upload_part_size_bytes = 5;
+        config.root_prefix = None;
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let request = PutObjectRequest {
+            container: MOBILE_ROOT_CONTAINER.to_string(),
+            key: "probe-overwrite.bin".to_string(),
+            body: ObjectBody::from_stream(stream::iter([Ok(Bytes::from_static(b"new body"))])),
+            size: Some(8),
+            content_type: Some("text/plain".to_string()),
+            preferred_upload_part_size_bytes: None,
+        };
+        adapter.put_object(request).await.expect("put object");
+
+        let create_requests = upload_state
+            .create_requests
+            .lock()
+            .expect("create requests poisoned")
+            .clone();
+        assert_eq!(create_requests.len(), 1);
+
+        let delete_requests = upload_state
+            .delete_requests
+            .lock()
+            .expect("delete requests poisoned")
+            .clone();
+        assert_eq!(
+            delete_requests,
+            vec![
+                json!({ "fileIds": ["file-existing-a"] }),
+                json!({ "fileIds": ["file-existing-b"] })
+            ]
+        );
     }
 
     #[tokio::test]

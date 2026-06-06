@@ -233,3 +233,13 @@ Conclusion:
   `16 GiB`
 - release/Admin/docs copy must continue to describe China Mobile large-file support conservatively
   until a newer limit-probe or isolated live test proves otherwise
+
+Follow-up on 2026-06-06:
+
+- `provider-mobile` now also handles the China Mobile `file/create` overwrite branch where
+  the upstream responds with `success=true`, `rapidUpload=false`, `exist=true`, and a missing
+  `uploadId`
+- when that branch is observed under the managed root, the gateway resolves same-name existing
+  files, deletes them through native `file/batchDelete`, and briefly retries `file/create`
+- this follow-up only fixes incremental overwrite writes for existing managed graph keys; it does
+  not change the conservative large-file support statement above
