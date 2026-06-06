@@ -220,3 +220,59 @@ curl -sS -i --max-time 5 http://192.168.1.43:61081/
   - `release_base_url=https://carrier-disk-gateway.agi2030.online/downloads/latest`
   - `HEAD /downloads/latest/ccbg-lxc-package.tar.gz` -> `200`, `x-ccbg-release-source=r2`
   - `HEAD /downloads/latest/ccbg-windows-x86_64.zip` -> `200`, `x-ccbg-release-source=r2`
+
+## 2026-06-06 Cloudflare FAQ/FUSE production update
+
+Command:
+
+```bash
+CCBG_CF_PROD_RELEASE_R2_BUCKET=ccbg-release-assets \
+scripts/deploy-cloudflare-public.sh production
+```
+
+Deploy result:
+
+- Worker: `ccbg-public`
+- Production Worker version ID: `d377dad3-5cdf-4136-af38-7755c007ea56`
+- Custom domain was not rebound; the existing `carrier-disk-gateway.agi2030.online`
+  Worker domain mapping served the new assets.
+- R2 release cache was refreshed for:
+  - `ccbg-lxc-package.tar.gz`
+  - `ccbg-windows-x86_64.zip`
+  - `ccbg-macos-x86_64.tar.gz`
+  - `ccbg-macos-arm64.tar.gz`
+  - `ccbg-openwrt-lite.tar.gz`
+
+Production smoke:
+
+- `HEAD https://carrier-disk-gateway.agi2030.online/` -> `200`,
+  `x-ccbg-version=0.1.6`, `x-ccbg-provenance=ccbg-0.1.6-walky-20260606`
+- `HEAD https://carrier-disk-gateway.agi2030.online/faq/` -> `200`,
+  `x-ccbg-version=0.1.6`, `x-ccbg-provenance=ccbg-0.1.6-walky-20260606`
+- `HEAD https://carrier-disk-gateway.agi2030.online/data/faq-catalog.json` -> `200`,
+  `x-ccbg-version=0.1.6`, `x-ccbg-provenance=ccbg-0.1.6-walky-20260606`
+- `GET /.well-known/ccbg-provenance.json` returned version `0.1.6`,
+  fingerprint `ccbg-0.1.6-walky-20260606`.
+- `GET /faq/` contains the `SMB / FUSE` card with the PVE host command and
+  container validation command.
+- `GET /data/faq-catalog.json` returned FAQ catalog version `2026-06-06`,
+  count `6`, and entry `smb-sidecar-fuse-lxc`.
+- `POST /api/faq/match` with query
+  `SMB share mounts need /dev/fuse CCBGRoot cannot mount Shares 0/1`
+  returned `smb-sidecar-fuse-lxc` as the top hit.
+- `HEAD /downloads/latest/ccbg-lxc-package.tar.gz` -> `200`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-windows-x86_64.zip` -> `200`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-macos-x86_64.tar.gz` -> `200`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-macos-arm64.tar.gz` -> `200`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-openwrt-lite.tar.gz` -> `200`, `x-ccbg-release-source=r2`
+
+Verification caveat:
+
+- Local `python scripts/check-cloudflare-public-fingerprint.py` passed before deploy.
+- `python scripts/check-cloudflare-public-fingerprint.py --deployed-base-url
+  https://carrier-disk-gateway.agi2030.online` was blocked by Cloudflare with `403`
+  for Python `urllib` requests.
+- Curl-based checks succeeded. `data/faq-catalog.json`, `.well-known/ccbg-provenance.json`,
+  `assets/app.js`, and `manifest.json` matched the staged asset SHA-256.
+- HTML pages should not be compared byte-for-byte on the production domain when Cloudflare
+  injects challenge JavaScript; validate status, headers, and visible content instead.

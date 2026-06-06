@@ -105,27 +105,22 @@ Copyright (c) 2026 walky
     .top-status-object-ops-row > span { color: var(--muted); white-space:normal; }
     .top-status-object-ops-header > span { font-size:8px; line-height:1.1; font-weight:800; color: var(--muted); text-transform:uppercase; }
     .top-status-meta-card { border-radius: 999px; padding: 5px 8px; display:flex; align-items:center; justify-content:space-between; gap: 8px; min-height: 44px; }
-    .top-status-limits-card { min-height: 0; padding: 8px 10px; display:flex; flex-direction:column; align-items:stretch; gap: 6px; }
-    .top-status-limits-card .top-status-chip-sub { white-space: normal; overflow: visible; text-overflow: clip; }
+    .top-status-limits-card { min-height: 0; padding: 6px 8px; display:flex; flex-direction:column; align-items:stretch; gap: 5px; }
+    .top-status-limits-card .top-status-chip-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .top-status-limits-card .top-status-chip-value.app-hidden { display:none; }
     .top-status-limits-header { min-width:0; display:flex; align-items:flex-start; gap:8px; }
     .top-status-limits-meta { min-width:0; flex:1 1 auto; display:flex; flex-direction:column; gap:2px; }
-    .top-status-limits-details { display:grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 148px), 1fr)); gap:6px; width:100%; }
-    .top-status-limit-item { min-width:0; border:1px solid rgba(216, 208, 194, 0.9); border-radius: 12px; background: rgba(255, 255, 250, 0.95); padding: 7px 8px; display:flex; flex-direction:column; gap:3px; }
-    .top-status-limit-item-head { display:flex; align-items:center; justify-content:space-between; gap:6px; flex-wrap:nowrap; }
+    .top-status-limits-details { display:grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 132px), 1fr)); gap:5px; width:100%; }
+    .top-status-limit-item { min-width:0; border:1px solid rgba(216, 208, 194, 0.9); border-radius: 12px; background: rgba(255, 255, 250, 0.95); padding: 6px 7px; display:flex; flex-direction:column; gap:3px; }
+    .top-status-limit-item-head { display:flex; align-items:flex-start; justify-content:space-between; gap:6px; flex-wrap:nowrap; }
     .top-status-limit-item-head strong { min-width:0; flex:1 1 auto; font-size: 11px; line-height: 1.15; color: var(--ink-strong); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .top-status-limit-item-head > span { display:inline-flex; align-items:center; gap:4px; flex:0 0 auto; white-space:nowrap; }
+    .top-status-limit-item-head > span,
+    .top-status-limit-item-head-tools { display:inline-flex; align-items:center; gap:4px; flex:0 0 auto; white-space:nowrap; }
     .top-status-limit-item-badge { display:inline-flex; align-items:center; border-radius:999px; padding:2px 5px; border:1px solid rgba(180, 83, 9, 0.24); background: rgba(180, 83, 9, 0.12); color: var(--warn); font-size: 8px; font-weight:700; line-height:1.1; white-space:nowrap; }
-    .top-status-limit-item-body { display:flex; flex-direction:column; gap:4px; font-size: 10px; line-height: 1.18; color: var(--muted); }
-    .top-status-limit-item-body > span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .top-status-limit-item-metrics { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:4px; width:100%; }
-    .top-status-limit-item-metric { min-width:0; border:1px solid rgba(216, 208, 194, 0.78); border-radius: 10px; padding: 4px 5px; background: rgba(255, 252, 246, 0.6); display:flex; flex-direction:column; gap:2px; }
-    .top-status-limit-item-metric span { font-size: 8px; line-height:1.1; font-weight:700; letter-spacing:0.04em; text-transform:uppercase; color: var(--muted); }
-    .top-status-limit-item-metric strong { font-size: 10px; line-height:1.15; color: var(--ink-strong); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .top-status-limit-item-foot { font-size: 9px; line-height: 1.15; color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .top-status-limit-cleanup-note { display:flex; align-items:center; gap:5px; border:1px solid rgba(180, 83, 9, 0.24); border-radius: 9px; padding: 4px 5px; background: rgba(180, 83, 9, 0.1); color: var(--warn); font-size: 9px; line-height:1.15; white-space:nowrap; overflow:hidden; }
-    .top-status-limit-cleanup-note > span { min-width:0; flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; }
-    .top-status-limit-cleanup-note button { flex:0 0 auto; padding:2px 6px; font-size:8px; line-height:1.1; }
+    .top-status-limit-item-inline { font-size: 9px; line-height: 1.12; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .top-status-limit-item-inline-metrics { font-size: 8px; line-height: 1.08; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .top-status-limit-item-foot { font-size: 8px; line-height: 1.1; color: var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .top-status-limit-cleanup-action { flex:0 0 auto; padding:2px 6px; font-size:8px; line-height:1.1; }
     .top-status-runtime-brief { min-width:0; min-height:44px; display:flex; flex-direction:column; align-items:flex-start; gap: 6px; padding: 8px 10px; }
     .top-status-runtime-brief-text { width:100%; min-width:0; flex:1 1 auto; display:flex; flex-direction:column; gap:2px; }
     .top-status-runtime-row { min-width:0; display:flex; align-items:baseline; gap:6px; }
@@ -856,8 +851,6 @@ Copyright (c) 2026 walky
     .top-status-chip[data-tone="error"] { border-color: rgba(240, 140, 140, 0.36); }
     .top-status-limits-card { background: rgba(17, 24, 34, 0.94); }
     .top-status-limits-card .top-status-limit-item { background:#0f1722; border-color:#223043; }
-    .top-status-limits-card .top-status-limit-item-metric { background:#111a24; border-color:#223043; }
-    .top-status-limits-card .top-status-limit-item-metric strong { color: var(--ink-strong); }
     .top-status-limits-card .top-status-limit-item-head strong { color: var(--ink-strong); }
     .top-status-limits-card .top-status-limit-item-badge { border-color: rgba(240, 190, 111, 0.32); background: rgba(180, 83, 9, 0.2); }
     .top-status-object-ops-table { border-color:#223043; }
@@ -8557,38 +8550,26 @@ Copyright (c) 2026 walky
       const latestUploadSpeed = formatBytesPerSecond(limitProbeLatestBytesPerSecond(latestProbe, 'upload'));
       const latestDownloadSpeed = formatBytesPerSecond(limitProbeLatestBytesPerSecond(latestProbe, 'download'));
       const bestUploadSpeed = formatBytesPerSecond(profile?.max_verified_upload_bytes_per_sec);
-	      const bestDownloadSpeed = formatBytesPerSecond(profile?.max_verified_download_bytes_per_sec);
-	      const latestUploadResponse = formatLatencyMs(limitProbeLatestFirstResponseLatencyMs(latestProbe, 'upload'));
-	      const latestDownloadResponse = formatLatencyMs(limitProbeLatestFirstResponseLatencyMs(latestProbe, 'download'));
-	      const cleanupBadge = profile?.latest_probe_cleanup_required
-	        ? `<span class="top-status-limit-item-badge">${escapeHtml(tr('topbar.limits.detail.cleanup_required', {}, 'Cleanup required'))}</span>`
-	        : '';
-	      const dailyFlowBadge = profile?.latest_probe_hit_daily_flow_limit
-	        ? `<span class="top-status-limit-item-badge">${escapeHtml(tr('topbar.limits.detail.daily_flow_limit', {}, 'Daily flow limit'))}</span>`
-	        : '';
-	      const cleanupNote = profile?.latest_probe_cleanup_required
-	        ? `<div class="top-status-limit-cleanup-note" title="${escapeHtmlAttr(cleanupText)}"><span>${escapeHtml(cleanupText)}</span><button class="secondary" type="button" data-limit-probe-cleanup-clear="${escapeHtmlAttr(profile?.provider || '')}" title="${escapeHtmlAttr(cleanupClearTitle)}">${escapeHtml(cleanupClearText)}</button></div>`
-	        : '';
-	      return `
-	        <div class="top-status-limit-item" title="${escapeHtmlAttr(providerLimitProfileTitle(profile))}">
-	          <div class="top-status-limit-item-head">
-	            <strong>${escapeHtml(providerLabel(profile?.provider))}</strong>
-	            <span>${cleanupBadge}${dailyFlowBadge}</span>
-	          </div>
-          <div class="top-status-limit-item-body">
-            <span>${escapeHtml(`${tr('topbar.limits.detail.upload', {}, 'Upload')} ${upload} · ${tr('topbar.limits.detail.download', {}, 'Download')} ${download} · ${tr('topbar.limits.detail.part', {}, 'Part')} ${part}`)}</span>
-            <div class="top-status-limit-item-metrics">
-              <div class="top-status-limit-item-metric">
-                <span>${escapeHtml(tr('topbar.limits.detail.latest', {}, 'Latest'))}</span>
-                <strong>${escapeHtml(`${tr('topbar.limits.detail.upload_speed', {}, 'Upload speed')} ${latestUploadSpeed} · ${tr('topbar.limits.detail.download_speed', {}, 'Download speed')} ${latestDownloadSpeed}`)}</strong>
-              </div>
-              <div class="top-status-limit-item-metric">
-                <span>${escapeHtml(tr('topbar.limits.detail.best', {}, 'Historical best'))}</span>
-                <strong>${escapeHtml(`${tr('topbar.limits.detail.upload_speed', {}, 'Upload speed')} ${bestUploadSpeed} · ${tr('topbar.limits.detail.download_speed', {}, 'Download speed')} ${bestDownloadSpeed}`)}</strong>
-              </div>
-            </div>
+      const bestDownloadSpeed = formatBytesPerSecond(profile?.max_verified_download_bytes_per_sec);
+      const latestUploadResponse = formatLatencyMs(limitProbeLatestFirstResponseLatencyMs(latestProbe, 'upload'));
+      const latestDownloadResponse = formatLatencyMs(limitProbeLatestFirstResponseLatencyMs(latestProbe, 'download'));
+      const cleanupBadge = profile?.latest_probe_cleanup_required
+        ? `<span class="top-status-limit-item-badge">${escapeHtml(tr('topbar.limits.detail.cleanup_required', {}, 'Cleanup required'))}</span>`
+        : '';
+      const dailyFlowBadge = profile?.latest_probe_hit_daily_flow_limit
+        ? `<span class="top-status-limit-item-badge">${escapeHtml(tr('topbar.limits.detail.daily_flow_limit', {}, 'Daily flow limit'))}</span>`
+        : '';
+      const cleanupAction = profile?.latest_probe_cleanup_required
+        ? `<button class="secondary top-status-limit-cleanup-action" type="button" data-limit-probe-cleanup-clear="${escapeHtmlAttr(profile?.provider || '')}" title="${escapeHtmlAttr(`${cleanupText} ${cleanupClearTitle}`)}">${escapeHtml(cleanupClearText)}</button>`
+        : '';
+      return `
+        <div class="top-status-limit-item" title="${escapeHtmlAttr(providerLimitProfileTitle(profile))}">
+          <div class="top-status-limit-item-head">
+            <strong>${escapeHtml(providerLabel(profile?.provider))}</strong>
+            <span class="top-status-limit-item-head-tools">${cleanupBadge}${dailyFlowBadge}${cleanupAction}</span>
           </div>
-          ${cleanupNote}
+          <div class="top-status-limit-item-inline">${escapeHtml(`${tr('topbar.limits.detail.upload', {}, 'Upload')} ${upload} · ${tr('topbar.limits.detail.download', {}, 'Download')} ${download} · ${tr('topbar.limits.detail.part', {}, 'Part')} ${part}`)}</div>
+          <div class="top-status-limit-item-inline-metrics">${escapeHtml(`${tr('topbar.limits.detail.latest', {}, 'Latest')} ${latestUploadSpeed}/${latestDownloadSpeed} · ${tr('topbar.limits.detail.best', {}, 'Historical best')} ${bestUploadSpeed}/${bestDownloadSpeed}`)}</div>
           <div class="top-status-limit-item-foot">${escapeHtml(`${tr('topbar.limits.detail.upload_response', {}, 'Write first response')} ${latestUploadResponse} · ${tr('topbar.limits.detail.download_response', {}, 'Read first response')} ${latestDownloadResponse} · ${tr('topbar.limits.detail.checked', { time: checked }, `Checked ${checked}`)}`)}</div>
         </div>
       `;
@@ -8650,9 +8631,7 @@ Copyright (c) 2026 walky
               <div class="top-status-limit-item-head">
                 <strong>${escapeHtml(tr('Cloud Limit Test Results', {}, 'Cloud Limit Test Results'))}</strong>
               </div>
-              <div class="top-status-limit-item-body">
-                <span>${escapeHtml(tr('topbar.limits.none', {}, 'No provider size probes yet.'))}</span>
-              </div>
+              <div class="top-status-limit-item-inline">${escapeHtml(tr('topbar.limits.none', {}, 'No provider size probes yet.'))}</div>
             </div>
           `;
       }

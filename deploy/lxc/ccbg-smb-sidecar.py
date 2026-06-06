@@ -835,6 +835,10 @@ def start_smbd(model: dict[str, Any]) -> tuple[int, str]:
     runtime_root = pathlib.Path(model["runtime_root"])
     log_dir = runtime_root / "logs"
     ensure_dir(log_dir)
+    # Debian's smbd still expects the system runtime pipe root under /run/samba.
+    # LXC guests without the distro smbd unit may not create it for us.
+    ensure_dir(pathlib.Path("/run/samba"))
+    ensure_dir(pathlib.Path("/run/samba/ncalrpc"))
     log_path = log_dir / "smbd-launch.log"
     log_handle = log_path.open("ab")
     process = subprocess.Popen(

@@ -67,6 +67,27 @@ SMB sidecar 默认挂载根目录是 `/mnt/ccbg/smb/mounts`，配置和 runtime 
 
 如果部署在 PVE/LXC 或其它容器里，真实挂载 `CCBGRoot` 这类 rclone-backed SMB share 还需要 guest 能访问 `/dev/fuse`。没有 `/dev/fuse` 时，`--enable-smb-sidecar` 仍会安装依赖、启用 sidecar units，并先启动 CCBG 管理的 `smbd` 监听 `0.0.0.0:445`；但用户保存 SMB 用户并自动生成 `CCBGRoot` 后，rclone mount 会停在 FUSE 前置条件，`status.json.last_error` 会提示容器需要暴露 `/dev/fuse`。
 
+PVE host 侧的最小开通步骤：
+
+```bash
+# 在 PVE 宿主机 shell 中执行；把 104 改成实际 CTID
+pct stop 104
+cat >> /etc/pve/lxc/104.conf <<'EOF'
+features: fuse=1,nesting=1
+lxc.cgroup2.devices.allow: c 10:229 rwm
+lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0
+EOF
+pct start 104
+```
+
+容器重启后，在 guest 中重新收敛 sidecar：
+
+```bash
+mkdir -p /run/samba/ncalrpc
+systemctl start ccbg-smb-sidecar-sync.service
+python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status
+```
+
 安装脚本会:
 
 - 创建 `ccbg` system user/group

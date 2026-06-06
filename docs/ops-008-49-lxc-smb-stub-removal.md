@@ -88,6 +88,76 @@ The .49 LXC guest currently does not expose `/dev/fuse`. This is acceptable for 
 listener/startup test: managed `smbd` listens on `0.0.0.0:445`, and Admin can configure SMB users.
 Real rclone-backed shares such as `CCBGRoot` still require the LXC guest to expose `/dev/fuse`.
 
+## 2026-06-06 FUSE Enablement and Sidecar Repair Follow-up
+
+Follow-up package and code state:
+
+- Package: `target/lxc-package/ccbg-lxc-package.tar.gz`
+- Package SHA256: `ba2027cdc4c7e0e78f3a3f3eb218c2f12d518b4f9b51466cd2be6cadcbfbca5b`
+- Deployed `gatewayd` SHA256: `4f56487f775c3338d732998ec1f002bc2625b06ac5bebfc9f958e51eabe208d1`
+- Deployed Admin HTML SHA256: `becc45f92ed148ba879621d908abf2439cadef333c47af9a33c198f9e102ae0a`
+
+Observed sidecar failure before the repair:
+
+```text
+state=error
+listener=0.0.0.0:445
+listener_ready=false
+last_error=smbd exited immediately; see /var/lib/ccbg/smb-sidecar/data/runtime/logs/smbd-launch.log
+```
+
+Root cause:
+
+- `smbd` still expected `/run/samba/ncalrpc`
+- in this LXC guest the distro `smbd.service` was intentionally disabled, so nothing created that
+  runtime pipe root before the managed sidecar launched `smbd`
+
+Code repair:
+
+- `deploy/lxc/ccbg-smb-sidecar.py` now creates `/run/samba` and `/run/samba/ncalrpc` before
+  launching managed `smbd`
+
+PVE host change used to expose FUSE to CT `104`:
+
+```bash
+pct stop 104
+cat >> /etc/pve/lxc/104.conf <<'EOF'
+features: fuse=1,nesting=1
+lxc.cgroup2.devices.allow: c 10:229 rwm
+lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0
+EOF
+pct start 104
+```
+
+Guest-side reconcile after the host change:
+
+```bash
+mkdir -p /run/samba/ncalrpc
+systemctl start ccbg-smb-sidecar-sync.service
+python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status
+```
+
+Validated final runtime state on `.49`:
+
+```text
+/dev/fuse present
+ccbg-root:root on /mnt/ccbg/smb/mounts/root type fuse.rclone
+192.168.1.49:445 smbd
+state=running
+listener_ready=true
+enabled_share_count=1
+mounted_share_count=1
+process_count=2
+last_error=null
+```
+
+Admin verification on the logged-in dashboard/session:
+
+- SMB Runtime moved from `error` to `degraded` after the sidecar repair
+- SMB Runtime moved from `degraded` to `running` after `/dev/fuse` was exposed and the sidecar
+  reconciled successfully
+- `Shares` returned from `0/1` to `1/1`
+
 ## Local Verification
 
 Run on the build workspace:

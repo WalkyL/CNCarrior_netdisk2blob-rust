@@ -2,7 +2,7 @@
   "license_id": "LicenseRef-CCBG-Public-Materials",
   "copyright": "Copyright (c) 2026 walky",
   "release_fingerprint": "ccbg-0.1.2-walky-20260603-bda37a712441fe32",
-  "version": "2026-05-28",
+  "version": "2026-06-06",
   "items": [
     {
       "id": "mobile-credential-configured-but-unavailable",
@@ -81,6 +81,23 @@
         "按 install 页面 Docker/Compose 步骤部署",
         "使用 LXC/Linux 包的 smoke 流程验证",
         "遇到权限问题先校验挂载目录与端口占用"
+      ],
+      "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/pve-lxc-deployment.md"
+    },
+    {
+      "id": "smb-sidecar-fuse-lxc",
+      "title": "SMB Runtime 显示 degraded，CCBGRoot 挂不上",
+      "summary": "PVE/LXC 容器里缺少 /dev/fuse 时，SMB sidecar 可以启动 smbd 并监听 445，但 rclone-backed share 不能 mount，需要在 PVE 宿主机给 LXC 透传 FUSE。",
+      "keywords": ["smb", "sidecar", "fuse", "/dev/fuse", "rclone mount", "CCBGRoot", "degraded", "listener ready", "listener 就绪", "share mount", "mounted_share_count"],
+      "provider": [],
+      "context": ["smb_runtime", "install", "lxc", "pve", "logs"],
+      "config_keys": ["CCBG_SMB_ENABLED", "CCBG_SMB_MOUNT_ROOT", "CCBG_SMB_BIND_ADDR", "CCBG_SMB_PORT"],
+      "error_patterns": ["SMB share mounts need /dev/fuse", "cannot mount until this LXC/container exposes /dev/fuse", "rclone-backed shares", "CCBGRoot cannot mount", "mounted_share_count=0", "Shares 0/1"],
+      "actions": [
+        "在 Admin 的 SMB Runtime 确认现象：listener 就绪但 state=degraded、Shares 0/1 或 mounted_share_count=0",
+        "在 PVE 宿主机停止对应 CTID，给 /etc/pve/lxc/<CTID>.conf 增加 fuse=1、cgroup2 设备允许和 /dev/fuse bind mount",
+        "重启 LXC 后在容器内确认 ls -l /dev/fuse 可见，再运行 systemctl start ccbg-smb-sidecar-sync.service",
+        "用 python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status 验证 state=running、listener_ready=true、mounted_share_count 等于 enabled_share_count"
       ],
       "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/pve-lxc-deployment.md"
     }
