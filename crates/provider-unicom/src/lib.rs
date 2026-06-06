@@ -953,7 +953,11 @@ impl UnicomBlobAdapter {
                 notes,
                 "remediation=fill China Unicom Access Token in Admin Web -> Unicom",
             );
-        } else if message.contains("HTTP 401") || message.contains("RSP_CODE=9999") {
+        } else if message.contains("HTTP 401")
+            || message.contains("RSP_CODE=9999")
+            || message.contains("RSP_CODE=1001")
+            || message.contains("无效登录信息")
+        {
             push_once(
                 notes,
                 "remediation=China Unicom token is likely stale or the browser headers no longer match; refresh pan.wo.cn, capture a fresh accesstoken, then save it again",
@@ -1396,6 +1400,7 @@ impl UnicomBlobAdapter {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn upload_chunk(
         &self,
         upload_started_at: Instant,
@@ -1419,7 +1424,6 @@ impl UnicomBlobAdapter {
             let first_upload_progress_ms = Arc::new(AtomicU64::new(0));
             let progress_observer = StreamFirstProgressObserver::new({
                 let first_upload_progress_ms = Arc::clone(&first_upload_progress_ms);
-                let upload_started_at = upload_started_at;
                 move || {
                     first_upload_progress_ms
                         .store(elapsed_millis(upload_started_at).max(1), Ordering::SeqCst);
@@ -1511,6 +1515,7 @@ impl UnicomBlobAdapter {
         )))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn upload_known_size_body(
         &self,
         upload_started_at: Instant,
@@ -1956,8 +1961,8 @@ impl BlobBackend for UnicomBlobAdapter {
             object_count: None,
         }];
 
-        if let Ok(family_scope) = self.family_scope_route().await {
-            if self
+        if let Ok(family_scope) = self.family_scope_route().await
+            && self
                 .query_all_files_page_for_scope(
                     family_scope.root_directory_id.as_str(),
                     0,
@@ -1967,12 +1972,11 @@ impl BlobBackend for UnicomBlobAdapter {
                 )
                 .await
                 .is_ok()
-            {
-                containers.push(ContainerInfo {
-                    name: UNICOM_FAMILY_CONTAINER.to_string(),
-                    object_count: None,
-                });
-            }
+        {
+            containers.push(ContainerInfo {
+                name: UNICOM_FAMILY_CONTAINER.to_string(),
+                object_count: None,
+            });
         }
 
         Ok(containers)
@@ -2411,15 +2415,14 @@ fn extract_download_url(operation: &str, data: Option<Value>) -> Result<String, 
         )));
     };
 
-    if let Ok(entries) = serde_json::from_value::<Vec<DownloadUrlEntry>>(data.clone()) {
-        if let Some(url) = entries
+    if let Ok(entries) = serde_json::from_value::<Vec<DownloadUrlEntry>>(data.clone())
+        && let Some(url) = entries
             .into_iter()
             .find_map(|entry| entry.download_url.or(entry.url))
             .map(|url| url.trim().to_string())
             .filter(|url| !url.is_empty())
-        {
-            return Ok(url);
-        }
+    {
+        return Ok(url);
     }
 
     if let Some(url) = find_download_url(&data) {
@@ -3155,7 +3158,7 @@ mod tests {
 
     type MockDownloadRoutes = BTreeMap<String, BTreeMap<String, String>>;
     type MockUploadFailures = BTreeMap<u64, usize>;
-    type MockQueryFailures = BTreeSet<String>;
+    type MockQueryFailures = BTreeMap<String, (&'static str, &'static str)>;
 
     #[derive(Clone)]
     struct MockDispatcherState {
@@ -3246,6 +3249,25 @@ mod tests {
         }
 
         async fn start_with_query_failures(
+            entries_by_parent: BTreeMap<String, Vec<Value>>,
+            file_bodies_by_id: BTreeMap<String, Vec<u8>>,
+            query_failure_keys: BTreeSet<String>,
+            token: &str,
+        ) -> Self {
+            let query_failures = query_failure_keys
+                .into_iter()
+                .map(|key| (key, ("9999", "系统异常")))
+                .collect::<MockQueryFailures>();
+            Self::start_with_query_failure_responses(
+                entries_by_parent,
+                file_bodies_by_id,
+                query_failures,
+                token,
+            )
+            .await
+        }
+
+        async fn start_with_query_failure_responses(
             entries_by_parent: BTreeMap<String, Vec<Value>>,
             file_bodies_by_id: BTreeMap<String, Vec<u8>>,
             query_failures: MockQueryFailures,
@@ -3411,8 +3433,8 @@ mod tests {
                 } else {
                     parent_directory_id.to_string()
                 };
-                if state.query_failures.contains(&scoped_parent_key) {
-                    ("9999", "系统异常", None)
+                if let Some((code, description)) = state.query_failures.get(&scoped_parent_key) {
+                    (*code, *description, None)
                 } else {
                     let mut entries = state
                         .entries_by_parent
@@ -4223,6 +4245,37 @@ mod tests {
                 .notes
                 .iter()
                 .any(|note| note.contains("family_root_probe_failed="))
+        );
+    }
+
+    #[tokio::test]
+    async fn health_surfaces_remediation_for_unicom_invalid_login_rsp_code() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start_with_query_failure_responses(
+            sample_entries(),
+            sample_file_bodies(),
+            BTreeMap::from([("0".to_string(), ("1001", "无效登录信息"))]),
+            token,
+        )
+        .await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        let health = adapter
+            .health()
+            .await
+            .expect("unicom health should return invalid-login payload");
+
+        assert!(
+            health
+                .notes
+                .iter()
+                .any(|note| note.contains("RSP_CODE=1001"))
+        );
+        assert!(
+            health
+                .notes
+                .iter()
+                .any(|note| note.contains("remediation=China Unicom token is likely stale"))
         );
     }
 

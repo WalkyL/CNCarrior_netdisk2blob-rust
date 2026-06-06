@@ -610,6 +610,10 @@ Copyright (c) 2026 walky
     .health-card h3 { margin:0; font-size:18px; }
     .health-card-head { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap: 10px; }
     .health-card-title-wrap { min-width:0; display:flex; flex-direction:column; gap: 8px; }
+    .health-remediation { margin-top: 10px; border:1px solid rgba(180, 83, 9, 0.28); border-radius: 12px; padding: 10px 12px; background:#fff8eb; color:#6f3f06; font-size: 13px; line-height:1.45; }
+    .health-remediation strong { display:block; margin-bottom: 4px; color:#6f3f06; }
+    .health-remediation ol { margin: 6px 0 0 18px; padding: 0; }
+    .health-remediation li { margin: 3px 0; }
     .health-pill-list { margin-top: 0; }
     .health-scope-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
     .scope-card-compact { padding: 10px; }
@@ -982,6 +986,8 @@ Copyright (c) 2026 walky
     .health-card.healthy, .onedrive-step.complete { border-color: rgba(99, 211, 156, 0.45); background: rgba(15, 40, 29, 0.78); }
     .health-card.degraded, .onedrive-step.pending { border-color: rgba(240, 190, 111, 0.45); background: rgba(45, 31, 13, 0.78); }
     .health-card.unavailable, .onedrive-step.blocked { border-color: rgba(240, 140, 140, 0.45); background: rgba(52, 21, 24, 0.8); }
+    .health-remediation { border-color: rgba(240, 190, 111, 0.34); background: rgba(45, 31, 13, 0.58); color:#f3d7a8; }
+    .health-remediation strong { color:#ffe2ad; }
     .carrier-access-card { border:1px solid var(--border); border-radius: 16px; padding: 14px; background: var(--panel-soft); }
     .carrier-access-card h3 { margin:0 0 8px; color: var(--ink-strong); font-size: 16px; }
     .carrier-access-status { display:inline-flex; align-items:center; gap: 8px; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 700; }
@@ -2938,6 +2944,12 @@ Copyright (c) 2026 walky
         'provider.health.empty_notes': 'No extra notes.',
         'provider.health.empty_scope_title': 'No storage scopes',
         'provider.health.empty_scope_body': 'This provider did not report any storage partitions.',
+        'provider.health.remediation_title': 'Action needed',
+        'provider.health.remediation_unicom_stale': 'China Unicom login has expired. Refresh the Unicom browser session, capture the current session, save credentials, then run Test Now again.',
+        'provider.health.remediation_step_open': 'Open the provider login tab.',
+        'provider.health.remediation_step_capture': 'Use the login assistant to capture the current browser session or finish SMS login.',
+        'provider.health.remediation_step_save_test': 'Save credentials, return to Dashboard, and click Test Now.',
+        'provider.health.open_provider_tab': 'Open Provider Login',
         'provider.health.test_now': 'Test Now',
         'provider.health.capabilities': 'read=%read% · write=%write% · delete=%delete%',
         'provider.health.role': 'role=%value%',
@@ -3571,6 +3583,12 @@ Copyright (c) 2026 walky
         'provider.health.empty_notes': '没有额外说明。',
         'provider.health.empty_scope_title': '没有存储作用域',
         'provider.health.empty_scope_body': '这个云盘还没有上报任何存储分区。',
+        'provider.health.remediation_title': '需要处理',
+        'provider.health.remediation_unicom_stale': '中国联通登录已经失效。请刷新联通浏览器会话，抓取当前会话，保存凭据，然后回到这里再次点击“立即测试”。',
+        'provider.health.remediation_step_open': '打开对应的云盘登录页。',
+        'provider.health.remediation_step_capture': '使用登录助手抓取当前浏览器会话；如果页面已退出登录，先完成短信登录。',
+        'provider.health.remediation_step_save_test': '保存凭据，回到 Dashboard，再点击“立即测试”。',
+        'provider.health.open_provider_tab': '打开登录页',
         'provider.health.test_now': '立即测试',
         'provider.health.capabilities': '读=%read% · 写=%write% · 删=%delete%',
         'provider.health.role': '角色=%value%',
@@ -9919,6 +9937,46 @@ Copyright (c) 2026 walky
         setAdminAlertFeedback(error.message || String(error), 'warn');
       }
     }
+    function providerHealthRemediationHtml(providerId, notes) {
+      const rawNotes = Array.isArray(notes) ? notes.map(note => String(note || '').trim()).filter(Boolean) : [];
+      const remediationNotes = rawNotes.filter(note => note.startsWith('remediation='));
+      if (!remediationNotes.length) {
+        return '';
+      }
+      const provider = String(providerId || '').trim();
+      const normalized = remediationNotes.join(' ').toLowerCase();
+      const isUnicomStale = provider === 'unicom' && (
+        normalized.includes('stale') ||
+        normalized.includes('accesstoken') ||
+        normalized.includes('browser headers')
+      );
+      const message = isUnicomStale
+        ? tr('provider.health.remediation_unicom_stale', {}, 'China Unicom login has expired. Refresh the Unicom browser session, capture the current session, save credentials, then run Test Now again.')
+        : remediationNotes.map(note => note.replace(/^remediation=/, '')).join(' ');
+      const steps = isUnicomStale
+        ? [
+            tr('provider.health.remediation_step_open', {}, 'Open the provider login tab.'),
+            tr('provider.health.remediation_step_capture', {}, 'Use the login assistant to capture the current browser session or finish SMS login.'),
+            tr('provider.health.remediation_step_save_test', {}, 'Save credentials, return to Dashboard, and click Test Now.'),
+          ]
+        : remediationNotes.map(note => note.replace(/^remediation=/, ''));
+      const button = provider
+        ? `<button class="secondary" type="button" data-admin-tab-jump="${escapeHtmlAttr(provider)}">${escapeHtml(tr('provider.health.open_provider_tab', {}, 'Open Provider Login'))}</button>`
+        : '';
+      return `
+        <div class="health-remediation">
+          <strong>${escapeHtml(tr('provider.health.remediation_title', {}, 'Action needed'))}</strong>
+          <div>${escapeHtml(message)}</div>
+          <ol>${steps.map(step => `<li>${escapeHtml(step)}</li>`).join('')}</ol>
+          <div class="actions">${button}</div>
+        </div>
+      `;
+    }
+    function providerHealthVisibleNotes(notes) {
+      return (Array.isArray(notes) ? notes : [])
+        .map(note => String(note || '').trim())
+        .filter(note => note && !note.startsWith('remediation=') && !note.startsWith('remediation_hint='));
+    }
     function renderProviderHealth(providers) {
       const container = document.getElementById('provider-health-grid');
       const visibleProviders = (providers || []).filter(provider => userVisibleProvider(provider.provider));
@@ -9932,9 +9990,11 @@ Copyright (c) 2026 walky
         return;
       }
       container.innerHTML = visibleProviders.map(provider => {
-        const notes = (provider.health.notes || []).length
-          ? provider.health.notes.map(note => escapeHtml(note)).join('<br>')
+        const visibleNotes = providerHealthVisibleNotes(provider.health.notes || []);
+        const notes = visibleNotes.length
+          ? visibleNotes.map(note => escapeHtml(note)).join('<br>')
           : escapeHtml(tr('provider.health.empty_notes', {}, 'No extra notes.'));
+        const remediation = providerHealthRemediationHtml(provider.provider, provider.health.notes || []);
         const status = provider.health.status || 'unavailable';
         const scopes = (provider.health.scopes || []).map(scope => {
           const meta = [];
@@ -9984,6 +10044,7 @@ Copyright (c) 2026 walky
               <button class="secondary" type="button" data-provider-test="${provider.provider}">${escapeHtml(tr('provider.health.test_now', {}, 'Test Now'))}</button>
             </div>
             <div class="scope-grid">${scopes || `<div class="scope-card"><h4>${escapeHtml(tr('provider.health.empty_scope_title', {}, 'No storage scopes'))}</h4><div class="scope-meta">${escapeHtml(tr('provider.health.empty_scope_body', {}, 'This provider did not report any storage partitions.'))}</div></div>`}</div>
+            ${remediation}
             <div class="health-notes">${notes}</div>
           </div>
         `;
@@ -18974,6 +19035,11 @@ Copyright (c) 2026 walky
       setTopologyFeedback(tr('topology.placement_updated', {}, 'New object placement policy updated. Save to apply live.'), 'warn');
     });
     document.getElementById('provider-health-grid').addEventListener('click', event => {
+      const tabButton = event.target.closest('button[data-admin-tab-jump]');
+      if (tabButton) {
+        activateAdminTab(tabButton.dataset.adminTabJump);
+        return;
+      }
       const button = event.target.closest('button[data-provider-test]');
       if (!button) {
         return;
