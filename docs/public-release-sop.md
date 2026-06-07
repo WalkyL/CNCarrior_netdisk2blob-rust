@@ -121,6 +121,7 @@ gh release view v0.1.7 --repo WalkyL/CNCarrior_netdisk2blob-rust --json assets
 
 ```bash
 CCBG_CF_TEST_RELEASE_R2_BUCKET=ccbg-release-assets-test \
+CCBG_RELEASE_LOCAL_TAG=v0.1.7 \
 scripts/deploy-cloudflare-public.sh test
 ```
 
@@ -134,8 +135,16 @@ scripts/deploy-cloudflare-public.sh test
 
 ```bash
 CCBG_CF_PROD_RELEASE_R2_BUCKET=ccbg-release-assets \
+CCBG_RELEASE_LOCAL_TAG=v0.1.7 \
 scripts/deploy-cloudflare-public.sh production
 ```
+
+Release note:
+
+- For a formal release, set `CCBG_RELEASE_LOCAL_TAG=vX.Y.Z` during Cloudflare deploy.
+- This makes `scripts/sync-cloudflare-release-cache.sh` prefer
+  `target/release-local/<tag>/` assets instead of stale files that may still exist under
+  `target/native-packages/`.
 
 如果是首次绑定 production custom domain，额外带：
 
