@@ -84,7 +84,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305,
     aead::{AeadInPlace, generic_array::GenericArray},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures_util::stream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -213,10 +213,10 @@ const CCBG_COPYRIGHT: &str = "Copyright (c) 2026 walky";
 const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust";
 const CCBG_RELEASE_CHANNEL: &str = "commercial-core";
-const CCBG_RELEASE_DATE: &str = "2026-06-07";
-const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.7-walky-20260607";
+const CCBG_RELEASE_DATE: &str = "2026-06-08";
+const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.8-walky-20260608";
 const DEFAULT_RELEASE_FINGERPRINT_SHA256: &str =
-    "8ba68a05c66276c9cffd3e79374130836818997140d6471375ec51e5e8114884";
+    "38c064a5534a12296c8f4682e2612cd1bba165719308fbe80b6bc8e8e07ad6cc";
 
 #[derive(Clone)]
 struct AppState {
@@ -17088,6 +17088,63 @@ async fn list_objects_from_home_providers(
     Ok(objects)
 }
 
+async fn list_delimited_objects_from_home_providers(
+    state: &AppState,
+    bucket: &str,
+    prefix: Option<&str>,
+    delimiter: &str,
+) -> Result<Vec<blob_core::ObjectInfo>, BlobError> {
+    let placements = state
+        .metadata_store
+        .object_placements_for_bucket(bucket)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+    let prefix = prefix.unwrap_or("");
+    let logical_records = logical_object_records_for_bucket(state, bucket)?;
+
+    let mut objects = Vec::new();
+    let mut seen = HashSet::new();
+    for placement in placements {
+        if !placement.key.starts_with(prefix) {
+            continue;
+        }
+        let remainder = &placement.key[prefix.len()..];
+        if remainder.is_empty() {
+            continue;
+        }
+        if remainder.contains(delimiter) {
+            if seen.insert((placement.provider.clone(), placement.key.clone())) {
+                objects.push(blob_core::ObjectInfo {
+                    key: placement.key,
+                    size: 0,
+                    etag: None,
+                    content_type: None,
+                    last_modified: None,
+                });
+            }
+            continue;
+        }
+        if !seen.insert((placement.provider.clone(), placement.key.clone())) {
+            continue;
+        }
+        let logical = logical_records.get(placement.key.as_str());
+        let size = logical
+            .map(|record| record.plaintext_size)
+            .unwrap_or_default();
+        let updated_at_unix_ms = logical
+            .map(|record| record.updated_at_unix_ms)
+            .unwrap_or(placement.updated_at_unix_ms);
+        objects.push(blob_core::ObjectInfo {
+            key: placement.key,
+            size,
+            etag: None,
+            content_type: logical.and_then(|record| record.logical_content_type.clone()),
+            last_modified: unix_ms_to_s3_timestamp(updated_at_unix_ms),
+        });
+    }
+    objects.sort_by(|left, right| left.key.cmp(&right.key));
+    Ok(objects)
+}
+
 fn request_body_limit_bytes(_config: &AppConfig) -> usize {
     // Route-level body caps must not block large streaming uploads before per-handler
     // auth, size, and backend-path checks run.
@@ -21512,6 +21569,43 @@ async fn list_bucket_objects_with_fallback(
 
     let indexed_objects = list_objects_from_home_providers(state, bucket, prefix).await?;
     objects = merge_object_lists_by_key(objects, indexed_objects);
+    let logical_records = logical_object_records_for_bucket(state, bucket)?;
+    objects = objects
+        .into_iter()
+        .map(|object| {
+            let key = object.key.clone();
+            public_object_info(object, logical_records.get(key.as_str()))
+        })
+        .collect();
+    objects.truncate(limit);
+
+    Ok(ReadResult {
+        source: read_backend.source,
+        value: objects,
+    })
+}
+
+async fn list_bucket_objects_for_delimited_listing(
+    state: &AppState,
+    bucket: &str,
+    prefix: Option<&str>,
+    delimiter: &str,
+    limit: usize,
+) -> Result<ReadResult<Vec<blob_core::ObjectInfo>>, BlobError> {
+    let read_backend = resolve_bucket_read_backend(state, bucket).await?;
+    let mut objects =
+        list_delimited_objects_from_home_providers(state, bucket, prefix, delimiter).await?;
+    if read_backend.source.provider == ProviderId::Stub {
+        let backend_objects = read_backend
+            .backend
+            .list_objects(ListObjectsRequest {
+                container: Some(bucket.to_string()),
+                prefix: prefix.map(str::to_string),
+                limit: Some(limit),
+            })
+            .await?;
+        objects = merge_object_lists_by_key(backend_objects, objects);
+    }
     let logical_records = logical_object_records_for_bucket(state, bucket)?;
     objects = objects
         .into_iter()
@@ -28892,13 +28986,28 @@ async fn list_objects_v2_with_bucket(
         .or(query.start_after.as_deref());
     let mut backend_limit = max_keys.saturating_add(1).max(2).min(1000);
     let page = loop {
-        let read = list_bucket_objects_with_fallback(
-            &state,
-            &bucket,
-            query.prefix.as_deref(),
-            backend_limit,
-        )
-        .await
+        let read = if query
+            .delimiter
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            list_bucket_objects_for_delimited_listing(
+                &state,
+                &bucket,
+                query.prefix.as_deref(),
+                query.delimiter.as_deref().unwrap_or(""),
+                backend_limit,
+            )
+            .await
+        } else {
+            list_bucket_objects_with_fallback(
+                &state,
+                &bucket,
+                query.prefix.as_deref(),
+                backend_limit,
+            )
+            .await
+        }
         .map_err(|error| map_bucket_error(error, &bucket))?;
         let source = read.source;
         record_data_plane_fallback_read(&state, source);
@@ -28953,7 +29062,7 @@ async fn list_objects_v2_with_bucket(
         body.push_str(&format!(
             "<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>{}</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass></Contents>",
             xml_escape(&object.key),
-            xml_escape(object.last_modified.as_deref().unwrap_or(DEFAULT_TIMESTAMP)),
+            xml_escape(&s3_last_modified_timestamp(object.last_modified.as_deref())),
             xml_escape(&quoted_etag(object.etag.as_deref())),
             object.size,
         ));
@@ -28970,6 +29079,33 @@ async fn list_objects_v2_with_bucket(
     let mut response = xml_response(StatusCode::OK, body);
     apply_read_source_headers(response.headers_mut(), read_source);
     Ok(response)
+}
+
+fn unix_ms_to_s3_timestamp(unix_ms: u64) -> Option<String> {
+    let millis = i64::try_from(unix_ms).ok()?;
+    Utc.timestamp_millis_opt(millis)
+        .single()
+        .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+}
+
+fn s3_last_modified_timestamp(raw: Option<&str>) -> String {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return DEFAULT_TIMESTAMP.to_string();
+    };
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(raw) {
+        return parsed
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    }
+    if let Some((date, time)) = raw.split_once(' ') {
+        let normalized = format!("{date}T{time}");
+        if let Ok(parsed) = DateTime::parse_from_rfc3339(&normalized) {
+            return parsed
+                .with_timezone(&Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        }
+    }
+    DEFAULT_TIMESTAMP.to_string()
 }
 
 fn list_objects_v2_projection(
@@ -33139,7 +33275,7 @@ mod tests {
     #[test]
     fn gateway_version_text_exposes_release_provenance() {
         let text = gateway_version_text();
-        assert!(text.contains("gatewayd 0.1.7"));
+        assert!(text.contains("gatewayd 0.1.8"));
         assert!(text.contains(DEFAULT_RELEASE_FINGERPRINT));
         assert!(text.contains(CCBG_LICENSE_ID));
         assert!(text.contains(CCBG_CANONICAL_REPO));
@@ -45324,6 +45460,84 @@ mod tests {
             )
         );
         assert!(!xml.contains("<Key>stock-rag-bridge-rust/tasktest-20260604/source_shards/base_info_f10/month=2026-06/bucket=01/part-1.ndjson</Key>"));
+    }
+
+    #[tokio::test]
+    async fn list_objects_v2_with_delimiter_uses_placements_for_parent_prefixes() {
+        let state = test_state();
+        let backend = backend_for_test(&state, ProviderId::Stub);
+        backend
+            .put_object(PutObjectRequest {
+                container: "root".to_string(),
+                key: "keepalive.txt".to_string(),
+                body: Bytes::from_static(b"x").into(),
+                size: Some(1),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("seed bucket");
+        state
+            .metadata_store
+            .upsert_object_placement(
+                "stub",
+                "root",
+                "stock-rag-bridge-rust/graph/cache/graph_rebuild_plan.json",
+                123,
+            )
+            .expect("placement should persist");
+
+        for (prefix, expected) in [
+            ("", "stock-rag-bridge-rust/"),
+            ("stock-rag-bridge-rust/", "stock-rag-bridge-rust/graph/"),
+            (
+                "stock-rag-bridge-rust/graph/",
+                "stock-rag-bridge-rust/graph/cache/",
+            ),
+        ] {
+            let uri: Uri = if prefix.is_empty() {
+                "/root?list-type=2&delimiter=%2F"
+                    .parse()
+                    .expect("uri should parse")
+            } else {
+                format!("/root?list-type=2&prefix={prefix}&delimiter=%2F")
+                    .parse()
+                    .expect("uri should parse")
+            };
+            let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+            let response = list_objects_v2(
+                State(state.clone()),
+                Path("root".to_string()),
+                Query(ListObjectsV2Query {
+                    list_type: Some("2".to_string()),
+                    prefix: (!prefix.is_empty()).then(|| prefix.to_string()),
+                    delimiter: Some("/".to_string()),
+                    ..Default::default()
+                }),
+                Method::GET,
+                OriginalUri(uri),
+                headers,
+            )
+            .await
+            .expect("list should succeed");
+
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body should read");
+            let xml = String::from_utf8(body.to_vec()).expect("xml should be utf-8");
+            assert!(
+                xml.contains(&format!(
+                    "<CommonPrefixes><Prefix>{expected}</Prefix></CommonPrefixes>"
+                )),
+                "expected prefix {expected} in {xml}"
+            );
+            assert!(
+                !xml.contains(
+                    "<Key>stock-rag-bridge-rust/graph/cache/graph_rebuild_plan.json</Key>"
+                ),
+                "deep placement must not leak as a file in parent listing: {xml}"
+            );
+        }
     }
 
     #[tokio::test]

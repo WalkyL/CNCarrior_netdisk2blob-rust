@@ -362,3 +362,25 @@ Production smoke:
   `fuse.rclone` mount.
 - Package `scripts/smoke.sh` exited non-zero because an authenticated Admin route returned `401`;
   manual health/runtime checks above were used for the post-upgrade acceptance.
+
+## 2026-06-08 v0.1.8 release candidate scope
+
+Release intent:
+
+- Promote the `.49` S3 mount fix into the next formal public release.
+- Keep the current provider messaging boundary: China Mobile large-file capability is still
+  limited by the 2026-06-05 `.49` 16 GiB isolated probe returning `04010319 / Insufficient Rights`.
+
+Included validation:
+
+- `.49` S3 `ListObjectsV2 delimiter=/` traversal now works for:
+  - `root/`
+  - `root/stock-rag-bridge-rust/`
+  - `root/stock-rag-bridge-rust/graph/`
+  - `root/stock-rag-bridge-rust/graph/cache/`
+- `rclone cat root/stock-rag-bridge-rust/graph/cache/graph_rebuild_plan.json` returned the
+  object body instead of hanging.
+- Temporary `rclone mount` of `root/stock-rag-bridge-rust/graph` passed mounted `ls/stat/head`.
+- Mounted write validation passed on `.49` for `small.txt`, `8 MiB`, and `32 MiB` objects.
+- Detailed live evidence is recorded in
+  [ops-010-49-s3-rclone-mount-listing.md](./ops-010-49-s3-rclone-mount-listing.md).
