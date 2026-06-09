@@ -22,6 +22,10 @@
 - `GET /readyz`: 只给探针用；当前 primary provider 为 `unavailable` 时返回 `503`
 - `GET /metrics`: Prometheus 文本格式指标
 
+如果配置了 `CCBG_CONTROL_API_KEY`，`61083` 上的 `/healthz`、`/readyz`、`/metrics`
+都必须带 `x-api-key: <key>`、`Authorization: Bearer <key>`、`Cookie: ccbg_admin_api_key=<key>`
+之一，或首次用 `?api_key=<key>` 建立 cookie；否则会返回 `401`。
+
 ## 端口选择原则
 
 1. `61080-61084` 作为默认核心端口段。

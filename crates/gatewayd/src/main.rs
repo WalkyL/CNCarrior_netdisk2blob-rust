@@ -5864,6 +5864,7 @@ struct ObjectReconcilePreviewRowPayload {
     status: &'static str,
     status_label: &'static str,
     note: String,
+    next_step: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -19641,6 +19642,7 @@ async fn object_reconcile_preview_row_payload(
     )
     .await?;
 
+    let next_step = object_reconcile_next_step_note(&desired);
     Ok(ObjectReconcilePreviewRowPayload {
         bucket: record.bucket.clone(),
         key: record.key.clone(),
@@ -19685,7 +19687,55 @@ async fn object_reconcile_preview_row_payload(
         status: desired.status,
         status_label: desired.status_label,
         note: desired.note,
+        next_step,
     })
+}
+
+fn object_reconcile_next_step_note(desired: &DesiredObjectReconcilePlan) -> String {
+    match desired.status {
+        "no_change" => {
+            "当前对象已经符合现行策略，不需要额外操作。".to_string()
+        }
+        "needs_changes" => {
+            "先点 Dry-run 确认变更和容量预算；确认无误后再执行显式收敛。执行时会先写新目标，成功后才切换元数据并安排删旧副本。".to_string()
+        }
+        "blocked" => {
+            if desired.note.contains("本地 spool 可用空间未知") {
+                "先检查网关宿主机上的 body spool 挂载和可用空间，让系统能读到 /var/lib/ccbg/body-spool 所在文件系统的剩余容量；然后再重新加载预览。".to_string()
+            } else if desired.note.contains("本地 spool 剩余空间不足") {
+                "先释放或扩容网关宿主机上的 body spool 空间，再重新加载预览；空间足够后才能执行显式收敛。".to_string()
+            } else if desired.note.contains("本地 spool 单对象上限不足") {
+                "先调大 CCBG_MAX_SPOOLED_OBJECT_BYTES，再重新加载预览；单对象 spool 上限足够后才能执行显式收敛。".to_string()
+            } else if desired
+                .note
+                .contains("历史对象缺少逻辑尺寸与加密元数据")
+            {
+                "这条历史对象缺少可安全估算收敛预算的元数据，当前不要执行。先通过新的覆盖写把它纳入现行元数据模型，或补齐对象上下文后再预览。".to_string()
+            } else if desired.note.contains("quota policy blocked")
+                || desired.note.contains("live capacity")
+                || desired.note.contains("free capacity is unavailable")
+                || desired.note.contains("used capacity is unavailable")
+            {
+                "先检查目标云盘的实时容量是否可见，或调整对应 provider 的 quota 阈值；确认目标云盘可写且容量可判定后，再重新加载预览。".to_string()
+            } else if desired.note.contains("不是流式读取路径")
+                || desired.note.contains("不是流式写入路径")
+            {
+                "当前 provider 能力还不满足这次历史对象重写路径，先不要执行。需要改成支持流式读写的路径，或把对象改走可流式处理的 provider 后再收敛。".to_string()
+            } else {
+                "先按上面的阻断原因处理容量、缓冲或 provider 能力问题，然后重新加载预览；只有预览不再阻断后再执行显式收敛。".to_string()
+            }
+        }
+        "skipped" => {
+            if desired.note.contains("application_id") {
+                "这条历史对象缺少 application_id，当前无法安全判断策略命中。先用带完整元数据的新写入或覆盖写重建对象，再重新加载预览。".to_string()
+            } else if desired.note.contains("logical content-type") {
+                "这条历史对象缺少 logical content-type，当前无法安全判断策略命中。先用带完整 content-type 的新写入或覆盖写重建对象，再重新加载预览。".to_string()
+            } else {
+                "先补齐这条历史对象缺失的上下文信息，再重新加载预览。".to_string()
+            }
+        }
+        _ => "先重新加载预览，确认当前对象状态后再决定是否执行显式收敛。".to_string(),
+    }
 }
 
 fn object_reconcile_record_id(bucket: &str, key: &str) -> String {
@@ -29574,6 +29624,147 @@ fn build_put_encryption_plan(
     }))
 }
 
+async fn verify_put_object_visibility(
+    backend: &DynBackend,
+    provider: ProviderId,
+    bucket: &str,
+    key: &str,
+    expected_size: u64,
+) -> Result<u32, BlobError> {
+    const PUT_OBJECT_VERIFY_MAX_ATTEMPTS: u32 = 3;
+    const PUT_OBJECT_VERIFY_RETRY_DELAY_MS: u64 = 150;
+
+    let mut last_error = None;
+    for attempt in 1..=PUT_OBJECT_VERIFY_MAX_ATTEMPTS {
+        match backend.head_object(bucket, key).await {
+            Ok(object) => {
+                if object.size == expected_size {
+                    return Ok(attempt);
+                }
+                last_error = Some(format!(
+                    "head returned size {} instead of {}",
+                    object.size, expected_size
+                ));
+            }
+            Err(error) => {
+                last_error = Some(error.to_string());
+            }
+        }
+
+        if attempt < PUT_OBJECT_VERIFY_MAX_ATTEMPTS {
+            sleep(Duration::from_millis(PUT_OBJECT_VERIFY_RETRY_DELAY_MS)).await;
+        }
+    }
+
+    Err(BlobError::Upstream(format!(
+        "provider {} reported put success for {}/{} but post-write head verification failed after {} attempts: {}",
+        provider.as_str(),
+        bucket,
+        key,
+        PUT_OBJECT_VERIFY_MAX_ATTEMPTS,
+        last_error.unwrap_or_else(|| "no verification result was captured".to_string())
+    )))
+}
+
+async fn maybe_cleanup_failed_put_object(
+    backend: &DynBackend,
+    home_provider: ProviderId,
+    bucket: &str,
+    key: &str,
+    previous_placement: Option<(ProviderId, u64)>,
+    failure_context: &'static str,
+) {
+    if previous_placement
+        .as_ref()
+        .is_some_and(|(provider, _)| *provider == home_provider)
+    {
+        warn!(
+            bucket = %bucket,
+            key = %key,
+            provider = home_provider.as_str(),
+            context = failure_context,
+            "skipping failed-put cleanup because the previous home object used the same provider"
+        );
+        return;
+    }
+
+    if let Err(cleanup_error) = backend.delete_object(bucket, key).await {
+        warn!(
+            bucket = %bucket,
+            key = %key,
+            provider = home_provider.as_str(),
+            context = failure_context,
+            error = %cleanup_error,
+            "failed to delete uploaded object after put rollback"
+        );
+    }
+}
+
+async fn mark_gateway_write_ahead_log_rolled_back(
+    state: &AppState,
+    context: &GatewayWriteAheadLogContext,
+) -> Result<(), BlobError> {
+    let mut record = context.record.clone();
+    record.phase = GatewayWriteAheadLogPhase::Committed;
+    record.committed_at_unix_ms = Some(current_unix_ms());
+    let previous_home_provider = record
+        .previous_placement
+        .as_ref()
+        .map(|placement| {
+            ProviderId::parse(&placement.provider).map_err(|error| {
+                BlobError::Configuration(format!(
+                    "failed to parse previous WAL home provider {}: {error}",
+                    placement.provider
+                ))
+            })
+        })
+        .transpose()?;
+    if let Some(home_provider) = previous_home_provider {
+        record.operation = GatewayWriteAheadLogOperation::MetadataSync;
+        record.home_provider = home_provider;
+        record.logical_record = record.previous_logical_record.clone();
+        if let Some(previous_plan) = record.previous_protection_plan.as_ref() {
+            let sync_targets = parse_provider_csv(&previous_plan.sync_targets_csv)?;
+            let fallback_read_order = sanitize_fallback_order_for_sync_targets(
+                &sync_targets,
+                &parse_provider_csv(&previous_plan.fallback_read_order_csv)?,
+            );
+            record.sync_targets = sync_targets;
+            record.fallback_read_order = fallback_read_order;
+        } else {
+            record.sync_targets = Vec::new();
+            record.fallback_read_order = Vec::new();
+        }
+    } else {
+        record.operation = GatewayWriteAheadLogOperation::Delete;
+        record.logical_record = None;
+        record.sync_targets = Vec::new();
+        record.fallback_read_order = Vec::new();
+    }
+    persist_gateway_write_ahead_log_record(state, context.remote_provider, &record).await
+}
+
+async fn mark_gateway_write_ahead_log_rolled_back_or_warn(
+    state: &AppState,
+    context: Option<&GatewayWriteAheadLogContext>,
+    bucket: &str,
+    key: &str,
+    action: &str,
+) {
+    if let Some(context) = context {
+        if let Err(error) = mark_gateway_write_ahead_log_rolled_back(state, context).await {
+            warn!(
+                bucket = %bucket,
+                key = %key,
+                action = %action,
+                remote_provider = context.remote_provider.as_str(),
+                error = %error,
+                "failed to persist rolled-back gateway write-ahead log state"
+            );
+        }
+    }
+}
+
 async fn execute_put_upload(
     state: &AppState,
     bucket: String,
@@ -29663,8 +29854,17 @@ async fn execute_put_upload(
     )
     .await
     .map_err(map_backend_error_to_s3)?;
-    persist_object_home_provider(state, home_provider, &bucket, &key)
-        .map_err(map_backend_error_to_s3)?;
+    if let Err(error) = persist_object_home_provider(state, home_provider, &bucket, &key) {
+        mark_gateway_write_ahead_log_rolled_back_or_warn(
+            state,
+            gateway_write_ahead_log.as_ref(),
+            &bucket,
+            &key,
+            "persist home placement before put",
+        )
+        .await;
+        return Err(map_backend_error_to_s3(error));
+    }
     let logical_persist_result = persist_logical_object_record(state, &desired_logical_record);
     if let Err(error) = logical_persist_result {
         restore_previous_object_write_state(
@@ -29674,6 +29874,14 @@ async fn execute_put_upload(
             previous_placement,
             previous_logical,
         );
+        mark_gateway_write_ahead_log_rolled_back_or_warn(
+            state,
+            gateway_write_ahead_log.as_ref(),
+            &bucket,
+            &key,
+            "persist logical metadata before put",
+        )
+        .await;
         return Err(map_backend_error_to_s3(error));
     }
 
@@ -29686,9 +29894,10 @@ async fn execute_put_upload(
         .start_operation(home_provider.as_str(), ProviderResourceOperationKind::Write);
     let (source_body, payload_validation) = request_body.into_parts(state, home_provider.as_str());
     let upload_body = match encryption_plan.as_ref() {
-        Some(plan) => encrypt_upload(source_body, plan.request.clone(), plan.key_encryption_key)
-            .map(|encrypted| encrypted.body)
-            .map_err(|error| {
+        Some(plan) => match encrypt_upload(source_body, plan.request.clone(), plan.key_encryption_key)
+        {
+            Ok(encrypted) => encrypted.body,
+            Err(error) => {
                 restore_previous_object_write_state(
                     state,
                     &bucket,
@@ -29696,11 +29905,20 @@ async fn execute_put_upload(
                     previous_placement,
                     previous_logical.clone(),
                 );
-                S3Error::internal_error(error.to_string())
-            })?,
+                mark_gateway_write_ahead_log_rolled_back_or_warn(
+                    state,
+                    gateway_write_ahead_log.as_ref(),
+                    &bucket,
+                    &key,
+                    "build encrypted put body",
+                )
+                .await;
+                return Err(S3Error::internal_error(error.to_string()));
+            }
+        },
         None => source_body,
     };
-    let result = home_backend
+    let result = match home_backend
         .put_object(PutObjectRequest {
             container: bucket.clone(),
             key: key.clone(),
@@ -29710,7 +29928,9 @@ async fn execute_put_upload(
             preferred_upload_part_size_bytes: None,
         })
         .await
-        .map_err(|error| {
+    {
+        Ok(result) => result,
+        Err(error) => {
             state.provider_io_stats.record_failure(
                 home_provider.as_str(),
                 ProviderIoOperationKind::Write,
@@ -29723,8 +29943,17 @@ async fn execute_put_upload(
                 previous_placement,
                 previous_logical.clone(),
             );
-            map_backend_error_to_s3(error)
-        })?;
+            mark_gateway_write_ahead_log_rolled_back_or_warn(
+                state,
+                gateway_write_ahead_log.as_ref(),
+                &bucket,
+                &key,
+                "write home object",
+            )
+            .await;
+            return Err(map_backend_error_to_s3(error));
+        }
+    };
     if let Some(validation) = payload_validation {
         if let Err(error) = validation.ensure_matched() {
             state.provider_io_stats.record_failure(
@@ -29748,8 +29977,75 @@ async fn execute_put_upload(
                     "failed to delete uploaded object after request-body hash mismatch"
                 );
             }
+            mark_gateway_write_ahead_log_rolled_back_or_warn(
+                state,
+                gateway_write_ahead_log.as_ref(),
+                &bucket,
+                &key,
+                "request-body hash mismatch after put",
+            )
+            .await;
             return Err(error);
         }
+    }
+    let verification_attempts = match verify_put_object_visibility(
+        &home_backend,
+        home_provider,
+        &bucket,
+        &key,
+        stored_size,
+    )
+    .await
+    {
+        Ok(attempts) => attempts,
+        Err(error) => {
+            state.provider_io_stats.record_failure(
+                home_provider.as_str(),
+                ProviderIoOperationKind::Write,
+                &error.to_string(),
+            );
+            warn!(
+                bucket = %bucket,
+                key = %key,
+                provider = home_provider.as_str(),
+                error = %error,
+                "put post-write head verification failed after provider returned success"
+            );
+            restore_previous_object_write_state(
+                state,
+                &bucket,
+                &key,
+                previous_placement,
+                previous_logical.clone(),
+            );
+            maybe_cleanup_failed_put_object(
+                &home_backend,
+                home_provider,
+                &bucket,
+                &key,
+                previous_placement,
+                "post-write head verification failed",
+            )
+            .await;
+            mark_gateway_write_ahead_log_rolled_back_or_warn(
+                state,
+                gateway_write_ahead_log.as_ref(),
+                &bucket,
+                &key,
+                "post-write head verification failure",
+            )
+            .await;
+            return Err(map_backend_error_to_s3(error));
+        }
+    };
+    if verification_attempts > 1 {
+        info!(
+            bucket = %bucket,
+            key = %key,
+            provider = home_provider.as_str(),
+            verification_attempts,
+            "put post-write head verification recovered after retry"
+        );
     }
     state.provider_io_stats.record_success_with_response(
         home_provider.as_str(),
@@ -32196,6 +32492,148 @@ mod tests {
 
         async fn delete_object(&self, _container: &str, _key: &str) -> Result<(), BlobError> {
             Err(BlobError::Upstream(self.message.clone()))
+        }
+    }
+
+    struct PostWriteVisibilityTestBackend {
+        name: &'static str,
+        inner: StubBackend,
+        target_bucket: String,
+        target_key: String,
+        remaining_head_failures: Mutex<u32>,
+        head_calls: AtomicU64,
+        delete_calls: AtomicU64,
+    }
+
+    impl PostWriteVisibilityTestBackend {
+        fn new(
+            name: &'static str,
+            target_bucket: impl Into<String>,
+            target_key: impl Into<String>,
+            remaining_head_failures: u32,
+        ) -> Self {
+            Self {
+                name,
+                inner: StubBackend::new(),
+                target_bucket: target_bucket.into(),
+                target_key: target_key.into(),
+                remaining_head_failures: Mutex::new(remaining_head_failures),
+                head_calls: AtomicU64::new(0),
+                delete_calls: AtomicU64::new(0),
+            }
+        }
+
+        async fn seed_object(
+            &self,
+            container: &str,
+            key: &str,
+            body: Bytes,
+            content_type: Option<String>,
+        ) {
+            self.inner
+                .put_object(PutObjectRequest {
+                    container: container.to_string(),
+                    key: key.to_string(),
+                    size: Some(body.len() as u64),
+                    body: ObjectBody::from_bytes(body),
+                    content_type,
+                    preferred_upload_part_size_bytes: None,
+                })
+                .await
+                .expect("seed object should persist");
+        }
+
+        fn is_target(&self, container: &str, key: &str) -> bool {
+            container == self.target_bucket && key == self.target_key
+        }
+
+        fn head_calls(&self) -> u64 {
+            self.head_calls.load(Ordering::Relaxed)
+        }
+
+        fn delete_calls(&self) -> u64 {
+            self.delete_calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobBackend for PostWriteVisibilityTestBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn health(&self) -> Result<ServiceHealth, BlobError> {
+            self.inner.health().await
+        }
+
+        async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
+            self.inner.list_containers().await
+        }
+
+        async fn list_objects(
+            &self,
+            request: ListObjectsRequest,
+        ) -> Result<Vec<ObjectInfo>, BlobError> {
+            self.inner.list_objects(request).await
+        }
+
+        async fn head_object(&self, container: &str, key: &str) -> Result<ObjectInfo, BlobError> {
+            if self.is_target(container, key) {
+                self.head_calls.fetch_add(1, Ordering::Relaxed);
+                let mut remaining = self
+                    .remaining_head_failures
+                    .lock()
+                    .expect("post-write head failure state should not be poisoned");
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    return Err(BlobError::NotFound(format!(
+                        "object not visible yet: {container}/{key}"
+                    )));
+                }
+            }
+            self.inner.head_object(container, key).await
+        }
+
+        async fn get_object(
+            &self,
+            container: &str,
+            key: &str,
+        ) -> Result<blob_core::ObjectPayload, BlobError> {
+            self.inner.get_object(container, key).await
+        }
+
+        async fn put_object(
+            &self,
+            request: PutObjectRequest,
+        ) -> Result<blob_core::PutObjectResult, BlobError> {
+            if self.is_target(&request.container, &request.key) {
+                let declared_size = request.size;
+                let key = request.key.clone();
+                let received = request.body.collect().await?;
+                if declared_size.is_some_and(|size| size != received.len() as u64) {
+                    return Err(BlobError::BodyStream(format!(
+                        "declared size {:?} did not match received {} for {key}",
+                        declared_size,
+                        received.len()
+                    )));
+                }
+                return Ok(blob_core::PutObjectResult {
+                    etag: None,
+                    first_response_latency_ms: Some(1),
+                });
+            }
+            self.inner.put_object(request).await
+        }
+
+        async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+            if self.is_target(container, key) {
+                self.delete_calls.fetch_add(1, Ordering::Relaxed);
+            }
+            self.inner.delete_object(container, key).await
         }
     }
 
@@ -44091,6 +44529,291 @@ mod tests {
                 .expect("placement should exist")
                 .provider,
             "telecom"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_rolls_back_metadata_when_post_write_head_verification_never_succeeds() {
+        let mut state = test_state();
+        let bucket = "placeholder".to_string();
+        let key = "notes/post-write-verify-missing.txt".to_string();
+        let backend = Arc::new(PostWriteVisibilityTestBackend::new(
+            "telecom-post-write-missing",
+            bucket.clone(),
+            key.clone(),
+            3,
+        ));
+        replace_backend(&mut state, ProviderId::Telecom, backend.clone());
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology.primary_provider = ProviderId::Stub;
+            control_plane.write_targets = vec![ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferHighSpeed;
+            control_plane.high_speed_providers = vec![ProviderId::Telecom];
+        }
+
+        let body = Bytes::from_static(b"post write verify");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect_err("put should fail when post-write head verification never succeeds")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be utf-8");
+        assert!(response_body.contains("post-write head verification failed"));
+
+        assert!(
+            state
+                .metadata_store
+                .object_placement(&bucket, &key)
+                .expect("placement should load after failed put")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .logical_object(&bucket, &key)
+                .expect("logical metadata should load after failed put")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .object_protection_plan(&bucket, &key)
+                .expect("protection plan should load after failed put")
+                .is_none()
+        );
+        assert_eq!(backend.head_calls(), 3);
+        assert_eq!(backend.delete_calls(), 1);
+
+        let write_io = state.provider_io_stats.snapshot_provider("telecom");
+        assert_eq!(write_io.write.success_count, 0);
+        assert_eq!(write_io.write.failure_count, 1);
+        assert!(
+            write_io
+                .write
+                .last_error
+                .as_deref()
+                .is_some_and(|value| value.contains("post-write head verification failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn put_post_write_verification_failure_does_not_delete_previous_same_provider_object() {
+        let mut state = test_state();
+        let bucket = "placeholder".to_string();
+        let key = "notes/post-write-verify-existing.txt".to_string();
+        let backend = Arc::new(PostWriteVisibilityTestBackend::new(
+            "telecom-post-write-existing",
+            bucket.clone(),
+            key.clone(),
+            3,
+        ));
+        backend
+            .seed_object(
+                &bucket,
+                &key,
+                Bytes::from_static(b"original contents"),
+                Some("text/plain".to_string()),
+            )
+            .await;
+        replace_backend(&mut state, ProviderId::Telecom, backend.clone());
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology.primary_provider = ProviderId::Stub;
+            control_plane.write_targets = vec![ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferHighSpeed;
+            control_plane.high_speed_providers = vec![ProviderId::Telecom];
+        }
+        state
+            .metadata_store
+            .upsert_object_placement("telecom", &bucket, &key, 100)
+            .expect("existing placement should persist");
+        state
+            .metadata_store
+            .upsert_logical_object(&LogicalObjectRecord {
+                bucket: bucket.clone(),
+                key: key.clone(),
+                application_id: Some("default".to_string()),
+                encrypted: false,
+                encryption_profile_id: None,
+                algorithm: None,
+                key_id: None,
+                key_source_kind: None,
+                key_source_ref: None,
+                chunk_plaintext_bytes: None,
+                plaintext_size: 17,
+                stored_size: 17,
+                logical_content_type: Some("text/plain".to_string()),
+                updated_at_unix_ms: 101,
+            })
+            .expect("existing logical metadata should persist");
+
+        let body = Bytes::from_static(b"new payload that should roll back");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect_err("put should fail when post-write verification cannot confirm overwrite")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        assert_eq!(backend.delete_calls(), 0);
+        assert_eq!(backend.head_calls(), 3);
+        let object = backend
+            .get_object(&bucket, &key)
+            .await
+            .expect("previous object should still exist");
+        let object_body = object
+            .body
+            .collect()
+            .await
+            .expect("previous body should read");
+        assert_eq!(object_body.as_ref(), b"original contents");
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load after rollback")
+            .expect("placement should still exist");
+        assert_eq!(placement.provider, "telecom");
+        assert_eq!(placement.updated_at_unix_ms, 100);
+        let logical = state
+            .metadata_store
+            .logical_object(&bucket, &key)
+            .expect("logical should load after rollback")
+            .expect("logical should still exist");
+        assert_eq!(logical.plaintext_size, 17);
+        assert_eq!(logical.stored_size, 17);
+    }
+
+    #[tokio::test]
+    async fn put_post_write_verification_failure_marks_wal_rollback_terminal_and_replay_safe() {
+        let mut state = test_state();
+        let telecom_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend.clone());
+        install_gateway_write_ahead_log_policy(&state, ProviderId::Telecom, &["default"]);
+
+        let bucket = "placeholder".to_string();
+        let key = "notes/post-write-verify-wal.txt".to_string();
+        let mobile_backend = Arc::new(PostWriteVisibilityTestBackend::new(
+            "mobile-post-write-wal",
+            bucket.clone(),
+            key.clone(),
+            3,
+        ));
+        replace_backend(&mut state, ProviderId::Mobile, mobile_backend.clone());
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology.primary_provider = ProviderId::Stub;
+            control_plane.write_targets = vec![ProviderId::Mobile];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferHighSpeed;
+            control_plane.high_speed_providers = vec![ProviderId::Mobile];
+        }
+
+        let body = Bytes::from_static(b"wal rollback body");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect_err("put should fail when post-write verification fails")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let records = gateway_write_ahead_log_records_for_test(&state, &telecom_backend).await;
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.phase, GatewayWriteAheadLogPhase::Committed);
+        assert_eq!(record.operation, GatewayWriteAheadLogOperation::Delete);
+        assert_eq!(record.bucket, bucket);
+        assert_eq!(record.key, key);
+
+        replay_gateway_write_ahead_log_from_remote(&state)
+            .await
+            .expect("wal replay should succeed after rollback terminalization");
+        assert!(
+            state
+                .metadata_store
+                .object_placement("placeholder", "notes/post-write-verify-wal.txt")
+                .expect("placement query should succeed after replay")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .logical_object("placeholder", "notes/post-write-verify-wal.txt")
+                .expect("logical query should succeed after replay")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .object_protection_plan("placeholder", "notes/post-write-verify-wal.txt")
+                .expect("plan query should succeed after replay")
+                .is_none()
         );
     }
 

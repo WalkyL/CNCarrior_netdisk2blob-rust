@@ -338,7 +338,7 @@ Agent -> Skill -> mcp-server / gatewayd
 - 默认 S3 API 为 `61080`
 - 默认 Admin Web UI 为 `61081`
 - 默认 OneDrive OAuth 本地回调为 `61082`
-- 默认 Metrics / 扩展健康检查为 `61083`，当前已提供 `/healthz`、`/readyz`、`/metrics`
+- 默认 Metrics / 扩展健康检查为 `61083`，当前已提供 `/healthz`、`/readyz`、`/metrics`；配置了 `CCBG_CONTROL_API_KEY` 时，这三个路由都要求 control API key
 - 可选 MCP Streamable HTTP 为 `61084`
 
 ## Agent 交付策略

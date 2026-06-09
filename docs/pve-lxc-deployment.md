@@ -118,10 +118,17 @@ sudo scripts/smoke.sh
 
 - `ccbg.service` 为 active/running
 - `GET /healthz` 返回 200
-- `GET /readyz` 返回 200
+- `GET /readyz` 返回 200；如果配置了 `CCBG_CONTROL_API_KEY`，必须带 `x-api-key: <key>` 或 `?api_key=<key>`
 - SigV4 `ListBuckets` 返回 200
 - 浏览器访问 `http://<LXC-IP>:61081/` 返回登录页或 Admin Web
 - `/etc/ccbg/ccbg.env` 中 `CCBG_ONEDRIVE_ENABLED=false`
+
+`scripts/smoke.sh` 会自动读取 `/etc/ccbg/ccbg.env` 里的 `CCBG_CONTROL_API_KEY`，并用
+`x-api-key` 探测 metrics `readyz`。如果你想手工验证，可直接运行:
+
+```bash
+curl -H "x-api-key: $(grep '^CCBG_CONTROL_API_KEY=' /etc/ccbg/ccbg.env | cut -d= -f2-)" http://127.0.0.1:61083/readyz
+```
 
 SMB sidecar profile 额外验收:
 

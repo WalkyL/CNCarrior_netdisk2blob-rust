@@ -16,9 +16,31 @@ metrics_endpoint="${CCBG_SMOKE_METRICS_ENDPOINT:-http://127.0.0.1:61083}"
 access_key="${CCBG_SMOKE_ACCESS_KEY_ID:-${CCBG_S3_ACCESS_KEY_ID:-ccbg}}"
 secret_key="${CCBG_SMOKE_SECRET_ACCESS_KEY:-${CCBG_S3_SECRET_ACCESS_KEY:-change-me}}"
 region="${CCBG_SMOKE_REGION:-${CCBG_S3_REGION:-us-east-1}}"
+control_api_key="${CCBG_SMOKE_CONTROL_API_KEY:-${CCBG_CONTROL_API_KEY:-}}"
 
 curl -fsS --max-time 5 "${endpoint}/healthz" >/dev/null
-curl -fsS --max-time 5 "${metrics_endpoint}/readyz" >/dev/null
+
+readyz_args=(--max-time 5)
+if [ -n "${control_api_key}" ]; then
+  readyz_args+=(-H "x-api-key: ${control_api_key}")
+fi
+readyz_status="$(curl -sS -o /dev/null -w '%{http_code}' "${readyz_args[@]}" "${metrics_endpoint}/readyz")"
+case "${readyz_status}" in
+  200)
+    ;;
+  401)
+    cat >&2 <<'EOF'
+metrics readyz rejected the smoke probe with 401 Unauthorized.
+Set CCBG_CONTROL_API_KEY in /etc/ccbg/ccbg.env, or override it for this run with
+CCBG_SMOKE_CONTROL_API_KEY=<control-api-key>, so smoke.sh can probe /readyz with x-api-key.
+EOF
+    exit 1
+    ;;
+  *)
+    echo "metrics readyz probe failed: status=${readyz_status} endpoint=${metrics_endpoint}/readyz" >&2
+    exit 1
+    ;;
+esac
 
 python3 - "${endpoint}" "${access_key}" "${secret_key}" "${region}" <<'PY'
 import datetime as dt

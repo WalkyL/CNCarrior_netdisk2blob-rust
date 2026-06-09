@@ -687,6 +687,11 @@ Copyright (c) 2026 walky
     .object-placement-summary-note { margin-top: 8px; }
     .object-placement-record-note { min-width: 240px; white-space: normal; }
     .object-reconcile-note { min-width: 260px; white-space: normal; }
+    .object-reconcile-guidance { display:flex; flex-direction:column; gap: 6px; min-width: 280px; }
+    .object-reconcile-guidance strong { color: var(--ink-strong); font-size: 12px; }
+    .object-reconcile-guidance span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .object-reconcile-row-actions { display:flex; flex-wrap:wrap; gap: 6px; margin-top: 8px; }
+    .object-reconcile-row-actions button { padding: 6px 10px; }
     .object-placement-samples { display:flex; flex-direction:column; gap: 4px; min-width: 0; }
     .object-placement-sample { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); word-break: break-all; }
     .object-placement-reasons { display:flex; flex-direction:column; gap: 4px; min-width: 0; }
@@ -10517,6 +10522,58 @@ Copyright (c) 2026 walky
     function objectReconcileExecutableRows(payload = objectReconcileState.payload) {
       return (payload?.rows || []).filter(row => row.status === 'needs_changes');
     }
+    function objectReconcileRowId(row) {
+      return JSON.stringify([String(row?.bucket || '').trim(), String(row?.key || '').trim()]);
+    }
+    function objectReconcileSelectedRows(ids = [], payload = objectReconcileState.payload) {
+      const wanted = new Set((ids || []).map(id => String(id)));
+      return (payload?.rows || []).filter(row => wanted.has(objectReconcileRowId(row)));
+    }
+    async function executeSpecificObjectReconcileRows(ids = [], dryRun = false) {
+      const rows = objectReconcileSelectedRows(ids);
+      if (!rows.length) {
+        setObjectReconcileFeedback('没有找到可执行的历史对象收敛项。', 'warn');
+        return;
+      }
+      if (!dryRun) {
+        const confirmed = window.confirm(`将执行 ${rows.length} 条显式收敛。新目标写成功后才会切换元数据并安排删旧副本。\n\n确认继续吗？`);
+        if (!confirmed) {
+          return;
+        }
+      }
+      setObjectReconcileFeedback(
+        dryRun ? `正在 dry-run ${rows.length} 条历史对象收敛…` : `正在执行 ${rows.length} 条历史对象收敛…`,
+        'warn',
+      );
+      try {
+        const payload = await fetchJson('/api/object-reconcile/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dry_run: dryRun,
+            rows: rows.map(row => ({
+              bucket: row.bucket,
+              key: row.key,
+            })),
+            operator: 'admin-web',
+            ticket: dryRun ? 'OPS-002-dry-run' : 'OPS-002',
+          }),
+        });
+        const failedEntries = (payload.entries || []).filter(entry => entry.outcome === 'failed');
+        const failureSummary = failedEntries.slice(0, 3).map(entry =>
+          `${entry.bucket}/${entry.key}: ${entry.message}`,
+        );
+        setObjectReconcileFeedback(
+          failureSummary.length ? `${payload.message} 失败示例：${failureSummary.join('；')}` : payload.message,
+          payload.failed_count > 0 ? 'warn' : 'ok',
+        );
+        objectReconcileState.loaded = false;
+        await loadObjectReconcilePreview(true);
+        objectPlacementRecordsState.loaded = false;
+      } catch (error) {
+        setObjectReconcileFeedback(error.message, 'warn');
+      }
+    }
     function renderObjectReconcileExecutionSummary(payload = objectReconcileState.payload) {
       const summaryNode = document.getElementById('object-reconcile-execute-summary');
       const dryRunButton = document.getElementById('dry-run-object-reconcile-preview');
@@ -10595,7 +10652,7 @@ Copyright (c) 2026 walky
               <th>期望副本目标</th>
               <th>变化</th>
               <th>状态</th>
-              <th>说明</th>
+              <th>原因与下一步</th>
             </tr>
           </thead>
           <tbody>
@@ -10609,12 +10666,33 @@ Copyright (c) 2026 walky
                 <td>${escapeHtml(providerList(row.desired_sync_targets))}</td>
                 <td class="object-reconcile-note">${escapeHtml(`新增：${providerList(row.add_sync_targets)}；移除：${providerList(row.remove_sync_targets)}；目标=${formatBytes(row.capacity_required_bytes)}；远端峰值=${formatBytes(row.provider_peak_required_bytes)}；本地缓冲=${formatBytes(row.local_spool_required_bytes)}`)}</td>
                 <td><span class="pill ${row.status === 'no_change' ? 'complete' : row.status === 'needs_changes' ? 'pending' : 'blocked'}">${escapeHtml(row.status_label || row.status || '未知')}</span></td>
-                <td class="object-reconcile-note">${escapeHtml(row.note || '')}</td>
+                <td class="object-reconcile-note">
+                  <div class="object-reconcile-guidance">
+                    <div><strong>原因</strong><br><span>${escapeHtml(row.note || '')}</span></div>
+                    <div><strong>下一步</strong><br><span>${escapeHtml(row.next_step || '重新加载预览，确认当前策略差异后再决定是否执行。')}</span></div>
+                    ${row.status === 'needs_changes' ? `
+                      <div class="object-reconcile-row-actions">
+                        <button class="secondary" type="button" data-reconcile-row-dry-run='${escapeHtml(objectReconcileRowId(row))}'>Dry-run 这条</button>
+                        <button class="secondary" type="button" data-reconcile-row-execute='${escapeHtml(objectReconcileRowId(row))}'>执行这条</button>
+                      </div>
+                    ` : ''}
+                  </div>
+                </td>
               </tr>
             `).join('')}
           </tbody>
         </table>
       `;
+      container.querySelectorAll('[data-reconcile-row-dry-run]').forEach(button => {
+        button.addEventListener('click', () => {
+          executeSpecificObjectReconcileRows([button.getAttribute('data-reconcile-row-dry-run')], true);
+        });
+      });
+      container.querySelectorAll('[data-reconcile-row-execute]').forEach(button => {
+        button.addEventListener('click', () => {
+          executeSpecificObjectReconcileRows([button.getAttribute('data-reconcile-row-execute')], false);
+        });
+      });
       renderObjectReconcileExecutionSummary(payload);
     }
     async function loadObjectReconcilePreview(force = false) {
@@ -10660,44 +10738,7 @@ Copyright (c) 2026 walky
         setObjectReconcileFeedback('当前页没有状态为“需要显式收敛”的对象。', 'warn');
         return;
       }
-      if (!dryRun) {
-        const confirmed = window.confirm(`将对当前页 ${rows.length} 条历史对象执行显式收敛。新副本写成功后才会切换元数据并安排删旧副本。\\n\\n确认继续吗？`);
-        if (!confirmed) {
-          return;
-        }
-      }
-      setObjectReconcileFeedback(
-        dryRun ? `正在 dry-run ${rows.length} 条历史对象收敛…` : `正在执行 ${rows.length} 条历史对象收敛…`,
-        'warn',
-      );
-      try {
-        const payload = await fetchJson('/api/object-reconcile/execute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            dry_run: dryRun,
-            rows: rows.map(row => ({
-              bucket: row.bucket,
-              key: row.key,
-            })),
-            operator: 'admin-web',
-            ticket: dryRun ? 'OPS-002-dry-run' : 'OPS-002',
-          }),
-        });
-        const failedEntries = (payload.entries || []).filter(entry => entry.outcome === 'failed');
-        const failureSummary = failedEntries.slice(0, 3).map(entry =>
-          `${entry.bucket}/${entry.key}: ${entry.message}`,
-        );
-        setObjectReconcileFeedback(
-          failureSummary.length ? `${payload.message} 失败示例：${failureSummary.join('；')}` : payload.message,
-          payload.failed_count > 0 ? 'warn' : 'ok',
-        );
-        objectReconcileState.loaded = false;
-        await loadObjectReconcilePreview(true);
-        objectPlacementRecordsState.loaded = false;
-      } catch (error) {
-        setObjectReconcileFeedback(error.message, 'warn');
-      }
+      await executeSpecificObjectReconcileRows(rows.map(objectReconcileRowId), dryRun);
     }
     function objectPlacementRecordSelectableRows(payload = objectPlacementRecordsState.payload) {
       return (payload?.rows || []).filter(row => row.delete_allowed);
