@@ -20,8 +20,8 @@
   `6f1813dd-d191-4fe8-8704-426f4aaaf731`。
 - 完整验收记录见 [ops-006-43-acceptance.md](ops-006-43-acceptance.md) 的
   `2026-06-07 v0.1.7 formal public release` 小节。
-- `v0.1.8` 准备发布，核心变更为 `.49` S3 delimiter listing / rclone mount 修复，
-  现场验收记录见 [ops-010-49-s3-rclone-mount-listing.md](ops-010-49-s3-rclone-mount-listing.md)。
+- `v0.1.9` 准备发布，核心变更为 `.49` 的 PUT 后可见性回滚修复、WAL 回滚终态修复、
+  Admin 历史对象收敛“原因与下一步”操作面板，以及带 control API key 的 LXC smoke。
 
 ## 1. Release 产物
 

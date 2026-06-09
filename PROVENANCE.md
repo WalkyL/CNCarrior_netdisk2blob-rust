@@ -11,25 +11,25 @@ be tied back to the canonical project history.
 Current development fingerprint:
 
 ```text
-ccbg-0.1.6-walky-20260606
+ccbg-0.1.9-walky-20260609
 ```
 
 Fingerprint SHA-256:
 
 ```text
-884b3ace20f26e68cbbbbdf24967f0509372f35b706c11636ea3b44e3dca912c
+83cdc863192838cd346f82fbf33165ea46494a71154963bbb6d1aedbffecb0b4
 ```
 
 Fingerprint seed:
 
 ```text
-carrier-cloud-blob-gateway|2026|walky|v0.1.6|commercial-core|personal-source-review-v1
+carrier-cloud-blob-gateway|2026|walky|v0.1.9|commercial-core|personal-source-review-v1
 ```
 
 Seed SHA-256:
 
 ```text
-7395f5376c5084be4932092b3c8ef17fb5ce62610f8242bd4b536e4c0cea3f2e
+cd49e279e67435b47f4965177f1c0402e2921121bfc1f4315142346d6014c135
 ```
 
 ## Where The Fingerprint Appears
@@ -69,8 +69,8 @@ artifacts:
 
 ```bash
 scripts/generate-release-provenance.py \
-  --release-name v0.1.6 \
-  --tag v0.1.6 \
+  --release-name v0.1.9 \
+  --tag v0.1.9 \
   --artifact target/openwrt-lite/ccbg-openwrt-lite.tar.gz \
   --build-step "scripts/build-openwrt-lite-package.sh"
 ```

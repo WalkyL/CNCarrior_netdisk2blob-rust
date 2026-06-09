@@ -7,6 +7,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -32,6 +34,27 @@ FORBIDDEN_SUFFIXES = {
 FORBIDDEN_NAME_PARTS = ["token", "cookie", "refresh", "secret", "credential"]
 
 
+def resolve_bash() -> str:
+    candidates = [
+        Path(r"D:\Apps\Git\bin\bash.exe"),
+        Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Users\walky\AppData\Local\Programs\Git\bin\bash.exe"),
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    resolved = shutil.which("bash")
+    if resolved:
+        lowered = os.path.normcase(os.path.normpath(resolved))
+        forbidden = {
+            os.path.normcase(os.path.normpath(r"C:\Windows\System32\bash.exe")),
+            os.path.normcase(os.path.normpath(r"C:\Users\walky\AppData\Local\Microsoft\WindowsApps\bash.exe")),
+        }
+        if lowered not in forbidden:
+            return resolved
+    raise SystemExit("missing non-WSL bash; install Git Bash on the build host or add it to PATH")
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -42,8 +65,9 @@ def sha256_file(path: Path) -> str:
 
 def stage_public_dir(out_dir: Path) -> Path:
     staged = out_dir / "staged-public"
+    bash_bin = resolve_bash()
     subprocess.run(
-        ["bash", "scripts/stage-cloudflare-public-assets.sh", str(staged)],
+        [bash_bin, "scripts/stage-cloudflare-public-assets.sh", str(staged)],
         cwd=ROOT,
         check=True,
     )

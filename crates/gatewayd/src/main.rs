@@ -213,10 +213,10 @@ const CCBG_COPYRIGHT: &str = "Copyright (c) 2026 walky";
 const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust";
 const CCBG_RELEASE_CHANNEL: &str = "commercial-core";
-const CCBG_RELEASE_DATE: &str = "2026-06-08";
-const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.8-walky-20260608";
+const CCBG_RELEASE_DATE: &str = "2026-06-09";
+const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.9-walky-20260609";
 const DEFAULT_RELEASE_FINGERPRINT_SHA256: &str =
-    "38c064a5534a12296c8f4682e2612cd1bba165719308fbe80b6bc8e8e07ad6cc";
+    "83cdc863192838cd346f82fbf33165ea46494a71154963bbb6d1aedbffecb0b4";
 
 #[derive(Clone)]
 struct AppState {
@@ -29894,28 +29894,29 @@ async fn execute_put_upload(
         .start_operation(home_provider.as_str(), ProviderResourceOperationKind::Write);
     let (source_body, payload_validation) = request_body.into_parts(state, home_provider.as_str());
     let upload_body = match encryption_plan.as_ref() {
-        Some(plan) => match encrypt_upload(source_body, plan.request.clone(), plan.key_encryption_key)
-        {
-            Ok(encrypted) => encrypted.body,
-            Err(error) => {
-                restore_previous_object_write_state(
-                    state,
-                    &bucket,
-                    &key,
-                    previous_placement,
-                    previous_logical.clone(),
-                );
-                mark_gateway_write_ahead_log_rolled_back_or_warn(
-                    state,
-                    gateway_write_ahead_log.as_ref(),
-                    &bucket,
-                    &key,
-                    "build encrypted put body",
-                )
-                .await;
-                return Err(S3Error::internal_error(error.to_string()));
+        Some(plan) => {
+            match encrypt_upload(source_body, plan.request.clone(), plan.key_encryption_key) {
+                Ok(encrypted) => encrypted.body,
+                Err(error) => {
+                    restore_previous_object_write_state(
+                        state,
+                        &bucket,
+                        &key,
+                        previous_placement,
+                        previous_logical.clone(),
+                    );
+                    mark_gateway_write_ahead_log_rolled_back_or_warn(
+                        state,
+                        gateway_write_ahead_log.as_ref(),
+                        &bucket,
+                        &key,
+                        "build encrypted put body",
+                    )
+                    .await;
+                    return Err(S3Error::internal_error(error.to_string()));
+                }
             }
-        },
+        }
         None => source_body,
     };
     let result = match home_backend
@@ -33713,7 +33714,7 @@ mod tests {
     #[test]
     fn gateway_version_text_exposes_release_provenance() {
         let text = gateway_version_text();
-        assert!(text.contains("gatewayd 0.1.8"));
+        assert!(text.contains("gatewayd 0.1.9"));
         assert!(text.contains(DEFAULT_RELEASE_FINGERPRINT));
         assert!(text.contains(CCBG_LICENSE_ID));
         assert!(text.contains(CCBG_CANONICAL_REPO));
