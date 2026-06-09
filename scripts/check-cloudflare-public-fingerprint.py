@@ -32,6 +32,7 @@ FORBIDDEN_SUFFIXES = {
     ".env",
 }
 FORBIDDEN_NAME_PARTS = ["token", "cookie", "refresh", "secret", "credential"]
+NON_DEPLOYED_REMOTE_FILES = {"_headers"}
 
 
 def resolve_bash() -> str:
@@ -158,12 +159,21 @@ def build_manifest(public_dir: Path, files: list[Path], fingerprint: str, finger
 
 def remote_bytes(base_url: str, relative: str) -> bytes:
     url = base_url.rstrip("/") + "/" + relative
-    with urllib.request.urlopen(url, timeout=15) as response:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "curl/8.8.0",
+            "Accept": "*/*",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
         return response.read()
 
 
 def validate_remote(base_url: str, manifest: dict) -> None:
     for entry in manifest["files"]:
+        if entry["path"] in NON_DEPLOYED_REMOTE_FILES:
+            continue
         remote_hash = sha256_bytes(remote_bytes(base_url, entry["path"]))
         if remote_hash != entry["sha256"]:
             raise SystemExit(f"remote hash mismatch for {entry['path']}: {remote_hash} != {entry['sha256']}")
