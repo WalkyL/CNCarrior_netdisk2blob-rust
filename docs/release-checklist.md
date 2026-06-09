@@ -14,14 +14,14 @@
 
 最近完成的正式发版：
 
-- `v0.1.7` 于 2026-06-07 完成公网发布，release tag 指向
-  `2365723306b1315df3abfb99c212e02a0a075d24`。
-- `/downloads/latest/*` 已切到 Cloudflare R2 的 v0.1.7 资产，生产 Worker version ID 为
-  `6f1813dd-d191-4fe8-8704-426f4aaaf731`。
+- `v0.1.9` 于 2026-06-09 完成公网发布，release tag 指向
+  `325946c50c5067108192c5653e4114f48eba932c`。
+- `/downloads/latest/*` 已切到 Cloudflare R2 的 v0.1.9 资产，生产 Worker version ID 为
+  `b48c3096-49a9-413b-9327-af5c36af9772`。
+- GitHub Release 已包含 LXC / Windows / macOS x86_64 / macOS arm64 / OpenWrt lite
+  五类宿主包、SHA256 sidecar、`ccbg-checksums.txt` 和 provenance 文件。
 - 完整验收记录见 [ops-006-43-acceptance.md](ops-006-43-acceptance.md) 的
-  `2026-06-07 v0.1.7 formal public release` 小节。
-- `v0.1.9` 准备发布，核心变更为 `.49` 的 PUT 后可见性回滚修复、WAL 回滚终态修复、
-  Admin 历史对象收敛“原因与下一步”操作面板，以及带 control API key 的 LXC smoke。
+  `2026-06-09 v0.1.9 formal public release` 小节。
 
 ## 1. Release 产物
 

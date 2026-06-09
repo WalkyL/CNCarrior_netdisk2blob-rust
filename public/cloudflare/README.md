@@ -86,22 +86,23 @@ To prefill the release cache manually:
 scripts/sync-cloudflare-release-cache.sh your-r2-bucket
 ```
 
-Current rollout as of 2026-06-06:
+Current rollout as of 2026-06-09:
 
 - test Worker: `ccbg-public-test`
 - production Worker: `ccbg-public`
 - test release cache bucket: `ccbg-release-assets-test`
 - production release cache bucket: `ccbg-release-assets`
-- latest production Worker version: `d377dad3-5cdf-4136-af38-7755c007ea56`
+- latest test Worker version: `878152d0-858c-4714-a19f-4f618430c886`
+- latest production Worker version: `b48c3096-49a9-413b-9327-af5c36af9772`
 - production headers:
-  `x-ccbg-version=0.1.6`, `x-ccbg-provenance=ccbg-0.1.6-walky-20260606`
+  `x-ccbg-version=0.1.9`, `x-ccbg-provenance=ccbg-0.1.9-walky-20260609`
 - production download verification:
   `HEAD /downloads/latest/ccbg-lxc-package.tar.gz` -> `200`, `x-ccbg-release-source=r2`
   `HEAD /downloads/latest/ccbg-windows-x86_64.zip` -> `200`, `x-ccbg-release-source=r2`
   `HEAD /downloads/latest/ccbg-macos-x86_64.tar.gz` -> `200`, `x-ccbg-release-source=r2`
   `HEAD /downloads/latest/ccbg-macos-arm64.tar.gz` -> `200`, `x-ccbg-release-source=r2`
   `HEAD /downloads/latest/ccbg-openwrt-lite.tar.gz` -> `200`, `x-ccbg-release-source=r2`
-- FAQ catalog version `2026-06-06` includes the `smb-sidecar-fuse-lxc` entry, and
+- FAQ catalog version `2026-06-09` includes the `smb-sidecar-fuse-lxc` entry, and
   production `/api/faq/match` returns it for `/dev/fuse` / `CCBGRoot cannot mount` queries.
 - install catalog exposes both LXC profiles:
   `scripts/install.sh --s3-only` for S3 gateway only, and

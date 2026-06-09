@@ -384,3 +384,71 @@ Included validation:
 - Mounted write validation passed on `.49` for `small.txt`, `8 MiB`, and `32 MiB` objects.
 - Detailed live evidence is recorded in
   [ops-010-49-s3-rclone-mount-listing.md](./ops-010-49-s3-rclone-mount-listing.md).
+
+## 2026-06-09 v0.1.9 formal public release
+
+Release identity:
+
+- Tag: `v0.1.9`
+- Release commit: `325946c50c5067108192c5653e4114f48eba932c`
+- Post-release tooling follow-up on `main`: `6d61c039a82742017adc3a61ab8766f8bf0d41c8`
+- GitHub Release: `https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/tag/v0.1.9`
+- Runtime fingerprint: `ccbg-0.1.9-walky-20260609`
+- Runtime fingerprint SHA-256: `83cdc863192838cd346f82fbf33165ea46494a71154963bbb6d1aedbffecb0b4`
+- macOS-only GitHub Actions run: `27190872074`
+- macOS assets were downloaded back to the local release host, flattened, and merged into `target/release-local/v0.1.9`.
+
+Release scope:
+
+- `.49` PUT post-write visibility verification now rejects false-positive upstream write success and rolls metadata back safely.
+- Gateway WAL rollback now terminalizes failed PUT paths safely, preventing stale replay from reviving failed metadata.
+- Admin 历史对象收敛面板新增“原因与下一步”说明，以及逐条 dry-run / execute 入口。
+- LXC `smoke.sh` 现在会读取 `CCBG_CONTROL_API_KEY` 并带 `x-api-key` 探测 `61083/readyz`。
+
+Local release gate and packaging:
+
+- `bash scripts/release-local.sh v0.1.9` completed locally with Windows + OpenWrt enabled.
+- macOS assets were produced by the macOS-only GitHub Actions workflow and merged back with `CCBG_RELEASE_MACOS_ASSET_DIR`.
+- Final GitHub Release contains 13 assets: five host packages, their SHA256 sidecars, `ccbg-checksums.txt`, `release-provenance.json`, and `release-provenance.md`.
+
+Release artifacts:
+
+```text
+d95d9b517b4e1572095b3483157f9b9f2b51ce6fcdb989895d521271a89fea86 *ccbg-lxc-package.tar.gz
+f8c1c952cb486430606852279fc9e1bed88cb1d47ebe967fa0cf6ab90905bc0d *ccbg-windows-x86_64.zip
+42405091a5e22fdc3d7fd71967d2de5570e3224644c99a16f82411b7c3f4e86c *ccbg-macos-x86_64.tar.gz
+e09271a3d0c60e0a15c08d4f6a8eb7ad862af7e1d8d3ab9ef7d81943ddf2c542 *ccbg-macos-arm64.tar.gz
+91144baea5bba5245980f14c9aa64b40b0fd1b1c45ca79444d819fe5879de1e4 *ccbg-openwrt-lite.tar.gz
+```
+
+Cloudflare deployment:
+
+- test R2 bucket: `ccbg-release-assets-test`
+- production R2 bucket: `ccbg-release-assets`
+- test Worker version ID: `878152d0-858c-4714-a19f-4f618430c886`
+- production Worker version ID: `b48c3096-49a9-413b-9327-af5c36af9772`
+
+Production smoke:
+
+- `HEAD /` -> `200`, `x-ccbg-version=0.1.9`, `x-ccbg-provenance=ccbg-0.1.9-walky-20260609`
+- `HEAD /downloads/latest/ccbg-lxc-package.tar.gz` -> `200`, `content-length=8098671`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-windows-x86_64.zip` -> `200`, `content-length=9543261`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-macos-x86_64.tar.gz` -> `200`, `content-length=8780126`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-macos-arm64.tar.gz` -> `200`, `content-length=8344050`, `x-ccbg-release-source=r2`
+- `HEAD /downloads/latest/ccbg-openwrt-lite.tar.gz` -> `200`, `content-length=9514024`, `x-ccbg-release-source=r2`
+
+Verification caveat:
+
+- The production deploy itself succeeded.
+- Full remote hash verification from `python scripts/check-cloudflare-public-fingerprint.py --deployed-base-url ...` hit two tool-side issues during the rollout:
+  - Python `urllib` default requests were blocked by Cloudflare until the script was updated to send a curl-like `User-Agent`.
+  - `_headers` is a Cloudflare config file, not a public URL, and had to be excluded from remote byte-for-byte checks.
+- After the release, `main` received a follow-up tool-only fix in `6d61c03 Harden Cloudflare public fingerprint smoke`.
+
+`.49` post-release update:
+
+- Deployed `target/release-local/v0.1.9/ccbg-lxc-package.tar.gz` to `192.168.1.49` with `./scripts/install.sh --enable-smb-sidecar`.
+- `/opt/ccbg/bin/gatewayd --version` returned `gatewayd 0.1.9`.
+- `/opt/ccbg/assets/admin/index.html` shows top runtime version `v0.1.9`.
+- `./scripts/smoke.sh` passed on `.49`.
+- `ccbg.service` was active after the upgrade, and SMB sidecar reconcile completed without blocking `smbd` or `rclone` runtime.
