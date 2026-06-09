@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "admin-api"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "blob-core",
  "policy-engine",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "admin-tui"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "admin-api",
  "anyhow",
@@ -133,7 +133,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth-broker"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "rand 0.8.6",
  "serde",
@@ -229,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "blob-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "bytes",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "browser-cdp"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "blob-core",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "ccbg-platform-profiles"
-version = "0.1.9"
+version = "0.1.10"
 
 [[package]]
 name = "cfg-if"
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "gatewayd"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "admin-api",
  "anyhow",
@@ -1075,7 +1075,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp-server"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "admin-api",
  "axum",
@@ -1104,7 +1104,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "metadata-store"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "replication-engine",
  "rusqlite",
@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "object-crypto"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "aes-gcm",
  "blob-core",
@@ -1308,7 +1308,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "policy-engine"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "serde",
  "thiserror",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "provider-mobile"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "axum",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "provider-onedrive"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "axum",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "provider-telecom"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "aes",
  "async-trait",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "provider-unicom"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "aes",
  "async-trait",
@@ -1593,7 +1593,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "replication-engine"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "policy-engine",
  "serde",
