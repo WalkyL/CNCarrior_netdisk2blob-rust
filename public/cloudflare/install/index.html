@@ -20,7 +20,7 @@
         <img class="brand-mark" src="/assets/ccbg-icon.svg" alt="" aria-hidden="true" />
         <span>
           <span class="brand-title">CCBG Install</span>
-          <span class="brand-subtitle">Windows / macOS / LXC / Container</span>
+          <span class="brand-subtitle">Windows / LXC / Container / macOS 实验</span>
         </span>
       </a>
       <nav class="nav" aria-label="Primary">
@@ -34,10 +34,10 @@
       <section class="hero install-hero">
         <div class="hero-copy">
           <div class="eyebrow">Install first</div>
-          <h1>选择平台，一条命令启动本地网关</h1>
+          <h1>选择平台，按发布包命令启动本地网关</h1>
           <p class="lead">
-            macOS 使用 `launchd`，Windows 使用无额外依赖的后台常驻任务路径；
-            Linux 优先 LXC、Docker 和 Podman。
+            Windows 使用 zip 包内的 `install.ps1`，Linux 优先 LXC、Docker 和 Podman；
+            macOS 当前仍是社区/实验包，使用 tar.gz 包内的 `launchd` 安装脚本。
           </p>
           <div class="actions">
             <a class="button primary" href="#install-catalog">查看命令</a>
@@ -47,7 +47,7 @@
         <aside class="install-console">
           <div class="console-title">
             <span>macOS</span>
-            <strong>Release package</strong>
+            <strong>Experimental package</strong>
           </div>
           <pre><code>curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz
 tar -xzf ccbg-macos-arm64.tar.gz
@@ -77,11 +77,11 @@ Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\ccbg-release
           </article>
           <article class="card">
             <h3>SMB sidecar profile</h3>
-            <p>如果安装时选择 SMB sidecar，安装脚本会先启动 CCBG 管理的 `smbd` 并监听 `0.0.0.0:445`。第一次使用时，进 Admin 添加一个 SMB 用户就会自动生成 `CCBGRoot` 默认共享；真实挂载这个共享时，PVE/LXC guest 还需要暴露 `/dev/fuse` 给 rclone mount。</p>
+            <p>这个 profile 目前只面向 Linux / LXC。安装脚本会先启动 CCBG 管理的 `smbd` 并监听 `0.0.0.0:445`。第一次使用时，进 Admin 添加一个 SMB 用户就会自动生成 `CCBGRoot` 默认共享；真实挂载这个共享时，PVE/LXC guest 还需要暴露 `/dev/fuse` 给 rclone mount。</p>
           </article>
           <article class="card">
             <h3>Windows / macOS</h3>
-            <p>Windows 使用包内 PowerShell 安装脚本；macOS 使用包内 launchd 安装脚本。官方宿主包默认把 Admin Web 打开到 `0.0.0.0:61081`。</p>
+            <p>Windows 使用包内 PowerShell 安装脚本，是当前官方原生宿主；macOS 使用包内 launchd 安装脚本，但当前仍按社区/实验包发布。两者默认都会把 Admin Web 打开到 `0.0.0.0:61081`。</p>
           </article>
         </div>
       </section>

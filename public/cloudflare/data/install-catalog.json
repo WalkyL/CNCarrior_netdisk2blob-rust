@@ -3,7 +3,7 @@
   "license": "LicenseRef-CCBG-Public-Materials",
   "release_fingerprint": "__CCBG_PUBLIC_RELEASE_FINGERPRINT__",
   "release_base_url": "https://carrier-disk-gateway.agi2030.online/downloads/latest",
-  "support_note": "Official host packages are intended to run as a local resident gateway with S3 on 61080 and Admin Web on 61081.",
+  "support_note": "Official host packages are intended to run as a local resident gateway with S3 on 61080 and Admin Web on 61081. The one-click SMB sidecar profile currently exists on Linux/LXC only.",
   "groups": [
     {
       "id": "official-hosts",
@@ -67,32 +67,8 @@
           "package": "ccbg-windows-x86_64.zip",
           "command": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip; Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\\ccbg-release; .\\ccbg-release\\ccbg-windows-x86_64\\deploy\\windows\\install.ps1\"",
           "upgrade": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-windows-x86_64.zip -OutFile ccbg-windows-x86_64.zip; Expand-Archive -Force ccbg-windows-x86_64.zip -DestinationPath .\\ccbg-release; .\\ccbg-release\\ccbg-windows-x86_64\\deploy\\windows\\install.ps1\"",
-          "upgrade_note": "Windows 直接重新下载 zip 并重复执行 install.ps1；脚本会覆盖 gatewayd.exe、Admin 资源并重新注册同名计划任务。",
+          "upgrade_note": "Windows 直接重新下载 zip 并重复执行 install.ps1；脚本会覆盖 gatewayd.exe、Admin 资源并重新注册同名计划任务。当前公开发布链路还不是 winget，而是 zip 包安装脚本。",
           "verify": "powershell -Command \"Invoke-WebRequest http://127.0.0.1:61080/healthz; Write-Host 'Admin Web: http://<this-host-ip>:61081/'\""
-        },
-        {
-          "id": "macos-x86_64",
-          "name": "macOS Intel",
-          "status": "official",
-          "arch": "x86_64",
-          "service_mode": "launchd user agent",
-          "package": "ccbg-macos-x86_64.tar.gz",
-          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
-          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
-          "upgrade_note": "macOS 通过重复执行包内 install.sh 原地更新二进制和 launchd agent；脚本会先 bootout 再 bootstrap。",
-          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd && echo 'Admin Web: http://<this-host-ip>:61081/'"
-        },
-        {
-          "id": "macos-arm64",
-          "name": "macOS Apple Silicon",
-          "status": "official",
-          "arch": "arm64",
-          "service_mode": "launchd user agent",
-          "package": "ccbg-macos-arm64.tar.gz",
-          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
-          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
-          "upgrade_note": "Apple Silicon 路径与 Intel 相同：重新解包并重复执行 install.sh 即可完成覆盖升级。",
-          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd && echo 'Admin Web: http://<this-host-ip>:61081/'"
         }
       ]
     },
@@ -112,6 +88,30 @@
           "upgrade": "docker pull ghcr.io/walkyl/carrier-cloud-blob-gateway:latest && docker stop ccbg && docker rm ccbg && docker run -d --name ccbg --restart unless-stopped -p 61080:61080 -p 61081:61081 -v ccbg-data:/var/lib/ccbg ghcr.io/walkyl/carrier-cloud-blob-gateway:latest",
           "upgrade_note": "fnOS 目前复用 Docker / Linux host 路径，升级时同样保留 ccbg-data volume。",
           "verify": "curl -fsS http://127.0.0.1:61080/healthz"
+        },
+        {
+          "id": "macos-x86_64",
+          "name": "macOS Intel",
+          "status": "experimental",
+          "arch": "x86_64",
+          "service_mode": "launchd user agent",
+          "package": "ccbg-macos-x86_64.tar.gz",
+          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
+          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
+          "upgrade_note": "社区/实验包；当前由 GitHub Actions macOS-only 例外构建产出，未签名、未公证、未经过官方 macOS 真机 smoke。仍通过包内 install.sh 覆盖升级。",
+          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd && echo 'Admin Web: http://<this-host-ip>:61081/'"
+        },
+        {
+          "id": "macos-arm64",
+          "name": "macOS Apple Silicon",
+          "status": "experimental",
+          "arch": "arm64",
+          "service_mode": "launchd user agent",
+          "package": "ccbg-macos-arm64.tar.gz",
+          "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
+          "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
+          "upgrade_note": "社区/实验包；当前由 GitHub Actions macOS-only 例外构建产出，未签名、未公证、未经过官方 macOS 真机 smoke。仍通过包内 install.sh 覆盖升级。",
+          "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd && echo 'Admin Web: http://<this-host-ip>:61081/'"
         },
         {
           "id": "openwrt-arm64",

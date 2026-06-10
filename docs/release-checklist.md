@@ -114,7 +114,7 @@ LXC 包验收必须确认:
 - [ ] 首页顶部配色与 `llm-router.agi2030.online` 的深色运维风格一致
 - [ ] 首页首屏可见 LXC/Linux 推荐安装命令
 - [ ] 首页和 `/install/` 的安装命令旁有复制按钮
-- [ ] `/install/` 可见 Windows `winget`、macOS `brew`、PVE LXC、Docker、Podman 命令
+- [ ] `/install/` 可见 Windows zip + `install.ps1`、macOS 实验 tar.gz + `install.sh`、PVE LXC、Docker、Podman 命令
 - [ ] `/install/` 可见 PVE LXC `S3 only` 与 `SMB sidecar` 两个安装选项
 - [ ] OpenWrt / fnOS 明确标为实验宿主
 - [ ] STM32 / ESP32-S3 明确标为嵌入式客户端示例，不进入可安装宿主列表

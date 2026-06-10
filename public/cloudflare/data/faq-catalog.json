@@ -2,7 +2,7 @@
   "license_id": "LicenseRef-CCBG-Public-Materials",
   "copyright": "Copyright (c) 2026 walky",
   "release_fingerprint": "__CCBG_PUBLIC_RELEASE_FINGERPRINT__",
-  "version": "2026-06-06",
+  "version": "2026-06-09",
   "items": [
     {
       "id": "mobile-credential-configured-but-unavailable",
@@ -100,6 +100,22 @@
         "用 python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status 验证 state=running、listener_ready=true、mounted_share_count 等于 enabled_share_count"
       ],
       "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/pve-lxc-deployment.md"
+    },
+    {
+      "id": "lxc-96m-encrypted-soak-summary",
+      "title": "96 MiB LXC 开启加密能不能跑",
+      "summary": "公开验证里，96 MiB Debian LXC 同时运行 gatewayd、SMB sidecar 和 FUSE 读环时，10 分钟 8 MiB 加密 soak 全成功，但时延会高于明文；日常仍建议 256 MiB+。",
+      "keywords": ["96 MiB", "96MB", "LXC", "memory", "encryption", "aes_256_gcm", "soak", "latency", "SMB sidecar", "FUSE", "low memory"],
+      "provider": [],
+      "context": ["install", "host_profile", "encryption", "smb_runtime"],
+      "config_keys": ["CCBG_MAX_IN_MEMORY_OBJECT_BYTES", "CCBG_MAX_SPOOLED_OBJECT_BYTES", "CCBG_DATA_PLANE_MAX_IN_FLIGHT"],
+      "error_patterns": ["out of memory", "OOM", "latency high", "encryption overhead", "insufficient memory"],
+      "actions": [
+        "把 96 MiB 视为实验或验收环境，不要当作舒适生产预算",
+        "低内存宿主把 CCBG_DATA_PLANE_MAX_IN_FLIGHT 控制在 2~4",
+        "预期加密路径的时延会高于明文；日常运行优先准备 256 MiB+"
+      ],
+      "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/resource-budget.md"
     }
   ]
 }

@@ -49,6 +49,7 @@
             <h3>SMB / FUSE</h3>
             <p>现象：SMB Runtime 显示 <code>degraded</code>，<code>listener 就绪</code>，但 <code>CCBGRoot</code> 或 rclone-backed share 挂不上。</p>
             <p>原因：PVE/LXC guest 里缺少 <code>/dev/fuse</code>。这一步必须在 PVE 宿主机给容器透传，Admin 页面不能自动完成。</p>
+            <p><code>FUSE</code> 可以理解成 Linux 的“用户态文件系统”接口。CCBG 的 SMB sidecar 会先用 <code>rclone mount</code> 把云盘内容挂成本地目录，再交给 <code>smbd</code> 共享出去；没有 <code>/dev/fuse</code> 时，445 监听可以起来，但真实 share 不能挂载成功。</p>
             <pre style="white-space: pre-wrap;"># PVE 宿主机 shell；把 &lt;CTID&gt; 改成实际容器 ID
 pct stop &lt;CTID&gt;
 cat &gt;&gt; /etc/pve/lxc/&lt;CTID&gt;.conf &lt;&lt;'EOF'
@@ -61,6 +62,12 @@ pct start &lt;CTID&gt;</pre>
 ls -l /dev/fuse
 systemctl start ccbg-smb-sidecar-sync.service
 python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status</pre>
+          </article>
+          <article class="card" style="padding: 1rem;">
+            <h3>96 MiB LXC + 加密</h3>
+            <p>我们公开做过一轮 96 MiB Debian LXC 的低内存验证：同时运行 gatewayd、SMB sidecar 和 FUSE 读环，10 分钟明文 soak 为 269/269 成功。</p>
+            <p>同一宿主上，8 MiB 对象、4 并发的 10 分钟加密 soak 为 216/216 成功，另外 16 MiB spooled 加密 smoke 也 4/4 成功。</p>
+            <p>对比同配置明文路径，加密后的网关 RSS 增幅不大，主要代价是时延更高。结论是：96 MiB 可以做验证，但不应视为舒适生产预算；日常仍建议 256 MiB+，并把 <code>CCBG_DATA_PLANE_MAX_IN_FLIGHT</code> 控制在 <code>2~4</code>。</p>
           </article>
         </div>
       </section>

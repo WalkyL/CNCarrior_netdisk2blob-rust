@@ -6,7 +6,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Carrier Cloud Blob Gateway</title>
-  <meta name="description" content="把运营商云盘转换为 S3 挂载点和 SMB 服务器的本地网关。" />
+  <meta name="description" content="把运营商云盘转换为本地 S3 块存储；Linux/LXC 可额外托管 SMB sidecar。" />
   <meta name="ccbg-provenance" content="__CCBG_PUBLIC_RELEASE_FINGERPRINT__" />
   <meta name="ccbg-fingerprint-sha256" content="__CCBG_PUBLIC_FINGERPRINT_SHA256__" />
   <meta name="ccbg-license" content="LicenseRef-CCBG-Public-Materials" />
@@ -39,7 +39,7 @@
       <section class="hero">
         <div class="hero-copy">
           <div class="eyebrow">carrier-disk-gateway.agi2030.online</div>
-          <h1>把运营商云盘转换为 S3 挂载点和 SMB 服务器</h1>
+          <h1>把运营商云盘转换为本地 S3 块存储</h1>
           <p class="lead">
             在家里的电脑、NAS 或小主机上运行 CCBG，把联通、电信、移动云盘变成局域网里的统一存储。
             Windows、macOS、Linux 和常见备份工具可以通过 S3 或 SMB 访问；登录、共享、健康状态和同步规则都在网页里管理。
@@ -49,8 +49,8 @@
             <a class="button" href="https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/releases/latest">查看 GitHub Release 列表</a>
           </div>
           <div class="hero-strip" aria-label="关键能力">
-            <span>S3 与 SMB</span>
-            <span>Windows / macOS / Linux</span>
+            <span>S3 全平台</span>
+            <span>Linux / LXC 可选 SMB sidecar</span>
             <span>网页登录助手</span>
             <span>适合低配小主机</span>
           </div>
@@ -65,7 +65,7 @@
 tar --no-same-owner -xzf ccbg-lxc-package.tar.gz
 sudo ./ccbg-lxc-package/scripts/install.sh --enable-smb-sidecar</code></pre>
           <div class="console-footer">
-            <span>61080 是 S3 API，61081 是 Admin；SMB profile 会先监听 445，进 Admin 加一个 SMB 用户即可自动生成默认 root 共享，PVE/LXC 挂载共享需暴露 /dev/fuse</span>
+            <span>61080 是 S3 API，61081 是 Admin；只有 Linux / LXC 的 SMB profile 会先监听 445。进 Admin 加一个 SMB 用户即可自动生成默认 root 共享；PVE/LXC 真正挂载共享前还需暴露 /dev/fuse</span>
             <a href="/install/">全部平台</a>
           </div>
         </aside>
@@ -82,7 +82,7 @@ sudo ./ccbg-lxc-package/scripts/install.sh --enable-smb-sidecar</code></pre>
         <div id="install-summary" class="install-grid" data-install-summary>
           <article class="card">
             <h3>PVE LXC</h3>
-            <p>官方宿主，systemd 后台常驻。</p>
+            <p>官方宿主，systemd 后台常驻；也是当前一体化 SMB sidecar 的默认宿主。</p>
             <code>ccbg-lxc-package.tar.gz</code>
           </article>
           <article class="card">
@@ -92,8 +92,8 @@ sudo ./ccbg-lxc-package/scripts/install.sh --enable-smb-sidecar</code></pre>
           </article>
           <article class="card">
             <h3>Windows / macOS</h3>
-            <p>官方原生宿主，后台常驻服务路径。</p>
-            <code>winget / brew</code>
+            <p>Windows 是官方 zip + PowerShell 安装路径；macOS 当前是社区/实验包，走 tar.gz + launchd。</p>
+            <code>zip / tar.gz install scripts</code>
           </article>
         </div>
       </section>
@@ -117,6 +117,32 @@ sudo ./ccbg-lxc-package/scripts/install.sh --enable-smb-sidecar</code></pre>
           <article class="card">
             <h3>低内存策略</h3>
             <p>大对象走流式和有界 spool；平台 profile 控制并发、日志和缓存上限。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-header">
+          <div>
+            <h2>低内存实测</h2>
+            <p class="section-lead">公开摘要只保留宿主级别、对象尺寸、时长和区间数据，不暴露内网地址、凭据或测试前缀。</p>
+          </div>
+        </div>
+        <div class="card-grid">
+          <article class="card">
+            <h3>96 MiB LXC + 明文</h3>
+            <p>公开实验环境在 96 MiB Debian LXC 上跑过 10 分钟明文 soak：8 MiB 对象、4 并发、同时保留 SMB sidecar 与 FUSE 读环，结果是 269/269 成功。</p>
+            <p>这轮里 gateway RSS 大致落在 p95 64.3 MiB、max 74.7 MiB；说明低内存环境可以验证功能，但余量并不宽。</p>
+          </article>
+          <article class="card">
+            <h3>96 MiB LXC + 加密</h3>
+            <p>同一宿主又做过 10 分钟加密 soak：8 MiB 对象、4 并发、216/216 成功；另有 16 MiB spooled 加密 smoke，4/4 成功。</p>
+            <p>加密后 gateway RSS 大致落在 p95 65.9 MiB、max 75.8 MiB，内存增幅有限，但时延高于明文。</p>
+          </article>
+          <article class="card">
+            <h3>公开结论</h3>
+            <p>CCBG 的加密路径已经过低内存验证；主要成本是时延，不是成倍放大的 RSS。96 MiB 适合实验和验收，不建议作为舒适生产预算。</p>
+            <p>日常运行仍建议 256 MiB+，并把 <code>CCBG_DATA_PLANE_MAX_IN_FLIGHT</code> 控制在 <code>2~4</code>。</p>
           </article>
         </div>
       </section>
