@@ -1122,6 +1122,30 @@ impl BrowserFlowCatalogCollection {
         Ok(Self { entries })
     }
 
+    pub fn from_json_dirs(dirs: &[PathBuf]) -> Result<Self, BlobError> {
+        let mut entries: Vec<BrowserFlowCatalogDirectoryEntry> = Vec::new();
+        for (index, dir) in dirs.iter().enumerate() {
+            if !dir.exists() {
+                if index == 0 {
+                    return Self::from_json_dir(dir);
+                }
+                continue;
+            }
+            let collection = Self::from_json_dir(dir)?;
+            for entry in collection.entries {
+                if let Some(existing_index) = entries.iter().position(|existing| {
+                    existing.catalog.provider == entry.catalog.provider
+                        && existing.catalog.surface == entry.catalog.surface
+                }) {
+                    entries[existing_index] = entry;
+                } else {
+                    entries.push(entry);
+                }
+            }
+        }
+        Ok(Self { entries })
+    }
+
     pub fn entries(&self) -> &[BrowserFlowCatalogDirectoryEntry] {
         &self.entries
     }
@@ -2995,6 +3019,43 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn browser_flow_catalog_collection_overlays_later_directories() {
+        let base_dir = temp_catalog_dir("catalog-overlay-base");
+        let override_dir = temp_catalog_dir("catalog-overlay-override");
+        fs::create_dir_all(&base_dir).expect("base temp dir should be created");
+        fs::create_dir_all(&override_dir).expect("override temp dir should be created");
+
+        let source = unicom_catalog_fixture_path();
+        let base_path = base_dir.join("unicom-web.json");
+        let override_path = override_dir.join("unicom-web.json");
+        fs::copy(&source, &base_path).expect("base fixture should copy");
+        let mut override_catalog =
+            BrowserFlowCatalog::from_json_file(&source).expect("fixture should parse");
+        override_catalog.description = Some("operator override".to_string());
+        fs::write(
+            &override_path,
+            serde_json::to_string_pretty(&override_catalog)
+                .expect("override catalog should serialize"),
+        )
+        .expect("override fixture should write");
+
+        let collection =
+            BrowserFlowCatalogCollection::from_json_dirs(&[base_dir.clone(), override_dir.clone()])
+                .expect("overlay catalog collection should load");
+        assert_eq!(collection.entries().len(), 1);
+        assert_eq!(collection.entries()[0].source_path, override_path);
+        assert_eq!(
+            collection
+                .get("unicom", "pan.wo.cn-web")
+                .and_then(|catalog| catalog.description.as_deref()),
+            Some("operator override")
+        );
+
+        let _ = fs::remove_dir_all(&base_dir);
+        let _ = fs::remove_dir_all(&override_dir);
     }
 
     #[test]

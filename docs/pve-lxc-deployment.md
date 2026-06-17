@@ -182,3 +182,4 @@ OneDrive 仍是 parking provider。除非有真实需求和单独回归，不要
 
 - 2026-06-03 `.49` LXC + SMB sidecar + no-stub 验收见 [ops-008-49-lxc-smb-stub-removal.md](ops-008-49-lxc-smb-stub-removal.md)。
 - 2026-06-09 `.49` `96 MiB` LXC 的明文/加密压力验证与压测脏数据清理见 [ops-011-49-encrypted-soak-and-cleanup.md](ops-011-49-encrypted-soak-and-cleanup.md)。
+- 2026-06-17 `.49` carrier login browser-flow LLM repair 部署见 [ops-012-49-browser-flow-llm-repair-deploy.md](ops-012-49-browser-flow-llm-repair-deploy.md)。

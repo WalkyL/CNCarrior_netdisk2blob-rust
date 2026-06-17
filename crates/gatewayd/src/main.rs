@@ -2086,6 +2086,7 @@ struct RuntimeStatusPayload {
     managed_root_base: String,
     managed_root_suffix: String,
     browser_flow_catalog_dir: String,
+    browser_flow_override_dir: String,
     provider_bridge_catalog_dir: String,
     provider_capability_catalog_dir: String,
     replication_workers: usize,
@@ -3254,6 +3255,7 @@ fn runtime_status_payload(state: &AppState) -> RuntimeStatusPayload {
         managed_root_base: state.config.managed_root_base.clone(),
         managed_root_suffix: state.config.managed_root_suffix.clone(),
         browser_flow_catalog_dir: state.config.browser_flow_catalog_dir.clone(),
+        browser_flow_override_dir: state.config.browser_flow_override_dir.clone(),
         provider_bridge_catalog_dir: state.config.provider_bridge_catalog_dir.clone(),
         provider_capability_catalog_dir: state.config.provider_capability_catalog_dir.clone(),
         replication_workers: state.config.replication_workers,
@@ -4001,6 +4003,64 @@ struct BrowserFlowDryRunPayload {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct BrowserFlowRepairBundleInput {
+    provider: String,
+    surface: String,
+    flow_id: String,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    browser_endpoints: Option<Vec<AuthCaptureBrowserEndpointInput>>,
+    #[serde(default)]
+    cdp_endpoint_url: Option<String>,
+    #[serde(default)]
+    cdp_target_selector: Option<String>,
+    #[serde(default)]
+    cdp_target_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowRepairFrameSnapshot {
+    frame_selector: Option<String>,
+    ok: bool,
+    value: serde_json::Value,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowRepairBundlePayload {
+    provider: String,
+    surface: String,
+    flow_id: String,
+    source_path: String,
+    catalog: BrowserFlowCatalog,
+    flow: BrowserFlow,
+    cdp_endpoint_url: String,
+    cdp_target_selector: Option<String>,
+    cdp_target_timeout_ms: Option<u64>,
+    snapshots: Vec<BrowserFlowRepairFrameSnapshot>,
+    llm_prompt: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct BrowserFlowCatalogOverrideInput {
+    provider: String,
+    surface: String,
+    catalog: BrowserFlowCatalog,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BrowserFlowCatalogOverridePayload {
+    provider: String,
+    surface: String,
+    override_path: String,
+    sha256: String,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct BrowserFlowSessionRunInput {
     provider: String,
     surface: String,
@@ -4303,6 +4363,7 @@ struct AppConfig {
     managed_root_base: String,
     managed_root_suffix: String,
     browser_flow_catalog_dir: String,
+    browser_flow_override_dir: String,
     provider_bridge_catalog_dir: String,
     provider_capability_catalog_dir: String,
     admin_username: Option<String>,
@@ -5326,6 +5387,13 @@ impl AppConfig {
         })?;
         let control_plane_file = env_or("CCBG_CONTROL_PLANE_FILE", "./data/control-plane.json");
         let credentials_dir = env_or("CCBG_CREDENTIALS_DIR", "./data/provider-credentials");
+        let browser_flow_override_dir = env_or(
+            "CCBG_BROWSER_FLOW_OVERRIDE_DIR",
+            &FsPath::new(&credentials_dir)
+                .join("browser-flow-overrides")
+                .display()
+                .to_string(),
+        );
         let instance_id_file = env_or("CCBG_INSTANCE_ID_FILE", "./data/instance-id");
         let instance_id = resolve_gateway_instance_id(&instance_id_file, &control_plane_file)?;
         let managed_root_base =
@@ -5368,6 +5436,7 @@ impl AppConfig {
                 "CCBG_BROWSER_FLOW_CATALOG_DIR",
                 "./config/browser-flows",
             ),
+            browser_flow_override_dir,
             provider_bridge_catalog_dir: env_or(
                 "CCBG_PROVIDER_BRIDGE_CATALOG_DIR",
                 "./config/provider-bridges",
@@ -6502,8 +6571,11 @@ async fn main() -> Result<()> {
     validate_startup_provider_catalogs(&config)
         .context("failed startup provider catalog validation")?;
     let browser_flow_catalogs = Arc::new(
-        BrowserFlowCatalogCollection::from_json_dir(&config.browser_flow_catalog_dir)
-            .context("failed to load browser flow catalogs")?,
+        BrowserFlowCatalogCollection::from_json_dirs(&[
+            PathBuf::from(&config.browser_flow_catalog_dir),
+            PathBuf::from(&config.browser_flow_override_dir),
+        ])
+        .context("failed to load browser flow catalogs")?,
     );
     let provider_bridge_catalogs = Arc::new(
         ProviderBridgeCatalogCollection::from_json_dir(&config.provider_bridge_catalog_dir)
@@ -6674,6 +6746,7 @@ async fn main() -> Result<()> {
         managed_root_base = %config.managed_root_base,
         managed_root_suffix = %config.managed_root_suffix,
         browser_flow_catalog_dir = %config.browser_flow_catalog_dir,
+        browser_flow_override_dir = %config.browser_flow_override_dir,
         provider_bridge_catalog_dir = %config.provider_bridge_catalog_dir,
         provider_capability_catalog_dir = %config.provider_capability_catalog_dir,
         primary_provider = primary_provider_name,
@@ -6842,6 +6915,14 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             get(get_browser_flow_by_id),
         )
         .route("/api/browser-flows/dry-run", post(run_browser_flow_dry_run))
+        .route(
+            "/api/browser-flows/repair-bundle",
+            post(build_browser_flow_repair_bundle),
+        )
+        .route(
+            "/api/browser-flows/overrides",
+            post(save_browser_flow_catalog_override),
+        )
         .route(
             "/api/browser-flows/session/{session_id}",
             get(get_browser_flow_session),
@@ -9804,6 +9885,61 @@ fn browser_flow_catalog_and_flow<'a>(
     Ok((catalog, flow))
 }
 
+fn effective_browser_flow_catalogs(
+    config: &AppConfig,
+) -> Result<BrowserFlowCatalogCollection, BlobError> {
+    BrowserFlowCatalogCollection::from_json_dirs(&[
+        PathBuf::from(&config.browser_flow_catalog_dir),
+        PathBuf::from(&config.browser_flow_override_dir),
+    ])
+}
+
+fn browser_flow_catalog_and_flow_from<'a>(
+    catalogs: &'a BrowserFlowCatalogCollection,
+    provider: &str,
+    surface: &str,
+    flow_id: &str,
+) -> Result<(&'a BrowserFlowCatalog, &'a BrowserFlow), BlobError> {
+    let catalog = catalogs.get(provider, surface).ok_or_else(|| {
+        BlobError::NotFound(format!(
+            "browser flow catalog not found for {provider}/{surface}"
+        ))
+    })?;
+    let flow = catalog
+        .find_flow(flow_id)
+        .ok_or_else(|| BlobError::NotFound(format!("browser flow not found: {flow_id}")))?;
+    Ok((catalog, flow))
+}
+
+fn browser_flow_override_path(config: &AppConfig, provider: &str, surface: &str) -> PathBuf {
+    let key = format!("{}/{}", provider.trim(), surface.trim());
+    FsPath::new(&config.browser_flow_override_dir).join(format!(
+        "{}--{}.json",
+        safe_browser_flow_override_stem(provider),
+        hash_hex(key.as_bytes())
+    ))
+}
+
+fn safe_browser_flow_override_stem(provider: &str) -> String {
+    let stem = provider
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let stem = stem.trim_matches('-');
+    if stem.is_empty() {
+        "browser-flow".to_string()
+    } else {
+        stem.chars().take(48).collect()
+    }
+}
+
 fn require_browser_flow_coordinates(
     provider: &str,
     surface: &str,
@@ -9846,6 +9982,14 @@ fn resolve_browser_flow_cdp_candidates(
     state: &AppState,
     input: &BrowserFlowSessionRunInput,
 ) -> Result<Vec<CdpConnectionConfig>, BlobError> {
+    resolve_browser_flow_cdp_candidates_from_catalogs(state, &state.browser_flow_catalogs, input)
+}
+
+fn resolve_browser_flow_cdp_candidates_from_catalogs(
+    state: &AppState,
+    catalogs: &BrowserFlowCatalogCollection,
+    input: &BrowserFlowSessionRunInput,
+) -> Result<Vec<CdpConnectionConfig>, BlobError> {
     let policy = current_auth_capture_policy(state);
     let request_endpoints = auth_capture_browser_endpoints_for_request(input);
     let endpoints = if !request_endpoints.is_empty() {
@@ -9853,8 +9997,8 @@ fn resolve_browser_flow_cdp_candidates(
     } else {
         auth_capture_browser_endpoints_for_policy(&policy)
     };
-    let flow_target_selector = browser_flow_default_cdp_target_selector(
-        state,
+    let flow_target_selector = browser_flow_default_cdp_target_selector_from_catalogs(
+        catalogs,
         &input.provider,
         &input.surface,
         &input.flow_id,
@@ -9998,7 +10142,15 @@ async fn connect_browser_flow_cdp_session(
     state: &AppState,
     input: &BrowserFlowSessionRunInput,
 ) -> Result<(CdpConnectionConfig, CdpBrowserFlowSession), BlobError> {
-    let candidates = resolve_browser_flow_cdp_candidates(state, input)?;
+    connect_browser_flow_cdp_session_from_catalogs(state, &state.browser_flow_catalogs, input).await
+}
+
+async fn connect_browser_flow_cdp_session_from_catalogs(
+    state: &AppState,
+    catalogs: &BrowserFlowCatalogCollection,
+    input: &BrowserFlowSessionRunInput,
+) -> Result<(CdpConnectionConfig, CdpBrowserFlowSession), BlobError> {
+    let candidates = resolve_browser_flow_cdp_candidates_from_catalogs(state, catalogs, input)?;
     let mut errors = Vec::new();
     for candidate in candidates {
         match CdpBrowserFlowSession::connect(&candidate).await {
@@ -10007,7 +10159,7 @@ async fn connect_browser_flow_cdp_session(
                 if message.contains("no matching CDP target found")
                     && candidate.target_selector.is_some()
                     && browser_flow_prefers_navigate_bootstrap(
-                        state,
+                        catalogs,
                         &input.provider,
                         &input.surface,
                         &input.flow_id,
@@ -10034,12 +10186,13 @@ async fn connect_browser_flow_cdp_session(
 }
 
 fn browser_flow_prefers_navigate_bootstrap(
-    state: &AppState,
+    catalogs: &BrowserFlowCatalogCollection,
     provider: &str,
     surface: &str,
     flow_id: &str,
 ) -> bool {
-    let Ok((catalog, flow)) = browser_flow_catalog_and_flow(state, provider, surface, flow_id)
+    let Ok((catalog, flow)) =
+        browser_flow_catalog_and_flow_from(catalogs, provider, surface, flow_id)
     else {
         return false;
     };
@@ -10774,6 +10927,7 @@ where
 
 async fn run_browser_flow_prerequisite_if_needed<S>(
     state: &AppState,
+    catalogs: &BrowserFlowCatalogCollection,
     provider: &str,
     surface: &str,
     flow: &BrowserFlow,
@@ -10790,7 +10944,7 @@ where
     };
 
     let (_, direct_prerequisite_flow) =
-        browser_flow_catalog_and_flow(state, provider, surface, prerequisite_flow_id)?;
+        browser_flow_catalog_and_flow_from(catalogs, provider, surface, prerequisite_flow_id)?;
     if browser_flow_prerequisite_is_satisfied(flow, direct_prerequisite_flow, session_runtime) {
         return Ok(());
     }
@@ -10805,7 +10959,7 @@ where
             )));
         }
         let (_, current_flow) =
-            browser_flow_catalog_and_flow(state, provider, surface, &current_flow_id)?;
+            browser_flow_catalog_and_flow_from(catalogs, provider, surface, &current_flow_id)?;
         prerequisite_chain.push(current_flow_id);
         cursor_flow_id = current_flow.prerequisite_flow_id.clone();
     }
@@ -10814,13 +10968,13 @@ where
     let mut current_runtime = session_runtime.clone();
     for prerequisite_flow_id in prerequisite_chain {
         let (_, prerequisite_flow) =
-            browser_flow_catalog_and_flow(state, provider, surface, &prerequisite_flow_id)?;
+            browser_flow_catalog_and_flow_from(catalogs, provider, surface, &prerequisite_flow_id)?;
         if browser_flow_outputs_are_present(prerequisite_flow, &current_runtime) {
             continue;
         }
 
         let plan = browser_flow_plan(
-            state.browser_flow_catalogs.as_ref(),
+            catalogs,
             provider,
             surface,
             &prerequisite_flow_id,
@@ -11086,8 +11240,13 @@ impl BrowserFlowOutputReader for CdpBrowserFlowSession {
 fn browser_flow_catalog_summary_payloads(
     state: &AppState,
 ) -> Vec<BrowserFlowCatalogSummaryPayload> {
-    state
-        .browser_flow_catalogs
+    browser_flow_catalog_summary_payloads_from(&state.browser_flow_catalogs)
+}
+
+fn browser_flow_catalog_summary_payloads_from(
+    catalogs: &BrowserFlowCatalogCollection,
+) -> Vec<BrowserFlowCatalogSummaryPayload> {
+    catalogs
         .entries()
         .iter()
         .map(|entry| BrowserFlowCatalogSummaryPayload {
@@ -15110,7 +15269,8 @@ async fn run_object_action(
 async fn list_browser_flow_catalogs(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<BrowserFlowCatalogSummaryPayload>>, ApiError> {
-    Ok(Json(browser_flow_catalog_summary_payloads(&state)))
+    let catalogs = effective_browser_flow_catalogs(&state.config)?;
+    Ok(Json(browser_flow_catalog_summary_payloads_from(&catalogs)))
 }
 
 async fn get_browser_flow_catalog(
@@ -15125,8 +15285,8 @@ async fn get_browser_flow_catalog(
         );
     }
 
-    let entry = state
-        .browser_flow_catalogs
+    let catalogs = effective_browser_flow_catalogs(&state.config)?;
+    let entry = catalogs
         .entries()
         .iter()
         .find(|entry| entry.catalog.provider == provider && entry.catalog.surface == surface)
@@ -15153,8 +15313,8 @@ async fn get_browser_flow_by_id(
         return Err(BlobError::Configuration("flow_id is required".to_string()).into());
     }
 
-    let entry = state
-        .browser_flow_catalogs
+    let catalogs = effective_browser_flow_catalogs(&state.config)?;
+    let entry = catalogs
         .entries()
         .iter()
         .find(|entry| entry.catalog.find_flow(flow_id).is_some())
@@ -15179,7 +15339,8 @@ async fn run_browser_flow_dry_run(
     let (provider, surface, flow_id) =
         require_browser_flow_coordinates(&input.provider, &input.surface, &input.flow_id)?;
 
-    let plan = state.browser_flow_catalogs.bind_flow(
+    let catalogs = effective_browser_flow_catalogs(&state.config)?;
+    let plan = catalogs.bind_flow(
         &provider,
         &surface,
         &flow_id,
@@ -15196,6 +15357,306 @@ async fn run_browser_flow_dry_run(
         flow_id: plan.flow.id,
         report,
     }))
+}
+
+async fn build_browser_flow_repair_bundle(
+    State(state): State<AppState>,
+    Json(input): Json<BrowserFlowRepairBundleInput>,
+) -> Result<Json<BrowserFlowRepairBundlePayload>, ApiError> {
+    let (provider, surface, flow_id) =
+        require_browser_flow_coordinates(&input.provider, &input.surface, &input.flow_id)?;
+    let catalogs = effective_browser_flow_catalogs(&state.config)?;
+    let entry = catalogs
+        .entries()
+        .iter()
+        .find(|entry| entry.catalog.provider == provider && entry.catalog.surface == surface)
+        .ok_or_else(|| {
+            BlobError::NotFound(format!(
+                "browser flow catalog not found for {provider}/{surface}"
+            ))
+        })?;
+    let flow = entry
+        .catalog
+        .find_flow(&flow_id)
+        .ok_or_else(|| BlobError::NotFound(format!("browser flow not found: {flow_id}")))?
+        .clone();
+    let cdp_request = BrowserFlowSessionRunInput {
+        provider: provider.clone(),
+        surface: surface.clone(),
+        flow_id: flow_id.clone(),
+        auth_session_id: None,
+        inputs: BTreeMap::new(),
+        runtime: BTreeMap::new(),
+        browser_endpoints: input.browser_endpoints,
+        cdp_endpoint_url: input.cdp_endpoint_url,
+        cdp_target_selector: input.cdp_target_selector,
+        cdp_target_timeout_ms: input.cdp_target_timeout_ms,
+    };
+    let (cdp, session) =
+        connect_browser_flow_cdp_session_from_catalogs(&state, &catalogs, &cdp_request).await?;
+    let snapshots = capture_browser_flow_repair_snapshots(&entry.catalog, &session).await;
+    let llm_prompt =
+        browser_flow_repair_llm_prompt(&provider, &surface, &flow_id, &input.last_error);
+
+    Ok(Json(BrowserFlowRepairBundlePayload {
+        provider,
+        surface,
+        flow_id,
+        source_path: entry.source_path.display().to_string(),
+        catalog: entry.catalog.clone(),
+        flow,
+        cdp_endpoint_url: cdp.endpoint_url,
+        cdp_target_selector: cdp.target_selector,
+        cdp_target_timeout_ms: cdp.target_timeout_ms,
+        snapshots,
+        llm_prompt,
+    }))
+}
+
+async fn save_browser_flow_catalog_override(
+    State(state): State<AppState>,
+    Json(input): Json<BrowserFlowCatalogOverrideInput>,
+) -> Result<Json<BrowserFlowCatalogOverridePayload>, ApiError> {
+    let provider = input.provider.trim();
+    let surface = input.surface.trim();
+    if provider.is_empty() || surface.is_empty() {
+        return Err(
+            BlobError::Configuration("provider and surface are both required".to_string()).into(),
+        );
+    }
+    if input.catalog.provider != provider || input.catalog.surface != surface {
+        return Err(BlobError::Configuration(format!(
+            "override catalog coordinates {} / {} do not match request {provider} / {surface}",
+            input.catalog.provider, input.catalog.surface
+        ))
+        .into());
+    }
+    input.catalog.validate()?;
+    let path = browser_flow_override_path(&state.config, provider, surface);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            BlobError::Configuration(format!(
+                "failed to create browser flow override dir {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let body = serde_json::to_string_pretty(&input.catalog).map_err(|error| {
+        BlobError::Configuration(format!(
+            "failed to encode browser flow override {}: {error}",
+            path.display()
+        ))
+    })?;
+    fs::write(&path, body.as_bytes()).map_err(|error| {
+        BlobError::Configuration(format!(
+            "failed to write browser flow override {}: {error}",
+            path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
+        BlobError::Configuration(format!(
+            "failed to protect browser flow override {}: {error}",
+            path.display()
+        ))
+    })?;
+    let catalogs = effective_browser_flow_catalogs(&state.config)?;
+    let _ = catalogs.get(provider, surface).ok_or_else(|| {
+        BlobError::Configuration(format!(
+            "saved browser flow override did not load for {provider}/{surface}"
+        ))
+    })?;
+
+    Ok(Json(BrowserFlowCatalogOverridePayload {
+        provider: provider.to_string(),
+        surface: surface.to_string(),
+        override_path: path.display().to_string(),
+        sha256: hash_hex(body.as_bytes()),
+        note: normalize_secret_field(input.note),
+    }))
+}
+
+async fn capture_browser_flow_repair_snapshots(
+    catalog: &BrowserFlowCatalog,
+    session: &CdpBrowserFlowSession,
+) -> Vec<BrowserFlowRepairFrameSnapshot> {
+    let mut frame_selectors = Vec::<Option<String>>::from([None]);
+    let mut seen = BTreeSet::new();
+    for frame in catalog
+        .elements
+        .iter()
+        .filter_map(|element| element.frame.clone())
+        .chain(
+            catalog
+                .operations
+                .iter()
+                .filter_map(|operation| operation.frame.clone()),
+        )
+        .chain(catalog.flows.iter().flat_map(|flow| {
+            flow.outputs
+                .iter()
+                .filter_map(|output| output.frame.clone())
+                .collect::<Vec<_>>()
+        }))
+    {
+        if seen.insert(frame.clone()) {
+            frame_selectors.push(Some(frame));
+        }
+        if frame_selectors.len() >= 16 {
+            break;
+        }
+    }
+
+    let mut snapshots = Vec::with_capacity(frame_selectors.len());
+    for frame_selector in frame_selectors {
+        let result = session
+            .evaluate_value_in_frame(
+                browser_flow_repair_snapshot_expression(),
+                frame_selector.as_deref(),
+            )
+            .await;
+        match result {
+            Ok(value) => snapshots.push(BrowserFlowRepairFrameSnapshot {
+                frame_selector,
+                ok: true,
+                value: redact_browser_flow_repair_value(value),
+                error: None,
+            }),
+            Err(error) => snapshots.push(BrowserFlowRepairFrameSnapshot {
+                frame_selector,
+                ok: false,
+                value: serde_json::Value::Null,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    snapshots
+}
+
+fn browser_flow_repair_snapshot_expression() -> &'static str {
+    r#"(() => {
+      const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+      const visible = node => {
+        if (!(node instanceof Element)) return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(node);
+        return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+      };
+      const brief = node => {
+        const rect = node.getBoundingClientRect();
+        return {
+          tag: node.tagName || null,
+          id: node.id || null,
+          name: node.getAttribute('name') || null,
+          type: node.getAttribute('type') || null,
+          role: node.getAttribute('role') || null,
+          class_name: String(node.className || '').slice(0, 160) || null,
+          placeholder: node.getAttribute('placeholder') || null,
+          aria_label: node.getAttribute('aria-label') || null,
+          text: normalize(node.innerText || node.textContent || '').slice(0, 160) || null,
+          visible: visible(node),
+          rect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }
+        };
+      };
+      const controls = Array.from(document.querySelectorAll('button,a,input,textarea,select,[role="button"],[role="tab"],label,span,div'))
+        .filter(node => visible(node))
+        .filter(node => {
+          const tag = String(node.tagName || '').toLowerCase();
+          const text = normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || node.getAttribute('placeholder') || '');
+          return ['button','a','input','textarea','select','label'].includes(tag)
+            || node.getAttribute('role')
+            || /登录|短信|验证码|手机|账号|密码|同意|确认|下一步|发送|获取|login|sms|code|phone|password|agree|submit/i.test(text);
+        })
+        .slice(0, 80)
+        .map(brief);
+      return {
+        title: document.title || null,
+        url: location.origin + location.pathname,
+        body_text: normalize(document.body?.innerText || document.body?.textContent || '').slice(0, 1800),
+        input_count: document.querySelectorAll('input,textarea,select').length,
+        controls
+      };
+    })()"#
+}
+
+fn redact_browser_flow_repair_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(value) => {
+            serde_json::Value::String(redact_browser_flow_repair_text(&value))
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(redact_browser_flow_repair_value)
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter()
+                .map(|(key, value)| (key, redact_browser_flow_repair_value(value)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
+fn redact_browser_flow_repair_text(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut digit_run = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_digit() {
+            digit_run.push(ch);
+            continue;
+        }
+        if !digit_run.is_empty() {
+            if digit_run.len() >= 7 {
+                output.push_str("<redacted-digits>");
+            } else {
+                output.push_str(&digit_run);
+            }
+            digit_run.clear();
+        }
+        output.push(ch);
+    }
+    if !digit_run.is_empty() {
+        if digit_run.len() >= 7 {
+            output.push_str("<redacted-digits>");
+        } else {
+            output.push_str(&digit_run);
+        }
+    }
+    output
+        .split_whitespace()
+        .map(|token| {
+            if token.contains('@')
+                || token
+                    .chars()
+                    .filter(|ch| ch.is_ascii_alphanumeric())
+                    .count()
+                    >= 24
+            {
+                "<redacted-token>"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn browser_flow_repair_llm_prompt(
+    provider: &str,
+    surface: &str,
+    flow_id: &str,
+    last_error: &Option<String>,
+) -> String {
+    let last_error = last_error
+        .as_deref()
+        .map(redact_browser_flow_repair_text)
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "You are repairing a carrier cloud browser-flow login catalog. Provider: {provider}. Surface: {surface}. Flow: {flow_id}. Last error: {last_error}. Use the supplied catalog JSON and CDP snapshots only. Return strict JSON only: {{\"catalog\": <complete replacement BrowserFlowCatalog>, \"summary\": \"one short sentence\", \"risk\": \"low|medium|high\"}}. Preserve schema_version, provider, surface, credential output semantics, and redaction flags. Do not include tokens, cookies, phone numbers, SMS codes, passwords, markdown, or explanations outside JSON."
+    )
 }
 
 async fn run_browser_flow_session(
@@ -15215,9 +15676,10 @@ async fn run_browser_flow_session(
         cdp_target_selector: input.cdp_target_selector.clone(),
         cdp_target_timeout_ms: input.cdp_target_timeout_ms,
     };
+    let catalogs = effective_browser_flow_catalogs(&state.config)?;
     let (provider, surface, flow_id) =
         require_browser_flow_coordinates(&input.provider, &input.surface, &input.flow_id)?;
-    let (_, flow) = browser_flow_catalog_and_flow(&state, &provider, &surface, &flow_id)?;
+    let (_, flow) = browser_flow_catalog_and_flow_from(&catalogs, &provider, &surface, &flow_id)?;
     let auth_session = upsert_browser_flow_auth_session(
         &state,
         input.auth_session_id.clone(),
@@ -15275,7 +15737,8 @@ async fn run_browser_flow_session(
         session.manual_challenge = None;
     })?;
     let auth_capture_policy = current_auth_capture_policy(&state);
-    let (cdp, cdp_session) = connect_browser_flow_cdp_session(&state, &cdp_request).await?;
+    let (cdp, cdp_session) =
+        connect_browser_flow_cdp_session_from_catalogs(&state, &catalogs, &cdp_request).await?;
     let _ = update_browser_flow_auth_session(&state, &auth_session.session_id, |session| {
         session.cdp_endpoint_url = Some(cdp.endpoint_url.clone());
         session.cdp_target_selector = cdp.target_selector.clone();
@@ -15288,6 +15751,7 @@ async fn run_browser_flow_session(
     );
     if let Err(error) = run_browser_flow_prerequisite_if_needed(
         &state,
+        &catalogs,
         &provider,
         &surface,
         flow,
@@ -15334,7 +15798,7 @@ async fn run_browser_flow_session(
         browser_flow_auth_session_snapshot(&state, &auth_session.session_id)
             .map_err(ApiError::from)?;
     let plan = browser_flow_plan(
-        state.browser_flow_catalogs.as_ref(),
+        &catalogs,
         &provider,
         &surface,
         &flow_id,
@@ -33303,6 +33767,7 @@ mod tests {
             managed_root_base: "ccbg-managed".to_string(),
             managed_root_suffix: "testabcd".to_string(),
             browser_flow_catalog_dir,
+            browser_flow_override_dir: temp_db_path().replace(".db", "-browser-flow-overrides"),
             provider_bridge_catalog_dir,
             provider_capability_catalog_dir,
             admin_username: Some("admin".to_string()),
@@ -36675,6 +37140,59 @@ mod tests {
         assert_eq!(payload.surface, "pan.wo.cn-web");
         assert_eq!(payload.flow.id, "unicom_move_entry");
         assert_eq!(payload.flow.start_page, "file_list_all");
+    }
+
+    #[tokio::test]
+    async fn browser_flow_override_save_is_used_by_effective_catalog_lookup() {
+        let state = test_state();
+        let base_catalog = state
+            .browser_flow_catalogs
+            .get("unicom", "pan.wo.cn-web")
+            .expect("base unicom catalog should exist")
+            .clone();
+        let mut override_catalog = base_catalog;
+        override_catalog.description = Some("operator repaired catalog".to_string());
+
+        let Json(saved) = save_browser_flow_catalog_override(
+            State(state.clone()),
+            Json(BrowserFlowCatalogOverrideInput {
+                provider: "unicom".to_string(),
+                surface: "pan.wo.cn-web".to_string(),
+                catalog: override_catalog,
+                note: Some("selector repair".to_string()),
+            }),
+        )
+        .await
+        .expect("override save should succeed");
+        assert!(
+            PathBuf::from(&saved.override_path)
+                .starts_with(FsPath::new(&state.config.browser_flow_override_dir))
+        );
+
+        let Json(payload) = get_browser_flow_catalog(
+            State(state),
+            Query(BrowserFlowCatalogQuery {
+                provider: "unicom".to_string(),
+                surface: "pan.wo.cn-web".to_string(),
+            }),
+        )
+        .await
+        .expect("effective catalog lookup should succeed");
+        assert_eq!(
+            payload.catalog.description.as_deref(),
+            Some("operator repaired catalog")
+        );
+    }
+
+    #[test]
+    fn browser_flow_repair_text_redacts_common_secret_shapes() {
+        let redacted = redact_browser_flow_repair_text(
+            "phone 18500001111 token abcdefghijklmnopqrstuvwxyz user test@example.com",
+        );
+        assert!(redacted.contains("<redacted-digits>"));
+        assert!(!redacted.contains("18500001111"));
+        assert!(!redacted.contains("abcdefghijklmnopqrstuvwxyz"));
+        assert!(!redacted.contains("test@example.com"));
     }
 
     #[tokio::test]
@@ -41013,6 +41531,17 @@ mod tests {
         assert!(html.contains("data-mobile-auth-action=\"probe-upload-surface\""));
         assert!(html.contains("data-mobile-auth-action=\"read-upload-probe\""));
         assert!(html.contains("data-mobile-auth-action=\"apply-and-save-outputs\""));
+        assert!(html.contains("data-unicom-auth-action=\"repair-flow\""));
+        assert!(html.contains("data-telecom-auth-action=\"repair-flow\""));
+        assert!(html.contains("data-mobile-auth-action=\"repair-flow\""));
+        assert!(html.contains("LLM 修复登录插件"));
+        assert!(html.contains("function startBrowserFlowLlmRepair("));
+        assert!(html.contains("function callBrowserFlowRepairLlm(prompt)"));
+        assert!(html.contains("function buildBrowserFlowRepairBundle("));
+        assert!(html.contains("function parseBrowserFlowRepairLlmJson("));
+        assert!(html.contains("function saveBrowserFlowCatalogOverride("));
+        assert!(html.contains("/api/browser-flows/repair-bundle"));
+        assert!(html.contains("/api/browser-flows/overrides"));
         assert!(html.contains("function renderMobileAuthAssistant()"));
         assert!(html.contains("function mobileRuntimeHasCredentialMaterial(runtime)"));
         assert!(html.contains("function mobileCredentialReadiness("));

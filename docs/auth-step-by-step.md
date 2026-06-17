@@ -33,6 +33,13 @@
 - `CCBG_TELECOM_BROWSER_ID`
 - `CCBG_TELECOM_BROWSER_ID_FILE`
 
+对需要浏览器/CDP 辅助的运营商登录流程，Admin 现在还提供一个面向操作者的修复入口:
+
+- 当联通 / 电信 / 移动登录页结构漂移，导致已知 browser-flow 无法继续时
+- 可以在对应登录助手里点击 `LLM 修复登录插件`
+- Admin 会读取当前 CDP 页面的脱敏 DOM 快照，要求前端 LLM 返回完整替换 catalog
+- 只有操作者确认后，override catalog 才会写入 `CCBG_BROWSER_FLOW_OVERRIDE_DIR`
+
 `auth-broker` 的边界也保持一致:
 
 - 只编排你明确提交的人工输入（text/phone_number/sms_code/password/captcha）

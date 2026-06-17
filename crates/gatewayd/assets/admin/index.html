@@ -7049,6 +7049,53 @@ Copyright (c) 2026 walky
       }
       return String(payload?.choices?.[0]?.message?.content || payload?.output_text || '').trim();
     }
+    async function callBrowserFlowRepairLlm(prompt) {
+      const endpoint = currentFrontLlmEndpoint();
+      if (!endpoint) {
+        throw new Error('当前没有可直接从前端调用的 LLM endpoint。');
+      }
+      const headers = { 'content-type': 'application/json' };
+      if (endpoint.api_key) {
+        headers.authorization = `Bearer ${endpoint.api_key}`;
+      }
+      const requestUrl = String(endpoint.endpoint_url).trim().replace(/\/$/, '') + '/chat/completions';
+      const requestBody = {
+          model: endpoint.model_id,
+          messages: [
+            { role: 'system', content: 'You repair browser automation catalogs. Return strict JSON only. Do not include markdown, explanations, secrets, cookies, phone numbers, SMS codes, or passwords.' },
+            { role: 'user', content: prompt },
+          ],
+          reasoning_effort: endpoint.reasoning_effort || undefined,
+          response_format: { type: 'json_object' },
+          temperature: 0.1,
+      };
+      let response = await fetch(requestUrl, {
+        method: 'POST',
+        mode: 'cors',
+        headers,
+        body: JSON.stringify(requestBody),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message = String(payload?.error?.message || payload?.error || payload?.message || `${response.status} ${response.statusText}`).trim();
+        if (/response_format|json_object/i.test(message)) {
+          delete requestBody.response_format;
+          response = await fetch(requestUrl, {
+            method: 'POST',
+            mode: 'cors',
+            headers,
+            body: JSON.stringify(requestBody),
+          });
+          const retryPayload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(String(retryPayload?.error?.message || retryPayload?.error || retryPayload?.message || `${response.status} ${response.statusText}`).trim());
+          }
+          return String(retryPayload?.choices?.[0]?.message?.content || retryPayload?.output_text || '').trim();
+        }
+        throw new Error(message);
+      }
+      return String(payload?.choices?.[0]?.message?.content || payload?.output_text || '').trim();
+    }
     async function buildAiExplainBundle({ sourceText, context, provider = '', title = 'AI解释', subtitle = '' }) {
       let faqHits = [];
       const faqMatchEndpoint = String(frontPluginConfig.faqMatchEndpoint || '').trim();
@@ -12354,6 +12401,17 @@ Copyright (c) 2026 walky
       const sessionExpiresAt = Number(unicomAuthAssistantState.session_expires_at_unix_ms || 0);
       const sessionTimeoutMs = Number(unicomAuthAssistantState.session_timeout_ms || 0);
       const sessionState = session?.status || 'idle';
+      const requestCodeFlowId = unicomFlowId('sms_request_code', 'unicom_sms_login_request_code_validate');
+      const resumeSubmitFlowId = unicomFlowId('sms_resume_submit_code', 'unicom_sms_login_resume_submit_code');
+      const captureSessionFlowId = unicomFlowId('capture_session', 'unicom_capture_current_session');
+      const activeFlowId = String(
+        session?.flow_id
+        || (unicomAuthAssistantState.action === 'capture-session'
+          ? captureSessionFlowId
+          : (unicomAuthAssistantState.action === 'resume-submit-code'
+            ? resumeSubmitFlowId
+            : requestCodeFlowId))
+      ).trim();
       const canStart = !!endpoint?.endpoint_url;
       const endpointLabel = browserFlowSessionEndpointLabel(session, endpoint);
       const isBusy = unicomAuthAssistantState.loading === true;
@@ -12361,6 +12419,7 @@ Copyright (c) 2026 walky
       const refreshDisabled = (session?.session_id || canStart) && !isBusy ? '' : 'disabled';
       const resumeDisabled = canStart && !isBusy ? '' : 'disabled';
       const captureDisabled = canStart && !isBusy ? '' : 'disabled';
+      const repairDisabled = canStart && !isBusy ? '' : 'disabled';
       const pendingPromptCount = promptList.length;
       const pendingPromptTone = pendingPromptCount ? 'pending' : 'ready';
       const pendingPromptSummary = assistantPendingPromptSummary(pendingPromptCount);
@@ -12375,6 +12434,9 @@ Copyright (c) 2026 walky
       const captureLabel = isBusy && unicomAuthAssistantState.action === 'capture-session'
         ? tr('assistant.state.capturing', {}, 'Capturing…')
         : 'Capture Current Session';
+      const repairLabel = isBusy && unicomAuthAssistantState.action === 'repair-flow'
+        ? 'Repairing…'
+        : 'LLM 修复登录插件';
       const sessionFacts = [
         [tr('assistant.unicom.fact.session_id', {}, 'Session ID'), session?.session_id || tr('assistant.value.not_created', {}, 'not created yet')],
         [tr('assistant.unicom.fact.flow', {}, 'Flow'), session?.flow_id || tr('assistant.value.not_available', {}, 'n/a')],
@@ -12500,6 +12562,7 @@ Copyright (c) 2026 walky
                   <button type="button" data-unicom-auth-action="request-code" ${startDisabled}>${escapeHtml(startLabel)}</button>
                   <button type="button" data-unicom-auth-action="resume-submit-code" ${resumeDisabled}>${escapeHtml(resumeLabel)}</button>
                   <button class="secondary" type="button" data-unicom-auth-action="refresh-session" ${refreshDisabled}>${session?.session_id ? tr('ui.refresh_session', {}, 'Refresh Session') : tr('ui.refresh_or_recover_session', {}, 'Refresh / Recover Session')}</button>
+                  <button class="secondary" type="button" data-unicom-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
                 </div>
                 <div class="unicom-assistant-summary-line">${escapeHtml(tr('assistant.unicom.otp_help', {}, 'When the OTP arrives, paste it into SMS Code above, then click Resume With SMS Code. If the carrier asks for captcha or another field, it appears below in this same panel.'))}</div>
                 <div class="provider-note">${canStart
@@ -12531,6 +12594,7 @@ Copyright (c) 2026 walky
                 </div>
                 <div class="actions">
                   <button class="secondary" type="button" data-unicom-auth-action="capture-session" ${captureDisabled}>${escapeHtml(captureLabel)}</button>
+                  <button class="secondary" type="button" data-unicom-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
                   <button class="secondary" type="button" data-unicom-auth-action="apply-outputs" ${accessToken ? '' : 'disabled'}>${escapeHtml(tr('Only Fill Credential Form', {}, 'Only Fill Credential Form'))}</button>
                   <button type="button" data-unicom-auth-action="apply-and-save-outputs" ${accessToken ? '' : 'disabled'}>${escapeHtml(tr('Save Captured Credentials', {}, 'Save Captured Credentials'))}</button>
                 </div>
@@ -12575,6 +12639,7 @@ Copyright (c) 2026 walky
           <button type="button" data-unicom-auth-action="request-code" ${startDisabled}>${escapeHtml(startLabel)}</button>
           <button class="secondary" type="button" data-unicom-auth-action="open-window">${escapeHtml(focusModeOpen ? tr('assistant.launcher.guided_open', {}, 'Guided Window Open') : tr('assistant.launcher.open_guided', {}, 'Open Guided Window'))}</button>
           <button class="secondary" type="button" data-unicom-auth-action="capture-session" ${captureDisabled}>${escapeHtml(captureLabel)}</button>
+          <button class="secondary" type="button" data-unicom-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
         </div>
       `;
       container.innerHTML = `
@@ -12997,6 +13062,7 @@ Copyright (c) 2026 walky
       const refreshDisabled = (session?.session_id || canStart) && !isBusy ? '' : 'disabled';
       const captureDisabled = canStart && !isBusy ? '' : 'disabled';
       const probeDisabled = canStart && !isBusy ? '' : 'disabled';
+      const repairDisabled = canStart && !isBusy ? '' : 'disabled';
       const hasCapturedSession = !!browserId || !!cookieHeader || !!accessToken;
       const guidance = deriveTelecomAssistantGuidance(session, runtime);
       const focusModeOpen = telecomAuthAssistantState.window_open === true;
@@ -13018,6 +13084,9 @@ Copyright (c) 2026 walky
       const readProbeLabel = isBusy && telecomAuthAssistantState.action === 'read-upload-probe'
         ? tr('assistant.state.reading', {}, 'Reading…')
         : tr('Read Probe State', {}, 'Read Probe State');
+      const repairLabel = isBusy && telecomAuthAssistantState.action === 'repair-flow'
+        ? 'Repairing…'
+        : 'LLM 修复登录插件';
       const uploadProbeSummary = telecomUploadProbeSummary(runtime);
       const uploadProbeRecentEvents = telecomUploadProbeRecentEvents(runtime);
       const uploadProbeLatestSurface = telecomUploadProbeLatestSurface(runtime);
@@ -13116,6 +13185,7 @@ Copyright (c) 2026 walky
                   <button type="button" data-telecom-auth-action="request-code" ${startDisabled}>${escapeHtml(startLabel)}</button>
                   <button type="button" data-telecom-auth-action="resume-submit-code" ${resumeDisabled}>${escapeHtml(resumeLabel)}</button>
                   <button class="secondary" type="button" data-telecom-auth-action="refresh-session" ${refreshDisabled}>${session?.session_id ? tr('ui.refresh_session', {}, 'Refresh Session') : tr('ui.refresh_or_recover_session', {}, 'Refresh Session State')}</button>
+                  <button class="secondary" type="button" data-telecom-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
                 </div>
                 <div class="unicom-assistant-summary-line">${escapeHtml(tr('When the OTP arrives, paste it into SMS Code above, then click Resume With SMS Code.', {}, 'When the OTP arrives, paste it into SMS Code above, then click Resume With SMS Code.'))}</div>
                 <div class="provider-note">${canStart
@@ -13169,6 +13239,7 @@ Copyright (c) 2026 walky
                   <button class="secondary" type="button" data-telecom-auth-action="capture-bundle" ${captureDisabled}>${escapeHtml(tr('ui.capture_personal_family', {}, 'Capture Personal + Family'))}</button>
                   <button class="secondary" type="button" data-telecom-auth-action="capture-session" ${captureDisabled}>${escapeHtml(captureLabel)}</button>
                   <button class="secondary" type="button" data-telecom-auth-action="capture-family-session" ${captureDisabled}>${escapeHtml(captureFamilyLabel)}</button>
+                  <button class="secondary" type="button" data-telecom-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
                   <button class="secondary" type="button" data-telecom-auth-action="apply-outputs" ${hasCapturedSession ? '' : 'disabled'}>${escapeHtml(tr('Only Fill Credential Form', {}, 'Only Fill Credential Form'))}</button>
                   <button type="button" data-telecom-auth-action="apply-and-save-outputs" ${hasCapturedSession ? '' : 'disabled'}>${escapeHtml(tr('Save Captured Credentials', {}, 'Save Captured Credentials'))}</button>
                 </div>
@@ -13279,6 +13350,7 @@ Copyright (c) 2026 walky
             <button class="secondary" type="button" data-telecom-auth-action="capture-session" ${captureDisabled}>${escapeHtml(captureLabel)}</button>
             <button class="secondary" type="button" data-telecom-auth-action="capture-family-session" ${captureDisabled}>${escapeHtml(captureFamilyLabel)}</button>
             <button class="secondary" type="button" data-telecom-auth-action="probe-upload-surface" ${probeDisabled}>${escapeHtml(probeLabel)}</button>
+            <button class="secondary" type="button" data-telecom-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
           </div>
           <div class="unicom-assistant-launcher-meta">
             <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
@@ -13590,6 +13662,246 @@ Copyright (c) 2026 walky
       const payload = await fetchJson(`/api/browser-flows/catalog?provider=mobile&surface=${encodeURIComponent(surface)}`);
       mobileAuthAssistantState.catalog = payload;
       return payload;
+    }
+    function browserFlowRepairSurface(provider) {
+      switch (String(provider || '').trim()) {
+        case 'unicom':
+          return providerBridgeSurface('unicom', 'pan.wo.cn-web');
+        case 'telecom':
+          return providerBridgeSurface('telecom', 'cloud.189.cn-web');
+        case 'mobile':
+          return providerBridgeSurface('mobile', 'yun.139.com-web');
+        default:
+          return '';
+      }
+    }
+    function browserFlowRepairState(provider) {
+      switch (String(provider || '').trim()) {
+        case 'unicom':
+          return unicomAuthAssistantState;
+        case 'telecom':
+          return telecomAuthAssistantState;
+        case 'mobile':
+          return mobileAuthAssistantState;
+        default:
+          return null;
+      }
+    }
+    function browserFlowRepairSetFeedback(provider, message, tone = 'warn') {
+      if (provider === 'unicom') {
+        setUnicomAuthAssistantFeedback(message, tone);
+        return;
+      }
+      if (provider === 'telecom') {
+        setTelecomAuthAssistantFeedback(message, tone);
+        return;
+      }
+      if (provider === 'mobile') {
+        setMobileAuthAssistantFeedback(message, tone);
+      }
+    }
+    function browserFlowRepairSetBusy(provider, busy) {
+      if (provider === 'unicom') {
+        setUnicomAssistantBusy(busy ? 'repair-flow' : '', busy);
+        return;
+      }
+      if (provider === 'telecom') {
+        setTelecomAssistantBusy(busy ? 'repair-flow' : '', busy);
+        return;
+      }
+      if (provider === 'mobile') {
+        setMobileAssistantBusy(busy ? 'repair-flow' : '', busy);
+      }
+    }
+    function browserFlowRepairResetCatalog(provider) {
+      if (provider === 'unicom') {
+        unicomAuthAssistantState.catalog = null;
+        renderUnicomAuthAssistant();
+        return;
+      }
+      if (provider === 'telecom') {
+        telecomAuthAssistantState.catalog = null;
+        renderTelecomAuthAssistant();
+        return;
+      }
+      if (provider === 'mobile') {
+        mobileAuthAssistantState.catalog = null;
+        renderMobileAuthAssistant();
+      }
+    }
+    async function loadBrowserFlowRepairCatalog(provider) {
+      if (provider === 'unicom') {
+        return loadUnicomBrowserFlowCatalog();
+      }
+      if (provider === 'telecom') {
+        return loadTelecomBrowserFlowCatalog();
+      }
+      if (provider === 'mobile') {
+        return loadMobileBrowserFlowCatalog();
+      }
+      throw new Error(`Unsupported browser-flow repair provider: ${provider || 'unknown'}`);
+    }
+    function browserFlowRepairDefaultFlowId(provider) {
+      if (provider === 'unicom') {
+        return unicomFlowId('sms_request_code', 'unicom_sms_login_request_code_validate');
+      }
+      if (provider === 'telecom') {
+        return telecomFlowId('sms_request_code', 'telecom_sms_login_request_code');
+      }
+      if (provider === 'mobile') {
+        return mobileFlowId('sms_request_code', 'mobile_sms_login_request_code_validate');
+      }
+      return '';
+    }
+    function browserFlowRepairPrompt(bundle) {
+      return [
+        String(bundle?.llm_prompt || '').trim(),
+        '',
+        'Repair context JSON:',
+        JSON.stringify({
+          provider: bundle?.provider,
+          surface: bundle?.surface,
+          flow_id: bundle?.flow_id,
+          source_path: bundle?.source_path,
+          cdp_endpoint_url: bundle?.cdp_endpoint_url,
+          cdp_target_selector: bundle?.cdp_target_selector,
+          cdp_target_timeout_ms: bundle?.cdp_target_timeout_ms,
+          catalog: bundle?.catalog,
+          flow: bundle?.flow,
+          snapshots: bundle?.snapshots || [],
+        }, null, 2),
+      ].join('\n');
+    }
+    function parseBrowserFlowRepairLlmJson(text) {
+      let raw = String(text || '').trim();
+      if (!raw) {
+        throw new Error('LLM 没有返回可解析内容。');
+      }
+      const fenced = raw.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+      if (fenced) {
+        raw = fenced[1].trim();
+      } else if (!raw.startsWith('{')) {
+        const start = raw.indexOf('{');
+        const end = raw.lastIndexOf('}');
+        if (start >= 0 && end > start) {
+          raw = raw.slice(start, end + 1);
+        }
+      }
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('LLM 返回值必须是 JSON object。');
+      }
+      if (!parsed.catalog || typeof parsed.catalog !== 'object' || Array.isArray(parsed.catalog)) {
+        throw new Error('LLM 返回 JSON 缺少 catalog 对象。');
+      }
+      return parsed;
+    }
+    async function copyBrowserFlowRepairPrompt(prompt) {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        throw new Error('当前浏览器不支持自动复制 Prompt。');
+      }
+      await navigator.clipboard.writeText(prompt);
+    }
+    async function buildBrowserFlowRepairBundle(provider, flowId, lastError = '') {
+      const catalogPayload = await loadBrowserFlowRepairCatalog(provider).catch(() => null);
+      const surface = browserFlowRepairSurface(provider);
+      const normalizedFlowId = String(flowId || '').trim() || browserFlowRepairDefaultFlowId(provider);
+      const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalogPayload, normalizedFlowId, {
+        preserveConfiguredSelector: provider === 'mobile',
+      });
+      return fetchJson('/api/browser-flows/repair-bundle', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider,
+          surface,
+          flow_id: normalizedFlowId,
+          last_error: String(lastError || '').trim() || null,
+          browser_endpoints: browserEndpoints.length ? browserEndpoints : null,
+        }),
+      });
+    }
+    async function saveBrowserFlowCatalogOverride(provider, surface, catalog, note = '') {
+      return fetchJson('/api/browser-flows/overrides', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider,
+          surface,
+          catalog,
+          note: String(note || '').trim() || null,
+        }),
+      });
+    }
+    async function startBrowserFlowLlmRepair(provider, flowId, lastError = '') {
+      const normalizedProvider = String(provider || '').trim();
+      const state = browserFlowRepairState(normalizedProvider);
+      const normalizedFlowId = String(flowId || '').trim() || browserFlowRepairDefaultFlowId(normalizedProvider);
+      if (!state || !normalizedFlowId) {
+        browserFlowRepairSetFeedback(normalizedProvider, '不支持这个云盘登录插件的自动修复。', 'warn');
+        return;
+      }
+      try {
+        browserFlowRepairSetBusy(normalizedProvider, true);
+        browserFlowRepairSetFeedback(normalizedProvider, '正在读取当前 CDP 页面并生成登录插件修复上下文…', 'warn');
+        const bundle = await buildBrowserFlowRepairBundle(normalizedProvider, normalizedFlowId, lastError || state.session?.last_error || '');
+        const prompt = browserFlowRepairPrompt(bundle);
+        let answer = '';
+        try {
+          browserFlowRepairSetFeedback(normalizedProvider, '已捕获脱敏 DOM 快照，正在调用前端 LLM 生成完整 catalog 覆盖…', 'warn');
+          answer = await callBrowserFlowRepairLlm(prompt);
+        } catch (llmError) {
+          await copyBrowserFlowRepairPrompt(prompt).catch(() => {});
+          aiExplainState = {
+            ...aiExplainState,
+            title: `${providerLabel(normalizedProvider) || normalizedProvider} 登录插件修复 Prompt`,
+            subtitle: '前端 LLM endpoint 不可用时，可把这个 Prompt 手工交给 LLM。',
+            sourceText: JSON.stringify(bundle.snapshots || [], null, 2),
+            prompt,
+            faqText: '此流程直接使用当前 CDP DOM 快照，不走 FAQ。',
+            answer: '',
+            provider: normalizedProvider,
+            context: 'browser-flow repair',
+            faqHits: [],
+          };
+          setAiExplainStatus('已生成并尝试复制修复 Prompt。前端 LLM endpoint 不可用或被 CORS 拦截。', 'warn');
+          renderAiExplainModal();
+          throw new Error(`已生成修复 Prompt，但无法直接调用前端 LLM：${llmError.message || llmError}`);
+        }
+        const patch = parseBrowserFlowRepairLlmJson(answer);
+        const catalog = patch.catalog;
+        const summary = String(patch.summary || '').trim() || 'LLM 已生成完整 catalog 覆盖。';
+        const risk = String(patch.risk || 'unknown').trim();
+        const confirmMessage = [
+          `${providerLabel(normalizedProvider) || normalizedProvider} 登录插件修复建议：`,
+          summary,
+          `风险：${risk}`,
+          '',
+          '确认后会写入本机 browser-flow override，并立即让后续登录动作使用新插件。',
+          '确认保存吗？',
+        ].join('\n');
+        if (!window.confirm(confirmMessage)) {
+          browserFlowRepairSetFeedback(normalizedProvider, '已取消保存 LLM 生成的登录插件覆盖。', 'warn');
+          return;
+        }
+        const saved = await saveBrowserFlowCatalogOverride(
+          normalizedProvider,
+          bundle.surface,
+          catalog,
+          `${summary} risk=${risk}`,
+        );
+        browserFlowRepairResetCatalog(normalizedProvider);
+        await loadBrowserFlowRepairCatalog(normalizedProvider).catch(() => null);
+        browserFlowRepairSetFeedback(
+          normalizedProvider,
+          `已保存登录插件覆盖：${saved.override_path || 'override'}，sha256=${String(saved.sha256 || '').slice(0, 12)}。请重试登录动作。`,
+          'ok',
+        );
+      } catch (error) {
+        browserFlowRepairSetFeedback(normalizedProvider, error.message || String(error), 'warn');
+      } finally {
+        browserFlowRepairSetBusy(normalizedProvider, false);
+      }
     }
     function browserFlowResolvedTargetSelector(probe, fallbackSelector = '') {
       const resolvedUrl = String(probe?.resolved_url || '').trim();
@@ -15093,12 +15405,24 @@ Copyright (c) 2026 walky
       const smsCode = String(mobileAuthAssistantState.sms_code || '').trim();
       const uploadProbeFile = String(mobileAuthAssistantState.upload_probe_file || '').trim();
       const sessionState = session?.status || 'idle';
+      const requestCodeFlowId = mobileFlowId('sms_request_code', 'mobile_sms_login_request_code_validate');
+      const resumeSubmitFlowId = mobileFlowId('sms_resume_submit_code', 'mobile_sms_login_resume_submit_code');
+      const captureSessionFlowId = mobileFlowId('capture_session', 'mobile_capture_current_session');
+      const activeFlowId = String(
+        session?.flow_id
+        || (mobileAuthAssistantState.action === 'capture-session'
+          ? captureSessionFlowId
+          : (mobileAuthAssistantState.action === 'resume-submit-code'
+            ? resumeSubmitFlowId
+            : requestCodeFlowId))
+      ).trim();
       const canStart = !!endpoint?.endpoint_url;
       const isBusy = mobileAuthAssistantState.loading === true;
       const startDisabled = canStart && !isBusy ? '' : 'disabled';
       const resumeDisabled = canStart && !isBusy ? '' : 'disabled';
       const captureDisabled = canStart && !isBusy ? '' : 'disabled';
       const probeDisabled = canStart && !isBusy ? '' : 'disabled';
+      const repairDisabled = canStart && !isBusy ? '' : 'disabled';
       const guidance = deriveMobileAssistantGuidance(session, runtime);
       const startLabel = isBusy && mobileAuthAssistantState.action === 'request-code'
         ? tr('assistant.state.requesting', {}, 'Requesting…')
@@ -15115,6 +15439,9 @@ Copyright (c) 2026 walky
       const readProbeLabel = isBusy && mobileAuthAssistantState.action === 'read-upload-probe'
         ? tr('assistant.state.reading', {}, 'Reading…')
         : tr('Read Probe State', {}, 'Read Probe State');
+      const repairLabel = isBusy && mobileAuthAssistantState.action === 'repair-flow'
+        ? 'Repairing…'
+        : 'LLM 修复登录插件';
       const hasCapturedSession = !!token || !!rootFolderId || !!userDomainId;
       const endpointLabel = browserFlowSessionEndpointLabel(session, endpoint);
       const uploadProbeSummary = mobileUploadProbeSummary(runtime);
@@ -15212,6 +15539,7 @@ Copyright (c) 2026 walky
                   <button type="button" data-mobile-auth-action="request-code" ${startDisabled}>${escapeHtml(startLabel)}</button>
                   <button type="button" data-mobile-auth-action="resume-submit-code" ${resumeDisabled}>${escapeHtml(resumeLabel)}</button>
                   <button class="secondary" type="button" data-mobile-auth-action="capture-session" ${captureDisabled}>${escapeHtml(captureLabel)}</button>
+                  <button class="secondary" type="button" data-mobile-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
                 </div>
                 <div class="unicom-assistant-summary-line">${escapeHtml(tr('assistant.mobile.start_help', {}, 'If the browser is already logged in, Start SMS Login + Guide skips the login flow and captures the live session directly. If the page is logged out, it moves the CDP page onto the Mobile login entry, requests the SMS code, and keeps all follow-up work anchored to this window.'))}</div>
                 <div class="provider-note">${canStart
@@ -15240,6 +15568,7 @@ Copyright (c) 2026 walky
                   </div>
                 </div>
                 <div class="actions">
+                  <button class="secondary" type="button" data-mobile-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
                   <button class="secondary" type="button" data-mobile-auth-action="apply-outputs" ${hasCapturedSession ? '' : 'disabled'}>${escapeHtml(tr('Only Fill Credential Form', {}, 'Only Fill Credential Form'))}</button>
                   <button type="button" data-mobile-auth-action="apply-and-save-outputs" ${hasCapturedSession ? '' : 'disabled'}>${escapeHtml(tr('Save Captured Credentials', {}, 'Save Captured Credentials'))}</button>
                 </div>
@@ -15347,6 +15676,7 @@ Copyright (c) 2026 walky
             <button class="secondary" type="button" data-mobile-auth-action="open-window">${escapeHtml(focusModeOpen ? tr('assistant.launcher.guided_open', {}, 'Guided Window Open') : tr('assistant.launcher.open_guided', {}, 'Open Guided Window'))}</button>
             <button class="secondary" type="button" data-mobile-auth-action="capture-session" ${captureDisabled}>${escapeHtml(captureLabel)}</button>
             <button class="secondary" type="button" data-mobile-auth-action="probe-upload-surface" ${probeDisabled}>${escapeHtml(probeLabel)}</button>
+            <button class="secondary" type="button" data-mobile-auth-action="repair-flow" data-browser-flow-repair-flow="${escapeHtmlAttr(activeFlowId)}" ${repairDisabled}>${escapeHtml(repairLabel)}</button>
           </div>
           <div class="unicom-assistant-launcher-meta">
             <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
@@ -19467,6 +19797,10 @@ Copyright (c) 2026 walky
         readMobileUploadProbeState();
         return;
       }
+      if (action === 'repair-flow') {
+        startBrowserFlowLlmRepair('mobile', actionButton.dataset.browserFlowRepairFlow, mobileAuthAssistantState.session?.last_error || '');
+        return;
+      }
       if (action === 'apply-outputs') {
         applyMobileAuthOutputsToCredentialForm();
         return;
@@ -19545,6 +19879,10 @@ Copyright (c) 2026 walky
         }
         if (action === 'refresh-session') {
           refreshUnicomAuthAssistantSession({ allowRecoverMissing: true });
+          return;
+        }
+        if (action === 'repair-flow') {
+          startBrowserFlowLlmRepair('unicom', actionButton.dataset.browserFlowRepairFlow, unicomAuthAssistantState.session?.last_error || '');
           return;
         }
         if (action === 'apply-outputs') {
@@ -19642,6 +19980,10 @@ Copyright (c) 2026 walky
       }
       if (action === 'read-upload-probe') {
         readTelecomUploadProbeState();
+        return;
+      }
+      if (action === 'repair-flow') {
+        startBrowserFlowLlmRepair('telecom', actionButton.dataset.browserFlowRepairFlow, telecomAuthAssistantState.session?.last_error || '');
         return;
       }
       if (action === 'apply-outputs') {
