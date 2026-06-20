@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-CCBG-Commercial
 // Copyright (c) 2026 walky
 
+use crate::MCP_PROTOCOL_VERSION;
 use crate::client::ControlPlaneClient;
-use crate::server::McpServer;
+use crate::resources::URI_PUBLIC_FEATURE_ACCESS_SUMMARY;
+use crate::server::{McpServer, RequestAccess, inspect_jsonrpc_request};
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -21,7 +23,6 @@ const DEFAULT_ENDPOINT: &str = "/mcp";
 const DEFAULT_ALLOWED_ORIGINS: &[&str] = &["http://localhost", "http://127.0.0.1"];
 const ALLOW_POST: &str = "POST";
 const MCP_PROTOCOL_VERSION_HEADER: &str = "MCP-Protocol-Version";
-const SUPPORTED_PROTOCOL_VERSION: &str = "2025-03-26";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpTransportConfig {
@@ -57,21 +58,38 @@ impl HttpTransportConfig {
         F: Fn(&str) -> Option<String>,
     {
         let mut cfg = Self::default();
-        cfg.enabled = parse_bool(lookup("MCP_SERVER_HTTP_ENABLED").as_deref()).unwrap_or(false);
-        if let Some(bind_addr) = lookup("MCP_SERVER_HTTP_BIND") {
+        cfg.enabled = parse_enabled(&lookup).unwrap_or(false);
+        if let Some(bind_addr) = first_env(
+            &lookup,
+            &["MCP_SERVER_HTTP_BIND", "CCBG_MCP_HTTP_BIND_ADDR"],
+        ) {
             cfg.bind_addr = bind_addr;
         }
-        if let Some(endpoint) = lookup("MCP_SERVER_HTTP_PATH") {
+        if let Some(endpoint) =
+            first_env(&lookup, &["MCP_SERVER_HTTP_PATH", "CCBG_MCP_HTTP_ENDPOINT"])
+        {
             cfg.endpoint = normalize_endpoint_path(&endpoint)?;
         }
-        if let Some(token) = lookup("MCP_SERVER_HTTP_BEARER_TOKEN") {
+        if let Some(token) = first_env(
+            &lookup,
+            &["MCP_SERVER_HTTP_BEARER_TOKEN", "CCBG_MCP_HTTP_BEARER_TOKEN"],
+        ) {
             cfg.bearer_token = Some(token);
         }
-        if let Some(origins) = lookup("MCP_SERVER_HTTP_ALLOWED_ORIGINS") {
+        if let Some(origins) = first_env(
+            &lookup,
+            &[
+                "MCP_SERVER_HTTP_ALLOWED_ORIGINS",
+                "CCBG_MCP_HTTP_ALLOWED_ORIGINS",
+            ],
+        ) {
             cfg.allowed_origins = parse_origin_list(&origins)?;
         }
         if cfg.enabled && cfg.bearer_token.is_none() {
-            return Err("MCP_SERVER_HTTP_BEARER_TOKEN is required when HTTP is enabled".into());
+            return Err(
+                "MCP_SERVER_HTTP_BEARER_TOKEN or CCBG_MCP_HTTP_BEARER_TOKEN is required when HTTP is enabled"
+                    .into(),
+            );
         }
         Ok(cfg)
     }
@@ -84,7 +102,7 @@ pub async fn serve_http<C: ControlPlaneClient + 'static>(
     let addr: SocketAddr = config.bind_addr.parse().map_err(|err| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("invalid MCP_SERVER_HTTP_BIND: {err}"),
+            format!("invalid MCP HTTP bind address: {err}"),
         )
     })?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -147,8 +165,15 @@ impl Clone for AppState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthStatus {
+    Missing,
+    Valid,
+    Invalid,
+}
+
 async fn post_mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Some(resp) = validate_auth_and_origin(&headers, &state) {
+    if let Some(resp) = validate_origin(&headers, &state) {
         return resp;
     }
     if let Some(resp) = validate_protocol_version(&headers) {
@@ -158,6 +183,26 @@ async fn post_mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes
         Ok(raw) => raw,
         Err(_) => return bad_request("request body must be utf-8"),
     };
+    let inspection = match inspect_jsonrpc_request(raw) {
+        Ok(inspection) => inspection,
+        Err(err) => return jsonrpc_bad_request(err),
+    };
+    let auth_status = auth_status(&headers, &state);
+    match (inspection.access, auth_status) {
+        (_, AuthStatus::Invalid) => {
+            return unauthorized_jsonrpc(inspection.id, "invalid bearer token");
+        }
+        (RequestAccess::Operator, AuthStatus::Missing) => {
+            return unauthorized_jsonrpc(
+                inspection.id,
+                &format!(
+                    "authentication required for operator MCP calls; call tools/list or read {URI_PUBLIC_FEATURE_ACCESS_SUMMARY} first"
+                ),
+            );
+        }
+        _ => {}
+    }
+
     match state.server.handle_jsonrpc_str(raw) {
         Ok(Some(value)) => (
             StatusCode::OK,
@@ -176,7 +221,7 @@ async fn post_mcp(State(state): State<AppState>, headers: HeaderMap, body: Bytes
 }
 
 async fn get_not_supported(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = validate_auth_and_origin(&headers, &state) {
+    if let Some(resp) = validate_origin(&headers, &state) {
         return resp;
     }
     if let Some(resp) = validate_protocol_version(&headers) {
@@ -191,7 +236,7 @@ async fn method_not_allowed(
     method: Method,
 ) -> Response {
     let _ = method;
-    if let Some(resp) = validate_auth_and_origin(&headers, &state) {
+    if let Some(resp) = validate_origin(&headers, &state) {
         return resp;
     }
     if let Some(resp) = validate_protocol_version(&headers) {
@@ -208,15 +253,18 @@ fn method_not_supported() -> Response {
         .into_response()
 }
 
-fn validate_auth_and_origin(headers: &HeaderMap, state: &AppState) -> Option<Response> {
-    let auth = match headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
-        Some(auth) => auth,
-        None => return Some(StatusCode::UNAUTHORIZED.into_response()),
-    };
-    let expected = format!("Bearer {}", state.bearer_token);
-    if auth != expected {
-        return Some(StatusCode::UNAUTHORIZED.into_response());
+fn auth_status(headers: &HeaderMap, state: &AppState) -> AuthStatus {
+    match headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    {
+        None => AuthStatus::Missing,
+        Some(auth) if auth == format!("Bearer {}", state.bearer_token) => AuthStatus::Valid,
+        Some(_) => AuthStatus::Invalid,
     }
+}
+
+fn validate_origin(headers: &HeaderMap, state: &AppState) -> Option<Response> {
     if let Some(origin) = headers.get(ORIGIN) {
         let origin = match origin.to_str() {
             Ok(origin) => origin,
@@ -236,10 +284,37 @@ fn validate_protocol_version(headers: &HeaderMap) -> Option<Response> {
     let Ok(protocol_version) = raw.to_str() else {
         return Some(bad_request("MCP-Protocol-Version must be valid ASCII"));
     };
-    if protocol_version == SUPPORTED_PROTOCOL_VERSION {
+    if protocol_version == MCP_PROTOCOL_VERSION {
         return None;
     }
     Some(bad_request("unsupported MCP-Protocol-Version"))
+}
+
+fn jsonrpc_bad_request(error: crate::error::McpErrorPayload) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(CONTENT_TYPE, "application/json")],
+        json!({"jsonrpc":"2.0","id":serde_json::Value::Null,"error":error}).to_string(),
+    )
+        .into_response()
+}
+
+fn unauthorized_jsonrpc(id: Option<serde_json::Value>, message: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(CONTENT_TYPE, "application/json")],
+        json!({
+            "jsonrpc":"2.0",
+            "id": id.unwrap_or(serde_json::Value::Null),
+            "error": {
+                "code": "unauthorized",
+                "message": message,
+                "retryable": false
+            }
+        })
+        .to_string(),
+    )
+        .into_response()
 }
 
 fn bad_request(message: &str) -> Response {
@@ -249,6 +324,33 @@ fn bad_request(message: &str) -> Response {
         json!({"error":message}).to_string(),
     )
         .into_response()
+}
+
+fn parse_enabled<F>(lookup: &F) -> Option<bool>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    first_env(
+        lookup,
+        &["MCP_SERVER_HTTP_ENABLED", "CCBG_MCP_HTTP_ENABLED"],
+    )
+    .and_then(|raw| parse_bool(Some(raw.as_str())))
+    .or_else(|| {
+        first_env(lookup, &["CCBG_MCP_TRANSPORT"]).and_then(|value| {
+            if value.eq_ignore_ascii_case("streamable_http") {
+                Some(true)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+fn first_env<F>(lookup: &F, keys: &[&str]) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    keys.iter().find_map(|key| lookup(key))
 }
 
 fn parse_bool(raw: Option<&str>) -> Option<bool> {
@@ -262,7 +364,7 @@ fn parse_bool(raw: Option<&str>) -> Option<bool> {
 
 fn normalize_endpoint_path(raw: &str) -> Result<String, String> {
     if raw.is_empty() {
-        return Err("MCP_SERVER_HTTP_PATH must not be empty".into());
+        return Err("MCP HTTP path must not be empty".into());
     }
     if raw.starts_with('/') {
         Ok(raw.to_string())
@@ -279,7 +381,7 @@ fn parse_origin_list(raw: &str) -> Result<Vec<String>, String> {
         .map(ToString::to_string)
         .collect();
     if origins.is_empty() {
-        return Err("MCP_SERVER_HTTP_ALLOWED_ORIGINS must contain at least one origin".into());
+        return Err("MCP HTTP allowed origins must contain at least one origin".into());
     }
     Ok(origins)
 }
@@ -316,7 +418,38 @@ mod tests {
     }
 
     #[test]
-    fn http_transport_auth_origin_and_methods() {
+    fn alias_envs_enable_http_transport() {
+        let cfg = HttpTransportConfig::from_env_lookup(|key| match key {
+            "CCBG_MCP_HTTP_ENABLED" => Some("true".to_string()),
+            "CCBG_MCP_HTTP_BIND_ADDR" => Some("127.0.0.1:61123".to_string()),
+            "CCBG_MCP_HTTP_ENDPOINT" => Some("mcp-http".to_string()),
+            "CCBG_MCP_HTTP_BEARER_TOKEN" => Some("secret".to_string()),
+            "CCBG_MCP_HTTP_ALLOWED_ORIGINS" => {
+                Some("http://localhost,http://127.0.0.1".to_string())
+            }
+            _ => None,
+        })
+        .expect("config");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.bind_addr, "127.0.0.1:61123");
+        assert_eq!(cfg.endpoint, "/mcp-http");
+        assert_eq!(cfg.bearer_token.as_deref(), Some("secret"));
+        assert_eq!(cfg.allowed_origins.len(), 2);
+    }
+
+    #[test]
+    fn transport_hint_can_enable_http_transport() {
+        let cfg = HttpTransportConfig::from_env_lookup(|key| match key {
+            "CCBG_MCP_TRANSPORT" => Some("streamable_http".to_string()),
+            "CCBG_MCP_HTTP_BEARER_TOKEN" => Some("secret".to_string()),
+            _ => None,
+        })
+        .expect("config");
+        assert!(cfg.enabled);
+    }
+
+    #[test]
+    fn http_transport_public_discovery_and_operator_auth() {
         let test_server = start_test_server();
         let addr = test_server.addr;
 
@@ -324,23 +457,43 @@ mod tests {
             let client = Client::builder().build().expect("client");
             let base = format!("http://{}", addr);
 
-            let ok = client
+            let public_initialize = client
                 .post(format!("{base}/mcp"))
-                .header(AUTHORIZATION, "Bearer secret")
                 .header(ACCEPT, "application/json, text/event-stream")
                 .header(ORIGIN, "http://localhost")
                 .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
                 .send()
                 .expect("request");
-            assert_eq!(ok.status().as_u16(), 200);
-            let v: Value = ok.json().expect("json");
-            assert_eq!(v["result"]["protocolVersion"], "2025-03-26");
+            assert_eq!(public_initialize.status().as_u16(), 200);
+            let value: Value = public_initialize.json().expect("json");
+            assert_eq!(
+                value["result"]["protocolVersion"],
+                crate::MCP_PROTOCOL_VERSION
+            );
+            assert_eq!(
+                value["result"]["serverInfo"]["name"],
+                crate::MCP_SERVER_NAME
+            );
+
+            let public_tools = client
+                .post(format!("{base}/mcp"))
+                .body(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#)
+                .send()
+                .expect("request");
+            assert_eq!(public_tools.status().as_u16(), 200);
+
+            let public_tool_call = client
+                .post(format!("{base}/mcp"))
+                .body(r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"mcp_feature_access_summary","arguments":{}}}"#)
+                .send()
+                .expect("request");
+            assert_eq!(public_tool_call.status().as_u16(), 200);
 
             let supported_version = client
                 .post(format!("{base}/mcp"))
                 .header(AUTHORIZATION, "Bearer secret")
-                .header(MCP_PROTOCOL_VERSION_HEADER, "2025-03-26")
-                .body(r#"{"jsonrpc":"2.0","id":2,"method":"initialize"}"#)
+                .header(MCP_PROTOCOL_VERSION_HEADER, crate::MCP_PROTOCOL_VERSION)
+                .body(r#"{"jsonrpc":"2.0","id":4,"method":"initialize"}"#)
                 .send()
                 .expect("request");
             assert_eq!(supported_version.status().as_u16(), 200);
@@ -349,22 +502,29 @@ mod tests {
                 .post(format!("{base}/mcp"))
                 .header(AUTHORIZATION, "Bearer secret")
                 .header(MCP_PROTOCOL_VERSION_HEADER, "2025-06-18")
-                .body(r#"{"jsonrpc":"2.0","id":3,"method":"initialize"}"#)
+                .body(r#"{"jsonrpc":"2.0","id":5,"method":"initialize"}"#)
                 .send()
                 .expect("request");
             assert_eq!(unsupported_version.status().as_u16(), 400);
 
-            let missing_auth = client
+            let missing_auth_operator = client
                 .post(format!("{base}/mcp"))
-                .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+                .body(r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"provider_list","arguments":{}}}"#)
                 .send()
                 .expect("request");
-            assert_eq!(missing_auth.status().as_u16(), 401);
+            assert_eq!(missing_auth_operator.status().as_u16(), 401);
+            let value: Value = missing_auth_operator.json().expect("json");
+            assert_eq!(value["error"]["code"], "unauthorized");
+            assert!(
+                value["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("feature-access-summary"))
+            );
 
             let invalid_auth = client
                 .post(format!("{base}/mcp"))
                 .header(AUTHORIZATION, "Bearer wrong")
-                .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+                .body(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#)
                 .send()
                 .expect("request");
             assert_eq!(invalid_auth.status().as_u16(), 401);
@@ -373,16 +533,12 @@ mod tests {
                 .post(format!("{base}/mcp"))
                 .header(AUTHORIZATION, "Bearer secret")
                 .header(ORIGIN, "https://evil.example")
-                .body(r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#)
+                .body(r#"{"jsonrpc":"2.0","id":8,"method":"initialize"}"#)
                 .send()
                 .expect("request");
             assert_eq!(invalid_origin.status().as_u16(), 403);
 
-            let get_resp = client
-                .get(format!("{base}/mcp"))
-                .header(AUTHORIZATION, "Bearer secret")
-                .send()
-                .expect("request");
+            let get_resp = client.get(format!("{base}/mcp")).send().expect("request");
             assert_eq!(get_resp.status().as_u16(), 405);
             assert_eq!(
                 get_resp
@@ -394,18 +550,11 @@ mod tests {
                 "POST"
             );
 
-            let delete_missing_auth = client
+            let delete_resp = client
                 .delete(format!("{base}/mcp"))
                 .send()
                 .expect("request");
-            assert_eq!(delete_missing_auth.status().as_u16(), 401);
-
-            let delete_with_auth = client
-                .delete(format!("{base}/mcp"))
-                .header(AUTHORIZATION, "Bearer secret")
-                .send()
-                .expect("request");
-            assert_eq!(delete_with_auth.status().as_u16(), 405);
+            assert_eq!(delete_resp.status().as_u16(), 405);
         });
 
         join.join().expect("test thread");
@@ -420,7 +569,6 @@ mod tests {
         let client = Client::builder().build().expect("client");
         let resp = client
             .post(format!("http://{addr}/mcp"))
-            .header(AUTHORIZATION, "Bearer secret")
             .body(r#"{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}"#)
             .send()
             .expect("request");
@@ -441,7 +589,7 @@ mod tests {
                     .post(format!("http://{addr}/mcp"))
                     .header(AUTHORIZATION, "Bearer secret")
                     .body(format!(
-                        r#"{{"jsonrpc":"2.0","id":{request_id},"method":"tools/list"}}"#
+                        r#"{{"jsonrpc":"2.0","id":{request_id},"method":"tools/call","params":{{"name":"provider_list","arguments":{{}}}}}}"#
                     ))
                     .send()
                     .expect("request");
@@ -449,9 +597,9 @@ mod tests {
                 let body: Value = response.json().expect("json");
                 assert_eq!(body["id"].as_u64(), Some(request_id));
                 assert!(
-                    body["result"]["tools"]
+                    body["result"]["structuredContent"]["providers"]
                         .as_array()
-                        .is_some_and(|v| !v.is_empty())
+                        .is_some()
                 );
             }));
         }

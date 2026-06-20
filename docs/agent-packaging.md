@@ -90,9 +90,31 @@
 
 - `127.0.0.1:61084/mcp`
 
+注意：
+
+- 这里的 `127.0.0.1:61084/mcp` 是 `ccbg` 自己的可选 MCP HTTP 入口。
+- 如果 Agent 还要接入 `.51` 的 ticket / coordination Hub，那个外部服务当前应使用：
+  - `http://192.168.1.51:8787/mcp`
+  - 服务身份：`agent-nats-redmine-hub`
+- 不要把 `.51` 外部 Hub 错配成 `192.168.1.51:61084/mcp`。
+
 ## MCP 能力边界
 
 MCP 不应把所有内部细节暴露成工具。建议分成四类:
+
+### 当前实现状态
+
+- 未鉴权公开发现:
+  - `tools/list`
+  - `resources/list`
+  - `prompts/list`
+  - tool: `mcp_feature_access_summary`
+  - resource: `ccbg://public/feature-access-summary`
+  - prompt: `discover_feature_access_model`
+- 已鉴权运维工具:
+  - 只读: `provider_list`、`provider_health`、`replication_get_status`、`replication_list_failed_jobs`、`alerts_list_recent`、`admin_status_get`、`applications_get`、`content_policies_get`、`provider_credentials_get`、`auth_capture_policy_get`、`replication_dlq_list`
+  - 修改: `applications_update`、`content_policies_update`、`topology_update`、`provider_credentials_update`、`auth_capture_policy_update`、`replication_retry_job`、`replication_dlq_replay_job`、`replication_dlq_replay_target`
+- MCP HTTP 若启用 bearer token，未鉴权调用仍可看能力面，但运维调用会返回 `401` 并引导先读公开发现摘要。
 
 ### S3 Tools
 
@@ -141,6 +163,7 @@ MCP 不应把所有内部细节暴露成工具。建议分成四类:
 - “先确认备份再读取”
 - “排查 provider 连接失败”
 - “为某个对象重试复制”
+- “先发现能力与鉴权边界”
 
 ## Skill 设计原则
 

@@ -242,6 +242,7 @@
 ```http
 GET /api/applications
 POST /api/applications
+GET /api/applications/{application_id}/credentials
 ```
 
 `POST` 使用全量替换语义:
@@ -261,7 +262,46 @@ POST /api/applications
 }
 ```
 
-响应不会返回明文 secret，只返回 `secret_access_key_present`。如果控制面还没有 `applications` 配置，网关会自动回退到旧的 `CCBG_S3_ACCESS_KEY_ID` / `CCBG_S3_SECRET_ACCESS_KEY`，保持现有客户端兼容。
+`GET /api/applications` 和 `POST /api/applications` 的响应不会返回明文 secret，只返回 `secret_access_key_present`。如果控制面还没有 `applications` 配置，网关会自动回退到旧的 `CCBG_S3_ACCESS_KEY_ID` / `CCBG_S3_SECRET_ACCESS_KEY`，保持现有客户端兼容。
+
+需要在 Admin UI 或运维脚本里显式导出某个应用的可复制 S3 凭据时，调用:
+
+```http
+GET /api/applications/{application_id}/credentials
+```
+
+响应示例:
+
+```json
+{
+  "id": "video-ingest",
+  "label": "Video ingest",
+  "access_key_id": "video-access-key",
+  "secret_access_key": "video-secret-key",
+  "enabled": true
+}
+```
+
+这个显式导出接口只应该用于管理员的复制、恢复或回填场景，不应该替代常规的应用列表读取。
+
+Admin UI 的 `显示 S3 凭据` / `复制 S3 凭据` 也是基于这个接口工作：
+
+- `显示 S3 凭据` 会回填当前应用的明文 `secret_access_key`
+- `复制 S3 凭据` 会额外生成一段可直接粘贴的 env 片段，默认包含:
+  - `CCBG_S3_ENDPOINT`
+  - `CCBG_S3_REGION`
+  - `CCBG_S3_FORCE_PATH_STYLE`
+  - `CCBG_S3_BUCKET`
+  - `CCBG_S3_PREFIX`
+  - `CCBG_S3_ACCESS_KEY_ID`
+  - `CCBG_S3_SECRET_ACCESS_KEY`
+
+其中 `bucket / prefix` 会优先参考该应用当前的权限范围:
+
+- 单个允许桶: 直接作为 `CCBG_S3_BUCKET`
+- 多个允许桶: 保留允许列表注释，并优先默认到 `root` 或第一个允许桶
+- 单个允许前缀: 直接作为 `CCBG_S3_PREFIX`
+- 多个允许前缀: 保留允许列表注释，并留空 `CCBG_S3_PREFIX` 让操作者按需填写
 
 ### 5.2 内容策略
 

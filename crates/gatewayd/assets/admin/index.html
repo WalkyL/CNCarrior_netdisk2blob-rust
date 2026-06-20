@@ -241,11 +241,14 @@ Copyright (c) 2026 walky
     .application-editor-core input,
     .application-editor-core select,
     .application-editor-advanced input,
-    .application-editor-advanced select { margin-top: 4px; }
+    .application-editor-advanced select,
+    .application-editor-advanced textarea { margin-top: 4px; }
     .application-editor-remove { align-self:end; }
     .application-editor-advanced { margin-top: 10px; }
     .application-editor-advanced summary { cursor:pointer; color: var(--muted); font-size: 12px; }
     .application-editor-advanced-grid { display:grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.9fr); gap: 10px; margin-top: 10px; }
+    .application-editor-snippet { grid-column: 1 / -1; }
+    .application-editor-snippet textarea { min-height: 132px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; }
     .application-editor-secret-note { margin-top: 8px; font-size: 12px; color: var(--muted); }
     .compact-tab-card { padding: 14px; }
     .compact-section-head { display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; flex-wrap:wrap; }
@@ -4711,12 +4714,15 @@ Copyright (c) 2026 walky
         'No application API keys exist yet. Create one in Credentials first, then scope its permissions here.': '还没有 S3 应用账号。先到 “S3 应用账号” 里创建一个，再在这里收窄权限。',
         'Enabled': '启用',
         'Generate Credentials': '生成账号',
+        'Show S3 Credentials': '显示 S3 凭据',
+        'Copy S3 Credentials': '复制 S3 凭据',
         'Application ID': '应用 ID',
         'Access Key ID': '访问密钥 ID',
         'Secret Access Key': '访问密钥密码',
         'Label': '标签',
         'Remove': '删除',
         'Advanced': '高级',
+        'Connection Snippet': '接入片段',
         'A secret is already stored. Leave this blank to keep it, or enter a new value to rotate it.': '已经保存过访问密码。留空表示保持不变；填写新值表示轮换密码。',
         'New applications must provide a secret before saving.': '新应用保存前必须提供访问密码。',
         'List buckets': '列桶',
@@ -6595,6 +6601,7 @@ Copyright (c) 2026 walky
         label: String(seed.label || '').trim(),
         access_key_id: `ccbg_${baseId}_${Date.now().toString(36)}`,
         secret_access_key: applicationSecretValue(),
+        advanced_open: false,
         enabled: seed.enabled !== false,
         secret_access_key_present: false,
         permissions: {
@@ -6618,7 +6625,100 @@ Copyright (c) 2026 walky
       app.id = baseId;
       app.access_key_id = `ccbg_${baseId}_${Date.now().toString(36)}`;
       app.secret_access_key = applicationSecretValue();
+      app.advanced_open = true;
       renderApplicationsEditor();
+    }
+    function normalizeApplicationScopeValues(values) {
+      return dedupe((Array.isArray(values) ? values : []).map(value => String(value || '').trim()).filter(Boolean));
+    }
+    function applicationConnectionSnippet(app) {
+      const allowedBuckets = normalizeApplicationScopeValues(app?.permissions?.allowed_buckets);
+      const allowedPrefixes = normalizeApplicationScopeValues(app?.permissions?.allowed_prefixes);
+      const bucket = allowedBuckets.includes('root') ? 'root' : (allowedBuckets[0] || 'root');
+      const prefix = allowedPrefixes.length === 1 ? allowedPrefixes[0] : '';
+      const endpoint = desktopMountEndpoint();
+      const region = String(desktopMountSeed?.region || '').trim() || 'us-east-1';
+      const lines = [
+        `# application_id=${String(app?.id || '').trim()}`,
+        `CCBG_S3_ENDPOINT=${endpoint}`,
+        `CCBG_S3_REGION=${region}`,
+        'CCBG_S3_FORCE_PATH_STYLE=true',
+      ];
+      if (!allowedBuckets.length) {
+        lines.push('# allowed_buckets=all; defaulting CCBG_S3_BUCKET to root for direct client config');
+      } else if (allowedBuckets.length > 1) {
+        lines.push(`# allowed_buckets=${allowedBuckets.join(', ')}`);
+      }
+      lines.push(`CCBG_S3_BUCKET=${bucket}`);
+      if (allowedPrefixes.length > 1) {
+        lines.push(`# allowed_prefixes=${allowedPrefixes.join(', ')}`);
+      }
+      lines.push(`CCBG_S3_PREFIX=${prefix}`);
+      lines.push(`CCBG_S3_ACCESS_KEY_ID=${String(app?.access_key_id || '').trim()}`);
+      lines.push(`CCBG_S3_SECRET_ACCESS_KEY=${String(app?.secret_access_key || '').trim()}`);
+      return lines.join('\n');
+    }
+    async function revealApplicationCredentials(index) {
+      applicationDrafts = collectApplicationsFromEditor();
+      const app = applicationDrafts[index];
+      if (!app) {
+        return null;
+      }
+      app.id = String(app.id || '').trim();
+      app.access_key_id = String(app.access_key_id || '').trim();
+      app.secret_access_key = String(app.secret_access_key || '').trim();
+      if (!app.id) {
+        setApplicationsFeedback('请先填写应用 ID。', 'warn');
+        return null;
+      }
+      if (!app.access_key_id) {
+        setApplicationsFeedback('请先填写访问密钥 ID。', 'warn');
+        return null;
+      }
+      let loadedFromSavedState = false;
+      if (!app.secret_access_key) {
+        const payload = await fetchJson(`/api/applications/${encodeURIComponent(app.id)}/credentials`);
+        app.id = String(payload?.id || app.id).trim();
+        app.label = String(payload?.label || app.label || '').trim();
+        app.access_key_id = String(payload?.access_key_id || '').trim();
+        app.secret_access_key = String(payload?.secret_access_key || '').trim();
+        app.enabled = payload?.enabled !== false;
+        loadedFromSavedState = true;
+      }
+      if (!app.secret_access_key) {
+        throw new Error(`应用 ${app.id} 当前没有可显示的 secret_access_key。`);
+      }
+      app.secret_access_key_present = !!app.secret_access_key_present || loadedFromSavedState;
+      app.advanced_open = true;
+      renderApplicationsEditor();
+      renderApplicationPermissionsEditor();
+      renderSmbSidecarEditor();
+      renderContentPoliciesEditor();
+      return applicationDrafts[index];
+    }
+    async function showApplicationCredentials(index) {
+      const app = await revealApplicationCredentials(index);
+      if (!app) {
+        return;
+      }
+      setApplicationsFeedback(`已显示 ${app.id} 的 S3 凭据和接入片段。`, 'ok');
+    }
+    function applicationCredentialsSnippet(app) {
+      return [
+        applicationConnectionSnippet(app),
+      ].join('\n');
+    }
+    async function copyApplicationCredentials(index) {
+      const app = await revealApplicationCredentials(index);
+      if (!app) {
+        return;
+      }
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        setApplicationsFeedback(`已在界面显示 ${app.id} 的 S3 凭据和接入片段。当前浏览器不支持自动复制，请手动复制。`, 'warn');
+        return;
+      }
+      await navigator.clipboard.writeText(applicationCredentialsSnippet(app));
+      setApplicationsFeedback(`已复制 ${app.id} 的 S3 凭据。`, 'ok');
     }
     function telecomFlowTargetInfo(flowId) {
       const catalogPayload = telecomAuthAssistantState.catalog;
@@ -16233,6 +16333,7 @@ Copyright (c) 2026 walky
         label: String(entry.label || '').trim(),
         access_key_id: String(entry.access_key_id || '').trim(),
         secret_access_key: '',
+        advanced_open: !!entry.advanced_open,
         enabled: entry.enabled !== false,
         secret_access_key_present: !!entry.secret_access_key_present,
         permissions: {
@@ -17587,6 +17688,8 @@ Copyright (c) 2026 walky
               </label>
               <div class="application-editor-tools">
                 <button class="secondary" type="button" data-generate-application-credentials="${index}">一键生成账号</button>
+                <button class="secondary" type="button" data-show-application-credentials="${index}">显示 S3 凭据</button>
+                <button class="secondary" type="button" data-copy-application-credentials="${index}">复制 S3 凭据</button>
               </div>
             </div>
           </div>
@@ -17601,17 +17704,20 @@ Copyright (c) 2026 walky
               <button class="secondary" type="button" data-remove-application="${index}">删除</button>
             </div>
           </div>
-          <details class="application-editor-advanced">
+          <details class="application-editor-advanced" ${app.advanced_open ? 'open' : ''}>
             <summary>高级选项</summary>
             <div class="application-editor-advanced-grid">
               <label>${renderFieldLabel('显示名称', '给管理员看的名称，方便在后台区分不同应用，不参与实际鉴权。')}
                 <input data-application-field="label" type="text" value="${escapeHtmlAttr(app.label)}" placeholder="Video ingest service" />
               </label>
               <label>${renderFieldLabel('访问密钥密码', '应用访问 S3 网关时使用的密码。已有应用留空表示保持现有密码不变。')}
-                <input data-application-field="secret_access_key" type="password" value="${escapeHtmlAttr(app.secret_access_key)}" placeholder="${app.secret_access_key_present ? 'Leave blank to keep existing secret' : 'Required for new applications'}" />
+                <input data-application-field="secret_access_key" type="text" value="${escapeHtmlAttr(app.secret_access_key)}" placeholder="${app.secret_access_key_present ? 'Leave blank to keep existing secret' : 'Required for new applications'}" />
+              </label>
+              <label class="application-editor-snippet">${renderFieldLabel('接入片段', '显示可直接粘贴给对方应用的 env 片段。显示或复制当前 S3 凭据后，这里会带上 endpoint、bucket、prefix 和完整 key。')}
+                <textarea data-application-preview="env" readonly placeholder="${app.secret_access_key_present ? '点击“显示 S3 凭据”或“复制 S3 凭据”后，这里会生成完整 env 片段。' : '生成或填写密码后，这里会自动生成完整 env 片段。'}">${escapeHtml(app.secret_access_key ? applicationConnectionSnippet(app) : '')}</textarea>
               </label>
             </div>
-            <div class="application-editor-secret-note">${app.secret_access_key_present ? '当前已经保存过访问密码。这里留空表示保持不变；填写新值表示轮换密码。' : '新应用在保存前必须填写访问密钥密码。'}</div>
+            <div class="application-editor-secret-note">${app.secret_access_key_present ? '当前已经保存过访问密码。点击右上角“显示 S3 凭据”可回填当前密码并展开接入片段；点击“复制 S3 凭据”会额外把完整 env 片段复制到剪贴板。这里留空表示保持不变，填写新值表示轮换密码。' : '新应用在保存前必须填写访问密钥密码。生成后可直接显示或复制给对方应用。'}</div>
           </details>
         </div>
       `).join('');
@@ -18146,6 +18252,9 @@ Copyright (c) 2026 walky
           label: credentialRow ? (credentialValue('label') || null) : (draft.label || null),
           access_key_id: credentialRow ? credentialValue('access_key_id') : draft.access_key_id,
           secret_access_key: credentialRow ? credentialValue('secret_access_key') : '',
+          advanced_open: credentialRow
+            ? !!credentialRow.querySelector('.application-editor-advanced')?.open
+            : !!draft.advanced_open,
           enabled: credentialRow ? !!credentialRow.querySelector('[data-application-field="enabled"]')?.checked : draft.enabled !== false,
           secret_access_key_present: credentialRow
             ? credentialRow.dataset.applicationSecretPresent === 'true'
@@ -20136,6 +20245,20 @@ Copyright (c) 2026 walky
         regenerateApplicationCredentials(Number(generateButton.dataset.generateApplicationCredentials));
         renderApplicationPermissionsEditor();
         renderContentPoliciesEditor();
+        return;
+      }
+      const showButton = event.target.closest('button[data-show-application-credentials]');
+      if (showButton) {
+        showApplicationCredentials(Number(showButton.dataset.showApplicationCredentials)).catch(error => {
+          setApplicationsFeedback(error.message || String(error), 'warn');
+        });
+        return;
+      }
+      const copyButton = event.target.closest('button[data-copy-application-credentials]');
+      if (copyButton) {
+        copyApplicationCredentials(Number(copyButton.dataset.copyApplicationCredentials)).catch(error => {
+          setApplicationsFeedback(error.message || String(error), 'warn');
+        });
         return;
       }
       const button = event.target.closest('button[data-remove-application]');

@@ -100,6 +100,18 @@ OpenWRT lite 不默认常驻 MCP HTTP。客户端不需要 Rust 环境，直接�
 
 当前 MCP 协议版本由 `mcp-server` 初始化响应声明为 `2025-03-26`。
 
+如果要启用可选的 MCP HTTP:
+
+- 旧环境变量名继续可用: `MCP_SERVER_HTTP_ENABLED`、`MCP_SERVER_HTTP_BIND`、`MCP_SERVER_HTTP_PATH`、`MCP_SERVER_HTTP_BEARER_TOKEN`
+- 也接受别名: `CCBG_MCP_HTTP_ENABLED`、`CCBG_MCP_HTTP_BIND_ADDR`、`CCBG_MCP_HTTP_ENDPOINT`、`CCBG_MCP_HTTP_BEARER_TOKEN`
+- 未鉴权调用可做公开能力发现；真正的运维 tool call 仍要求 bearer token
+
+注意：
+
+- 这里的 `mcp-server` 是本机 `ccbg` 的 stdio MCP，用来访问本机 `gatewayd` 控制面。
+- 如果 Agent 还要接入 `.51` 的外部 Agent-nats-redmine-hub，当前 live MCP endpoint 是 `http://192.168.1.51:8787/mcp`。
+- 不要把外部 Hub 错配成 `192.168.1.51:61084/mcp`。
+
 ## Smoke
 
 在 OpenWRT 上:

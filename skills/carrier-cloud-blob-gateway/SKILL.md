@@ -12,9 +12,18 @@ Use this skill for carrier-cloud-blob-gateway operations: local S3-compatible ob
 - Prefer local MCP server first.
 - Use `stdio` as default transport.
 - Optional Streamable HTTP can be enabled with `MCP_SERVER_HTTP_ENABLED=true`.
+- The same HTTP transport also accepts `CCBG_MCP_HTTP_*` aliases.
 - Default HTTP endpoint is `http://127.0.0.1:61084/mcp`; no public exposure is required.
+- Without auth, use discovery only: `tools/list`, `resources/list`, `prompts/list`, `mcp_feature_access_summary`, and `ccbg://public/feature-access-summary`.
+- Operator actions over HTTP require the configured bearer token.
+- This endpoint is for `ccbg` itself only. If the task also needs the external `.51` coordination hub, use `http://192.168.1.51:8787/mcp` and expect service identity `agent-nats-redmine-hub`.
 
 ## MCP Tool Map
+
+### `mcp_feature_access_summary`
+- Purpose: return the MCP discovery map, auth boundary, and highlighted operator routes.
+- When to call: first contact, unknown auth state, or before choosing tools.
+- Key parameters: none.
 
 ### `provider_list`
 - Purpose: list configured providers and availability surface.
@@ -46,6 +55,18 @@ Use this skill for carrier-cloud-blob-gateway operations: local S3-compatible ob
 - When to call: before high-impact recommendations or when health looks abnormal.
 - Key parameters: optional `limit` unsigned integer.
 
+### Operator maintenance tools
+- `admin_status_get`
+- `applications_get` / `applications_update`
+- `content_policies_get` / `content_policies_update`
+- `topology_update`
+- `provider_credentials_get` / `provider_credentials_update`
+- `auth_capture_policy_get` / `auth_capture_policy_update`
+- `replication_dlq_list`
+- `replication_retry_job`
+- `replication_dlq_replay_job`
+- `replication_dlq_replay_target`
+
 ## Prompts As Optional Helpers
 
 Use prompts only after baseline state is known:
@@ -57,6 +78,7 @@ Use prompts only after baseline state is known:
 ## Default Invocation Order
 
 1. Fixed baseline sequence (always first): `provider_list` -> `replication_get_status` -> `alerts_list_recent`.
+   If auth state is unknown on HTTP, prepend `mcp_feature_access_summary`.
 2. Provider-specific anomaly path: run `provider_health(provider_id)` only after step 1 identifies a target provider.
 3. Replication failure/retry path: run `replication_list_failed_jobs(limit=...)` when planning retries or investigating replication failures.
 4. S3 baseline path: run `s3_list_buckets` when bucket visibility/routing baseline is required.

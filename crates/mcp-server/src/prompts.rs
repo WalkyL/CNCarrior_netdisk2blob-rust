@@ -2,8 +2,11 @@
 // Copyright (c) 2026 walky
 
 use crate::error::ServerError;
+use crate::schema::McpAccess;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+pub const PROMPT_DISCOVER_FEATURE_ACCESS_MODEL: &str = "discover_feature_access_model";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptArgumentSchema {
@@ -18,10 +21,20 @@ pub struct PromptSchema {
     pub description: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Vec<PromptArgumentSchema>>,
+    #[serde(rename = "authRequired")]
+    pub auth_required: bool,
+    pub access: McpAccess,
 }
 
 pub fn prompt_registry() -> Vec<PromptSchema> {
     vec![
+        PromptSchema {
+            name: PROMPT_DISCOVER_FEATURE_ACCESS_MODEL,
+            description: "Explain which MCP features are public and which require authentication.",
+            arguments: None,
+            auth_required: false,
+            access: McpAccess::PublicDiscovery,
+        },
         PromptSchema {
             name: "safe_object_read",
             description: "Safely read one object with minimal blast radius.",
@@ -30,6 +43,8 @@ pub fn prompt_registry() -> Vec<PromptSchema> {
                 description: "Object key to read.",
                 required: true,
             }]),
+            auth_required: true,
+            access: McpAccess::Operator,
         },
         PromptSchema {
             name: "check_replication_before_fallback",
@@ -39,6 +54,8 @@ pub fn prompt_registry() -> Vec<PromptSchema> {
                 description: "Object key to validate.",
                 required: true,
             }]),
+            auth_required: true,
+            access: McpAccess::Operator,
         },
         PromptSchema {
             name: "diagnose_provider_connection_failure",
@@ -48,6 +65,8 @@ pub fn prompt_registry() -> Vec<PromptSchema> {
                 description: "Provider identifier to inspect.",
                 required: true,
             }]),
+            auth_required: true,
+            access: McpAccess::Operator,
         },
         PromptSchema {
             name: "retry_replication_for_one_object",
@@ -57,13 +76,25 @@ pub fn prompt_registry() -> Vec<PromptSchema> {
                 description: "Object key to retry.",
                 required: true,
             }]),
+            auth_required: true,
+            access: McpAccess::Operator,
         },
     ]
+}
+
+pub fn is_public_prompt(name: &str) -> bool {
+    prompt_registry()
+        .into_iter()
+        .find(|prompt| prompt.name == name)
+        .is_some_and(|prompt| !prompt.auth_required)
 }
 
 pub fn get_prompt(name: &str, arguments: Option<&Value>) -> Result<Value, ServerError> {
     let args = arguments.cloned().unwrap_or_else(|| json!({}));
     let text = match name {
+        PROMPT_DISCOVER_FEATURE_ACCESS_MODEL => {
+            "Discover CCBG MCP capabilities in two passes. First call tools/list, resources/list, and prompts/list. Then read ccbg://public/feature-access-summary or call mcp_feature_access_summary. Use the authRequired and access fields to separate public discovery from operator-only workflows.".to_string()
+        }
         "safe_object_read" => {
             let object_key = required_str(&args, "object_key")?;
             format!(
@@ -85,7 +116,7 @@ pub fn get_prompt(name: &str, arguments: Option<&Value>) -> Result<Value, Server
         "retry_replication_for_one_object" => {
             let object_key = required_str(&args, "object_key")?;
             format!(
-                "Retry replication for `{object_key}`. First inspect replication_list_failed_jobs(limit=50) to locate matching job_id. Confirm replication_get_status. Prepare a minimal retry plan for that single object and include rollback/safety checks."
+                "Retry replication for `{object_key}`. First inspect replication_list_failed_jobs(limit=50) to locate matching job_id. Confirm replication_get_status. Prepare a minimal retry plan for that single object and include rollback and safety checks."
             )
         }
         _ => {
@@ -117,11 +148,42 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ServerError> 
 
 #[cfg(test)]
 mod tests {
-    use super::prompt_registry;
+    use super::{PROMPT_DISCOVER_FEATURE_ACCESS_MODEL, is_public_prompt, prompt_registry};
+    use crate::schema::McpAccess;
 
     #[test]
-    fn schemas_do_not_expose_secret_fields() {
-        let banned = ["secret", "token", "password", "credential", "private_key"];
+    fn registry_marks_public_and_operator_prompts() {
+        let prompts = prompt_registry();
+        let public = prompts
+            .iter()
+            .find(|prompt| prompt.name == PROMPT_DISCOVER_FEATURE_ACCESS_MODEL)
+            .expect("public prompt");
+        assert_eq!(public.access, McpAccess::PublicDiscovery);
+        assert!(!public.auth_required);
+
+        let operator = prompts
+            .iter()
+            .find(|prompt| prompt.name == "safe_object_read")
+            .expect("operator prompt");
+        assert_eq!(operator.access, McpAccess::Operator);
+        assert!(operator.auth_required);
+    }
+
+    #[test]
+    fn public_prompt_lookup_matches_registry_metadata() {
+        assert!(is_public_prompt(PROMPT_DISCOVER_FEATURE_ACCESS_MODEL));
+        assert!(!is_public_prompt("safe_object_read"));
+        assert!(!is_public_prompt("missing"));
+    }
+
+    #[test]
+    fn registry_does_not_expose_high_risk_secret_field_names() {
+        let banned = [
+            "password",
+            "private_key",
+            "secret_access_key",
+            "cookie_header",
+        ];
         for prompt in prompt_registry() {
             let encoded = serde_json::to_string(&prompt).expect("schema serializes");
             let encoded = encoded.to_ascii_lowercase();

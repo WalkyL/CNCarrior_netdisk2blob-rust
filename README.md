@@ -94,6 +94,7 @@ carrier-cloud-blob-gateway/
 推荐优先阅读的运维文档:
 
 - [docs/auth-step-by-step.md](docs/auth-step-by-step.md)
+- [docs/agent-nats-redmine-hub-integration.md](docs/agent-nats-redmine-hub-integration.md)
 - [docs/router-deployment-guide.md](docs/router-deployment-guide.md)
 - [docs/object-actions-and-history.md](docs/object-actions-and-history.md)
 - [docs/object-actions-api-reference.md](docs/object-actions-api-reference.md)
@@ -103,6 +104,7 @@ carrier-cloud-blob-gateway/
 - [docs/unicom-phase-closeout-report.md](docs/unicom-phase-closeout-report.md)
 - [docs/provider-completion-standard.md](docs/provider-completion-standard.md)
 - [docs/github-publication.md](docs/github-publication.md)
+- [docs/development-cargo-proxy.md](docs/development-cargo-proxy.md)
 
 ## 快速启动
 
@@ -116,6 +118,14 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 当前默认监听地址为 `127.0.0.1:61080`，该端口规划为本地 S3 兼容数据面入口。
 
 如果宿主是软路由或 OpenWRT 类设备，先看 [docs/router-deployment-guide.md](docs/router-deployment-guide.md)。推荐默认保持 `Admin Web`、`OAuth Callback`、`Metrics` 都只监听 `127.0.0.1`，仅按需要显式开放 `S3 API`。
+
+如果这台 Windows 机器访问 `crates.io` 不稳定，可直接使用：
+
+```powershell
+.\scripts\cargo-with-proxy.ps1 test -p mcp-server
+```
+
+默认会走本地 `socks5h://127.0.0.1:10808`，并自动设置 `NO_PROXY=127.0.0.1,localhost,::1`。详细说明见 [docs/development-cargo-proxy.md](docs/development-cargo-proxy.md)。
 
 软路由场景建议同时把 `CCBG_DATA_PLANE_MAX_IN_FLIGHT` 控制在 `2~4`，让数据面在并发超限时直接返回 `503`，而不是在小内存宿主上继续堆积请求。
 如果客户端有突发请求峰值，还可以再打开 `CCBG_DATA_PLANE_MAX_REQUESTS_PER_SECOND`，做一个更保守的每秒请求阀门。
@@ -142,6 +152,18 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 - OneDrive OAuth 本地回调: `61082`（延后集成时才启用）
 - Metrics / 扩展健康检查: `61083`
 - MCP Streamable HTTP: `61084`（可选，默认优先 stdio）
+
+当前 `ccbg` 自带 MCP 的 HTTP 入口分成两层:
+
+- 未鉴权可用: `initialize`、`tools/list`、`resources/list`、`prompts/list`，以及公开发现资源 `ccbg://public/feature-access-summary`
+- 已鉴权可用: provider/replication/status/applications/content-policies/topology/provider-credentials/auth-capture-policy/DLQ 相关运维工具
+- HTTP transport 同时接受 `MCP_SERVER_HTTP_*` 和 `CCBG_MCP_HTTP_*` 环境变量
+
+如果你的 Agent 还要同时接入 `.51` 的工单/协调 Hub，注意那是另一个服务：
+
+- live Hub 身份：`agent-nats-redmine-hub`
+- live Hub MCP：`http://192.168.1.51:8787/mcp`
+- 不要把 `.51` Hub 误配成 `http://192.168.1.51:61084/mcp`
 
 ## 数据面目标
 
@@ -197,6 +219,14 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 - `CCBG_CONTROL_API_KEY` 仍可独立保护脚本访问、机器间调用和指标接口
 - 脚本访问可用 `x-api-key: <key>` 或 `Authorization: Bearer <key>`
 - S3 数据面仍然单独使用 `CCBG_S3_ACCESS_KEY_ID` + `CCBG_S3_SECRET_ACCESS_KEY` 的 SigV4，不复用控制面 API key
+
+当前 S3 应用账号运维入口:
+
+- Admin Web 的 `S3 应用账号` 标签页支持按应用生成 `access_key_id + secret_access_key`
+- 应用列表接口默认只返回 `secret_access_key_present`，不会在列表响应里泄露明文 secret
+- 管理员需要现场交付对方应用时，可在单个应用上点击 `显示 S3 凭据` 或 `复制 S3 凭据`
+- `复制 S3 凭据` 会生成完整 env 片段，默认包含 `CCBG_S3_ENDPOINT / REGION / FORCE_PATH_STYLE / BUCKET / PREFIX / ACCESS_KEY_ID / SECRET_ACCESS_KEY`
+- 其中 `bucket / prefix` 会优先参考该应用当前的权限范围；如果权限范围里有多个候选值，界面会保留注释而不是替你盲选
 
 当前已落地的复制人工干预能力:
 

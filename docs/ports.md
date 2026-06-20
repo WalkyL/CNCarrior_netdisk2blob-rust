@@ -16,6 +16,13 @@
 | Metrics / Extended Health | `127.0.0.1:61083` | 指标和增强健康检查 |
 | MCP Streamable HTTP | `127.0.0.1:61084` | 可选的 MCP HTTP 接入端口 |
 
+补充说明：
+
+- `61084` 只表示本项目 `ccbg` 自己的可选 MCP HTTP 入口。
+- 该入口支持未鉴权公开发现，但带状态读取/修改的运维调用仍要求 bearer token。
+- 公开发现建议先读 `ccbg://public/feature-access-summary` 或调用 `mcp_feature_access_summary`。
+- 如果需要接入 `.51` 的外部协调 Hub，live MCP endpoint 是 `http://192.168.1.51:8787/mcp`，不是 `61084`。
+
 `61083` 当前实际暴露:
 
 - `GET /healthz`: 扩展健康摘要，返回运行态、监控聚合和 alerts

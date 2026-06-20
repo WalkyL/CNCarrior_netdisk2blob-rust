@@ -2,10 +2,22 @@
 // Copyright (c) 2026 walky
 
 use crate::error::ServerError;
-use admin_api::{ADMIN_API_VERSION, AdminApiErrorCode, AdminApiErrorResponse, ROUTE_STATUS};
+use admin_api::{
+    ADMIN_API_VERSION, AdminApiErrorCode, AdminApiErrorResponse, ROUTE_AUTH_CAPTURE_POLICY,
+    ROUTE_PROVIDER_CREDENTIALS, ROUTE_REPLICATION_DLQ, ROUTE_REPLICATION_DLQ_REPLAY_JOB,
+    ROUTE_REPLICATION_DLQ_REPLAY_TARGET, ROUTE_REPLICATION_RETRY_JOB, ROUTE_STATUS,
+    ROUTE_TOPOLOGY_UPDATE, ReplicationDlqListPayload, ReplicationDlqReplayPayload,
+    ReplicationDlqTargetReplayPayload, ReplicationRetryPayload,
+};
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 use std::time::Duration;
+
+const ROUTE_APPLICATIONS: &str = "/api/applications";
+const ROUTE_CONTENT_POLICIES: &str = "/api/content-policies";
 
 pub trait ControlPlaneClient: Send + Sync {
     fn provider_list(&self) -> Result<ProviderListResult, ServerError>;
@@ -15,6 +27,30 @@ pub trait ControlPlaneClient: Send + Sync {
     fn deployment_config_summary(&self) -> Result<DeploymentConfigSummary, ServerError>;
     fn s3_list_buckets(&self) -> Result<BucketListResult, ServerError>;
     fn alerts_list_recent(&self, limit: usize) -> Result<AlertListResult, ServerError>;
+    fn admin_status_get(&self) -> Result<Value, ServerError>;
+    fn applications_get(&self) -> Result<Value, ServerError>;
+    fn applications_update(&self, payload: Value) -> Result<Value, ServerError>;
+    fn content_policies_get(&self) -> Result<Value, ServerError>;
+    fn content_policies_update(&self, payload: Value) -> Result<Value, ServerError>;
+    fn topology_update(&self, payload: Value) -> Result<Value, ServerError>;
+    fn provider_credentials_get(&self, provider_id: &str) -> Result<Value, ServerError>;
+    fn provider_credentials_update(
+        &self,
+        provider_id: &str,
+        payload: Value,
+    ) -> Result<Value, ServerError>;
+    fn auth_capture_policy_get(&self) -> Result<Value, ServerError>;
+    fn auth_capture_policy_update(&self, payload: Value) -> Result<Value, ServerError>;
+    fn replication_dlq_list(&self) -> Result<ReplicationDlqListPayload, ServerError>;
+    fn replication_retry_job(&self, job_id: u64) -> Result<ReplicationRetryPayload, ServerError>;
+    fn replication_dlq_replay_job(
+        &self,
+        job_id: u64,
+    ) -> Result<ReplicationDlqReplayPayload, ServerError>;
+    fn replication_dlq_replay_target(
+        &self,
+        target: &str,
+    ) -> Result<ReplicationDlqTargetReplayPayload, ServerError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +171,99 @@ impl ControlPlaneClient for StubControlPlaneClient {
     fn alerts_list_recent(&self, _limit: usize) -> Result<AlertListResult, ServerError> {
         Ok(AlertListResult { alerts: vec![] })
     }
+
+    fn admin_status_get(&self) -> Result<Value, ServerError> {
+        Ok(Value::Object(Default::default()))
+    }
+
+    fn applications_get(&self) -> Result<Value, ServerError> {
+        Ok(Value::Object(Default::default()))
+    }
+
+    fn applications_update(&self, payload: Value) -> Result<Value, ServerError> {
+        Ok(payload)
+    }
+
+    fn content_policies_get(&self) -> Result<Value, ServerError> {
+        Ok(Value::Object(Default::default()))
+    }
+
+    fn content_policies_update(&self, payload: Value) -> Result<Value, ServerError> {
+        Ok(payload)
+    }
+
+    fn topology_update(&self, payload: Value) -> Result<Value, ServerError> {
+        Ok(payload)
+    }
+
+    fn provider_credentials_get(&self, provider_id: &str) -> Result<Value, ServerError> {
+        Ok(serde_json::json!({
+            "provider": provider_id,
+            "token_present": false,
+        }))
+    }
+
+    fn provider_credentials_update(
+        &self,
+        provider_id: &str,
+        payload: Value,
+    ) -> Result<Value, ServerError> {
+        Ok(serde_json::json!({
+            "provider": provider_id,
+            "payload": payload,
+        }))
+    }
+
+    fn auth_capture_policy_get(&self) -> Result<Value, ServerError> {
+        Ok(Value::Object(Default::default()))
+    }
+
+    fn auth_capture_policy_update(&self, payload: Value) -> Result<Value, ServerError> {
+        Ok(payload)
+    }
+
+    fn replication_dlq_list(&self) -> Result<ReplicationDlqListPayload, ServerError> {
+        Ok(ReplicationDlqListPayload {
+            entries: vec![],
+            open_count: 0,
+            returned_count: 0,
+        })
+    }
+
+    fn replication_retry_job(&self, job_id: u64) -> Result<ReplicationRetryPayload, ServerError> {
+        Ok(ReplicationRetryPayload {
+            job_id,
+            status: "not_implemented".to_string(),
+            target: "unknown".to_string(),
+            bucket: String::new(),
+            key: String::new(),
+        })
+    }
+
+    fn replication_dlq_replay_job(
+        &self,
+        job_id: u64,
+    ) -> Result<ReplicationDlqReplayPayload, ServerError> {
+        Ok(ReplicationDlqReplayPayload {
+            original_job_id: job_id,
+            replayed_job_id: job_id,
+            status: "not_implemented".to_string(),
+            target: "unknown".to_string(),
+            bucket: String::new(),
+            key: String::new(),
+        })
+    }
+
+    fn replication_dlq_replay_target(
+        &self,
+        target: &str,
+    ) -> Result<ReplicationDlqTargetReplayPayload, ServerError> {
+        Ok(ReplicationDlqTargetReplayPayload {
+            target: target.to_string(),
+            replayed_jobs: 0,
+            jobs: vec![],
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -223,10 +352,19 @@ fn normalize_api_key(api_key: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone)]
+pub enum TransportMethod {
+    Get,
+    Post,
+}
+
+#[derive(Debug, Clone)]
 pub struct TransportRequest {
+    pub method: TransportMethod,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub timeout: Duration,
+    pub body: Option<Vec<u8>>,
+    pub retryable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -243,8 +381,7 @@ pub enum TransportError {
 }
 
 pub trait ControlPlaneTransport: Send + Sync {
-    fn fetch_status(&self, request: &TransportRequest)
-    -> Result<TransportResponse, TransportError>;
+    fn send(&self, request: &TransportRequest) -> Result<TransportResponse, TransportError>;
 }
 
 pub struct ReqwestControlPlaneTransport {
@@ -261,13 +398,17 @@ impl ReqwestControlPlaneTransport {
 }
 
 impl ControlPlaneTransport for ReqwestControlPlaneTransport {
-    fn fetch_status(
-        &self,
-        request: &TransportRequest,
-    ) -> Result<TransportResponse, TransportError> {
-        let mut req = self.client.get(&request.url).timeout(request.timeout);
+    fn send(&self, request: &TransportRequest) -> Result<TransportResponse, TransportError> {
+        let mut req = match request.method {
+            TransportMethod::Get => self.client.get(&request.url),
+            TransportMethod::Post => self.client.post(&request.url),
+        }
+        .timeout(request.timeout);
         for (name, value) in &request.headers {
             req = req.header(name, value);
+        }
+        if let Some(body) = &request.body {
+            req = req.body(body.clone());
         }
         let response = req.send().map_err(|e| {
             if e.is_timeout() {
@@ -298,16 +439,52 @@ impl<T: ControlPlaneTransport> HttpControlPlaneClient<T> {
     }
 
     fn fetch_status_document(&self) -> Result<AdminStatusDocument, ServerError> {
-        let request = self.build_status_request();
+        self.get_json(&self.config.status_path, "status document")
+    }
 
+    fn admin_headers(&self, include_json_content_type: bool) -> Vec<(String, String)> {
+        let mut headers = vec![(
+            "x-admin-api-version".to_string(),
+            ADMIN_API_VERSION.to_string(),
+        )];
+        if let Some(api_key) = self.config.api_key.as_deref() {
+            headers.push(("x-api-key".to_string(), api_key.to_string()));
+        }
+        if include_json_content_type {
+            headers.push(("content-type".to_string(), "application/json".to_string()));
+        }
+        headers
+    }
+
+    fn build_request(
+        &self,
+        method: TransportMethod,
+        path: &str,
+        body: Option<Vec<u8>>,
+        retryable: bool,
+    ) -> TransportRequest {
+        let base = self.config.base_url.trim_end_matches('/');
+        let normalized_path = path.trim_start_matches('/');
+        TransportRequest {
+            method,
+            url: format!("{base}/{normalized_path}"),
+            headers: self.admin_headers(body.is_some()),
+            timeout: self.config.timeout,
+            body,
+            retryable,
+        }
+    }
+
+    fn send_request(&self, request: TransportRequest) -> Result<TransportResponse, ServerError> {
         let mut attempts = 0usize;
         loop {
-            let result = self.transport.fetch_status(&request);
+            let result = self.transport.send(&request);
             match result {
                 Ok(resp) => {
                     if !(200..=299).contains(&resp.status_code) {
                         let error = map_http_error(resp.status_code, &resp.body);
-                        if is_retryable_http_status(resp.status_code)
+                        if request.retryable
+                            && is_retryable_http_status(resp.status_code)
                             && attempts < self.config.max_retries
                         {
                             attempts += 1;
@@ -315,18 +492,17 @@ impl<T: ControlPlaneTransport> HttpControlPlaneClient<T> {
                         }
                         return Err(error);
                     }
-                    return serde_json::from_slice::<AdminStatusDocument>(&resp.body)
-                        .map_err(|e| ServerError::BadRequest(format!("invalid status json: {e}")));
+                    return Ok(resp);
                 }
                 Err(TransportError::Timeout) => {
-                    if attempts < self.config.max_retries {
+                    if request.retryable && attempts < self.config.max_retries {
                         attempts += 1;
                         continue;
                     }
                     return Err(ServerError::Timeout("control API timeout".into()));
                 }
                 Err(TransportError::Unavailable(msg)) => {
-                    if attempts < self.config.max_retries {
+                    if request.retryable && attempts < self.config.max_retries {
                         attempts += 1;
                         continue;
                     }
@@ -343,21 +519,41 @@ impl<T: ControlPlaneTransport> HttpControlPlaneClient<T> {
         }
     }
 
-    fn build_status_request(&self) -> TransportRequest {
-        let base = self.config.base_url.trim_end_matches('/');
-        let path = self.config.status_path.trim_start_matches('/');
-        let mut headers = vec![(
-            "x-admin-api-version".to_string(),
-            ADMIN_API_VERSION.to_string(),
-        )];
-        if let Some(api_key) = self.config.api_key.as_deref() {
-            headers.push(("x-api-key".to_string(), api_key.to_string()));
-        }
-        TransportRequest {
-            url: format!("{base}/{path}"),
-            headers,
-            timeout: self.config.timeout,
-        }
+    fn get_json<R: DeserializeOwned>(&self, path: &str, label: &str) -> Result<R, ServerError> {
+        let request = self.build_request(TransportMethod::Get, path, None, true);
+        let response = self.send_request(request)?;
+        serde_json::from_slice::<R>(&response.body)
+            .map_err(|err| ServerError::BadRequest(format!("invalid {label} json: {err}")))
+    }
+
+    fn get_json_value(&self, path: &str, label: &str) -> Result<Value, ServerError> {
+        self.get_json(path, label)
+    }
+
+    fn post_json_value(
+        &self,
+        path: &str,
+        payload: &Value,
+        label: &str,
+    ) -> Result<Value, ServerError> {
+        let body = serde_json::to_vec(payload).map_err(|err| {
+            ServerError::Internal(format!("failed to encode {label} request: {err}"))
+        })?;
+        let request = self.build_request(TransportMethod::Post, path, Some(body), false);
+        let response = self.send_request(request)?;
+        serde_json::from_slice::<Value>(&response.body)
+            .map_err(|err| ServerError::BadRequest(format!("invalid {label} json: {err}")))
+    }
+
+    fn post_empty_json<R: DeserializeOwned>(
+        &self,
+        path: &str,
+        label: &str,
+    ) -> Result<R, ServerError> {
+        let request = self.build_request(TransportMethod::Post, path, None, false);
+        let response = self.send_request(request)?;
+        serde_json::from_slice::<R>(&response.body)
+            .map_err(|err| ServerError::BadRequest(format!("invalid {label} json: {err}")))
     }
 }
 
@@ -551,6 +747,86 @@ impl<T: ControlPlaneTransport> ControlPlaneClient for HttpControlPlaneClient<T> 
             .collect();
         Ok(AlertListResult { alerts })
     }
+
+    fn admin_status_get(&self) -> Result<Value, ServerError> {
+        self.get_json_value(&self.config.status_path, "admin status")
+    }
+
+    fn applications_get(&self) -> Result<Value, ServerError> {
+        self.get_json_value(ROUTE_APPLICATIONS, "applications")
+    }
+
+    fn applications_update(&self, payload: Value) -> Result<Value, ServerError> {
+        self.post_json_value(ROUTE_APPLICATIONS, &payload, "applications")
+    }
+
+    fn content_policies_get(&self) -> Result<Value, ServerError> {
+        self.get_json_value(ROUTE_CONTENT_POLICIES, "content policies")
+    }
+
+    fn content_policies_update(&self, payload: Value) -> Result<Value, ServerError> {
+        self.post_json_value(ROUTE_CONTENT_POLICIES, &payload, "content policies")
+    }
+
+    fn topology_update(&self, payload: Value) -> Result<Value, ServerError> {
+        self.post_json_value(ROUTE_TOPOLOGY_UPDATE, &payload, "topology update")
+    }
+
+    fn provider_credentials_get(&self, provider_id: &str) -> Result<Value, ServerError> {
+        let path = route_with_param(ROUTE_PROVIDER_CREDENTIALS, "{provider}", provider_id);
+        self.get_json_value(&path, "provider credentials")
+    }
+
+    fn provider_credentials_update(
+        &self,
+        provider_id: &str,
+        payload: Value,
+    ) -> Result<Value, ServerError> {
+        let path = route_with_param(ROUTE_PROVIDER_CREDENTIALS, "{provider}", provider_id);
+        self.post_json_value(&path, &payload, "provider credentials")
+    }
+
+    fn auth_capture_policy_get(&self) -> Result<Value, ServerError> {
+        self.get_json_value(ROUTE_AUTH_CAPTURE_POLICY, "auth capture policy")
+    }
+
+    fn auth_capture_policy_update(&self, payload: Value) -> Result<Value, ServerError> {
+        self.post_json_value(ROUTE_AUTH_CAPTURE_POLICY, &payload, "auth capture policy")
+    }
+
+    fn replication_dlq_list(&self) -> Result<ReplicationDlqListPayload, ServerError> {
+        self.get_json(ROUTE_REPLICATION_DLQ, "replication dlq")
+    }
+
+    fn replication_retry_job(&self, job_id: u64) -> Result<ReplicationRetryPayload, ServerError> {
+        let path = route_with_param(ROUTE_REPLICATION_RETRY_JOB, "{job_id}", &job_id.to_string());
+        self.post_empty_json(&path, "replication retry job")
+    }
+
+    fn replication_dlq_replay_job(
+        &self,
+        job_id: u64,
+    ) -> Result<ReplicationDlqReplayPayload, ServerError> {
+        let path = route_with_param(
+            ROUTE_REPLICATION_DLQ_REPLAY_JOB,
+            "{job_id}",
+            &job_id.to_string(),
+        );
+        self.post_empty_json(&path, "replication dlq replay job")
+    }
+
+    fn replication_dlq_replay_target(
+        &self,
+        target: &str,
+    ) -> Result<ReplicationDlqTargetReplayPayload, ServerError> {
+        let path = route_with_param(ROUTE_REPLICATION_DLQ_REPLAY_TARGET, "{target}", target);
+        self.post_empty_json(&path, "replication dlq replay target")
+    }
+}
+
+fn route_with_param(template: &str, placeholder: &str, value: &str) -> String {
+    let encoded = utf8_percent_encode(value, NON_ALPHANUMERIC).to_string();
+    template.replace(placeholder, &encoded)
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -661,11 +937,12 @@ mod tests {
         AlertListResult, BucketListResult, ControlPlaneClient, ControlPlaneTransport,
         DeploymentConfigSummary, FailedJobsResult, HttpControlPlaneClient,
         HttpControlPlaneClientConfig, ProviderListResult, ReplicationStatusResult,
-        ReqwestControlPlaneTransport, TransportError, TransportRequest, TransportResponse,
+        ReqwestControlPlaneTransport, TransportError, TransportMethod, TransportRequest,
+        TransportResponse,
     };
     use crate::error::{ErrorCode, ServerError};
     use admin_api::{ADMIN_API_VERSION, ROUTE_STATUS};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::collections::VecDeque;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -693,10 +970,7 @@ mod tests {
     }
 
     impl ControlPlaneTransport for MockTransport {
-        fn fetch_status(
-            &self,
-            request: &TransportRequest,
-        ) -> Result<TransportResponse, TransportError> {
+        fn send(&self, request: &TransportRequest) -> Result<TransportResponse, TransportError> {
             self.calls.lock().expect("calls lock").push(request.clone());
             self.responses
                 .lock()
@@ -745,6 +1019,7 @@ mod tests {
         let client = client_with_transport(Arc::clone(&transport), 0);
         let _: ProviderListResult = client.provider_list().expect("provider_list");
         let call = transport.calls.lock().expect("calls lock")[0].clone();
+        assert!(matches!(call.method, TransportMethod::Get));
         assert_eq!(call.url, "http://control.example:8080/api/status");
         assert_eq!(request_header(&call, "x-api-key"), Some("test-key"));
         assert_eq!(
@@ -752,6 +1027,8 @@ mod tests {
             Some(ADMIN_API_VERSION)
         );
         assert_eq!(call.timeout, Duration::from_millis(750));
+        assert!(call.body.is_none());
+        assert!(call.retryable);
     }
 
     #[test]
@@ -891,6 +1168,44 @@ mod tests {
         assert_eq!(result.alerts[0].severity, "warn");
         assert_eq!(result.alerts[0].summary, "Latency: Provider mobile slow");
         assert_eq!(result.alerts[0].created_at_unix_ms, 0);
+    }
+
+    #[test]
+    fn applications_update_uses_post_json_body_without_retry() {
+        let transport = Arc::new(MockTransport::with_responses(vec![ok_response(json!({
+            "applications": []
+        }))]));
+        let client = client_with_transport(Arc::clone(&transport), 3);
+        let payload = json!({"applications": [{"id": "product-manager-agent"}]});
+        let result = client
+            .applications_update(payload.clone())
+            .expect("applications update");
+        assert_eq!(result, json!({"applications": []}));
+
+        let call = transport.calls.lock().expect("calls lock")[0].clone();
+        assert!(matches!(call.method, TransportMethod::Post));
+        assert_eq!(call.url, "http://control.example:8080/api/applications");
+        assert!(!call.retryable);
+        let body = call.body.as_ref().expect("body");
+        let decoded: Value = serde_json::from_slice(body).expect("json body");
+        assert_eq!(decoded, payload);
+        assert_eq!(
+            request_header(&call, "content-type"),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn mutating_post_is_not_retried_on_timeout() {
+        let transport = Arc::new(MockTransport::with_responses(vec![Err(
+            TransportError::Timeout,
+        )]));
+        let client = client_with_transport(Arc::clone(&transport), 3);
+        let error = client
+            .applications_update(json!({"applications": []}))
+            .expect_err("timeout");
+        assert!(matches!(error, ServerError::Timeout(_)));
+        assert_eq!(transport.call_count(), 1);
     }
 
     #[test]

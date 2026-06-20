@@ -1240,6 +1240,15 @@ struct DataPlaneApplicationPayload {
     permissions: DataPlaneApplicationPermissionsPayload,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct DataPlaneApplicationCredentialExportPayload {
+    id: String,
+    label: Option<String>,
+    access_key_id: String,
+    secret_access_key: String,
+    enabled: bool,
+}
+
 fn default_smb_enabled() -> bool {
     false
 }
@@ -6806,6 +6815,10 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         .route(
             "/api/applications",
             get(get_data_plane_applications).post(update_data_plane_applications),
+        )
+        .route(
+            "/api/applications/{application_id}/credentials",
+            get(export_data_plane_application_credentials),
         )
         .route(
             "/api/smb",
@@ -12675,6 +12688,25 @@ async fn get_data_plane_applications(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DataPlaneApplicationPayload>>, ApiError> {
     Ok(Json(current_data_plane_application_payloads(&state)))
+}
+
+async fn export_data_plane_application_credentials(
+    State(state): State<AppState>,
+    Path(application_id): Path<String>,
+) -> Result<Json<DataPlaneApplicationCredentialExportPayload>, ApiError> {
+    let application_id = application_id.trim();
+    if application_id.is_empty() {
+        return Err(ApiError(BlobError::Configuration(
+            "application id must not be empty".to_string(),
+        )));
+    }
+    let application = current_data_plane_applications(&state)
+        .into_iter()
+        .find(|application| application.id == application_id)
+        .ok_or_else(|| BlobError::NotFound(format!("application not found: {application_id}")))?;
+    Ok(Json(data_plane_application_credential_export_payload(
+        &application,
+    )))
 }
 
 async fn get_smb_sidecar_config(
@@ -27446,6 +27478,18 @@ fn data_plane_application_payload(
     }
 }
 
+fn data_plane_application_credential_export_payload(
+    application: &DataPlaneApplication,
+) -> DataPlaneApplicationCredentialExportPayload {
+    DataPlaneApplicationCredentialExportPayload {
+        id: application.id.clone(),
+        label: application.label.clone(),
+        access_key_id: application.access_key_id.clone(),
+        secret_access_key: application.secret_access_key.clone(),
+        enabled: application.enabled,
+    }
+}
+
 fn current_data_plane_application_payloads(state: &AppState) -> Vec<DataPlaneApplicationPayload> {
     current_data_plane_applications(state)
         .iter()
@@ -41647,8 +41691,16 @@ mod tests {
         assert!(html.contains("application-editor-grid"));
         assert!(html.contains("application-editor-advanced"));
         assert!(html.contains("Generate Credentials"));
+        assert!(html.contains("Show S3 Credentials"));
+        assert!(html.contains("Copy S3 Credentials"));
+        assert!(html.contains("Connection Snippet"));
         assert!(html.contains("Advanced"));
         assert!(html.contains("/api/applications"));
+        assert!(html.contains("data-show-application-credentials"));
+        assert!(html.contains("data-copy-application-credentials"));
+        assert!(html.contains("function showApplicationCredentials("));
+        assert!(html.contains("function revealApplicationCredentials("));
+        assert!(html.contains("function copyApplicationCredentials("));
         assert!(html.contains("function saveApplications()"));
         assert!(html.contains("<h2>S3 访问权限</h2>"));
         assert!(html.contains("id=\"application-permissions-list\""));
@@ -51670,6 +51722,65 @@ mod tests {
             &[],
         );
         assert!(authorize_s3(&state, &Method::GET, &uri, &disabled_headers, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn data_plane_application_credentials_export_returns_plaintext_secret() {
+        let state = test_state();
+        let _ = update_data_plane_applications(
+            State(state.clone()),
+            Json(DataPlaneApplicationsInput {
+                applications: vec![DataPlaneApplicationInput {
+                    id: "product-manager-agent".to_string(),
+                    label: Some("Product Manager Agent".to_string()),
+                    access_key_id: "ccbg_product-manager-agent_mqm9sjv0".to_string(),
+                    secret_access_key: Some("product-manager-agent-secret".to_string()),
+                    enabled: true,
+                    permissions: None,
+                }],
+            }),
+        )
+        .await
+        .expect("application should save");
+
+        let Json(exported) = export_data_plane_application_credentials(
+            State(state.clone()),
+            Path("product-manager-agent".to_string()),
+        )
+        .await
+        .expect("application credentials should export");
+        assert_eq!(exported.id, "product-manager-agent");
+        assert_eq!(
+            exported.access_key_id,
+            "ccbg_product-manager-agent_mqm9sjv0"
+        );
+        assert_eq!(exported.secret_access_key, "product-manager-agent-secret");
+        assert!(exported.enabled);
+
+        let Json(list_payload) = get_data_plane_applications(State(state.clone()))
+            .await
+            .expect("application list should load");
+        let list_json = serde_json::to_value(&list_payload).expect("list payload should serialize");
+        assert!(list_json[0].get("secret_access_key").is_none());
+        assert_eq!(
+            list_json[0]
+                .get("secret_access_key_present")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn data_plane_application_credentials_export_rejects_unknown_application() {
+        let state = test_state();
+        let ApiError(error) = export_data_plane_application_credentials(
+            State(state.clone()),
+            Path("missing-app".to_string()),
+        )
+        .await
+        .expect_err("unknown application should return not found");
+        assert!(matches!(error, BlobError::NotFound(_)));
+        assert!(error.to_string().contains("missing-app"));
     }
 
     #[tokio::test]

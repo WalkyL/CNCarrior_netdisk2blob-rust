@@ -23,6 +23,8 @@
 - 网关托管加密密钥
 - placement、logical object、protection plan、待执行复制队列
 
+这里的 “S3 应用账号” 指的是应用级 `access_key_id + secret_access_key`。恢复后，Admin Web 仍然默认只在列表里显示 `secret_access_key_present`；需要现场回填或交付给外部应用时，再按单个应用显式显示或复制明文凭据。
+
 备份不包含：
 
 - 云盘里的对象字节

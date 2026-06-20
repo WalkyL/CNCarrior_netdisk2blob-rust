@@ -86,6 +86,7 @@
 - 实现 `mcp-server`
 - 优先支持 stdio transport
 - 设计稳定的 tools / resources / prompts 面
+- HTTP transport 补齐“未鉴权公开发现 + 已鉴权运维”分层
 - 生成首版 Skill 包
 
 交付物:
@@ -148,3 +149,4 @@
 4. 上传下载大文件前，先确认 LXC 的磁盘缓存与临时目录容量。
 5. 如果使用 Web UI 和 OAuth 回调，确保 `61081-61082` 在容器内部保留。
 6. 如果启用 MCP Streamable HTTP，确保 `61084` 仅暴露给受控网络。
+7. 如果同时接入 `.51` 的外部 Agent-nats-redmine-hub，使用 `http://192.168.1.51:8787/mcp`，不要把外部 Hub 配到 `61084`。

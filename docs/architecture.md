@@ -349,6 +349,9 @@ Agent -> Skill -> mcp-server / gatewayd
 - 远程或多客户端场景可选 Streamable HTTP
 - MCP 层只做受控能力暴露，不绕过策略层直接访问 provider
 - MCP 工具必须支持读取和修改 primary provider / sync targets 配置
+- `ccbg` 自己的可选 MCP HTTP 入口默认是 `127.0.0.1:61084/mcp`
+- 该 HTTP 入口支持“未鉴权公开发现 + 已鉴权运维”两层模型：公开发现可列出 tool/resource/prompt 及其 `authRequired` 状态，运维调用继续要求 bearer token
+- 如果 Agent 还要接入 `.51` 的 ticket / coordination Hub，当前 live endpoint 是 `http://192.168.1.51:8787/mcp`，不要和本项目的 `61084` 混用
 
 ### Skill
 

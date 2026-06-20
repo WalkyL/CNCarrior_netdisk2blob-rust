@@ -500,6 +500,7 @@ gatewayd (S3 API :61080)
 1. `stdio` 作为默认模式
 2. `Streamable HTTP` 作为后续扩展模式
 3. HTTP 模式默认监听 `61084`
+4. 若 Agent 同时需要接入 `.51` 的外部 coordination Hub，应单独使用 `http://192.168.1.51:8787/mcp`，不能把该 Hub 错配为本项目自己的 `61084`
 
 ## Skill 封装规划
 
@@ -576,6 +577,7 @@ skills/
 - OneDrive OAuth Callback: `61082`
 - Metrics / Extended Health: `61083`
 - MCP Streamable HTTP: `61084`
+- `61084/mcp` 当前支持未鉴权能力发现，带状态/配置变更的运维 MCP 调用继续要求 bearer token
 
 端口选择原则:
 
