@@ -85,19 +85,46 @@ This is the live proof that `.49` now satisfies all three multipart expectations
 2. does not stall at the response-header phase,
 3. exposes a stable S3-compatible multipart ETag that `rclone` accepts.
 
-### Original large-file repro
+### Post-fix large-file retest
 
-The previous live repro with `rclone --timeout 30s` and the `5.475 GiB` archive now succeeds end-to-end after the header-streaming fix.
+After the logical-etag follow-up fix was deployed, the original large-object scenario was rerun on `2026-06-22` with the real `5.475 GiB` archive and the same stressed client timeout (`rclone --timeout 30s`).
 
-Key evidence from:
+Retest input:
 
-- `D:\tmp\ccbg-invalidpart-retest\rclone-complete-stream-20260621-223012.log`
+- source file:
+  - `D:\podman-image-backups\product-manager-agent\large-object-test\preview-android\product-preview-android.docker-archive.tar`
+- source size:
+  - `5879118336` bytes (`5.475 GiB`)
+- destination object:
+  - `root/podman-images/192.168.1.52/product-manager-agent/product-preview-android-20260622-003312.docker-archive.tar`
+- rclone flags:
+  - `--s3-chunk-size 256Mi`
+  - `--s3-upload-concurrency 1`
+  - `--transfers 1`
+  - `--checkers 1`
+  - `--multi-thread-streams 1`
+  - `--retries 1`
+  - `--low-level-retries 1`
+  - `--contimeout 15s`
+  - `--timeout 30s`
 
-Observed milestones:
+Observed result:
 
-- last multipart chunk uploaded at `2026-06-21 22:39:53`
-- multipart upload finished at `2026-06-21 22:56:15`
-- `Copied (new)` at `2026-06-21 22:56:16`
+- `rclone copyto` exit code:
+  - `0`
+- remote `lsjson` size:
+  - `5879118336`
+- elapsed wall clock:
+  - `1561.1` seconds (`26m0.4s`)
+- runtime status evidence:
+  - `stage=completed`
+  - `requested_part_count=22`
+  - `plaintext_size=5879118336`
+  - `stage_history=[queued, opening_parts, writing_home_object, cleanup, completed]`
+- rclone completion line:
+  - `2026-06-22 00:59:13 Copied (new)`
+
+This is the live proof that the real large-file path now also survives both the header-timeout pressure and the post-complete ETag verification that previously still failed in forced multipart smoke.
 
 ## Remaining limitation
 
@@ -115,4 +142,4 @@ So the remaining problem is not S3 compatibility at the response-header layer an
 
 You can paste the following to the counterpart:
 
-> `.49` 这边现在已经把 multipart 相关的三个兼容性问题都补上了：一是 `CompleteMultipartUpload` 会正确接受 XML entity-encoded ETag，不会再因为 `&#34;etag&#34;` / `&quot;etag&quot;` 误判成 `InvalidPart`；二是 complete 路径会先回 HTTP 200 header，再用 keepalive body 持续占住连接，避免 `rclone timeout awaiting response headers`；三是 complete 结果和后续对象元数据现在都会统一使用 S3 兼容的 multipart ETag，不会再出现 `multipart upload corrupted: Etag differ`。现网已经用强制 multipart 的 12 MiB `rclone copyto` 复测通过，exit code=0，同时 `/api/status` 的 `runtime.multipart_complete` 能看到 completed job 和阶段时间线。当前剩余瓶颈不是协议兼容性，而是 `.49` 在 complete 阶段仍需把所有 multipart 临时分片重新串流写入 home backend，所以总 complete 耗时依然偏长。`
+> `.49` 这边现在已经把 multipart 相关的三个兼容性问题都补上了：一是 `CompleteMultipartUpload` 会正确接受 XML entity-encoded ETag，不会再因为 `&#34;etag&#34;` / `&quot;etag&quot;` 误判成 `InvalidPart`；二是 complete 路径会先回 HTTP 200 header，再用 keepalive body 持续占住连接，避免 `rclone timeout awaiting response headers`；三是 complete 结果和后续对象元数据现在都会统一使用 S3 兼容的 multipart ETag，不会再出现 `multipart upload corrupted: Etag differ`。现网已经先用强制 multipart 的 12 MiB smoke 复测通过，又用真实 `5.475 GiB` 归档在 `--timeout 30s` 压力下复测通过，`rclone copyto` exit code=0，`/api/status` 的 `runtime.multipart_complete` 也能看到 completed job 和阶段时间线。当前剩余瓶颈不是协议兼容性，而是 `.49` 在 complete 阶段仍需把所有 multipart 临时分片重新串流写入 home backend，所以总 complete 耗时依然偏长。`
