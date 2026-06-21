@@ -623,6 +623,7 @@ dependencies = [
  "hex",
  "hmac",
  "libc",
+ "md-5",
  "metadata-store",
  "object-crypto",
  "percent-encoding",

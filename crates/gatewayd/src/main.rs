@@ -3,6 +3,8 @@
 
 #[cfg(unix)]
 use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env,
@@ -87,8 +89,9 @@ use chacha20poly1305::{
 use chrono::{DateTime, TimeZone, Utc};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use futures_util::stream;
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::{FutureExt, StreamExt, TryStreamExt};
 use hmac::{Hmac, Mac};
+use md5::Md5;
 use metadata_store::{
     GatewayWriteAheadLogStateRecord, LogicalObjectRecord, MetadataRetentionPolicy,
     MetadataSnapshot, MetadataStore, MetadataStoreOptions, MetadataTargetStatus,
@@ -120,8 +123,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tar::{Builder as TarBuilder, Header as TarHeader};
 #[cfg(test)]
-use tokio::sync::oneshot;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::Notify;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::time::{Duration, Instant, sleep, timeout, timeout_at};
 use tokio::{
     fs::File as TokioFile,
@@ -138,6 +141,10 @@ type HmacSha256 = Hmac<Sha256>;
 
 const S3_NS: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 const REQUEST_ID: &str = "ccbg-local";
+const S3_XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+const COMPLETE_MULTIPART_KEEPALIVE_CHUNK: &[u8] = b" \n";
+const COMPLETE_MULTIPART_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+const MULTIPART_COMPLETE_RECENT_JOB_LIMIT: usize = 16;
 const DEFAULT_TIMESTAMP: &str = "1970-01-01T00:00:00.000Z";
 const SOURCE_PROVIDER_HEADER: &str = "x-ccbg-source-provider";
 const FALLBACK_FROM_HEADER: &str = "x-ccbg-fallback-from";
@@ -240,6 +247,7 @@ struct AppState {
     provider_resource_stats: Arc<ProviderResourceStatsState>,
     process_memory_history: Arc<ProcessMemoryHistoryState>,
     spool_usage: Arc<SpoolUsageState>,
+    multipart_complete_status: Arc<MultipartCompleteStatusState>,
     external_kms_runtime: Arc<Mutex<ExternalKmsRuntimeState>>,
     admin_log_source: Arc<dyn AdminLogSource>,
     started_at_unix_ms: u64,
@@ -599,6 +607,17 @@ struct SpoolUsageInner {
 #[derive(Debug, Default)]
 struct SpoolUsageState {
     inner: Mutex<SpoolUsageInner>,
+}
+
+#[derive(Debug, Default)]
+struct MultipartCompleteStatusInner {
+    active: BTreeMap<String, MultipartCompleteJobStatusPayload>,
+    recent: VecDeque<MultipartCompleteJobStatusPayload>,
+}
+
+#[derive(Debug, Default)]
+struct MultipartCompleteStatusState {
+    inner: Mutex<MultipartCompleteStatusInner>,
 }
 
 #[derive(Debug)]
@@ -2111,6 +2130,49 @@ struct RuntimeStatusPayload {
     catalogs: RuntimeCatalogStatusPayload,
     process_memory: ProcessMemoryPayload,
     spool_storage: SpoolStoragePayload,
+    multipart_complete: MultipartCompleteRuntimeStatusPayload,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum MultipartCompleteStage {
+    Queued,
+    OpeningParts,
+    WritingHomeObject,
+    Cleanup,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MultipartCompleteStageEventPayload {
+    stage: MultipartCompleteStage,
+    started_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MultipartCompleteJobStatusPayload {
+    upload_id: String,
+    bucket: String,
+    key: String,
+    application_id: String,
+    plaintext_size: u64,
+    requested_part_count: usize,
+    stage: MultipartCompleteStage,
+    queued_at_unix_ms: u64,
+    last_updated_at_unix_ms: u64,
+    completed_at_unix_ms: Option<u64>,
+    failed_at_unix_ms: Option<u64>,
+    last_error: Option<String>,
+    stage_history: Vec<MultipartCompleteStageEventPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct MultipartCompleteRuntimeStatusPayload {
+    active_count: usize,
+    recent_limit: usize,
+    active_jobs: Vec<MultipartCompleteJobStatusPayload>,
+    recent_jobs: Vec<MultipartCompleteJobStatusPayload>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2668,6 +2730,140 @@ impl SpoolUsageState {
             peak_bytes: inner.peak_bytes,
         }
     }
+}
+
+impl MultipartCompleteStatusState {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn begin_job(
+        &self,
+        upload_id: &str,
+        bucket: &str,
+        key: &str,
+        application_id: &str,
+        plaintext_size: u64,
+        requested_part_count: usize,
+    ) {
+        let now_unix_ms = current_unix_ms();
+        let stage = MultipartCompleteStage::Queued;
+        let job = MultipartCompleteJobStatusPayload {
+            upload_id: upload_id.to_string(),
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            application_id: application_id.to_string(),
+            plaintext_size,
+            requested_part_count,
+            stage,
+            queued_at_unix_ms: now_unix_ms,
+            last_updated_at_unix_ms: now_unix_ms,
+            completed_at_unix_ms: None,
+            failed_at_unix_ms: None,
+            last_error: None,
+            stage_history: vec![MultipartCompleteStageEventPayload {
+                stage,
+                started_at_unix_ms: now_unix_ms,
+            }],
+        };
+        self.inner
+            .lock()
+            .expect("multipart complete status poisoned")
+            .active
+            .insert(upload_id.to_string(), job);
+    }
+
+    fn update_stage(&self, upload_id: &str, stage: MultipartCompleteStage) {
+        let now_unix_ms = current_unix_ms();
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("multipart complete status poisoned");
+        let Some(job) = inner.active.get_mut(upload_id) else {
+            return;
+        };
+        set_multipart_complete_job_stage(job, stage, now_unix_ms);
+    }
+
+    fn complete_job(&self, upload_id: &str) {
+        self.finish_job(upload_id, MultipartCompleteStage::Completed, None);
+    }
+
+    fn fail_job(&self, upload_id: &str, error: impl Into<String>) {
+        self.finish_job(
+            upload_id,
+            MultipartCompleteStage::Failed,
+            Some(error.into()),
+        );
+    }
+
+    fn snapshot(&self) -> MultipartCompleteRuntimeStatusPayload {
+        let inner = self
+            .inner
+            .lock()
+            .expect("multipart complete status poisoned");
+        let mut active_jobs: Vec<_> = inner.active.values().cloned().collect();
+        active_jobs.sort_by(|left, right| {
+            right
+                .queued_at_unix_ms
+                .cmp(&left.queued_at_unix_ms)
+                .then_with(|| left.upload_id.cmp(&right.upload_id))
+        });
+        MultipartCompleteRuntimeStatusPayload {
+            active_count: active_jobs.len(),
+            recent_limit: MULTIPART_COMPLETE_RECENT_JOB_LIMIT,
+            active_jobs,
+            recent_jobs: inner.recent.iter().cloned().collect(),
+        }
+    }
+
+    fn finish_job(
+        &self,
+        upload_id: &str,
+        stage: MultipartCompleteStage,
+        last_error: Option<String>,
+    ) {
+        let now_unix_ms = current_unix_ms();
+        let mut inner = self
+            .inner
+            .lock()
+            .expect("multipart complete status poisoned");
+        let Some(mut job) = inner.active.remove(upload_id) else {
+            return;
+        };
+        set_multipart_complete_job_stage(&mut job, stage, now_unix_ms);
+        match stage {
+            MultipartCompleteStage::Completed => {
+                job.completed_at_unix_ms = Some(now_unix_ms);
+                job.failed_at_unix_ms = None;
+                job.last_error = None;
+            }
+            MultipartCompleteStage::Failed => {
+                job.failed_at_unix_ms = Some(now_unix_ms);
+                job.last_error = last_error;
+            }
+            _ => {}
+        }
+        inner.recent.push_front(job);
+        while inner.recent.len() > MULTIPART_COMPLETE_RECENT_JOB_LIMIT {
+            inner.recent.pop_back();
+        }
+    }
+}
+
+fn set_multipart_complete_job_stage(
+    job: &mut MultipartCompleteJobStatusPayload,
+    stage: MultipartCompleteStage,
+    now_unix_ms: u64,
+) {
+    if job.stage != stage {
+        job.stage = stage;
+        job.stage_history.push(MultipartCompleteStageEventPayload {
+            stage,
+            started_at_unix_ms: now_unix_ms,
+        });
+    }
+    job.last_updated_at_unix_ms = now_unix_ms;
 }
 
 impl ActiveSpoolLease {
@@ -3280,6 +3476,7 @@ fn runtime_status_payload(state: &AppState) -> RuntimeStatusPayload {
         catalogs: runtime_catalog_status_payload(state),
         process_memory: current_process_memory_payload(state),
         spool_storage: current_spool_storage_payload(state),
+        multipart_complete: state.multipart_complete_status.snapshot(),
     }
 }
 
@@ -6501,17 +6698,7 @@ fn slice_body_by_range(body: ObjectBody, range: ByteRangeInclusive) -> ObjectBod
 
 impl IntoResponse for S3Error {
     fn into_response(self) -> Response {
-        let body = format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-<Error>\
-<Code>{}</Code>\
-<Message>{}</Message>\
-<RequestId>{}</RequestId>\
-</Error>",
-            xml_escape(self.code),
-            xml_escape(&self.message),
-            REQUEST_ID
-        );
+        let body = format!("{S3_XML_DECLARATION}{}", s3_error_xml_payload(&self));
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
@@ -6524,6 +6711,19 @@ impl IntoResponse for S3Error {
 
         (self.status, headers, body).into_response()
     }
+}
+
+fn s3_error_xml_payload(error: &S3Error) -> String {
+    format!(
+        "<Error>\
+<Code>{}</Code>\
+<Message>{}</Message>\
+<RequestId>{}</RequestId>\
+</Error>",
+        xml_escape(error.code),
+        xml_escape(&error.message),
+        REQUEST_ID
+    )
 }
 
 struct ParsedAuthorization {
@@ -6690,6 +6890,7 @@ async fn main() -> Result<()> {
         provider_resource_stats,
         process_memory_history: Arc::new(ProcessMemoryHistoryState::new()),
         spool_usage,
+        multipart_complete_status: Arc::new(MultipartCompleteStatusState::new()),
         external_kms_runtime: Arc::new(Mutex::new(ExternalKmsRuntimeState::default())),
         admin_log_source: Arc::new(InMemoryAdminLogSource {
             ring: admin_log_ring,
@@ -17768,8 +17969,13 @@ enum PreparedPutRequestBody {
     Plain {
         body: ObjectBody,
         validation: Option<StreamingPayloadHashValidation>,
+        etag_override_source: Option<Arc<dyn PreparedPutRequestEtagOverrideSource>>,
     },
     Spooled(SpooledRequestBody),
+}
+
+trait PreparedPutRequestEtagOverrideSource: Send + Sync {
+    fn resolved_etag(&self) -> Result<String, S3Error>;
 }
 
 impl PreparedPutRequestBody {
@@ -17777,6 +17983,7 @@ impl PreparedPutRequestBody {
         Self::Plain {
             body,
             validation: None,
+            etag_override_source: None,
         }
     }
 
@@ -17784,6 +17991,18 @@ impl PreparedPutRequestBody {
         Self::Plain {
             body,
             validation: Some(validation),
+            etag_override_source: None,
+        }
+    }
+
+    fn plain_with_etag_override(
+        body: ObjectBody,
+        etag_override_source: Arc<dyn PreparedPutRequestEtagOverrideSource>,
+    ) -> Self {
+        Self::Plain {
+            body,
+            validation: None,
+            etag_override_source: Some(etag_override_source),
         }
     }
 
@@ -17791,13 +18010,22 @@ impl PreparedPutRequestBody {
         self,
         state: &AppState,
         provider: &str,
-    ) -> (ObjectBody, Option<StreamingPayloadHashValidation>) {
+    ) -> (
+        ObjectBody,
+        Option<StreamingPayloadHashValidation>,
+        Option<Arc<dyn PreparedPutRequestEtagOverrideSource>>,
+    ) {
         match self {
-            Self::Plain { body, validation } => (body, validation),
+            Self::Plain {
+                body,
+                validation,
+                etag_override_source,
+            } => (body, validation, etag_override_source),
             Self::Spooled(mut body) => {
                 body.attach_provider_tracking(&state.provider_resource_stats, provider);
                 (
                     body.into_object_body(state.config.spooled_body_chunk_bytes),
+                    None,
                     None,
                 )
             }
@@ -17878,6 +18106,7 @@ fn build_plaintext_logical_record(
     LogicalObjectRecord {
         bucket: bucket.to_string(),
         key: key.to_string(),
+        etag: None,
         application_id: Some(application.application_id.clone()),
         encrypted: false,
         encryption_profile_id: None,
@@ -21811,6 +22040,7 @@ async fn build_historical_object_rewrite_plan(
             logical_record: LogicalObjectRecord {
                 bucket: bucket.to_string(),
                 key: key.to_string(),
+                etag: logical.and_then(|record| record.etag.clone()),
                 application_id: logical.and_then(|record| record.application_id.clone()),
                 encrypted: true,
                 encryption_profile_id: Some(profile.id.clone()),
@@ -21838,6 +22068,7 @@ async fn build_historical_object_rewrite_plan(
             logical_record: LogicalObjectRecord {
                 bucket: bucket.to_string(),
                 key: key.to_string(),
+                etag: logical.and_then(|record| record.etag.clone()),
                 application_id: logical.and_then(|record| record.application_id.clone()),
                 encrypted: false,
                 encryption_profile_id: None,
@@ -28077,14 +28308,15 @@ fn public_object_info(
     let Some(logical) = logical else {
         return object;
     };
+    let etag = object.etag.clone().or_else(|| logical.etag.clone());
     if !logical.encrypted {
-        return object;
+        return blob_core::ObjectInfo { etag, ..object };
     }
 
     blob_core::ObjectInfo {
         key: object.key,
         size: logical.plaintext_size,
-        etag: object.etag,
+        etag,
         content_type: logical.logical_content_type.clone().or(object.content_type),
         last_modified: object.last_modified,
     }
@@ -30112,6 +30344,7 @@ fn build_put_encryption_plan(
     let logical_record = LogicalObjectRecord {
         bucket: bucket.to_string(),
         key: key.to_string(),
+        etag: None,
         application_id: Some(application.application_id.clone()),
         encrypted: true,
         encryption_profile_id: Some(profile.id.clone()),
@@ -30400,7 +30633,8 @@ async fn execute_put_upload(
     let _write_operation = state
         .provider_resource_stats
         .start_operation(home_provider.as_str(), ProviderResourceOperationKind::Write);
-    let (source_body, payload_validation) = request_body.into_parts(state, home_provider.as_str());
+    let (source_body, payload_validation, etag_override_source) =
+        request_body.into_parts(state, home_provider.as_str());
     let upload_body = match encryption_plan.as_ref() {
         Some(plan) => {
             match encrypt_upload(source_body, plan.request.clone(), plan.key_encryption_key) {
@@ -30497,6 +30731,11 @@ async fn execute_put_upload(
             return Err(error);
         }
     }
+    let effective_etag = etag_override_source
+        .as_ref()
+        .map(|source| source.resolved_etag())
+        .transpose()?
+        .or(result.etag.clone());
     let verification_attempts = match verify_put_object_visibility(
         &home_backend,
         home_provider,
@@ -30573,12 +30812,16 @@ async fn execute_put_upload(
         current_unix_ms(),
     )
     .map_err(map_backend_error_to_s3)?;
+    let mut finalized_logical_record = desired_logical_record.clone();
+    finalized_logical_record.etag = effective_etag.clone();
+    persist_logical_object_record(state, &finalized_logical_record)
+        .map_err(map_backend_error_to_s3)?;
     let mut jobs = state.replication.enqueue_put(
         &effective_topology,
         Some(home_provider.as_str().to_string()),
         bucket.clone(),
         key.clone(),
-        result.etag.clone(),
+        effective_etag.clone(),
         stored_size,
         stored_content_type.clone(),
     );
@@ -30630,7 +30873,7 @@ async fn execute_put_upload(
     }
 
     let mut response = StatusCode::OK.into_response();
-    if let Some(etag) = result.etag {
+    if let Some(etag) = effective_etag {
         response.headers_mut().insert(
             ETAG,
             HeaderValue::from_str(&quoted_etag(Some(&etag))).expect("etag should be valid"),
@@ -31766,7 +32009,7 @@ fn parse_complete_parts_xml(xml: &str) -> Result<Vec<(u32, String)>, S3Error> {
             .trim()
             .parse::<u32>()
             .map_err(|_| S3Error::invalid_request("PartNumber must be an integer."))?;
-        let etag = item[etag_start + "<ETag>".len()..etag_end]
+        let etag = xml_unescape(item[etag_start + "<ETag>".len()..etag_end].trim())?
             .trim()
             .trim_matches('"')
             .to_string();
@@ -31779,6 +32022,244 @@ fn parse_complete_parts_xml(xml: &str) -> Result<Vec<(u32, String)>, S3Error> {
         ));
     }
     Ok(parts)
+}
+
+struct MultipartCompletePlan {
+    state: AppState,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    application: S3ApplicationIdentity,
+    plaintext_size: u64,
+    content_type: Option<String>,
+    part_paths: Vec<PathBuf>,
+}
+
+fn complete_multipart_upload_result_xml(bucket: &str, key: &str, complete_etag: &str) -> String {
+    format!(
+        "<CompleteMultipartUploadResult xmlns=\"{S3_NS}\">\
+<Bucket>{}</Bucket><Key>{}</Key><ETag>{}</ETag>\
+</CompleteMultipartUploadResult>",
+        xml_escape(bucket),
+        xml_escape(key),
+        xml_escape(&quoted_etag(Some(complete_etag)))
+    )
+}
+
+fn multipart_complete_error_summary(error: &S3Error) -> String {
+    format!("{}: {}", error.code, error.message)
+}
+
+#[derive(Debug, Default)]
+struct MultipartCompleteEtagAccumulator {
+    current_part_hasher: Option<Md5>,
+    part_digests: Vec<[u8; 16]>,
+}
+
+impl MultipartCompleteEtagAccumulator {
+    fn start_part(&mut self) {
+        self.current_part_hasher = Some(Md5::new());
+    }
+
+    fn update_part(&mut self, chunk: &[u8]) {
+        self.current_part_hasher
+            .get_or_insert_with(Md5::new)
+            .update(chunk);
+    }
+
+    fn finish_part(&mut self) {
+        let digest = self
+            .current_part_hasher
+            .take()
+            .unwrap_or_else(Md5::new)
+            .finalize();
+        self.part_digests.push(digest.into());
+    }
+
+    fn complete_etag(&self) -> Result<String, S3Error> {
+        if self.current_part_hasher.is_some() || self.part_digests.is_empty() {
+            return Err(S3Error::internal_error(
+                "multipart complete etag state is incomplete.",
+            ));
+        }
+        Ok(s3_multipart_complete_etag(&self.part_digests))
+    }
+}
+
+fn s3_multipart_complete_etag(part_digests: &[[u8; 16]]) -> String {
+    let mut hasher = Md5::new();
+    for digest in part_digests {
+        hasher.update(digest);
+    }
+    let digest = hasher.finalize();
+    format!("{}-{}", hex::encode(digest), part_digests.len())
+}
+
+#[derive(Debug)]
+struct MultipartCompleteEtagOverrideSource {
+    state: Arc<Mutex<MultipartCompleteEtagAccumulator>>,
+}
+
+impl PreparedPutRequestEtagOverrideSource for MultipartCompleteEtagOverrideSource {
+    fn resolved_etag(&self) -> Result<String, S3Error> {
+        self.state
+            .lock()
+            .expect("multipart complete etag state poisoned")
+            .complete_etag()
+    }
+}
+
+async fn finalize_multipart_upload(plan: MultipartCompletePlan) -> Result<String, S3Error> {
+    plan.state
+        .multipart_complete_status
+        .update_stage(&plan.upload_id, MultipartCompleteStage::OpeningParts);
+    let mut sources = Vec::with_capacity(plan.part_paths.len());
+    for path in &plan.part_paths {
+        let file = TokioFile::open(path).await.map_err(|_| {
+            S3Error::invalid_part("One or more of the specified parts could not be found.")
+        })?;
+        sources.push(file);
+    }
+    let chunk_bytes = plan.state.config.spooled_body_chunk_bytes.max(1);
+    plan.state
+        .multipart_complete_status
+        .update_stage(&plan.upload_id, MultipartCompleteStage::WritingHomeObject);
+    let complete_etag = Arc::new(Mutex::new(MultipartCompleteEtagAccumulator::default()));
+    {
+        let mut complete_etag = complete_etag
+            .lock()
+            .expect("multipart complete etag state poisoned");
+        complete_etag.start_part();
+    }
+    let multipart_body = ObjectBody::from_stream(futures_util::stream::try_unfold(
+        (
+            sources,
+            0usize,
+            vec![0u8; chunk_bytes],
+            Arc::clone(&complete_etag),
+        ),
+        |(mut sources, mut idx, mut buffer, complete_etag)| async move {
+            loop {
+                if idx >= sources.len() {
+                    return Ok(None);
+                }
+                let read = sources[idx]
+                    .read(&mut buffer)
+                    .await
+                    .map_err(|error| BlobError::BodyStream(error.to_string()))?;
+                if read == 0 {
+                    {
+                        let mut complete_etag = complete_etag
+                            .lock()
+                            .expect("multipart complete etag state poisoned");
+                        complete_etag.finish_part();
+                        idx = idx.saturating_add(1);
+                        if idx < sources.len() {
+                            complete_etag.start_part();
+                        }
+                    }
+                    continue;
+                }
+                complete_etag
+                    .lock()
+                    .expect("multipart complete etag state poisoned")
+                    .update_part(&buffer[..read]);
+                let chunk = Bytes::copy_from_slice(&buffer[..read]);
+                return Ok(Some((chunk, (sources, idx, buffer, complete_etag))));
+            }
+        },
+    ));
+
+    let complete_etag_override: Arc<dyn PreparedPutRequestEtagOverrideSource> =
+        Arc::new(MultipartCompleteEtagOverrideSource {
+            state: Arc::clone(&complete_etag),
+        });
+    execute_put_upload(
+        &plan.state,
+        plan.bucket.clone(),
+        plan.key.clone(),
+        plan.application,
+        plan.plaintext_size,
+        plan.content_type,
+        PreparedPutRequestBody::plain_with_etag_override(multipart_body, complete_etag_override),
+        ProviderWritePathKind::Spooled,
+    )
+    .await?;
+    let complete_etag = complete_etag
+        .lock()
+        .expect("multipart complete etag state poisoned")
+        .complete_etag()?;
+    plan.state
+        .multipart_complete_status
+        .update_stage(&plan.upload_id, MultipartCompleteStage::Cleanup);
+    plan.state
+        .metadata_store
+        .delete_multipart_upload_session(&plan.upload_id)
+        .map_err(|error| map_backend_error_to_s3(BlobError::Upstream(error.to_string())))?;
+    let dir = multipart_upload_dir(&plan.state.config, &plan.upload_id);
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    Ok(complete_multipart_upload_result_xml(
+        &plan.bucket,
+        &plan.key,
+        &complete_etag,
+    ))
+}
+
+fn multipart_complete_streaming_response(
+    receiver: oneshot::Receiver<Result<String, S3Error>>,
+) -> Response {
+    enum StreamState {
+        EmitDeclaration(oneshot::Receiver<Result<String, S3Error>>),
+        AwaitResult(oneshot::Receiver<Result<String, S3Error>>),
+        Done,
+    }
+
+    let body = Body::from_stream(stream::unfold(
+        StreamState::EmitDeclaration(receiver),
+        |state| async move {
+            match state {
+                StreamState::EmitDeclaration(receiver) => Some((
+                    Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                        concat!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n").as_bytes(),
+                    )),
+                    StreamState::AwaitResult(receiver),
+                )),
+                StreamState::AwaitResult(mut receiver) => {
+                    tokio::select! {
+                        result = &mut receiver => {
+                            let payload = match result {
+                                Ok(Ok(body)) => body,
+                                Ok(Err(error)) => s3_error_xml_payload(&error),
+                                Err(_) => s3_error_xml_payload(&S3Error::internal_error(
+                                    "multipart completion task terminated unexpectedly.",
+                                )),
+                            };
+                            Some((
+                                Ok::<Bytes, std::convert::Infallible>(Bytes::from(payload)),
+                                StreamState::Done,
+                            ))
+                        }
+                        _ = sleep(COMPLETE_MULTIPART_KEEPALIVE_INTERVAL) => Some((
+                            Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                                COMPLETE_MULTIPART_KEEPALIVE_CHUNK,
+                            )),
+                            StreamState::AwaitResult(receiver),
+                        )),
+                    }
+                }
+                StreamState::Done => None,
+            }
+        },
+    ));
+    let mut response = StatusCode::OK.into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
+    response
+        .headers_mut()
+        .insert("x-amz-request-id", HeaderValue::from_static(REQUEST_ID));
+    *response.body_mut() = body;
+    response
 }
 
 async fn complete_multipart_upload(
@@ -31830,7 +32311,6 @@ async fn complete_multipart_upload(
     let mut previous_part_number = 0u32;
     let mut selected_parts = Vec::with_capacity(requested_parts.len());
     let mut plaintext_size = 0u64;
-    let mut final_etag_hasher = Sha256::new();
     for (part_number, expected_etag) in requested_parts {
         if part_number <= previous_part_number {
             return Err(S3Error::invalid_part_order(
@@ -31847,73 +32327,59 @@ async fn complete_multipart_upload(
             ));
         }
         plaintext_size = plaintext_size.saturating_add(part.size_bytes);
-        final_etag_hasher.update(part.etag.as_bytes());
         selected_parts.push(part.clone());
     }
 
-    let mut sources = Vec::with_capacity(selected_parts.len());
-    for part in &selected_parts {
-        let path = multipart_part_path(&state.config, &upload_id, part.part_number as u16);
-        let file = TokioFile::open(&path).await.map_err(|_| {
-            S3Error::invalid_part("One or more of the specified parts could not be found.")
-        })?;
-        sources.push(file);
-    }
-    let chunk_bytes = state.config.spooled_body_chunk_bytes.max(1);
-    let multipart_body = ObjectBody::from_stream(futures_util::stream::try_unfold(
-        (sources, 0usize, vec![0u8; chunk_bytes]),
-        |(mut sources, mut idx, mut buffer)| async move {
-            loop {
-                if idx >= sources.len() {
-                    return Ok(None);
-                }
-                let read = sources[idx]
-                    .read(&mut buffer)
-                    .await
-                    .map_err(|error| BlobError::BodyStream(error.to_string()))?;
-                if read == 0 {
-                    idx = idx.saturating_add(1);
-                    continue;
-                }
-                let chunk = Bytes::copy_from_slice(&buffer[..read]);
-                return Ok(Some((chunk, (sources, idx, buffer))));
-            }
-        },
-    ));
-
-    execute_put_upload(
-        &state,
-        bucket.clone(),
-        key.clone(),
+    let part_paths = selected_parts
+        .iter()
+        .map(|part| multipart_part_path(&state.config, &upload_id, part.part_number as u16))
+        .collect();
+    state.multipart_complete_status.begin_job(
+        &upload_id,
+        &bucket,
+        &key,
+        &application.application_id,
+        plaintext_size,
+        selected_parts.len(),
+    );
+    let plan = MultipartCompletePlan {
+        state: state.clone(),
+        bucket,
+        key,
+        upload_id,
         application,
         plaintext_size,
-        session.content_type,
-        PreparedPutRequestBody::plain(multipart_body),
-        ProviderWritePathKind::Spooled,
-    )
-    .await?;
-    state
-        .metadata_store
-        .delete_multipart_upload_session(&upload_id)
-        .map_err(|error| map_backend_error_to_s3(BlobError::Upstream(error.to_string())))?;
-    let dir = multipart_upload_dir(&state.config, &upload_id);
-    let _ = tokio::fs::remove_dir_all(&dir).await;
-    let complete_etag = hex::encode(final_etag_hasher.finalize());
-    let body = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
-<CompleteMultipartUploadResult xmlns=\"{S3_NS}\">\
-<Bucket>{}</Bucket><Key>{}</Key><ETag>{}</ETag>\
-</CompleteMultipartUploadResult>",
-        xml_escape(&bucket),
-        xml_escape(&key),
-        xml_escape(&quoted_etag(Some(&complete_etag)))
-    );
-    let mut response = StatusCode::OK.into_response();
-    response
-        .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("application/xml"));
-    *response.body_mut() = Body::from(body);
-    Ok(response)
+        content_type: session.content_type,
+        part_paths,
+    };
+    let upload_id = plan.upload_id.clone();
+    let multipart_complete_status = state.multipart_complete_status.clone();
+    let (completion_tx, completion_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let result = match std::panic::AssertUnwindSafe(finalize_multipart_upload(plan))
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(body)) => {
+                multipart_complete_status.complete_job(&upload_id);
+                Ok(body)
+            }
+            Ok(Err(error)) => {
+                multipart_complete_status
+                    .fail_job(&upload_id, multipart_complete_error_summary(&error));
+                Err(error)
+            }
+            Err(_) => {
+                let error =
+                    S3Error::internal_error("multipart completion task terminated unexpectedly.");
+                multipart_complete_status
+                    .fail_job(&upload_id, multipart_complete_error_summary(&error));
+                Err(error)
+            }
+        };
+        let _ = completion_tx.send(result);
+    });
+    Ok(multipart_complete_streaming_response(completion_rx))
 }
 
 async fn abort_multipart_upload(
@@ -32508,6 +32974,49 @@ fn xml_escape(input: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+fn xml_unescape(input: &str) -> Result<String, S3Error> {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find('&') {
+        output.push_str(&rest[..start]);
+        let entity = &rest[start + 1..];
+        let end = entity.find(';').ok_or_else(|| {
+            S3Error::invalid_request("Malformed XML entity in CompleteMultipartUpload ETag.")
+        })?;
+        let entity_name = &entity[..end];
+        let unescaped = match entity_name {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => {
+                let codepoint = if let Some(hex) = entity_name
+                    .strip_prefix("#x")
+                    .or_else(|| entity_name.strip_prefix("#X"))
+                {
+                    u32::from_str_radix(hex, 16).ok()
+                } else if let Some(decimal) = entity_name.strip_prefix('#') {
+                    decimal.parse::<u32>().ok()
+                } else {
+                    None
+                }
+                .and_then(char::from_u32)
+                .ok_or_else(|| {
+                    S3Error::invalid_request(
+                        "Unsupported XML entity in CompleteMultipartUpload ETag.",
+                    )
+                })?;
+                codepoint
+            }
+        };
+        output.push(unescaped);
+        rest = &entity[end + 1..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
+
 fn quoted_etag(etag: Option<&str>) -> String {
     format!("\"{}\"", etag.unwrap_or(""))
 }
@@ -32598,6 +33107,40 @@ mod tests {
         let etag = object_http_etag(&object).expect("fallback etag should exist");
         assert!(!etag.is_empty());
         assert_eq!(etag.len(), 64);
+    }
+
+    #[test]
+    fn public_object_info_uses_logical_etag_when_backend_omits_one() {
+        let object = blob_core::ObjectInfo {
+            key: "smoke/direct-side.txt".to_string(),
+            size: 10,
+            etag: None,
+            content_type: Some("text/plain".to_string()),
+            last_modified: Some("2026-06-04T20:53:22.000Z".to_string()),
+        };
+        let logical = LogicalObjectRecord {
+            bucket: "root".to_string(),
+            key: "smoke/direct-side.txt".to_string(),
+            etag: Some("multipart-etag-3".to_string()),
+            application_id: Some("default".to_string()),
+            encrypted: false,
+            encryption_profile_id: None,
+            algorithm: None,
+            key_id: None,
+            key_source_kind: None,
+            key_source_ref: None,
+            chunk_plaintext_bytes: None,
+            plaintext_size: 10,
+            stored_size: 10,
+            logical_content_type: Some("text/plain".to_string()),
+            updated_at_unix_ms: 123,
+        };
+        let public = public_object_info(object, Some(&logical));
+        assert_eq!(public.etag.as_deref(), Some("multipart-etag-3"));
+        assert_eq!(
+            object_http_etag(&public).as_deref(),
+            Some("multipart-etag-3")
+        );
     }
 
     struct FailingBackend {
@@ -32848,6 +33391,184 @@ mod tests {
             &self,
             request: PutObjectRequest,
         ) -> Result<blob_core::PutObjectResult, BlobError> {
+            self.inner.put_object(request).await
+        }
+
+        async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+            self.inner.delete_object(container, key).await
+        }
+    }
+
+    struct DelayedStreamingWriteStubBackend {
+        name: &'static str,
+        delay: Duration,
+        inner: StubBackend,
+    }
+
+    impl DelayedStreamingWriteStubBackend {
+        fn new(name: &'static str, delay: Duration) -> Self {
+            Self {
+                name,
+                delay,
+                inner: StubBackend::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobBackend for DelayedStreamingWriteStubBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                read: true,
+                write: true,
+                delete: true,
+                multipart_upload: false,
+                streaming_get: true,
+                streaming_put: true,
+                max_single_upload_bytes: None,
+                max_single_download_bytes: None,
+                upload_part_size_bytes: None,
+            }
+        }
+
+        async fn health(&self) -> Result<ServiceHealth, BlobError> {
+            Ok(ServiceHealth {
+                backend: self.name().to_string(),
+                status: HealthStatus::Healthy,
+                capabilities: self.capabilities(),
+                scopes: Vec::new(),
+                notes: vec!["test delayed streaming write backend".to_string()],
+            })
+        }
+
+        async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
+            self.inner.list_containers().await
+        }
+
+        async fn list_objects(
+            &self,
+            request: ListObjectsRequest,
+        ) -> Result<Vec<ObjectInfo>, BlobError> {
+            self.inner.list_objects(request).await
+        }
+
+        async fn get_object(
+            &self,
+            container: &str,
+            key: &str,
+        ) -> Result<blob_core::ObjectPayload, BlobError> {
+            self.inner.get_object(container, key).await
+        }
+
+        async fn put_object(
+            &self,
+            request: PutObjectRequest,
+        ) -> Result<blob_core::PutObjectResult, BlobError> {
+            sleep(self.delay).await;
+            self.inner.put_object(request).await
+        }
+
+        async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+            self.inner.delete_object(container, key).await
+        }
+    }
+
+    struct BlockingStreamingWriteStubBackend {
+        name: &'static str,
+        inner: StubBackend,
+        started: Notify,
+        release: Notify,
+        started_flag: AtomicBool,
+        release_flag: AtomicBool,
+    }
+
+    impl BlockingStreamingWriteStubBackend {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                inner: StubBackend::new(),
+                started: Notify::new(),
+                release: Notify::new(),
+                started_flag: AtomicBool::new(false),
+                release_flag: AtomicBool::new(false),
+            }
+        }
+
+        async fn wait_for_put_start(&self) {
+            if self.started_flag.load(Ordering::SeqCst) {
+                return;
+            }
+            self.started.notified().await;
+        }
+
+        fn allow_put_to_finish(&self) {
+            self.release_flag.store(true, Ordering::SeqCst);
+            self.release.notify_waiters();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobBackend for BlockingStreamingWriteStubBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                read: true,
+                write: true,
+                delete: true,
+                multipart_upload: false,
+                streaming_get: true,
+                streaming_put: true,
+                max_single_upload_bytes: None,
+                max_single_download_bytes: None,
+                upload_part_size_bytes: None,
+            }
+        }
+
+        async fn health(&self) -> Result<ServiceHealth, BlobError> {
+            Ok(ServiceHealth {
+                backend: self.name().to_string(),
+                status: HealthStatus::Healthy,
+                capabilities: self.capabilities(),
+                scopes: Vec::new(),
+                notes: vec!["test blocking streaming write backend".to_string()],
+            })
+        }
+
+        async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
+            self.inner.list_containers().await
+        }
+
+        async fn list_objects(
+            &self,
+            request: ListObjectsRequest,
+        ) -> Result<Vec<ObjectInfo>, BlobError> {
+            self.inner.list_objects(request).await
+        }
+
+        async fn get_object(
+            &self,
+            container: &str,
+            key: &str,
+        ) -> Result<blob_core::ObjectPayload, BlobError> {
+            self.inner.get_object(container, key).await
+        }
+
+        async fn put_object(
+            &self,
+            request: PutObjectRequest,
+        ) -> Result<blob_core::PutObjectResult, BlobError> {
+            self.started_flag.store(true, Ordering::SeqCst);
+            self.started.notify_waiters();
+            if !self.release_flag.load(Ordering::SeqCst) {
+                self.release.notified().await;
+            }
             self.inner.put_object(request).await
         }
 
@@ -34060,6 +34781,7 @@ mod tests {
             provider_resource_stats,
             process_memory_history: Arc::new(ProcessMemoryHistoryState::new()),
             spool_usage,
+            multipart_complete_status: Arc::new(MultipartCompleteStatusState::new()),
             external_kms_runtime: Arc::new(Mutex::new(ExternalKmsRuntimeState::default())),
             admin_log_source: Arc::new(InMemoryAdminLogSource {
                 ring: Arc::new(Mutex::new(AdminLogRing::new(
@@ -40772,6 +41494,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: bucket.clone(),
                 key: key.clone(),
+                etag: None,
                 application_id: Some("default".to_string()),
                 encrypted: false,
                 encryption_profile_id: None,
@@ -43837,6 +44560,52 @@ mod tests {
         xml[start..end].to_string()
     }
 
+    fn extract_xml_tag(xml: &str, tag: &str) -> String {
+        let start_tag = format!("<{tag}>");
+        let end_tag = format!("</{tag}>");
+        let start = xml
+            .find(&start_tag)
+            .unwrap_or_else(|| panic!("{tag} start tag should exist"))
+            + start_tag.len();
+        let end = xml[start..]
+            .find(&end_tag)
+            .unwrap_or_else(|| panic!("{tag} end tag should exist"))
+            + start;
+        xml[start..end].to_string()
+    }
+
+    fn expected_s3_multipart_etag(parts: &[&[u8]]) -> String {
+        let digests: Vec<[u8; 16]> = parts
+            .iter()
+            .map(|part| {
+                let mut hasher = Md5::new();
+                hasher.update(part);
+                let digest = hasher.finalize();
+                digest.into()
+            })
+            .collect();
+        s3_multipart_complete_etag(&digests)
+    }
+
+    async fn assert_complete_multipart_upload_succeeded(response: Response) -> String {
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("complete response body should read");
+        let xml = String::from_utf8(body.to_vec()).expect("complete response should be utf8 xml");
+        assert!(xml.contains("<CompleteMultipartUploadResult"));
+        assert!(!xml.contains("<Error>"));
+        xml
+    }
+
+    #[test]
+    fn s3_multipart_complete_etag_uses_md5_of_part_md5s() {
+        assert_eq!(
+            expected_s3_multipart_etag(&[b"hello ", b"world"]),
+            "e09e4fd6265b36115fe3db32df945d84-2"
+        );
+    }
+
     #[tokio::test]
     async fn multipart_initiate_upload_complete_and_get_succeeds() {
         let mut state = test_state();
@@ -43937,7 +44706,7 @@ mod tests {
             complete_xml.as_bytes(),
             &[("content-type", "application/xml")],
         );
-        post_object(
+        let complete_response = post_object(
             State(state.clone()),
             Path((bucket.clone(), key.clone())),
             Method::POST,
@@ -43947,6 +44716,151 @@ mod tests {
         )
         .await
         .expect("complete should succeed");
+        let complete_xml = assert_complete_multipart_upload_succeeded(complete_response).await;
+        assert_eq!(
+            extract_xml_tag(&complete_xml, "ETag"),
+            xml_escape(&quoted_etag(Some(&expected_s3_multipart_etag(&[
+                b"hello ", b"world"
+            ]))))
+        );
+
+        let get_uri: Uri = format!("/{bucket}/{key}").parse().expect("uri");
+        let get_headers = signed_headers(&state.config, &Method::GET, &get_uri, &[], &[]);
+        let get_response = get_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::GET,
+            OriginalUri(get_uri),
+            get_headers,
+        )
+        .await
+        .expect("get should succeed");
+        let body = to_bytes(get_response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        assert_eq!(body.as_ref(), b"hello world");
+    }
+
+    #[test]
+    fn parse_complete_parts_xml_unescapes_entity_encoded_etags() {
+        let xml = concat!(
+            "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+            "<Part><ETag>&#34;etag-1&#34;</ETag><PartNumber>1</PartNumber></Part>",
+            "<Part><ETag>&quot;etag-2&quot;</ETag><PartNumber>2</PartNumber></Part>",
+            "<Part><ETag>&#x22;etag-3&#x22;</ETag><PartNumber>3</PartNumber></Part>",
+            "</CompleteMultipartUpload>",
+        );
+        assert_eq!(
+            parse_complete_parts_xml(xml).expect("parser should accept XML-escaped etags"),
+            vec![
+                (1, "etag-1".to_string()),
+                (2, "etag-2".to_string()),
+                (3, "etag-3".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_accepts_entity_encoded_etags() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 64;
+        let bucket = "placeholder".to_string();
+        let key = "notes/multipart-complete-escaped-etag.txt".to_string();
+        let init_uri: Uri = format!("/{bucket}/{key}?uploads").parse().expect("uri");
+        let init_headers = signed_headers(&state.config, &Method::POST, &init_uri, &[], &[]);
+        let init_response = post_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::POST,
+            OriginalUri(init_uri),
+            init_headers,
+            Body::empty(),
+        )
+        .await
+        .expect("initiate should succeed");
+        let init_body = to_bytes(init_response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let upload_id = extract_upload_id(&String::from_utf8(init_body.to_vec()).expect("utf8"));
+
+        let part1 = Bytes::from_static(b"hello ");
+        let upload_part1_uri: Uri = format!("/{bucket}/{key}?partNumber=1&uploadId={upload_id}")
+            .parse()
+            .expect("uri");
+        let part1_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &upload_part1_uri,
+            &part1,
+            &[("content-length", "6")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(upload_part1_uri),
+            part1_headers,
+            part1.clone().into(),
+        )
+        .await
+        .expect("part1 upload should succeed");
+
+        let part2 = Bytes::from_static(b"world");
+        let upload_part2_uri: Uri = format!("/{bucket}/{key}?partNumber=2&uploadId={upload_id}")
+            .parse()
+            .expect("uri");
+        let part2_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &upload_part2_uri,
+            &part2,
+            &[("content-length", "5")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(upload_part2_uri),
+            part2_headers,
+            part2.clone().into(),
+        )
+        .await
+        .expect("part2 upload should succeed");
+
+        let parts = state
+            .metadata_store
+            .list_multipart_upload_parts(&upload_id)
+            .expect("parts should list");
+        let complete_xml = format!(
+            concat!(
+                "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">",
+                "<Part><ETag>&#34;{}&#34;</ETag><PartNumber>1</PartNumber></Part>",
+                "<Part><ETag>&#34;{}&#34;</ETag><PartNumber>2</PartNumber></Part>",
+                "</CompleteMultipartUpload>"
+            ),
+            parts[0].etag, parts[1].etag
+        );
+        let complete_uri: Uri = format!("/{bucket}/{key}?uploadId={upload_id}")
+            .parse()
+            .expect("uri");
+        let complete_headers = signed_headers(
+            &state.config,
+            &Method::POST,
+            &complete_uri,
+            complete_xml.as_bytes(),
+            &[("content-type", "application/xml")],
+        );
+        let complete_response = post_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::POST,
+            OriginalUri(complete_uri),
+            complete_headers,
+            Body::from(complete_xml),
+        )
+        .await
+        .expect("complete should succeed");
+        assert_complete_multipart_upload_succeeded(complete_response).await;
 
         let get_uri: Uri = format!("/{bucket}/{key}").parse().expect("uri");
         let get_headers = signed_headers(&state.config, &Method::GET, &get_uri, &[], &[]);
@@ -44527,7 +45441,7 @@ mod tests {
             complete_xml.as_bytes(),
             &[],
         );
-        post_object(
+        let complete_response = post_object(
             State(state.clone()),
             Path((bucket.clone(), key.clone())),
             Method::POST,
@@ -44537,9 +45451,271 @@ mod tests {
         )
         .await
         .expect("complete should succeed");
+        assert_complete_multipart_upload_succeeded(complete_response).await;
         let snapshot = state.provider_resource_stats.snapshot_provider("telecom");
         assert_eq!(snapshot.write_paths.in_memory_count, 0);
         assert!(snapshot.write_paths.spooled_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_returns_response_before_slow_backend_finishes() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).max_in_memory_object_bytes = 4;
+        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 64;
+        let telecom_backend: DynBackend = Arc::new(DelayedStreamingWriteStubBackend::new(
+            "telecom-delayed-stream",
+            Duration::from_millis(200),
+        ));
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend);
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.high_speed_providers = vec![ProviderId::Telecom];
+            control_plane.write_targets = vec![ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferHighSpeed;
+        }
+
+        let bucket = "placeholder".to_string();
+        let key = "notes/multipart-complete-streaming-response.txt".to_string();
+        let init_uri: Uri = format!("/{bucket}/{key}?uploads").parse().expect("uri");
+        let init_headers = signed_headers(&state.config, &Method::POST, &init_uri, &[], &[]);
+        let init_response = post_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::POST,
+            OriginalUri(init_uri),
+            init_headers,
+            Body::empty(),
+        )
+        .await
+        .expect("initiate should succeed");
+        let init_body = to_bytes(init_response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let upload_id = extract_upload_id(&String::from_utf8(init_body.to_vec()).expect("utf8"));
+
+        let part = Bytes::from_static(b"hello");
+        let part_uri: Uri = format!("/{bucket}/{key}?partNumber=1&uploadId={upload_id}")
+            .parse()
+            .expect("uri");
+        let part_headers = signed_headers(&state.config, &Method::PUT, &part_uri, &part, &[]);
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(part_uri),
+            part_headers,
+            part.into(),
+        )
+        .await
+        .expect("part upload should succeed");
+
+        let parts = state
+            .metadata_store
+            .list_multipart_upload_parts(&upload_id)
+            .expect("parts should list");
+        let complete_xml = format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+            parts[0].etag
+        );
+        let complete_uri: Uri = format!("/{bucket}/{key}?uploadId={upload_id}")
+            .parse()
+            .expect("uri");
+        let complete_headers = signed_headers(
+            &state.config,
+            &Method::POST,
+            &complete_uri,
+            complete_xml.as_bytes(),
+            &[],
+        );
+        let complete_response = timeout(
+            Duration::from_millis(50),
+            post_object(
+                State(state.clone()),
+                Path((bucket.clone(), key.clone())),
+                Method::POST,
+                OriginalUri(complete_uri),
+                complete_headers,
+                Body::from(complete_xml),
+            ),
+        )
+        .await
+        .expect("complete should return a streaming response before the backend put finishes")
+        .expect("complete should succeed");
+        assert_complete_multipart_upload_succeeded(complete_response).await;
+    }
+
+    #[tokio::test]
+    async fn multipart_complete_status_exposes_active_and_recent_jobs() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).max_in_memory_object_bytes = 4;
+        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 64;
+        let telecom_backend = Arc::new(BlockingStreamingWriteStubBackend::new(
+            "telecom-blocking-stream",
+        ));
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend.clone());
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.high_speed_providers = vec![ProviderId::Telecom];
+            control_plane.write_targets = vec![ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferHighSpeed;
+        }
+
+        let bucket = "placeholder".to_string();
+        let key = "notes/multipart-complete-status.txt".to_string();
+        let init_uri: Uri = format!("/{bucket}/{key}?uploads").parse().expect("uri");
+        let init_headers = signed_headers(&state.config, &Method::POST, &init_uri, &[], &[]);
+        let init_response = post_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::POST,
+            OriginalUri(init_uri),
+            init_headers,
+            Body::empty(),
+        )
+        .await
+        .expect("initiate should succeed");
+        let init_body = to_bytes(init_response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let upload_id = extract_upload_id(&String::from_utf8(init_body.to_vec()).expect("utf8"));
+
+        let part = Bytes::from_static(b"hello");
+        let part_uri: Uri = format!("/{bucket}/{key}?partNumber=1&uploadId={upload_id}")
+            .parse()
+            .expect("uri");
+        let part_headers = signed_headers(&state.config, &Method::PUT, &part_uri, &part, &[]);
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(part_uri),
+            part_headers,
+            part.into(),
+        )
+        .await
+        .expect("part upload should succeed");
+
+        let parts = state
+            .metadata_store
+            .list_multipart_upload_parts(&upload_id)
+            .expect("parts should list");
+        let complete_xml = format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"{}\"</ETag></Part></CompleteMultipartUpload>",
+            parts[0].etag
+        );
+        let complete_uri: Uri = format!("/{bucket}/{key}?uploadId={upload_id}")
+            .parse()
+            .expect("uri");
+        let complete_headers = signed_headers(
+            &state.config,
+            &Method::POST,
+            &complete_uri,
+            complete_xml.as_bytes(),
+            &[],
+        );
+        let complete_response = timeout(
+            Duration::from_millis(50),
+            post_object(
+                State(state.clone()),
+                Path((bucket.clone(), key.clone())),
+                Method::POST,
+                OriginalUri(complete_uri),
+                complete_headers,
+                Body::from(complete_xml),
+            ),
+        )
+        .await
+        .expect("complete should return before the blocked backend write finishes")
+        .expect("complete should succeed");
+        telecom_backend.wait_for_put_start().await;
+
+        let Json(status_during_complete) = admin_status(State(state.clone()), HeaderMap::new())
+            .await
+            .expect("admin status should succeed");
+        assert_eq!(
+            status_during_complete
+                .runtime
+                .multipart_complete
+                .active_count,
+            1
+        );
+        assert!(
+            status_during_complete
+                .runtime
+                .multipart_complete
+                .recent_jobs
+                .is_empty()
+        );
+        let active_job = status_during_complete
+            .runtime
+            .multipart_complete
+            .active_jobs
+            .iter()
+            .find(|job| job.upload_id == upload_id)
+            .expect("active multipart complete job should be visible");
+        assert_eq!(active_job.bucket, bucket);
+        assert_eq!(active_job.key, key);
+        assert_eq!(active_job.application_id, "default");
+        assert_eq!(active_job.plaintext_size, 5);
+        assert_eq!(active_job.requested_part_count, 1);
+        assert_eq!(active_job.stage, MultipartCompleteStage::WritingHomeObject);
+        assert_eq!(
+            active_job
+                .stage_history
+                .iter()
+                .map(|event| event.stage)
+                .collect::<Vec<_>>(),
+            vec![
+                MultipartCompleteStage::Queued,
+                MultipartCompleteStage::OpeningParts,
+                MultipartCompleteStage::WritingHomeObject,
+            ]
+        );
+
+        telecom_backend.allow_put_to_finish();
+        assert_complete_multipart_upload_succeeded(complete_response).await;
+
+        let Json(status_after_complete) = admin_status(State(state), HeaderMap::new())
+            .await
+            .expect("admin status should succeed");
+        assert_eq!(
+            status_after_complete
+                .runtime
+                .multipart_complete
+                .active_count,
+            0
+        );
+        let recent_job = status_after_complete
+            .runtime
+            .multipart_complete
+            .recent_jobs
+            .iter()
+            .find(|job| job.upload_id == upload_id)
+            .expect("completed multipart complete job should be retained in recent history");
+        assert_eq!(recent_job.stage, MultipartCompleteStage::Completed);
+        assert!(recent_job.completed_at_unix_ms.is_some());
+        assert_eq!(recent_job.failed_at_unix_ms, None);
+        assert_eq!(recent_job.last_error, None);
+        assert_eq!(
+            recent_job
+                .stage_history
+                .iter()
+                .map(|event| event.stage)
+                .collect::<Vec<_>>(),
+            vec![
+                MultipartCompleteStage::Queued,
+                MultipartCompleteStage::OpeningParts,
+                MultipartCompleteStage::WritingHomeObject,
+                MultipartCompleteStage::Cleanup,
+                MultipartCompleteStage::Completed,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -45244,6 +46420,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: bucket.clone(),
                 key: key.clone(),
+                etag: None,
                 application_id: Some("default".to_string()),
                 encrypted: false,
                 encryption_profile_id: None,
@@ -47103,6 +48280,7 @@ mod tests {
             provider_resource_stats,
             process_memory_history: Arc::new(ProcessMemoryHistoryState::new()),
             spool_usage,
+            multipart_complete_status: Arc::new(MultipartCompleteStatusState::new()),
             external_kms_runtime: Arc::new(Mutex::new(ExternalKmsRuntimeState::default())),
             admin_log_source: Arc::new(InMemoryAdminLogSource {
                 ring: Arc::new(Mutex::new(AdminLogRing::new(
@@ -49770,6 +50948,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: "root".to_string(),
                 key: "docs/placed.txt".to_string(),
+                etag: None,
                 application_id: Some("default".to_string()),
                 encrypted: true,
                 encryption_profile_id: Some("enc-router".to_string()),
@@ -50105,6 +51284,7 @@ mod tests {
             logical_record: Some(LogicalObjectRecord {
                 bucket: "placeholder".to_string(),
                 key: key.to_string(),
+                etag: None,
                 application_id: Some("default".to_string()),
                 encrypted: false,
                 encryption_profile_id: None,
@@ -50349,6 +51529,7 @@ mod tests {
             logical_record: Some(LogicalObjectRecord {
                 bucket: "placeholder".to_string(),
                 key: "critical/recover.txt".to_string(),
+                etag: None,
                 application_id: Some("default".to_string()),
                 encrypted: false,
                 encryption_profile_id: None,
@@ -50435,6 +51616,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: "placeholder".to_string(),
                 key: "critical/stale.txt".to_string(),
+                etag: None,
                 application_id: Some("default".to_string()),
                 encrypted: false,
                 encryption_profile_id: None,
@@ -50478,6 +51660,7 @@ mod tests {
             logical_record: Some(LogicalObjectRecord {
                 bucket: "placeholder".to_string(),
                 key: "critical/stale.txt".to_string(),
+                etag: None,
                 application_id: Some("default".to_string()),
                 encrypted: false,
                 encryption_profile_id: None,
@@ -50559,6 +51742,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: "placeholder".to_string(),
                 key: "critical/deleted.txt".to_string(),
+                etag: None,
                 application_id: Some("default".to_string()),
                 encrypted: false,
                 encryption_profile_id: None,
@@ -51938,7 +53122,7 @@ mod tests {
             complete_xml.as_bytes(),
             &[("content-type", "application/xml")],
         );
-        post_object(
+        let complete_response = post_object(
             State(state.clone()),
             Path((bucket.clone(), key.clone())),
             Method::POST,
@@ -51948,6 +53132,7 @@ mod tests {
         )
         .await
         .expect("complete should succeed");
+        assert_complete_multipart_upload_succeeded(complete_response).await;
 
         let get_uri: Uri = format!("/{bucket}/{key}").parse().expect("uri");
         let get_headers = signed_headers(&state.config, &Method::GET, &get_uri, &[], &[]);
@@ -52599,6 +53784,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: "root".to_string(),
                 key: "videos/legacy.mp4".to_string(),
+                etag: None,
                 application_id: None,
                 encrypted: false,
                 encryption_profile_id: None,
@@ -52739,6 +53925,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: "root".to_string(),
                 key: "videos/legacy.mp4".to_string(),
+                etag: None,
                 application_id: None,
                 encrypted: false,
                 encryption_profile_id: None,
@@ -52840,6 +54027,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: "root".to_string(),
                 key: "videos/legacy.mp4".to_string(),
+                etag: None,
                 application_id: None,
                 encrypted: false,
                 encryption_profile_id: None,
@@ -53000,6 +54188,7 @@ mod tests {
             .upsert_logical_object(&LogicalObjectRecord {
                 bucket: "root".to_string(),
                 key: "videos/legacy.mp4".to_string(),
+                etag: None,
                 application_id: None,
                 encrypted: false,
                 encryption_profile_id: None,

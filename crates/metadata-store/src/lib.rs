@@ -80,6 +80,7 @@ pub struct ObjectPlacementProviderSummaryRecord {
 pub struct LogicalObjectRecord {
     pub bucket: String,
     pub key: String,
+    pub etag: Option<String>,
     pub application_id: Option<String>,
     pub encrypted: bool,
     pub encryption_profile_id: Option<String>,
@@ -1135,11 +1136,12 @@ impl MetadataStore {
         connection
             .execute(
                 "INSERT INTO logical_objects (
-                    bucket, key, application_id, encrypted, encryption_profile_id, algorithm, key_id,
+                    bucket, key, etag, application_id, encrypted, encryption_profile_id, algorithm, key_id,
                     key_source_kind, key_source_ref, chunk_plaintext_bytes, plaintext_size,
                     stored_size, logical_content_type, updated_at_unix_ms
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                  ON CONFLICT(bucket, key) DO UPDATE SET
+                    etag = excluded.etag,
                     application_id = excluded.application_id,
                     encrypted = excluded.encrypted,
                     encryption_profile_id = excluded.encryption_profile_id,
@@ -1155,6 +1157,7 @@ impl MetadataStore {
                 params![
                     record.bucket.as_str(),
                     record.key.as_str(),
+                    record.etag.as_deref(),
                     record.application_id.as_deref(),
                     if record.encrypted { 1 } else { 0 },
                     record.encryption_profile_id.as_deref(),
@@ -1366,7 +1369,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         connection
             .query_row(
-                "SELECT bucket, key, application_id, encrypted, encryption_profile_id, algorithm, key_id,
+                "SELECT bucket, key, etag, application_id, encrypted, encryption_profile_id, algorithm, key_id,
                         key_source_kind, key_source_ref, chunk_plaintext_bytes, plaintext_size,
                         stored_size, logical_content_type, updated_at_unix_ms
                  FROM logical_objects
@@ -1385,7 +1388,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         let mut statement = connection
             .prepare(
-                "SELECT bucket, key, application_id, encrypted, encryption_profile_id, algorithm, key_id,
+                "SELECT bucket, key, etag, application_id, encrypted, encryption_profile_id, algorithm, key_id,
                         key_source_kind, key_source_ref, chunk_plaintext_bytes, plaintext_size,
                         stored_size, logical_content_type, updated_at_unix_ms
                  FROM logical_objects
@@ -1405,7 +1408,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         let mut statement = connection
             .prepare(
-                "SELECT bucket, key, application_id, encrypted, encryption_profile_id, algorithm, key_id,
+                "SELECT bucket, key, etag, application_id, encrypted, encryption_profile_id, algorithm, key_id,
                         key_source_kind, key_source_ref, chunk_plaintext_bytes, plaintext_size,
                         stored_size, logical_content_type, updated_at_unix_ms
                  FROM logical_objects
@@ -1486,14 +1489,15 @@ impl MetadataStore {
         for record in logical_objects {
             transaction
                 .execute(
-                    "INSERT INTO logical_objects (
-                        bucket, key, application_id, encrypted, encryption_profile_id, algorithm, key_id,
+                "INSERT INTO logical_objects (
+                        bucket, key, etag, application_id, encrypted, encryption_profile_id, algorithm, key_id,
                         key_source_kind, key_source_ref, chunk_plaintext_bytes, plaintext_size,
                         stored_size, logical_content_type, updated_at_unix_ms
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     params![
                         record.bucket.as_str(),
                         record.key.as_str(),
+                        record.etag.as_deref(),
                         record.application_id.as_deref(),
                         if record.encrypted { 1 } else { 0 },
                         record.encryption_profile_id.as_deref(),
@@ -1812,6 +1816,7 @@ impl MetadataStore {
                 CREATE TABLE IF NOT EXISTS logical_objects (
                     bucket TEXT NOT NULL,
                     key TEXT NOT NULL,
+                    etag TEXT NULL,
                     application_id TEXT NULL,
                     encrypted INTEGER NOT NULL,
                     encryption_profile_id TEXT NULL,
@@ -1879,6 +1884,7 @@ impl MetadataStore {
                     "INTEGER NULL",
                 )
             })
+            .and_then(|_| ensure_logical_objects_column(&connection, "etag", "TEXT NULL"))
             .and_then(|_| ensure_logical_objects_column(&connection, "application_id", "TEXT NULL"))
             .and_then(|_| {
                 ensure_gateway_write_ahead_log_state_column(
@@ -2000,18 +2006,19 @@ fn row_to_logical_object_record(
     Ok(LogicalObjectRecord {
         bucket: row.get(0)?,
         key: row.get(1)?,
-        application_id: row.get(2)?,
-        encrypted: row.get::<_, i64>(3)? != 0,
-        encryption_profile_id: row.get(4)?,
-        algorithm: row.get(5)?,
-        key_id: row.get(6)?,
-        key_source_kind: row.get(7)?,
-        key_source_ref: row.get(8)?,
-        chunk_plaintext_bytes: row.get::<_, Option<i64>>(9)?.map(|value| value as u64),
-        plaintext_size: row.get::<_, i64>(10)? as u64,
-        stored_size: row.get::<_, i64>(11)? as u64,
-        logical_content_type: row.get(12)?,
-        updated_at_unix_ms: row.get::<_, i64>(13)? as u64,
+        etag: row.get(2)?,
+        application_id: row.get(3)?,
+        encrypted: row.get::<_, i64>(4)? != 0,
+        encryption_profile_id: row.get(5)?,
+        algorithm: row.get(6)?,
+        key_id: row.get(7)?,
+        key_source_kind: row.get(8)?,
+        key_source_ref: row.get(9)?,
+        chunk_plaintext_bytes: row.get::<_, Option<i64>>(10)?.map(|value| value as u64),
+        plaintext_size: row.get::<_, i64>(11)? as u64,
+        stored_size: row.get::<_, i64>(12)? as u64,
+        logical_content_type: row.get(13)?,
+        updated_at_unix_ms: row.get::<_, i64>(14)? as u64,
     })
 }
 
@@ -3428,6 +3435,7 @@ mod tests {
         let record = LogicalObjectRecord {
             bucket: "root".to_string(),
             key: "encrypted/a.txt".to_string(),
+            etag: Some("etag-a".to_string()),
             application_id: Some("media-app".to_string()),
             encrypted: true,
             encryption_profile_id: Some("router-default".to_string()),
@@ -3484,6 +3492,7 @@ mod tests {
         let logical = LogicalObjectRecord {
             bucket: "root".to_string(),
             key: "docs/placed.txt".to_string(),
+            etag: Some("etag-placed".to_string()),
             application_id: Some("backup-app".to_string()),
             encrypted: true,
             encryption_profile_id: Some("enc-a".to_string()),

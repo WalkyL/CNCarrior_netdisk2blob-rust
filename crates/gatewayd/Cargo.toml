@@ -25,6 +25,7 @@ flate2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 libc = { workspace = true }
+md5 = { workspace = true }
 futures-util = { workspace = true }
 metadata-store = { path = "../metadata-store" }
 object-crypto = { path = "../object-crypto" }
