@@ -95,6 +95,7 @@ carrier-cloud-blob-gateway/
 
 - [docs/auth-step-by-step.md](docs/auth-step-by-step.md)
 - [docs/agent-nats-redmine-hub-integration.md](docs/agent-nats-redmine-hub-integration.md)
+- [docs/ops-012-51-agent-bus-read-reply.md](docs/ops-012-51-agent-bus-read-reply.md)
 - [docs/router-deployment-guide.md](docs/router-deployment-guide.md)
 - [docs/object-actions-and-history.md](docs/object-actions-and-history.md)
 - [docs/object-actions-api-reference.md](docs/object-actions-api-reference.md)
