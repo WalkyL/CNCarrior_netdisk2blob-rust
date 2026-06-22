@@ -32,10 +32,10 @@ GitHub 对 CCBG 只承担版本管理职责：源码、分支、tag、issue 模�
 ESP32-S3 示例，以及后续新增的嵌入式或固件构建，都必须从 `.47` 的项目工作区执行。
 `.46` 不再保留项目代码，也不再运行 CCBG 编译任务。
 
-当前本机和局域网没有 macOS 构建器。macOS `x86_64` / `arm64` 暂时降级为社区/实验包，
-由 GitHub Actions macOS-only 例外构建产出；这些包未签名、未公证、未经过本项目控制
-的 macOS 真机 smoke，不按官方宿主承诺。产物必须下载回 `.47`，进入同一 checksum、
-R2/GitHub fallback 和 `/downloads/latest/*` smoke 链路。
+macOS `x86_64` / `arm64` 仍然是社区/实验包，但现在由 GitHub Actions 在 self-hosted
+build-runner 容器内产出；这些包未签名、未公证、未经过本项目控制的 macOS 真机 smoke，
+不按官方宿主承诺。产物必须下载回 `.47`，进入同一 checksum、R2/GitHub fallback 和
+`/downloads/latest/*` smoke 链路。
 
 本地流程改为：
 
@@ -50,19 +50,19 @@ R2/GitHub fallback 和 `/downloads/latest/*` smoke 链路。
 优点是入口集中、产物能自动汇总。缺点是把内网构建、GitHub-hosted macOS、GHCR、
 Cloudflare 部署和公网 smoke 绑定在一起，任何一环的环境差异都会影响整条发布链。
 
-### 使用 GitHub macOS-only workflow
+### 使用 GitHub macOS asset workflow on self-hosted runner
 
-优点是能使用真实 macOS runner。缺点是 GitHub hosted macOS runner 有 credit 限制。
-当前接受这个方案作为 macOS-only 例外，因为本机和局域网没有 macOS 构建器。边界是：
-只构建 macOS 资产，不承担 Linux/Windows/OpenWrt、Cloudflare 部署或通用 release gate。
+优点是仍然保留 GitHub 作为触发和留档入口，但实际编译由本地 build-runner 容器完成。
+边界是：只构建 macOS 资产，不承担 Linux/Windows/OpenWrt、Cloudflare 部署或通用
+release gate。
 
 ## Consequences
 
 - 推送 `main` 或 `test` 不会自动部署。
 - release 前必须显式运行本地质量门并留存结果。
 - Cloudflare 部署使用 `.47` Cloudflare 凭据，发布人需要确认当前 shell 环境。
-- macOS 包是社区/实验包；当前由 GitHub Actions macOS-only 例外构建产出，并下载回
-  `.47` 进入统一发布链路。
+- macOS 包是社区/实验包；当前由 GitHub Actions self-hosted build-runner 容器产出，并
+  下载回 `.47` 进入统一发布链路。
 - 如果公网安装 catalog 继续指向 GitHub release download URL，发布人必须手动保证
   对应资产已上传到 GitHub Release。
 - 新增任何构建主机前，必须先在项目文档里记录机器、目录、凭据边界和清理方案。

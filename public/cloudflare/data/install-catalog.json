@@ -98,7 +98,7 @@
           "package": "ccbg-macos-x86_64.tar.gz",
           "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
           "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-x86_64.tar.gz && tar -xzf ccbg-macos-x86_64.tar.gz && ./ccbg-macos-x86_64/deploy/macos/install.sh",
-          "upgrade_note": "社区/实验包；当前由 GitHub Actions macOS-only 例外构建产出，未签名、未公证、未经过官方 macOS 真机 smoke。仍通过包内 install.sh 覆盖升级。",
+          "upgrade_note": "社区/实验包；当前由 GitHub Actions self-hosted build-runner 容器产出，未签名、未公证、未经过官方 macOS 真机 smoke。仍通过包内 install.sh 覆盖升级。",
           "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd && echo 'Admin Web: http://<this-host-ip>:61081/'"
         },
         {
@@ -110,7 +110,7 @@
           "package": "ccbg-macos-arm64.tar.gz",
           "command": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
           "upgrade": "curl -fsSLO https://carrier-disk-gateway.agi2030.online/downloads/latest/ccbg-macos-arm64.tar.gz && tar -xzf ccbg-macos-arm64.tar.gz && ./ccbg-macos-arm64/deploy/macos/install.sh",
-          "upgrade_note": "社区/实验包；当前由 GitHub Actions macOS-only 例外构建产出，未签名、未公证、未经过官方 macOS 真机 smoke。仍通过包内 install.sh 覆盖升级。",
+          "upgrade_note": "社区/实验包；当前由 GitHub Actions self-hosted build-runner 容器产出，未签名、未公证、未经过官方 macOS 真机 smoke。仍通过包内 install.sh 覆盖升级。",
           "verify": "launchctl print gui/$UID/online.agi2030.ccbg.gatewayd && echo 'Admin Web: http://<this-host-ip>:61081/'"
         },
         {

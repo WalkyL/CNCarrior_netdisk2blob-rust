@@ -109,8 +109,9 @@ fi
 if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ] && [ "${CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD:-false}" != "true" ]; then
   cat >&2 <<'EOF'
 macOS release artifacts are not built on the local/LAN release host right now.
-Use the GitHub Actions macOS-only release build, download its artifacts, and
-pass them back with CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets.
+Use the GitHub Actions macOS asset workflow on the configured self-hosted
+build-runner container, download its artifacts, and pass them back with
+CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets.
 Set CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD=true only after a documented local/LAN
 macOS builder or Darwin cross toolchain exists.
 EOF

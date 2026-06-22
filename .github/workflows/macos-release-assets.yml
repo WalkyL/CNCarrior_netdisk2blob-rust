@@ -1,4 +1,4 @@
-name: macOS release assets
+name: macOS release assets via build-runner
 
 on:
   workflow_dispatch:
@@ -11,20 +11,24 @@ on:
 permissions:
   contents: read
 
+env:
+  CCBG_BUILD_IMAGE: localhost/product-build-runner:latest
+  CCBG_CARGO_ZIGBUILD_VERSION: 0.22.3
+  CCBG_ZIG_VERSION: 0.16.0
+
 jobs:
   build:
     name: ${{ matrix.package }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
           - package: ccbg-macos-x86_64
             target: x86_64-apple-darwin
-            runner: macos-14
           - package: ccbg-macos-arm64
             target: aarch64-apple-darwin
-            runner: macos-14
 
     steps:
       - name: Checkout release tag
@@ -32,24 +36,59 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
 
-      - name: Install GNU checksum tools
+      - name: Ensure Podman machine is running
+        shell: powershell
         run: |
-          brew install coreutils
-          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+          $ErrorActionPreference = 'Stop'
+          podman machine start | Out-Null
 
-      - name: Install Rust target
-        run: rustup target add "${{ matrix.target }}"
-
-      - name: Build gatewayd
-        run: cargo build --release --locked --target "${{ matrix.target }}" -p gatewayd
-
-      - name: Package macOS asset
+      - name: Verify build runner image
+        shell: powershell
         run: |
-          scripts/build-native-package.sh \
-            --skip-build \
-            --target "${{ matrix.target }}" \
-            --package-name "${{ matrix.package }}"
-          sha256sum -c "target/native-packages/${{ matrix.package }}.tar.gz.sha256"
+          $ErrorActionPreference = 'Stop'
+          podman image inspect $env:CCBG_BUILD_IMAGE | Out-Null
+
+      - name: Build gatewayd and package macOS asset in build runner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          $scriptPath = Join-Path $workspace "target\ci-build\build-${{ matrix.package }}.sh"
+
+          $script = @'
+set -euo pipefail
+
+cargo install cargo-zigbuild --locked --version "${CCBG_CARGO_ZIGBUILD_VERSION}"
+
+zig_url="https://ziglang.org/download/${CCBG_ZIG_VERSION}/zig-x86_64-linux-${CCBG_ZIG_VERSION}.tar.xz"
+zig_root="/tmp/zig"
+mkdir -p "${zig_root}"
+curl -fsSL "${zig_url}" -o /tmp/zig.tar.xz
+tar -C "${zig_root}" -xJf /tmp/zig.tar.xz --strip-components=1
+export PATH="${zig_root}:$PATH"
+"${zig_root}/zig" version
+
+rustup target add "__TARGET__"
+cargo zigbuild --release --locked --target "__TARGET__" -p gatewayd
+scripts/build-native-package.sh \
+  --skip-build \
+  --target "__TARGET__" \
+  --package-name "__PACKAGE__"
+sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
+'@
+
+          $script = $script.Replace('__TARGET__', '${{ matrix.target }}').Replace('__PACKAGE__', '${{ matrix.package }}')
+          [System.IO.Directory]::CreateDirectory((Split-Path -Parent $scriptPath)) | Out-Null
+          [System.IO.File]::WriteAllText($scriptPath, ($script -replace "`r`n", "`n"), [System.Text.Encoding]::ASCII)
+
+          podman run --rm `
+            --pull=never `
+            -e CCBG_CARGO_ZIGBUILD_VERSION=$env:CCBG_CARGO_ZIGBUILD_VERSION `
+            -e CCBG_ZIG_VERSION=$env:CCBG_ZIG_VERSION `
+            -v "${workspace}:/workspace" `
+            -w /workspace `
+            $env:CCBG_BUILD_IMAGE `
+            bash "/workspace/target/ci-build/build-${{ matrix.package }}.sh"
 
       - name: Upload macOS asset
         uses: actions/upload-artifact@v4

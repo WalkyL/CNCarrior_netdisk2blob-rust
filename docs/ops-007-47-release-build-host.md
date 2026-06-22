@@ -10,7 +10,7 @@ Accepted
 
 ## Decision
 
-`192.168.1.47` is the default CCBG build and release host. GitHub is only the source, branch, tag, issue, optional Release page, and release-record system. GitHub Actions must not compile Linux, OpenWrt, Windows, container tar/image, or Cloudflare release artifacts. The current local/LAN environment has no macOS builder, so macOS release assets use a GitHub Actions macOS-only exception build entry until a local/LAN macOS builder is documented.
+`192.168.1.47` is the default CCBG build and release host. GitHub is only the source, branch, tag, issue, optional Release page, and release-record system. GitHub Actions must not compile Linux, OpenWrt, Windows, container tar/image, or Cloudflare release artifacts. macOS release assets use the GitHub Actions workflow on the configured self-hosted build-runner container (`localhost/product-build-runner:latest`) and then merge back on `.47`.
 
 A tag or GitHub Release page is not a completed release. A release is complete only after the local/LAN build artifacts have been generated, synchronized to the public delivery path, and `/downloads/latest/*` resolves to the new assets.
 
@@ -32,8 +32,8 @@ C:\Users\walky\workspaces\carrier-cloud-blob-gateway
 | Podman `x86/x64` | `.47` | Official host | `podman build -f deploy/Containerfile .` |
 | Windows `x86_64` | `.47` | Official host | `CCBG_RELEASE_BUILD_WINDOWS=true scripts/release-local.sh <tag>` |
 | OpenWrt `arm64` | `.47` | Experimental host | `CCBG_RELEASE_BUILD_OPENWRT=true scripts/release-local.sh <tag>` |
-| macOS `x86_64` | GitHub Actions macOS-only exception, merged on `.47` | Community / experimental package | `CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
-| macOS `arm64` | GitHub Actions macOS-only exception, merged on `.47` | Community / experimental package | `CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
+| macOS `x86_64` | self-hosted build-runner container on the configured LAN runner, merged on `.47` | Community / experimental package | `CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
+| macOS `arm64` | self-hosted build-runner container on the configured LAN runner, merged on `.47` | Community / experimental package | `CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
 | STM32 client-only example | `.47` | Embedded client example | `CC='zig cc' scripts/check-stm32-client-example.sh` |
 | ESP32-S3 client-only example | `.47` | Embedded client example | `$(bash scripts/resolve-python.sh) scripts/check-esp32-s3-client-example.py` |
 | ESP32-S3 relay-lite PoC | `.47` | Feasibility PoC | `CC='zig cc' scripts/check-esp32-s3-relay-lite-poc.sh` |
@@ -42,7 +42,7 @@ C:\Users\walky\workspaces\carrier-cloud-blob-gateway
 
 macOS packages are community / experimental packages. They are unsigned, unnotarized, and not macOS smoke-tested by the official release gate.
 
-Current state: this project has no local/LAN macOS builder. For releases, build macOS assets with the GitHub Actions macOS-only workflow, download those artifacts, and merge them on `.47` with `CCBG_RELEASE_MACOS_ASSET_DIR`. This exception does not restore GitHub Actions as a general CI/release system. The resulting assets must still enter the same checksum, R2/GitHub fallback, and `/downloads/latest/*` smoke path.
+Current state: macOS assets are produced by the GitHub Actions workflow running inside the configured self-hosted build-runner container. Download those artifacts and merge them on `.47` with `CCBG_RELEASE_MACOS_ASSET_DIR`. This does not restore GitHub Actions as a general CI/release system. The resulting assets must still enter the same checksum, R2/GitHub fallback, and `/downloads/latest/*` smoke path.
 
 ## Embedded Boundary
 

@@ -12,7 +12,7 @@
 
 - GitHub 默认只保存分支、tag、issue、可选 Release 页面和发布记录。
 - Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认走 `.47` 或受控局域网 runner。
-- 当前本机和局域网没有 macOS 构建器；发布时 macOS 资产走 GitHub Actions macOS-only 例外构建入口。
+- macOS 资产走 GitHub Actions self-hosted build-runner 容器入口，不再依赖 GitHub-hosted macOS runner。
 - 只打 tag 或只创建 GitHub Release 页面不算发版完成。
 - 必须确认 `/downloads/latest/*` 已指向本轮新资产，并通过下载 smoke，才算发版完成。
 - provider 能力文案也属于 release 的一部分。没有新的 limit-probe 或隔离实测证据时，不得把中国移动的 `04010319 / Insufficient Rights` 已知限制写成“超大文件已验证通过”。
@@ -73,9 +73,9 @@ scripts/release-local.sh v0.1.7
 ```
 
 Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认都在 `.47` 或受控局域网 runner 上
-生成，不把 GitHub Actions 当默认构建入口。macOS 因当前没有本机/局域网构建器，发布时
-走 GitHub Actions macOS-only 例外构建；下载产物后用下面的方式合并回本 SOP 的校验、
-上传和 `/downloads/latest/*` smoke：
+生成，不把 GitHub Actions 当默认构建入口。macOS 资产由 GitHub Actions 在 self-hosted
+build-runner 容器中构建；下载产物后用下面的方式合并回本 SOP 的校验、上传和
+`/downloads/latest/*` smoke：
 
 ```bash
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \

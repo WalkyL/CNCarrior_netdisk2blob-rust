@@ -1,6 +1,6 @@
 # Windows / macOS 与公网安装页 rollout TODO
 
-说明：本 TODO 用于把 `carrier-disk-gateway.agi2030.online` 调整为安装优先的公开入口，并把 Windows 纳入正式宿主支持；macOS 暂时按 GitHub Actions macOS-only 例外构建产出的社区/实验包展示。实现时继续遵守“组件可插拔、内存使用最小化”的项目原则：平台 catalog、安装命令、打包脚本和服务管理脚本都应可替换，不把供应商、平台或发布源写死到 Rust 核心里。
+说明：本 TODO 用于把 `carrier-disk-gateway.agi2030.online` 调整为安装优先的公开入口，并把 Windows 纳入正式宿主支持；macOS 仍作为社区/实验包展示，但实际构建由 GitHub Actions 在 self-hosted build-runner 容器中完成。实现时继续遵守“组件可插拔、内存使用最小化”的项目原则：平台 catalog、安装命令、打包脚本和服务管理脚本都应可替换，不把供应商、平台或发布源写死到 Rust 核心里。
 
 ## 角色分工
 
@@ -90,7 +90,7 @@
 **状态:** pending
 **目标:** CI 至少覆盖 catalog、Cloudflare public fingerprint、原生打包脚本 smoke。
 **Coding 指导:** 先做不依赖交叉编译工具链的 smoke；Windows/macOS 真机运行作为 release checklist gate。
-**验收方法:** `.47` 本地 release gate 能跑通；macOS `x86_64` 与 `arm64` 社区/实验包由 GitHub Actions macOS-only workflow 生成，下载后通过 `CCBG_RELEASE_MACOS_ASSET_DIR` 合并回 `.47` release 目录。
+**验收方法:** `.47` 本地 release gate 能跑通；macOS `x86_64` 与 `arm64` 社区/实验包由 GitHub Actions self-hosted build-runner workflow 生成，下载后通过 `CCBG_RELEASE_MACOS_ASSET_DIR` 合并回 `.47` release 目录。
 **验收标准:** `git diff --check`、public fingerprint、license check、native packaging smoke 全部通过。
 **依赖:** WS-002, PKG-001
 **不做事项:** 不在 CI 保存真实签名证书或 GitHub release token。

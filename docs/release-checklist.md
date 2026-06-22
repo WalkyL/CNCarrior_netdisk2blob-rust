@@ -35,7 +35,7 @@
 - [x] 容器镜像构建文件已显式复制 Admin HTML
 - [x] 已有本地 release 流程：`scripts/check-release-ready.sh` 与 `scripts/release-local.sh`
 - [x] 所有 release 编译入口收敛到 `.47`
-- [x] GitHub 默认只负责分支、tag、可选 Release 页面和发布记录；当前 macOS 发布资产走 GitHub Actions macOS-only 例外构建入口
+- [x] GitHub 默认只负责分支、tag、可选 Release 页面和发布记录；当前 macOS 发布资产由 GitHub Actions 在 self-hosted build-runner 容器中构建
 - [x] Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认走 `.47` 或受控局域网 runner
 - [x] 只打 tag 或只创建 GitHub Release 页面不算发版完成，必须让 `/downloads/latest/*` 指到新资产并通过 smoke
 - [ ] 生成本次正式 release 的 provenance 文件
@@ -185,7 +185,7 @@ LXC 包验收必须确认:
 - [ ] `.43` 全量人工验收全部通过
 - [ ] release 产物与 SHA256 已生成
 - [ ] provenance 已生成
-- [ ] macOS `x86_64` 与 `arm64` 社区/实验包已由 GitHub Actions macOS-only workflow 生成，并已下载合并回 `.47` release 目录
+- [ ] macOS `x86_64` 与 `arm64` 社区/实验包已由 GitHub Actions self-hosted build-runner workflow 生成，并已下载合并回 `.47` release 目录
 - [ ] 回滚包 / 上一个稳定版本可用
 - [ ] 发布记录已落文档
 - [ ] Windows/macOS 后台常驻路径至少经过对应真机 smoke
@@ -209,7 +209,6 @@ LXC 包验收必须确认:
 截至 2026-06-01：
 
 - GitHub Actions 不再承担通用 CI、Linux/Windows/OpenWrt 发版或 Cloudflare 部署
-- GitHub Actions 不再承担通用 CI、Linux/Windows/OpenWrt 发版或 Cloudflare 部署
-- 当前本机和局域网没有 macOS 构建器，macOS 发布资产走 GitHub Actions macOS-only 例外构建入口
+- macOS 发布资产走 GitHub Actions self-hosted build-runner 容器入口，不依赖 GitHub-hosted macOS runner
 - Linux/Windows/OpenWrt release gate 与 Cloudflare 部署改为 `.47` 本地脚本；macOS 产物下载回 `.47` 后进入同一校验和 `/downloads/latest/*` 发布链路
 - macOS 暂时降级为社区/实验包

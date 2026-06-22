@@ -5,9 +5,10 @@
 GitHub 在 CCBG 项目里默认只承担版本管理职责：保存源码、分支、tag、issue 模板和
 可选 GitHub Release 页面记录。Linux、OpenWrt、Windows、容器 tar/镜像二进制和
 Cloudflare 公开站点部署不依赖 GitHub Actions 自动执行，统一由 `.47` 发布构建主机
-或受控局域网 runner 运行脚本。当前本机和局域网没有 macOS 构建器，所以发布时 macOS
-资产固定走 GitHub Actions 的 macOS-only 例外构建入口；该例外只覆盖 macOS，不恢复
-通用 GitHub CI 或通用发版。macOS 资产仍必须进入同一 release 校验和
+或受控局域网 runner 运行脚本。macOS 资产仍通过 GitHub Actions 触发，但实际编译在
+配置好的 self-hosted build-runner 容器 `localhost/product-build-runner:latest` 内完成；
+该入口只覆盖 macOS，不恢复通用 GitHub CI 或通用发版。macOS 资产仍必须进入同一
+release 校验和
 `/downloads/latest/*` 发布链路。
 
 源码一期按公开仓库交付，但仓库不是 MIT 开源仓库。它采用商业核心、公开材料、
@@ -43,8 +44,9 @@ Cloudflare 公开站点部署不依赖 GitHub Actions 自动执行，统一由 `
 推送到 GitHub 本身不会触发 Linux/OpenWrt/Windows/容器构建，也不会触发
 Cloudflare 部署。只打 tag 或只创建 GitHub Release 页面不算发版完成；必须先在本机
 或受控局域网 runner 跑 release gate、生成发布物、同步发布资产，并确认公网
-`/downloads/latest/*` 指向新资产后，才算完成发版。macOS 资产由 macOS-only GitHub
-Actions 构建后，也必须下载回发布流程并参与同一校验、上传和下载 smoke。
+`/downloads/latest/*` 指向新资产后，才算完成发版。macOS 资产由 GitHub Actions 在
+self-hosted build-runner 容器中构建后，也必须下载回发布流程并参与同一校验、上传和
+下载 smoke。
 
 ## 本地 release gate
 
@@ -91,9 +93,9 @@ CCBG_RELEASE_BUILD_OPENWRT=true \
 scripts/release-local.sh v0.1.7
 ```
 
-macOS `x86_64` / `arm64` 当前由 GitHub Actions macOS-only workflow 产出，并按社区/
-实验包发布。它们未签名、未公证、未经过本项目控制的 macOS 真机 smoke。发布人必须
-下载 GitHub Actions 产物并合并回本地 release 目录：
+macOS `x86_64` / `arm64` 当前由 GitHub Actions 在 self-hosted build-runner 容器中产出，
+并按社区/实验包发布。它们未签名、未公证、未经过本项目控制的 macOS 真机 smoke。
+发布人必须下载 GitHub Actions 产物并合并回本地 release 目录：
 
 ```bash
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \
@@ -128,7 +130,7 @@ runner，不走 GitHub Actions。当前构建收敛到 `192.168.1.47`：
 | Podman `x86/x64` | `.47` | `podman build -f deploy/Containerfile .` |
 | Windows `x86_64` | `.47` | `CCBG_RELEASE_BUILD_WINDOWS=true scripts/release-local.sh <tag>` |
 | OpenWrt `arm64` | `.47` | `CCBG_RELEASE_BUILD_OPENWRT=true scripts/release-local.sh <tag>` |
-| macOS `x86_64/arm64` | GitHub Actions macOS-only exception, then merged on `.47` | `CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
+| macOS `x86_64/arm64` | self-hosted build-runner container on the configured LAN runner, then merged on `.47` | `CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
 | STM32 client-only 示例 | `.47` | `scripts/check-stm32-client-example.sh` |
 | ESP32-S3 client-only 示例 | `.47` | `scripts/check-esp32-s3-client-example.py`；如需要 ESP-IDF 真编译，也只在 `.47` 上执行 |
 
@@ -197,11 +199,10 @@ CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY=true scripts/deploy-cloudflare-public.sh producti
 ## 机器边界
 
 - `192.168.1.43` 是 CCBG 验收测试机，用来跑发布候选版本和人工全量验收。
-- `192.168.1.43` 是 CCBG 验收测试机，用来跑发布候选版本和人工全量验收。
 - `192.168.1.47` 是 CCBG 默认发布构建主机，工作区为
   `C:\Users\walky\workspaces\carrier-cloud-blob-gateway`。
-- 当前本机和局域网没有 macOS 构建器；macOS 发布资产走 GitHub Actions macOS-only
-  例外构建入口，产物下载回 `.47` 后再进入统一发布链路。
+- macOS 发布资产走 GitHub Actions self-hosted build-runner 容器入口，产物下载回 `.47`
+  后再进入统一发布链路。
 - `192.168.1.46` 不再保留 CCBG 项目代码，也不再运行 CCBG 编译任务。
 
 ## 发布注意事项

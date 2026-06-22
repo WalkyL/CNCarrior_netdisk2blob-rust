@@ -59,7 +59,7 @@ STM32 更适合作为客户端消费本地 S3 API，而不是承载完整控制�
 
 - GitHub 公开仓库
 - 商业核心边界 + 公开材料许可 + 个人非商业源码审查申请
-- `.47` 本地 release gate；当前 macOS 包为 GitHub Actions macOS-only 例外构建产出的社区/实验包
+- `.47` 本地 release gate；当前 macOS 包由 GitHub Actions self-hosted build-runner 容器产出的社区/实验包
 
 ## 系统目标
 
