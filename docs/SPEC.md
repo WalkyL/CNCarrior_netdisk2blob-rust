@@ -89,3 +89,68 @@ Let authenticated Admin Web operators reveal and copy one application's S3 crede
 - No new environment variables.
 - S3 secrets remain stored in the existing control-plane state or default S3 config.
 - Plaintext secrets are still excluded from `/api/applications` list responses.
+
+## SMB Sidecar Runtime Isolation
+
+### Objective
+
+Keep `ccbg-smb-sidecar-sync.service` as a short-lived reconcile trigger while moving long-running
+`rclone mount` and `smbd` processes out of that oneshot service cgroup.
+
+### Interface
+
+- `deploy/lxc/ccbg-smb-sidecar.py sync` still owns reconcile logic and `status.json` updates.
+- Long-running SMB sidecar processes are launched as dedicated transient systemd service units.
+- Runtime status continues to expose `pid`, `running`, `mounted`, and log file paths for each
+  managed process/share.
+
+### Data Flow
+
+1. `ccbg-smb-sidecar-sync.service` runs `ccbg-smb-sidecar.py sync`.
+2. The script computes the desired sidecar runtime spec and compares it with the stored metadata.
+3. When reconciliation is needed, the script stops prior managed runtime units, unmounts stale
+   shares, and launches fresh transient units for `smbd` and each `rclone mount`.
+4. `status.json` and `managed-runtime.json` record the new runtime state without leaving the child
+   processes inside the `sync.service` cgroup.
+
+### Error Handling
+
+- If `systemd-run` is unavailable, the script falls back to the previous direct-process launch
+  behavior.
+- A runtime-spec version bump forces one post-upgrade reconcile so older direct-process deployments
+  are migrated to transient units on the next sync pass.
+
+### Configuration
+
+- No new operator-facing environment variables.
+- Transient unit names are derived from share ids and do not require manual configuration.
+
+## HTTP 5xx Diagnostic Logging
+
+### Objective
+
+Replace generic `tower_http` 5xx trace lines with higher-signal request logs that include route
+context and the concrete application error message.
+
+### Interface
+
+- All `gatewayd` HTTP listeners use a shared custom trace layer.
+- `ApiError`, `DataPlaneApiError`, `S3Error`, and `ControlApiError` emit an additional structured
+  warning when returning a `5xx` response.
+
+### Data Flow
+
+1. The custom trace layer creates a span with `method`, `route`, and `query`.
+2. If a response returns `5xx`, the trace layer logs `status` and `latency_ms` on that span.
+3. When the response body is built from an internal error type, the error adapter logs the
+   response class plus the concrete error code/message.
+
+### Error Handling
+
+- Non-5xx responses keep the current low-noise behavior.
+- Transport failures before a response still log through the custom trace `on_failure` hook.
+
+### Configuration
+
+- No new environment variables.
+- Existing `RUST_LOG` filtering remains the control point for surfacing the new warning lines.

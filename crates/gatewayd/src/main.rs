@@ -56,7 +56,9 @@ use axum::routing::any;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{ConnectInfo, DefaultBodyLimit, Multipart, OriginalUri, Path, Query, State},
+    extract::{
+        ConnectInfo, DefaultBodyLimit, MatchedPath, Multipart, OriginalUri, Path, Query, State,
+    },
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request as AxumRequest, StatusCode, Uri,
         header::{
@@ -132,8 +134,8 @@ use tokio::{
 };
 #[cfg(test)]
 use tower::util::ServiceExt;
-use tower_http::trace::TraceLayer;
-use tracing::{info, warn};
+use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
+use tracing::{Span, info, info_span, warn};
 use tracing_subscriber::fmt::MakeWriter;
 
 type DynBackend = Arc<dyn BlobBackend>;
@@ -6442,10 +6444,13 @@ impl IntoResponse for ApiError {
             BlobError::NotFound(_) => (StatusCode::NOT_FOUND, AdminApiErrorCode::NotFound),
             BlobError::BodyStream(_) => (StatusCode::BAD_REQUEST, AdminApiErrorCode::BadRequest),
         };
+        let message = error.to_string();
+        let error_code = format!("{code:?}");
+        log_gateway_error_response(status, "admin_api", Some(error_code.as_str()), &message);
 
         (
             status,
-            Json(AdminApiErrorResponse::with_code(error.to_string(), code)),
+            Json(AdminApiErrorResponse::with_code(message, code)),
         )
             .into_response()
     }
@@ -6486,6 +6491,7 @@ impl From<BlobError> for DataPlaneApiError {
 
 impl IntoResponse for DataPlaneApiError {
     fn into_response(self) -> Response {
+        log_gateway_error_response(self.status, "data_plane_api", None, &self.message);
         (self.status, Json(json!({ "error": self.message }))).into_response()
     }
 }
@@ -6698,6 +6704,7 @@ fn slice_body_by_range(body: ObjectBody, range: ByteRangeInclusive) -> ObjectBod
 
 impl IntoResponse for S3Error {
     fn into_response(self) -> Response {
+        log_gateway_error_response(self.status, "s3_api", Some(self.code), &self.message);
         let body = format!("{S3_XML_DECLARATION}{}", s3_error_xml_payload(&self));
 
         let mut headers = HeaderMap::new();
@@ -6724,6 +6731,85 @@ fn s3_error_xml_payload(error: &S3Error) -> String {
         xml_escape(&error.message),
         REQUEST_ID
     )
+}
+
+fn request_route_label<B>(request: &AxumRequest<B>) -> String {
+    request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str)
+        .unwrap_or_else(|| request.uri().path())
+        .to_string()
+}
+
+fn log_gateway_error_response(
+    status: StatusCode,
+    error_kind: &'static str,
+    error_code: Option<&str>,
+    message: &str,
+) {
+    if !status.is_server_error() {
+        return;
+    }
+    match error_code {
+        Some(error_code) => warn!(
+            status = status.as_u16(),
+            error_kind,
+            error_code,
+            error_message = message,
+            "returning error response"
+        ),
+        None => warn!(
+            status = status.as_u16(),
+            error_kind,
+            error_message = message,
+            "returning error response"
+        ),
+    }
+}
+
+macro_rules! gateway_http_trace_layer {
+    () => {{
+        TraceLayer::new_for_http()
+            .make_span_with(|request: &AxumRequest<Body>| {
+                let route = request_route_label(request);
+                let query = request.uri().query().unwrap_or("");
+                info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    route = %route,
+                    query = %query
+                )
+            })
+            .on_response(|response: &Response, latency: Duration, span: &Span| {
+                let status = response.status();
+                if status.is_server_error() {
+                    warn!(
+                        parent: span,
+                        status = status.as_u16(),
+                        latency_ms = latency.as_millis() as u64,
+                        "http request returned server error"
+                    );
+                }
+            })
+            .on_failure(
+                |failure_classification: ServerErrorsFailureClass,
+                 latency: Duration,
+                 span: &Span| {
+                    if !matches!(
+                        failure_classification,
+                        ServerErrorsFailureClass::StatusCode(_)
+                    ) {
+                        warn!(
+                            parent: span,
+                            classification = ?failure_classification,
+                            latency_ms = latency.as_millis() as u64,
+                            "http request failed before response"
+                        );
+                    }
+                },
+            )
+    }};
 }
 
 struct ParsedAuthorization {
@@ -6934,7 +7020,7 @@ async fn main() -> Result<()> {
         )
         .with_state(state)
         .layer(DefaultBodyLimit::max(request_body_limit_bytes(&config)))
-        .layer(TraceLayer::new_for_http());
+        .layer(gateway_http_trace_layer!());
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr)
         .await
@@ -7230,7 +7316,7 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             state.clone(),
             capture_admin_client_ip,
         ))
-        .layer(TraceLayer::new_for_http());
+        .layer(gateway_http_trace_layer!());
     tokio::spawn(async move {
         if let Err(error) = axum::serve(
             admin_listener,
@@ -7260,7 +7346,7 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             state.clone(),
             require_control_api_key,
         ))
-        .layer(TraceLayer::new_for_http());
+        .layer(gateway_http_trace_layer!());
     tokio::spawn(async move {
         if let Err(error) = axum::serve(metrics_listener, metrics_app).await {
             warn!(error = %error, "metrics service exited");
@@ -7279,7 +7365,7 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         let callback_app = Router::new()
             .route("/auth/onedrive/callback", get(handle_onedrive_callback))
             .with_state(state.clone())
-            .layer(TraceLayer::new_for_http());
+            .layer(gateway_http_trace_layer!());
         tokio::spawn(async move {
             if let Err(error) = axum::serve(callback_listener, callback_app).await {
                 warn!(error = %error, "onedrive callback service exited");
@@ -7364,6 +7450,13 @@ impl ControlApiError {
 
 impl IntoResponse for ControlApiError {
     fn into_response(self) -> Response {
+        let error_code = format!("{:?}", self.code);
+        log_gateway_error_response(
+            self.status,
+            "control_api",
+            Some(error_code.as_str()),
+            &self.message,
+        );
         let mut response = (
             self.status,
             Json(AdminApiErrorResponse::with_code(self.message, self.code)),
@@ -33084,6 +33177,15 @@ mod tests {
             ))
             .display()
             .to_string()
+    }
+
+    #[test]
+    fn request_route_label_falls_back_to_uri_path() {
+        let request = AxumRequest::builder()
+            .uri("/objects/root/demo.txt?prefix=demo")
+            .body(Body::empty())
+            .expect("request should build");
+        assert_eq!(request_route_label(&request), "/objects/root/demo.txt");
     }
 
     #[test]

@@ -9,6 +9,7 @@ import json
 import os
 import pathlib
 import pwd
+import shlex
 import shutil
 import signal
 import socket
@@ -20,6 +21,8 @@ from typing import Any
 
 GROUP_NAME = "ccbg-smb"
 STATUS_SCHEMA_VERSION = 1
+RUNTIME_SPEC_VERSION = 2
+SMBD_UNIT_NAME = "ccbg-smb-sidecar-smbd.service"
 
 
 def now_ms() -> int:
@@ -109,6 +112,78 @@ def normalize_pid(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def managed_unit_name(role: str, identifier: str | None = None) -> str:
+    if not identifier:
+        return SMBD_UNIT_NAME
+    slug = "".join(char.lower() if char.isalnum() else "-" for char in identifier).strip("-")
+    slug = "-".join(part for part in slug.split("-") if part) or "default"
+    suffix = hashlib.sha1(identifier.encode("utf-8")).hexdigest()[:8]
+    return f"ccbg-smb-sidecar-{role}-{slug}-{suffix}.service"
+
+
+def systemd_run_available() -> bool:
+    return shutil.which("systemd-run") is not None and shutil.which("systemctl") is not None
+
+
+def systemd_unit_main_pid(unit_name: str) -> int | None:
+    if not unit_name or not systemd_run_available():
+        return None
+    result = subprocess.run(
+        ["systemctl", "show", unit_name, "--property", "MainPID", "--value"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    pid = normalize_pid(result.stdout.strip())
+    return pid or None
+
+
+def stop_systemd_unit(unit_name: str | None) -> None:
+    if not unit_name or not systemd_run_available():
+        return
+    subprocess.run(
+        ["systemctl", "stop", unit_name],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.run(
+        ["systemctl", "reset-failed", unit_name],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def start_transient_unit(unit_name: str, command: list[str], log_path: pathlib.Path) -> int:
+    ensure_dir(log_path.parent)
+    stop_systemd_unit(unit_name)
+    shell_command = (
+        f"exec >>{shlex.quote(str(log_path))} 2>&1; exec "
+        + " ".join(shlex.quote(part) for part in command)
+    )
+    run_checked(
+        [
+            "systemd-run",
+            "--collect",
+            "--quiet",
+            "--service-type=exec",
+            "--unit",
+            unit_name,
+            "/bin/bash",
+            "-lc",
+            shell_command,
+        ]
+    )
+    time.sleep(1.0)
+    pid = systemd_unit_main_pid(unit_name)
+    if not pid or not pid_exists(pid):
+        raise RuntimeError(f"managed unit {unit_name} exited immediately; see {log_path}")
+    return pid
 
 
 def local_ipv4_interface_specs() -> list[str]:
@@ -324,6 +399,7 @@ def build_share_models(
         "runtime_root": runtime_root,
         "smb_conf_path": smb_conf_path,
         "rclone_conf_path": rclone_conf_path,
+        "smbd_unit_name": managed_unit_name("smbd"),
         "applications": applications,
         "bind_addr": bind_addr,
         "port": int(smb.get("port") or 445),
@@ -408,6 +484,7 @@ def build_share_models(
                 "guest_ok": bool(entry.get("guest_ok")),
                 "valid_usernames": share_usernames,
                 "mount_path": mount_path,
+                "unit_name": managed_unit_name("rclone", share_id),
                 "create_mask": str(entry.get("create_mask") or smb.get("create_mask") or "0660").strip()
                 or "0660",
                 "directory_mask": str(
@@ -430,6 +507,7 @@ def build_share_models(
 
 def runtime_spec_payload(model: dict[str, Any]) -> dict[str, Any]:
     return {
+        "runtime_spec_version": RUNTIME_SPEC_VERSION,
         "bind_addr": model["bind_addr"],
         "config_root": str(model["config_root"]),
         "create_mask": model["create_mask"],
@@ -675,6 +753,18 @@ def stop_previous_runtime(paths: dict[str, pathlib.Path]) -> None:
     share_states = previous.get("share_states") or []
     processes = previous.get("processes") or []
 
+    stopped_units = set()
+    for process in processes:
+        unit_name = str(process.get("unit_name") or "").strip()
+        if unit_name and unit_name not in stopped_units:
+            stop_systemd_unit(unit_name)
+            stopped_units.add(unit_name)
+    for share in share_states:
+        unit_name = str(share.get("unit_name") or "").strip()
+        if unit_name and unit_name not in stopped_units:
+            stop_systemd_unit(unit_name)
+            stopped_units.add(unit_name)
+
     for process in processes:
         pid = normalize_pid(process.get("pid"))
         terminate_pid(pid)
@@ -692,6 +782,9 @@ def stop_model_runtime(model: dict[str, Any]) -> None:
     smb_conf_path = str(model["smb_conf_path"])
     rclone_remotes = {f"ccbg-{share['id']}:{share['remote_path']}" for share in model["shares"]}
     mount_paths = {str(share["mount_path"]) for share in model["shares"]}
+    stop_systemd_unit(str(model.get("smbd_unit_name") or "").strip())
+    for share in model["shares"]:
+        stop_systemd_unit(str(share.get("unit_name") or "").strip())
 
     for proc_dir in pathlib.Path("/proc").iterdir():
         if not proc_dir.name.isdigit():
@@ -768,6 +861,7 @@ def start_rclone_mounts(model: dict[str, Any], group_entry: grp.struct_group) ->
                     "mount_path": str(mount_path),
                     "remote_path": share["remote_path"],
                     "read_only": share["read_only"],
+                    "unit_name": share["unit_name"],
                     "pid": None,
                     "mounted": False,
                     "running": False,
@@ -802,18 +896,24 @@ def start_rclone_mounts(model: dict[str, Any], group_entry: grp.struct_group) ->
         ]
         if share["read_only"]:
             cmd += ["--read-only"]
-        process = subprocess.Popen(
-            cmd,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        time.sleep(1.0)
-        if process.poll() is not None:
+        unit_name = str(share["unit_name"])
+        if systemd_run_available():
             log_handle.close()
-            raise RuntimeError(
-                f"rclone mount for share {share['id']} exited immediately; see {log_path}"
+            pid = start_transient_unit(unit_name, cmd, log_path)
+        else:
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
             )
+            time.sleep(1.0)
+            if process.poll() is not None:
+                log_handle.close()
+                raise RuntimeError(
+                    f"rclone mount for share {share['id']} exited immediately; see {log_path}"
+                )
+            pid = process.pid
         share_states.append(
             {
                 "id": share["id"],
@@ -821,10 +921,11 @@ def start_rclone_mounts(model: dict[str, Any], group_entry: grp.struct_group) ->
                 "mount_path": str(mount_path),
                 "remote_path": share["remote_path"],
                 "read_only": share["read_only"],
-                "pid": process.pid,
+                "pid": pid,
+                "unit_name": unit_name,
                 "mounted": mountpoint_active(mount_path),
-                "running": pid_exists(process.pid),
-                "rss_bytes": process_rss_bytes(process.pid),
+                "running": pid_exists(pid),
+                "rss_bytes": process_rss_bytes(pid),
                 "log_path": str(log_path),
             }
         )
@@ -840,15 +941,20 @@ def start_smbd(model: dict[str, Any]) -> tuple[int, str]:
     ensure_dir(pathlib.Path("/run/samba"))
     ensure_dir(pathlib.Path("/run/samba/ncalrpc"))
     log_path = log_dir / "smbd-launch.log"
+    command = [
+        "smbd",
+        "--foreground",
+        "--no-process-group",
+        "-s",
+        str(model["smb_conf_path"]),
+    ]
+    if systemd_run_available():
+        pid = start_transient_unit(str(model["smbd_unit_name"]), command, log_path)
+        return pid, str(log_path)
+
     log_handle = log_path.open("ab")
     process = subprocess.Popen(
-        [
-            "smbd",
-            "--foreground",
-            "--no-process-group",
-            "-s",
-            str(model["smb_conf_path"]),
-        ],
+        command,
         stdout=log_handle,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -1061,7 +1167,16 @@ def sync_runtime() -> int:
                 f"smbd started but did not accept connections on {model['bind_addr']}:{model['port']}"
             )
 
-        processes = [build_process_payload("smbd", smbd_pid, {"log_path": smbd_log_path})]
+        processes = [
+            build_process_payload(
+                "smbd",
+                smbd_pid,
+                {
+                    "unit_name": model["smbd_unit_name"],
+                    "log_path": smbd_log_path,
+                },
+            )
+        ]
         for share in share_states:
             processes.append(
                 build_process_payload(
@@ -1071,6 +1186,7 @@ def sync_runtime() -> int:
                         "share_id": share["id"],
                         "share_name": share["share_name"],
                         "mount_path": share["mount_path"],
+                        "unit_name": share["unit_name"],
                         "log_path": share["log_path"],
                     },
                 )

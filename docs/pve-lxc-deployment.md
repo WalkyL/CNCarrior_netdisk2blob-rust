@@ -63,6 +63,9 @@ sudo scripts/install.sh
 
 `--enable-smb-sidecar` 会把 Admin 里的 SMB 能力打开并准备自动挂接。安装后即使还没有 SMB 用户或 share，sidecar 也会先启动一个由 CCBG 管理的 `smbd`，默认监听 `0.0.0.0:445`。第一次使用时，用户进入 Admin 的 SMB 页面添加一个 SMB 用户即可；如果没有手工创建 share，控制面会自动生成 `CCBGRoot` 默认 root 共享，保存后由 systemd path/timer 自动重试并收敛到可用共享。
 
+从当前实现开始，`ccbg-smb-sidecar-sync.service` 只负责 reconcile；长时间运行的 `smbd` 和
+`rclone mount` 会被放进独立的 transient systemd units，不再留在 `sync.service` 的 cgroup 里。
+
 SMB sidecar 默认挂载根目录是 `/mnt/ccbg/smb/mounts`，配置和 runtime data 位于 `/var/lib/ccbg/smb-sidecar/`。这个挂载点避开 Ubuntu/Debian LXC 中 `fusermount3` AppArmor profile 对 `/srv`、`/var/lib` 等自定义 mount point 的常见拦截。
 
 如果部署在 PVE/LXC 或其它容器里，真实挂载 `CCBGRoot` 这类 rclone-backed SMB share 还需要 guest 能访问 `/dev/fuse`。没有 `/dev/fuse` 时，`--enable-smb-sidecar` 仍会安装依赖、启用 sidecar units，并先启动 CCBG 管理的 `smbd` 监听 `0.0.0.0:445`；但用户保存 SMB 用户并自动生成 `CCBGRoot` 后，rclone mount 会停在 FUSE 前置条件，`status.json.last_error` 会提示容器需要暴露 `/dev/fuse`。
@@ -136,6 +139,7 @@ SMB sidecar profile 额外验收:
 sudo systemctl status ccbg-smb-sidecar.path ccbg-smb-sidecar.timer --no-pager
 sudo systemctl start ccbg-smb-sidecar-sync.service
 sudo cat /var/lib/ccbg/smb-sidecar/status.json
+sudo systemctl list-units 'ccbg-smb-sidecar-*.service' --no-pager
 ```
 
 验收标准:
@@ -144,6 +148,7 @@ sudo cat /var/lib/ccbg/smb-sidecar/status.json
 - `--enable-smb-sidecar` 安装后 path/timer 应启用。
 - SMB 配置完整时，`status.json` 应显示 `state=running`、`listener_ready=true`，且 share mount 计数等于启用 share 数。
 - SMB 用户/share 尚未配置时，`status.json` 应显示 `state=running`、`listener_ready=true`、share 计数为 `0`，且 Admin 的 SMB Runtime 区块能展示当前监听状态。
+- `ccbg-smb-sidecar-sync.service` 可以是 `inactive (dead)`；真正的长生命周期进程应出现在独立的 `ccbg-smb-sidecar-*.service` transient units 中。
 - LXC guest 准备挂载 share 前应能访问 `/dev/fuse`；否则 `CCBGRoot` 会自动生成，但 share mount 不会成功。
 
 ## 升级
