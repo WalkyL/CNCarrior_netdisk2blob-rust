@@ -201,3 +201,38 @@ context and the concrete application error message.
 
 - No new environment variables.
 - Existing `RUST_LOG` filtering remains the control point for surfacing the new warning lines.
+
+## Object Delete Convergence
+
+### Objective
+
+Make object deletion idempotent when backend data is already gone, and ensure stale-object cleanup
+removes the full metadata set instead of leaving orphaned logical records behind.
+
+### Interface
+
+- S3 `DeleteObject` continues using the existing endpoint and auth model.
+- Admin `POST /api/object-actions` delete continues using the existing request shape.
+- Admin stale metadata cleanup endpoints keep the same routes:
+  - `POST /api/object-placement/delete-stale`
+  - `POST /api/object-placement/delete-stale-bulk`
+
+### Data Flow
+
+1. Delete loads the current placement, logical object, and protection-plan metadata.
+2. Backend delete is attempted against the recorded home provider.
+3. If backend delete returns `NotFound`, the operation still converges as a successful delete.
+4. Metadata cleanup removes `object_placements`, `logical_objects`, and
+   `object_protection_plans` in one metadata-store transaction.
+5. Replication delete jobs and delete WAL metadata still follow the existing path.
+
+### Error Handling
+
+- Backend `NotFound` on delete is treated as idempotent success.
+- Other backend delete failures still abort the delete and preserve metadata.
+- Stale metadata cleanup still refuses to run when the recorded home object is confirmed to exist.
+
+### Configuration
+
+- No new environment variables.
+- No secret handling changes.

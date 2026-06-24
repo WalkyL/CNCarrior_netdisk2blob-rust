@@ -15015,10 +15015,12 @@ async fn run_object_action(
                 previous_protection_plan_record.clone(),
             )
             .await?;
-            backend.delete_object(&bucket, &key).await?;
-            delete_persisted_object_home_provider(&state, &bucket, &key)?;
-            delete_object_protection_plan(&state, &bucket, &key)?;
-            delete_logical_object_record(&state, &bucket, &key)?;
+            match backend.delete_object(&bucket, &key).await {
+                Ok(()) => {}
+                Err(error) if should_treat_delete_not_found_as_success(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
+            delete_object_metadata_records(&state, &bucket, &key)?;
             replication_jobs.extend(enqueue_replication_delete_for_object(
                 &state,
                 home_provider,
@@ -17688,6 +17690,25 @@ fn delete_persisted_object_home_provider(
                 "failed to delete object placement for {bucket}/{key}: {error}"
             ))
         })
+}
+
+fn delete_object_metadata_records(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<(), BlobError> {
+    state
+        .metadata_store
+        .delete_object_metadata(bucket, key)
+        .map_err(|error| {
+            BlobError::Upstream(format!(
+                "failed to delete object metadata for {bucket}/{key}: {error}"
+            ))
+        })
+}
+
+fn should_treat_delete_not_found_as_success(error: &BlobError) -> bool {
+    matches!(error, BlobError::NotFound(_))
 }
 
 fn restore_previous_object_write_state(
@@ -22307,10 +22328,7 @@ async fn delete_stale_object_placement_payload(
         ObjectPlacementHomeObjectCheck::Missing => {}
     }
 
-    state
-        .metadata_store
-        .delete_object_placement(bucket, key)
-        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+    delete_object_metadata_records(state, bucket, key)?;
 
     Ok(DeleteStaleObjectPlacementPayload {
         provider: record.provider.clone(),
@@ -22318,7 +22336,7 @@ async fn delete_stale_object_placement_payload(
         bucket: record.bucket,
         key: record.key,
         deleted: true,
-        message: "已删除 placement 元数据；底层云盘文件未删除。".to_string(),
+        message: "已删除残留对象元数据；底层云盘文件未删除。".to_string(),
     })
 }
 
@@ -22373,7 +22391,7 @@ async fn delete_stale_object_placement_bulk_payload(
     let failed_count = requested.saturating_sub(deleted_count);
     let message = match (deleted_count, failed_count) {
         (0, failed) => format!("批量删除未成功：{failed} 条都未删除。"),
-        (deleted, 0) => format!("批量删除完成：已删除 {deleted} 条 placement 元数据。"),
+        (deleted, 0) => format!("批量删除完成：已删除 {deleted} 条残留对象元数据。"),
         (deleted, failed) => {
             format!("批量删除部分完成：已删除 {deleted} 条，{failed} 条未删除。")
         }
@@ -31617,15 +31635,13 @@ async fn delete_object(
     .await
     .map_err(map_backend_error_to_s3)?;
 
-    home_backend
-        .delete_object(&bucket, &key)
-        .await
-        .map_err(|error| map_object_error(error, &bucket, &key))?;
+    match home_backend.delete_object(&bucket, &key).await {
+        Ok(()) => {}
+        Err(error) if should_treat_delete_not_found_as_success(&error) => {}
+        Err(error) => return Err(map_object_error(error, &bucket, &key)),
+    }
 
-    delete_persisted_object_home_provider(&state, &bucket, &key)
-        .map_err(map_backend_error_to_s3)?;
-    delete_object_protection_plan(&state, &bucket, &key).map_err(map_backend_error_to_s3)?;
-    delete_logical_object_record(&state, &bucket, &key).map_err(map_backend_error_to_s3)?;
+    delete_object_metadata_records(&state, &bucket, &key).map_err(map_backend_error_to_s3)?;
 
     let jobs = enqueue_replication_delete_for_object(
         &state,
@@ -49193,6 +49209,36 @@ mod tests {
             .metadata_store
             .upsert_object_placement("stub", "root", "docs/stale.txt", 123)
             .expect("stale placement should persist");
+        state
+            .metadata_store
+            .upsert_logical_object(&LogicalObjectRecord {
+                bucket: "root".to_string(),
+                key: "docs/stale.txt".to_string(),
+                etag: None,
+                application_id: Some("cleanup-app".to_string()),
+                encrypted: false,
+                encryption_profile_id: None,
+                algorithm: None,
+                key_id: None,
+                key_source_kind: None,
+                key_source_ref: None,
+                chunk_plaintext_bytes: None,
+                plaintext_size: 9,
+                stored_size: 9,
+                logical_content_type: Some("text/plain".to_string()),
+                updated_at_unix_ms: 124,
+            })
+            .expect("stale logical should persist");
+        state
+            .metadata_store
+            .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
+                bucket: "root".to_string(),
+                key: "docs/stale.txt".to_string(),
+                sync_targets_csv: "telecom".to_string(),
+                fallback_read_order_csv: "telecom".to_string(),
+                updated_at_unix_ms: 125,
+            })
+            .expect("stale protection plan should persist");
 
         let Json(payload) = delete_stale_object_placement(
             State(state.clone()),
@@ -49210,13 +49256,27 @@ mod tests {
         assert_eq!(payload.key, "docs/stale.txt");
         assert_eq!(
             payload.message,
-            "已删除 placement 元数据；底层云盘文件未删除。"
+            "已删除残留对象元数据；底层云盘文件未删除。"
         );
         assert!(
             state
                 .metadata_store
                 .object_placement("root", "docs/stale.txt")
                 .expect("placement lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .logical_object("root", "docs/stale.txt")
+                .expect("logical lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .object_protection_plan("root", "docs/stale.txt")
+                .expect("plan lookup should succeed")
                 .is_none()
         );
     }
@@ -49346,6 +49406,158 @@ mod tests {
             .expect("failed live entry should be present");
         assert!(!failed_entry.deleted);
         assert!(failed_entry.message.contains("仍然存在"));
+    }
+
+    #[tokio::test]
+    async fn object_action_delete_cleans_metadata_when_backend_object_is_already_missing() {
+        let state = test_state();
+        state
+            .metadata_store
+            .upsert_object_placement("stub", "root", "docs/missing-delete.txt", 100)
+            .expect("placement should persist");
+        state
+            .metadata_store
+            .upsert_logical_object(&LogicalObjectRecord {
+                bucket: "root".to_string(),
+                key: "docs/missing-delete.txt".to_string(),
+                etag: None,
+                application_id: Some("default".to_string()),
+                encrypted: false,
+                encryption_profile_id: None,
+                algorithm: None,
+                key_id: None,
+                key_source_kind: None,
+                key_source_ref: None,
+                chunk_plaintext_bytes: None,
+                plaintext_size: 7,
+                stored_size: 7,
+                logical_content_type: Some("text/plain".to_string()),
+                updated_at_unix_ms: 101,
+            })
+            .expect("logical should persist");
+        state
+            .metadata_store
+            .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
+                bucket: "root".to_string(),
+                key: "docs/missing-delete.txt".to_string(),
+                sync_targets_csv: "telecom".to_string(),
+                fallback_read_order_csv: "telecom".to_string(),
+                updated_at_unix_ms: 102,
+            })
+            .expect("plan should persist");
+
+        run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Delete {
+                bucket: "root".to_string(),
+                key: "docs/missing-delete.txt".to_string(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect("admin delete should treat backend not found as success");
+
+        assert!(
+            state
+                .metadata_store
+                .object_placement("root", "docs/missing-delete.txt")
+                .expect("placement lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .logical_object("root", "docs/missing-delete.txt")
+                .expect("logical lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .object_protection_plan("root", "docs/missing-delete.txt")
+                .expect("plan lookup should succeed")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn s3_delete_cleans_metadata_when_backend_object_is_already_missing() {
+        let state = test_state();
+        state
+            .metadata_store
+            .upsert_object_placement("stub", "root", "docs/missing-s3-delete.txt", 100)
+            .expect("placement should persist");
+        state
+            .metadata_store
+            .upsert_logical_object(&LogicalObjectRecord {
+                bucket: "root".to_string(),
+                key: "docs/missing-s3-delete.txt".to_string(),
+                etag: None,
+                application_id: Some("default".to_string()),
+                encrypted: false,
+                encryption_profile_id: None,
+                algorithm: None,
+                key_id: None,
+                key_source_kind: None,
+                key_source_ref: None,
+                chunk_plaintext_bytes: None,
+                plaintext_size: 8,
+                stored_size: 8,
+                logical_content_type: Some("text/plain".to_string()),
+                updated_at_unix_ms: 101,
+            })
+            .expect("logical should persist");
+        state
+            .metadata_store
+            .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
+                bucket: "root".to_string(),
+                key: "docs/missing-s3-delete.txt".to_string(),
+                sync_targets_csv: "telecom".to_string(),
+                fallback_read_order_csv: "telecom".to_string(),
+                updated_at_unix_ms: 102,
+            })
+            .expect("plan should persist");
+
+        let uri: Uri = "/root/docs/missing-s3-delete.txt"
+            .parse()
+            .expect("delete uri should parse");
+        let headers = signed_headers(&state.config, &Method::DELETE, &uri, &[], &[]);
+
+        delete_object(
+            State(state.clone()),
+            Path(("root".to_string(), "docs/missing-s3-delete.txt".to_string())),
+            Method::DELETE,
+            OriginalUri(uri),
+            headers,
+        )
+        .await
+        .expect("s3 delete should treat backend not found as success");
+
+        assert!(
+            state
+                .metadata_store
+                .object_placement("root", "docs/missing-s3-delete.txt")
+                .expect("placement lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .logical_object("root", "docs/missing-s3-delete.txt")
+                .expect("logical lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .object_protection_plan("root", "docs/missing-s3-delete.txt")
+                .expect("plan lookup should succeed")
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -1515,7 +1515,7 @@ Copyright (c) 2026 walky
       </div>
       <div class="object-browser-shell">
         <h3>Placement 记录 / 元数据清理</h3>
-        <p>这里列的是网关持久化的 home-provider 元数据，不是当前读来源的实时目录。每一行都会直接到记录中的归属云盘做一次存在性检查。只有状态显示“底层对象已不存在”的记录，才允许删除 placement。删除 placement 只会删除网关元数据，不会删除任何云盘文件。当前页里这类记录可以多选后批量删除。</p>
+        <p>这里列的是网关持久化的 home-provider 元数据，不是当前读来源的实时目录。每一行都会直接到记录中的归属云盘做一次存在性检查。只有状态显示“底层对象已不存在”的记录，才允许删除残留对象元数据。这个动作只会删除网关里的 placement、logical object、protection plan 元数据，不会删除任何云盘文件。当前页里这类记录可以多选后批量删除。</p>
         <div class="object-placement-record-controls">
           <div>
             <label>云盘</label>
@@ -10926,14 +10926,14 @@ Copyright (c) 2026 walky
       const selectedRows = selectedObjectPlacementRecordRows(payload);
       button.disabled = selectedRows.length === 0;
       if (!payload) {
-        summaryNode.textContent = '加载后可勾选“底层对象已不存在”的记录，再批量删除 placement 元数据。';
+        summaryNode.textContent = '加载后可勾选“底层对象已不存在”的记录，再批量删除残留对象元数据。';
         return;
       }
       if (!selectableRows.length) {
-        summaryNode.textContent = '当前页没有可批量删除的 placement 记录。只有“底层对象已不存在”的记录才允许删除。';
+        summaryNode.textContent = '当前页没有可批量删除的残留对象记录。只有“底层对象已不存在”的记录才允许删除。';
         return;
       }
-      summaryNode.textContent = `当前页可批量删除 ${selectableRows.length} 条 · 已选 ${selectedRows.length} 条。批量删除只会删除 placement 元数据，不会删除任何云盘文件。`;
+      summaryNode.textContent = `当前页可批量删除 ${selectableRows.length} 条 · 已选 ${selectedRows.length} 条。批量删除只会删除残留对象元数据，不会删除任何云盘文件。`;
     }
     function objectPlacementRecordStateMeta(row) {
       const state = String(row?.home_object_state || '').trim();
@@ -10948,7 +10948,7 @@ Copyright (c) 2026 walky
         return {
           pillClass: 'blocked',
           pillText: '底层对象已不存在',
-          note: '这条记录现在只剩 placement 元数据。确认无误后，可以删除 placement，让网关不再把它当作 home provider。',
+          note: '这条记录现在只剩残留对象元数据。确认无误后，可以删除 placement、logical object、protection plan，让网关不再把它当作现存对象。',
         };
       }
       return {
@@ -11119,18 +11119,18 @@ Copyright (c) 2026 walky
       if (!provider || !bucket || !key) {
         return;
       }
-      const confirmed = window.confirm(`只会删除网关里的 placement 元数据，不会删除任何云盘文件。\\n\\n确认删除 ${bucket}/${key} 的 placement 吗？`);
+      const confirmed = window.confirm(`只会删除网关里的残留对象元数据，不会删除任何云盘文件。\\n\\n确认删除 ${bucket}/${key} 的残留元数据吗？`);
       if (!confirmed) {
         return;
       }
-      setObjectPlacementRecordsFeedback(`正在删除 ${bucket}/${key} 的 placement 元数据…`, 'warn');
+      setObjectPlacementRecordsFeedback(`正在删除 ${bucket}/${key} 的残留对象元数据…`, 'warn');
       try {
         const payload = await fetchJson('/api/object-placement/delete-stale', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ provider, bucket, key }),
         });
-        setObjectPlacementRecordsFeedback(payload.message || 'Placement 元数据已删除。', 'ok');
+        setObjectPlacementRecordsFeedback(payload.message || '残留对象元数据已删除。', 'ok');
         objectPlacementRecordsState.selected_ids.delete(objectPlacementRecordId(provider, bucket, key));
         objectPlacementRecordsState.loaded = false;
         await loadObjectPlacementRecords(true);
@@ -11144,11 +11144,11 @@ Copyright (c) 2026 walky
         setObjectPlacementRecordsFeedback('请先勾选要删除的 placement 记录。', 'warn');
         return;
       }
-      const confirmed = window.confirm(`只会删除网关里的 placement 元数据，不会删除任何云盘文件。\\n\\n确认批量删除已选的 ${selectedRows.length} 条 placement 记录吗？`);
+      const confirmed = window.confirm(`只会删除网关里的残留对象元数据，不会删除任何云盘文件。\\n\\n确认批量删除已选的 ${selectedRows.length} 条残留记录吗？`);
       if (!confirmed) {
         return;
       }
-      setObjectPlacementRecordsFeedback(`正在批量删除 ${selectedRows.length} 条 placement 元数据…`, 'warn');
+      setObjectPlacementRecordsFeedback(`正在批量删除 ${selectedRows.length} 条残留对象元数据…`, 'warn');
       try {
         const payload = await fetchJson('/api/object-placement/delete-stale-bulk', {
           method: 'POST',

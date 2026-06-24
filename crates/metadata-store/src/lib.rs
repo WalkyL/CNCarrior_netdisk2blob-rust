@@ -1228,6 +1228,31 @@ impl MetadataStore {
         Ok(())
     }
 
+    pub fn delete_object_metadata(&self, bucket: &str, key: &str) -> Result<(), MetadataError> {
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+        transaction
+            .execute(
+                "DELETE FROM object_placements WHERE bucket = ?1 AND key = ?2",
+                params![bucket, key],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        transaction
+            .execute(
+                "DELETE FROM object_protection_plans WHERE bucket = ?1 AND key = ?2",
+                params![bucket, key],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        transaction
+            .execute(
+                "DELETE FROM logical_objects WHERE bucket = ?1 AND key = ?2",
+                params![bucket, key],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        transaction.commit().map_err(MetadataError::Sqlite)?;
+        Ok(())
+    }
+
     pub fn object_protection_plan(
         &self,
         bucket: &str,
@@ -3472,6 +3497,69 @@ mod tests {
             store
                 .logical_object("root", "encrypted/a.txt")
                 .expect("logical object query should succeed")
+                .is_none()
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn delete_object_metadata_removes_placement_logical_and_plan_together() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        store
+            .upsert_object_placement("stub", "root", "docs/stale.txt", 123)
+            .expect("placement should persist");
+        store
+            .upsert_logical_object(&LogicalObjectRecord {
+                bucket: "root".to_string(),
+                key: "docs/stale.txt".to_string(),
+                etag: None,
+                application_id: Some("cleanup-app".to_string()),
+                encrypted: false,
+                encryption_profile_id: None,
+                algorithm: None,
+                key_id: None,
+                key_source_kind: None,
+                key_source_ref: None,
+                chunk_plaintext_bytes: None,
+                plaintext_size: 9,
+                stored_size: 9,
+                logical_content_type: Some("text/plain".to_string()),
+                updated_at_unix_ms: 124,
+            })
+            .expect("logical should persist");
+        store
+            .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
+                bucket: "root".to_string(),
+                key: "docs/stale.txt".to_string(),
+                sync_targets_csv: "telecom".to_string(),
+                fallback_read_order_csv: "telecom".to_string(),
+                updated_at_unix_ms: 125,
+            })
+            .expect("plan should persist");
+
+        store
+            .delete_object_metadata("root", "docs/stale.txt")
+            .expect("full object metadata delete should succeed");
+
+        assert!(
+            store
+                .object_placement("root", "docs/stale.txt")
+                .expect("placement lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            store
+                .logical_object("root", "docs/stale.txt")
+                .expect("logical lookup should succeed")
+                .is_none()
+        );
+        assert!(
+            store
+                .object_protection_plan("root", "docs/stale.txt")
+                .expect("plan lookup should succeed")
                 .is_none()
         );
 
