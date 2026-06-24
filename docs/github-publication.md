@@ -34,6 +34,7 @@ workflow 产出的资产仍必须下载回 `.47`，并进入同一 release 校�
 - OpenWrt lite 打包入口: [build-openwrt-lite-package.sh](../scripts/build-openwrt-lite-package.sh)
 - 本地 release gate: [check-release-ready.sh](../scripts/check-release-ready.sh)
 - 本地 release 组包: [release-local.sh](../scripts/release-local.sh)
+- build-runner artifact 下载整理: [download-build-runner-release-assets.sh](../scripts/download-build-runner-release-assets.sh)
 - 本地 Cloudflare 部署: [deploy-cloudflare-public.sh](../scripts/deploy-cloudflare-public.sh)
 - 公网发版 SOP: [public-release-sop.md](public-release-sop.md)
 - macOS `launchd` 安装脚本: [deploy/macos](../deploy/macos)
@@ -106,13 +107,30 @@ scripts/release-local.sh v0.1.7
 workflow 生成 `ccbg-lxc-package` artifact，下载后再合并回本地 release 目录：
 
 ```bash
-CCBG_RELEASE_LXC_ASSET_DIR=/path/to/ccbg-lxc-package \
+scripts/download-build-runner-release-assets.sh --run-id <github-run-id> --skip-macos
+source target/build-runner-assets/release-inputs/release-local.env.sh
+scripts/release-local.sh v0.1.7
+```
+
+如果这一轮同时还要合并 macOS build-runner assets，用同一个下载整理脚本准备目录：
+
+```bash
+scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+source target/build-runner-assets/release-inputs/release-local.env.sh
 scripts/release-local.sh v0.1.7
 ```
 
 macOS `x86_64` / `arm64` 当前也由 GitHub Actions 在 self-hosted build-runner 容器中
 产出，并按社区/实验包发布。它们未签名、未公证、未经过本项目控制的 macOS 真机
 smoke。发布人必须下载 GitHub Actions 产物并合并回本地 release 目录：
+
+```bash
+scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+source target/build-runner-assets/release-inputs/release-local.env.sh
+scripts/release-local.sh v0.1.7
+```
+
+如果已经手工拿到了 artifact 目录，也可以直接传环境变量：
 
 ```bash
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \

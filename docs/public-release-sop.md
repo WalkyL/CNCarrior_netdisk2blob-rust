@@ -81,7 +81,8 @@ workflow，下载 `ccbg-lxc-package` artifact 后合并回本 SOP 的校验、�
 `/downloads/latest/*` smoke：
 
 ```bash
-CCBG_RELEASE_LXC_ASSET_DIR=/path/to/ccbg-lxc-package \
+scripts/download-build-runner-release-assets.sh --run-id <github-run-id> --skip-macos
+source target/build-runner-assets/release-inputs/release-local.env.sh
 scripts/release-local.sh v0.1.7
 ```
 
@@ -89,6 +90,15 @@ macOS 资产也由 GitHub Actions 在 self-hosted build-runner 容器中构建�
 方式合并回本 SOP 的校验、上传和 `/downloads/latest/*` smoke：
 
 ```bash
+scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+source target/build-runner-assets/release-inputs/release-local.env.sh
+scripts/release-local.sh v0.1.7
+```
+
+如果 artifacts 不是用脚本下载整理的，仍可手工设置：
+
+```bash
+CCBG_RELEASE_LXC_ASSET_DIR=/path/to/ccbg-lxc-package \
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \
 scripts/release-local.sh v0.1.7
 ```

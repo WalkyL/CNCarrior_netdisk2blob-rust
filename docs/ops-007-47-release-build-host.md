@@ -69,8 +69,9 @@ Git Bash does not expose `gh` in `PATH`.
 Merge downloaded build-runner artifacts on `.47`:
 
 ```bash
-CCBG_RELEASE_LXC_ASSET_DIR=<downloaded-lxc-artifact> \
-CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>
+scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+source target/build-runner-assets/release-inputs/release-local.env.sh
+scripts/release-local.sh <tag>
 ```
 
 For embedded examples:
