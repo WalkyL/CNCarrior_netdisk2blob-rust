@@ -42629,6 +42629,11 @@ mod tests {
         assert!(html.contains("应用根"));
         assert!(html.contains("用户根模板"));
         assert!(html.contains("归属地"));
+        assert!(html.contains("不参与 S3 SigV4 签名"));
+        assert!(html.contains("region 保持 us-east-1 这类中性签名值"));
+        assert!(html.contains("不要塞进 `region`"));
+        assert!(html.contains("bucket + prefix"));
+        assert!(html.contains("CCBG_S3_USER_ROOT_TEMPLATE"));
         assert!(html.contains("Advanced"));
         assert!(html.contains("/api/applications"));
         assert!(html.contains("data-show-application-credentials"));

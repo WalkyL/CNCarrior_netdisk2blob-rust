@@ -481,6 +481,47 @@ mod tests {
                 .send()
                 .expect("request");
             assert_eq!(public_tools.status().as_u16(), 200);
+            let value: Value = public_tools.json().expect("json");
+            assert!(
+                value["result"]["tools"]
+                    .as_array()
+                    .is_some_and(|tools| tools.iter().any(|tool| {
+                        tool["name"] == "mcp_storage_access_model_summary"
+                            && tool["authRequired"] == false
+                    }))
+            );
+
+            let public_resources = client
+                .post(format!("{base}/mcp"))
+                .body(r#"{"jsonrpc":"2.0","id":21,"method":"resources/list"}"#)
+                .send()
+                .expect("request");
+            assert_eq!(public_resources.status().as_u16(), 200);
+            let value: Value = public_resources.json().expect("json");
+            assert!(
+                value["result"]["resources"]
+                    .as_array()
+                    .is_some_and(|resources| resources.iter().any(|resource| {
+                        resource["uri"] == "ccbg://public/storage-access-model"
+                            && resource["authRequired"] == false
+                    }))
+            );
+
+            let public_prompts = client
+                .post(format!("{base}/mcp"))
+                .body(r#"{"jsonrpc":"2.0","id":22,"method":"prompts/list"}"#)
+                .send()
+                .expect("request");
+            assert_eq!(public_prompts.status().as_u16(), 200);
+            let value: Value = public_prompts.json().expect("json");
+            assert!(
+                value["result"]["prompts"]
+                    .as_array()
+                    .is_some_and(|prompts| prompts.iter().any(|prompt| {
+                        prompt["name"] == "design_storage_access_mapping"
+                            && prompt["authRequired"] == false
+                    }))
+            );
 
             let public_tool_call = client
                 .post(format!("{base}/mcp"))
@@ -488,6 +529,12 @@ mod tests {
                 .send()
                 .expect("request");
             assert_eq!(public_tool_call.status().as_u16(), 200);
+            let value: Value = public_tool_call.json().expect("json");
+            assert_eq!(
+                value["result"]["structuredContent"]["publicDiscoveryConventions"]["storageAccessModel"]
+                    ["resource"],
+                "ccbg://public/storage-access-model"
+            );
 
             let supported_version = client
                 .post(format!("{base}/mcp"))

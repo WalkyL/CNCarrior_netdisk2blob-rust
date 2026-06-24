@@ -600,6 +600,11 @@ mod tests {
             response["result"]["structuredContent"]["authentication"]["publicDiscoveryAvailableWithoutAuth"],
             true
         );
+        assert_eq!(
+            response["result"]["structuredContent"]["publicDiscoveryConventions"]["storageAccessModel"]
+                ["tool"],
+            TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY
+        );
     }
 
     #[test]
@@ -680,6 +685,62 @@ mod tests {
         assert!(first.get("description").is_some());
         assert!(first.get("mimeType").is_some());
         assert!(first.get("authRequired").is_some());
+    }
+
+    #[test]
+    fn public_discovery_lists_storage_mapping_entries() {
+        let server = McpServer::new(StubControlPlaneClient);
+
+        let mut out = Vec::new();
+        server
+            .serve_stdio(
+                &br#"{"jsonrpc":"2.0","id":24,"method":"tools/list"}"#[..],
+                &mut out,
+            )
+            .expect("stdio works");
+        let tools_response: Value = serde_json::from_slice(&out).expect("json response");
+        assert!(
+            tools_response["result"]["tools"]
+                .as_array()
+                .is_some_and(|tools| tools.iter().any(|tool| {
+                    tool["name"] == TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY
+                        && tool["authRequired"] == false
+                }))
+        );
+
+        out.clear();
+        server
+            .serve_stdio(
+                &br#"{"jsonrpc":"2.0","id":25,"method":"resources/list"}"#[..],
+                &mut out,
+            )
+            .expect("stdio works");
+        let resources_response: Value = serde_json::from_slice(&out).expect("json response");
+        assert!(
+            resources_response["result"]["resources"]
+                .as_array()
+                .is_some_and(|resources| resources.iter().any(|resource| {
+                    resource["uri"] == URI_PUBLIC_STORAGE_ACCESS_MODEL
+                        && resource["authRequired"] == false
+                }))
+        );
+
+        out.clear();
+        server
+            .serve_stdio(
+                &br#"{"jsonrpc":"2.0","id":26,"method":"prompts/list"}"#[..],
+                &mut out,
+            )
+            .expect("stdio works");
+        let prompts_response: Value = serde_json::from_slice(&out).expect("json response");
+        assert!(
+            prompts_response["result"]["prompts"]
+                .as_array()
+                .is_some_and(|prompts| prompts.iter().any(|prompt| {
+                    prompt["name"] == PROMPT_DESIGN_STORAGE_ACCESS_MAPPING
+                        && prompt["authRequired"] == false
+                }))
+        );
     }
 
     #[test]
