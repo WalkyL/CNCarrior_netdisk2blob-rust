@@ -23,6 +23,13 @@ scripts/build-lxc-package.sh --target x86_64-unknown-linux-gnu
 scripts/build-lxc-package.sh --binary target/gatewayd-linux-x86_64
 ```
 
+如果 Windows 主机本地已经准备好 `Podman` 和 `localhost/product-build-runner:latest`，优先走这个两段式流程，避免把新的 `gatewayd.exe` 和旧的 Linux ELF 混在一起:
+
+```bash
+scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd
+scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
+```
+
 打包脚本会用 `file` 检查选中的二进制；如果不是 ELF，会直接失败，避免把 Windows 二进制误打进 LXC 包。
 
 输出:
@@ -158,6 +165,21 @@ sudo systemctl list-units 'ccbg-smb-sidecar-*.service' --no-pager
 3. 运行 `sudo scripts/smoke.sh`。
 4. 查看 `journalctl -u ccbg.service -n 100 --no-pager`。
 
+Windows + Podman 本地构建主机的推荐升级流程:
+
+```bash
+scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd
+scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
+scp target/lxc-package/ccbg-lxc-package.tar.gz root@<guest-ip>:/tmp/ccbg-lxc-package.tar.gz
+ssh root@<guest-ip>
+rm -rf /tmp/ccbg-lxc-package
+mkdir -p /tmp/ccbg-lxc-package
+cd /tmp/ccbg-lxc-package
+tar --no-same-owner -xzf /tmp/ccbg-lxc-package.tar.gz
+cd ccbg-lxc-package
+./scripts/install.sh --enable-smb-sidecar
+```
+
 ## 回滚
 
 安装脚本会在升级前保存旧二进制。回滚最近一次备份:
@@ -188,3 +210,4 @@ OneDrive 仍是 parking provider。除非有真实需求和单独回归，不要
 - 2026-06-03 `.49` LXC + SMB sidecar + no-stub 验收见 [ops-008-49-lxc-smb-stub-removal.md](ops-008-49-lxc-smb-stub-removal.md)。
 - 2026-06-09 `.49` `96 MiB` LXC 的明文/加密压力验证与压测脏数据清理见 [ops-011-49-encrypted-soak-and-cleanup.md](ops-011-49-encrypted-soak-and-cleanup.md)。
 - 2026-06-17 `.49` carrier login browser-flow LLM repair 部署见 [ops-012-49-browser-flow-llm-repair-deploy.md](ops-012-49-browser-flow-llm-repair-deploy.md)。
+- 2026-06-24 `.49` MCP 公开发现、应用存储映射字段和 affiliation 写入偏好部署见 [ops-013-49-mcp-storage-affiliation-deploy.md](ops-013-49-mcp-storage-affiliation-deploy.md)。

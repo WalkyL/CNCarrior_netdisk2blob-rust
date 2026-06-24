@@ -106,6 +106,17 @@ scripts/release-local.sh v0.1.7
 本机/局域网 macOS 构建器或 Darwin 交叉工具链，并显式设置
 `CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD=true`。
 
+如果当前发布主机是 Windows，但需要给 `.49` 这类 Linux LXC 目标生成新的 Linux ELF，
+优先使用本地 Podman build-runner 容器而不是直接依赖 Windows `target/release/gatewayd.exe`:
+
+```bash
+scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd
+scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
+```
+
+这一步的目的不是替代 `release-local.sh`，而是避免“新的 Windows EXE + 旧的 Linux ELF”
+并存时误把旧 Linux binary 打进 LXC 包。
+
 如果确实需要把本地生成的资产上传到同一个 GitHub Release，显式打开：
 
 ```bash

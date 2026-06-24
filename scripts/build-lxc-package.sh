@@ -80,6 +80,7 @@ if command -v file >/dev/null 2>&1; then
       echo "LXC package requires a Linux ELF gatewayd binary, got: ${binary_kind}" >&2
       if [ -z "${TARGET}" ] && [ -z "${BINARY_OVERRIDE}" ]; then
         echo "on Windows, pass --target <linux-target> or --binary <linux-gatewayd>" >&2
+        echo "recommended: scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd" >&2
       fi
       exit 1
       ;;
