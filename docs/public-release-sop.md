@@ -12,7 +12,8 @@
 
 - GitHub 默认只保存分支、tag、issue、可选 Release 页面和发布记录。
 - Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认走 `.47` 或受控局域网 runner。
-- macOS 资产走 GitHub Actions self-hosted build-runner 容器入口，不再依赖 GitHub-hosted macOS runner。
+- 当 `.47` 本地 Linux 构建不可用时，LXC fallback 包和 macOS 资产可走 GitHub Actions
+  self-hosted build-runner 容器入口，不再依赖 GitHub-hosted runner 做实际编译。
 - 只打 tag 或只创建 GitHub Release 页面不算发版完成。
 - 必须确认 `/downloads/latest/*` 已指向本轮新资产，并通过下载 smoke，才算发版完成。
 - provider 能力文案也属于 release 的一部分。没有新的 limit-probe 或隔离实测证据时，不得把中国移动的 `04010319 / Insufficient Rights` 已知限制写成“超大文件已验证通过”。
@@ -73,9 +74,19 @@ scripts/release-local.sh v0.1.7
 ```
 
 Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认都在 `.47` 或受控局域网 runner 上
-生成，不把 GitHub Actions 当默认构建入口。macOS 资产由 GitHub Actions 在 self-hosted
-build-runner 容器中构建；下载产物后用下面的方式合并回本 SOP 的校验、上传和
+生成，不把 GitHub Actions 当默认构建入口。
+
+如果 `.47` 本地 Linux 构建不可用，先手工触发 GitHub Actions `release assets via build-runner`
+workflow，下载 `ccbg-lxc-package` artifact 后合并回本 SOP 的校验、上传和
 `/downloads/latest/*` smoke：
+
+```bash
+CCBG_RELEASE_LXC_ASSET_DIR=/path/to/ccbg-lxc-package \
+scripts/release-local.sh v0.1.7
+```
+
+macOS 资产也由 GitHub Actions 在 self-hosted build-runner 容器中构建；下载产物后用下面的
+方式合并回本 SOP 的校验、上传和 `/downloads/latest/*` smoke：
 
 ```bash
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \
@@ -89,6 +100,12 @@ scripts/release-local.sh v0.1.7
 - `target/native-packages/ccbg-macos-x86_64.tar.gz`
 - `target/native-packages/ccbg-macos-arm64.tar.gz`
 - `target/openwrt-lite/ccbg-openwrt-lite.tar.gz`
+
+如果本轮 LXC 包来自 GitHub Actions artifact，还要额外确认：
+
+- 本地 release 目录里已有 `ccbg-lxc-package.tar.gz`
+- 该文件来自 `CCBG_RELEASE_LXC_ASSET_DIR` 指定目录，而不是旧的 `target/lxc-package/`
+- `ccbg-checksums.txt` 已覆盖这份合并回来的 LXC 包
 
 同时确认官方宿主包默认行为：
 

@@ -1,4 +1,4 @@
-name: macOS release assets via build-runner
+name: release assets via build-runner
 
 on:
   workflow_dispatch:
@@ -7,6 +7,21 @@ on:
         description: Release tag to package
         required: true
         default: v0.1.9
+      build_linux_lxc:
+        description: Build Linux LXC package in the local Podman build-runner
+        required: true
+        default: true
+        type: boolean
+      build_macos_x86_64:
+        description: Build macOS x86_64 community asset
+        required: true
+        default: true
+        type: boolean
+      build_macos_arm64:
+        description: Build macOS arm64 community asset
+        required: true
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -15,10 +30,59 @@ env:
   CCBG_BUILD_IMAGE: localhost/product-build-runner:latest
   CCBG_CARGO_ZIGBUILD_VERSION: 0.22.3
   CCBG_ZIG_VERSION: 0.16.0
+  CCBG_LINUX_TARGET: x86_64-unknown-linux-gnu
 
 jobs:
-  build:
+  linux_lxc:
+    name: ccbg-lxc-package
+    if: ${{ inputs.build_linux_lxc }}
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Ensure Podman machine is running
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          podman machine start | Out-Null
+
+      - name: Verify build runner image
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          podman image inspect $env:CCBG_BUILD_IMAGE | Out-Null
+
+      - name: Build Linux LXC package in build runner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+
+          podman run --rm `
+            --pull=never `
+            -v "${workspace}:/workspace" `
+            -w /workspace `
+            $env:CCBG_BUILD_IMAGE `
+            bash -lc "cargo build --release --locked --target '${env:CCBG_LINUX_TARGET}' -p gatewayd && scripts/build-lxc-package.sh --skip-build --target '${env:CCBG_LINUX_TARGET}' && sha256sum -c target/lxc-package/ccbg-lxc-package.tar.gz.sha256"
+
+      - name: Upload Linux LXC package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccbg-lxc-package
+          path: |
+            target/lxc-package/ccbg-lxc-package.tar.gz
+            target/lxc-package/ccbg-lxc-package.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  build_macos:
     name: ${{ matrix.package }}
+    if: ${{ (matrix.package == 'ccbg-macos-x86_64' && inputs.build_macos_x86_64) || (matrix.package == 'ccbg-macos-arm64' && inputs.build_macos_arm64) }}
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 90
     strategy:

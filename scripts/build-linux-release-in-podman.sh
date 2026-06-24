@@ -72,7 +72,10 @@ if ! podman image exists "${IMAGE}"; then
   exit 1
 fi
 
-workspace_mount="$(cd "${ROOT_DIR}" && pwd)"
+workspace_mount="${ROOT_DIR}"
+if command -v cygpath >/dev/null 2>&1; then
+  workspace_mount="$(cygpath -w "${ROOT_DIR}")"
+fi
 
 podman run --rm \
   -v "${workspace_mount}:${CONTAINER_WORKDIR}" \

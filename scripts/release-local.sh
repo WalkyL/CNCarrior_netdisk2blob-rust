@@ -66,6 +66,17 @@ copy_artifacts() {
   shopt -u nullglob
 }
 
+copy_required_artifacts() {
+  local file
+  for file in "$@"; do
+    if [ ! -e "${file}" ]; then
+      echo "missing required artifact: ${file}" >&2
+      exit 1
+    fi
+    cp "${file}" "${OUT_DIR}/"
+  done
+}
+
 build_gatewayd() {
   local target="$1"
   if [ "${target}" = "${HOST_TRIPLE}" ]; then
@@ -84,10 +95,19 @@ build_gatewayd_and_mcp() {
   fi
 }
 
-echo "building Linux LXC package on .47 for ${LINUX_TARGET}"
-build_gatewayd "${LINUX_TARGET}"
-scripts/build-lxc-package.sh --skip-build --target "${LINUX_TARGET}"
-copy_artifacts "${ROOT_DIR}/target/lxc-package/ccbg-lxc-package.tar.gz"*
+if [ -n "${CCBG_RELEASE_LXC_ASSET_DIR:-}" ]; then
+  echo "copying external Linux LXC assets from ${CCBG_RELEASE_LXC_ASSET_DIR}"
+  copy_required_artifacts \
+    "${CCBG_RELEASE_LXC_ASSET_DIR}/ccbg-lxc-package.tar.gz" \
+    "${CCBG_RELEASE_LXC_ASSET_DIR}/ccbg-lxc-package.tar.gz.sha256"
+else
+  echo "building Linux LXC package on .47 for ${LINUX_TARGET}"
+  build_gatewayd "${LINUX_TARGET}"
+  scripts/build-lxc-package.sh --skip-build --target "${LINUX_TARGET}"
+  copy_required_artifacts \
+    "${ROOT_DIR}/target/lxc-package/ccbg-lxc-package.tar.gz" \
+    "${ROOT_DIR}/target/lxc-package/ccbg-lxc-package.tar.gz.sha256"
+fi
 
 if [ "${CCBG_RELEASE_BUILD_WINDOWS:-false}" = "true" ]; then
   echo "building Windows package on .47 for ${WINDOWS_TARGET}"
@@ -109,7 +129,7 @@ fi
 if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ] && [ "${CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD:-false}" != "true" ]; then
   cat >&2 <<'EOF'
 macOS release artifacts are not built on the local/LAN release host right now.
-Use the GitHub Actions macOS asset workflow on the configured self-hosted
+Use the GitHub Actions release-assets workflow on the configured self-hosted
 build-runner container, download its artifacts, and pass them back with
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets.
 Set CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD=true only after a documented local/LAN
@@ -138,9 +158,11 @@ fi
 
 if [ -n "${CCBG_RELEASE_MACOS_ASSET_DIR:-}" ]; then
   echo "copying external macOS assets from ${CCBG_RELEASE_MACOS_ASSET_DIR}"
-  copy_artifacts \
-    "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-x86_64.tar.gz"* \
-    "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-arm64.tar.gz"*
+  copy_required_artifacts \
+    "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-x86_64.tar.gz" \
+    "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-x86_64.tar.gz.sha256" \
+    "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-arm64.tar.gz" \
+    "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-arm64.tar.gz.sha256"
 fi
 
 (

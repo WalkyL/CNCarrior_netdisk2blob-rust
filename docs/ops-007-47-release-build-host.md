@@ -10,7 +10,9 @@ Accepted
 
 ## Decision
 
-`192.168.1.47` is the default CCBG build and release host. GitHub is only the source, branch, tag, issue, optional Release page, and release-record system. GitHub Actions must not compile Linux, OpenWrt, Windows, container tar/image, or Cloudflare release artifacts. macOS release assets use the GitHub Actions workflow on the configured self-hosted build-runner container (`localhost/product-build-runner:latest`) and then merge back on `.47`.
+`192.168.1.47` is the default CCBG build and release host. GitHub is only the source, branch, tag, issue, optional Release page, and release-record system. GitHub Actions must not become a generic or automatic build/deploy system for Linux, OpenWrt, Windows, container tar/image, or Cloudflare release artifacts.
+
+There is one controlled exception: when `.47` cannot build Linux locally, a manually triggered self-hosted build-runner workflow may produce the Linux LXC package inside the local Podman image `localhost/product-build-runner:latest`. macOS release assets use the same self-hosted build-runner container path. Those artifacts still merge back on `.47`; GitHub Actions does not publish them directly.
 
 A tag or GitHub Release page is not a completed release. A release is complete only after the local/LAN build artifacts have been generated, synchronized to the public delivery path, and `/downloads/latest/*` resolves to the new assets.
 
@@ -26,7 +28,7 @@ C:\Users\walky\workspaces\carrier-cloud-blob-gateway
 
 | Target / architecture | Build host | Release status | Build entry |
 | --- | --- | --- | --- |
-| PVE LXC `x86/x64` | `.47` | Official host | `scripts/release-local.sh <tag>` |
+| PVE LXC `x86/x64` | `.47`; fallback: self-hosted build-runner container, merged on `.47` | Official host | `scripts/release-local.sh <tag>`; fallback: `CCBG_RELEASE_LXC_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
 | Linux native `x86_64-unknown-linux-gnu` | `.47` | Official package input | `CCBG_RELEASE_LINUX_TARGET=x86_64-unknown-linux-gnu scripts/release-local.sh <tag>` |
 | Docker `x86/x64` | `.47` | Official host | `docker build -f deploy/Dockerfile .` |
 | Podman `x86/x64` | `.47` | Official host | `podman build -f deploy/Containerfile .` |
@@ -42,7 +44,7 @@ C:\Users\walky\workspaces\carrier-cloud-blob-gateway
 
 macOS packages are community / experimental packages. They are unsigned, unnotarized, and not macOS smoke-tested by the official release gate.
 
-Current state: macOS assets are produced by the GitHub Actions workflow running inside the configured self-hosted build-runner container. Download those artifacts and merge them on `.47` with `CCBG_RELEASE_MACOS_ASSET_DIR`. This does not restore GitHub Actions as a general CI/release system. The resulting assets must still enter the same checksum, R2/GitHub fallback, and `/downloads/latest/*` smoke path.
+Current state: macOS assets are produced by the GitHub Actions workflow running inside the configured self-hosted build-runner container. When `.47` local Linux build is unavailable, the same workflow may also produce the Linux LXC package. Download those artifacts and merge them on `.47` with `CCBG_RELEASE_MACOS_ASSET_DIR` and, if needed, `CCBG_RELEASE_LXC_ASSET_DIR`. This does not restore GitHub Actions as a general CI/release system. The resulting assets must still enter the same checksum, R2/GitHub fallback, and `/downloads/latest/*` smoke path.
 
 ## Embedded Boundary
 
@@ -64,9 +66,10 @@ If release assets must be uploaded to GitHub, `scripts/release-local.sh` resolve
 through `scripts/resolve-gh.sh`; `.47` can use `C:\Program Files\GitHub CLI\gh.exe` even when
 Git Bash does not expose `gh` in `PATH`.
 
-Merge downloaded macOS artifacts on `.47`:
+Merge downloaded build-runner artifacts on `.47`:
 
 ```bash
+CCBG_RELEASE_LXC_ASSET_DIR=<downloaded-lxc-artifact> \
 CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>
 ```
 

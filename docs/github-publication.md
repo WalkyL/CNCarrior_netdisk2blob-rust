@@ -5,10 +5,18 @@
 GitHub 在 CCBG 项目里默认只承担版本管理职责：保存源码、分支、tag、issue 模板和
 可选 GitHub Release 页面记录。Linux、OpenWrt、Windows、容器 tar/镜像二进制和
 Cloudflare 公开站点部署不依赖 GitHub Actions 自动执行，统一由 `.47` 发布构建主机
-或受控局域网 runner 运行脚本。macOS 资产仍通过 GitHub Actions 触发，但实际编译在
-配置好的 self-hosted build-runner 容器 `localhost/product-build-runner:latest` 内完成；
-该入口只覆盖 macOS，不恢复通用 GitHub CI 或通用发版。macOS 资产仍必须进入同一
-release 校验和
+或受控局域网 runner 运行脚本。
+
+当 `.47` 本地 Linux 构建不可用时，允许手工触发 GitHub Actions 的 self-hosted
+build-runner workflow；实际编译仍在本地容器
+`localhost/product-build-runner:latest` 内完成。当前这个入口只允许产出：
+
+- Linux LXC fallback 包 `ccbg-lxc-package`
+- macOS 社区/实验包 `ccbg-macos-x86_64`
+- macOS 社区/实验包 `ccbg-macos-arm64`
+
+它不恢复通用 GitHub CI，也不接管 Windows / OpenWrt / Cloudflare 发版。所有通过
+workflow 产出的资产仍必须下载回 `.47`，并进入同一 release 校验和
 `/downloads/latest/*` 发布链路。
 
 源码一期按公开仓库交付，但仓库不是 MIT 开源仓库。它采用商业核心、公开材料、
@@ -44,9 +52,9 @@ release 校验和
 推送到 GitHub 本身不会触发 Linux/OpenWrt/Windows/容器构建，也不会触发
 Cloudflare 部署。只打 tag 或只创建 GitHub Release 页面不算发版完成；必须先在本机
 或受控局域网 runner 跑 release gate、生成发布物、同步发布资产，并确认公网
-`/downloads/latest/*` 指向新资产后，才算完成发版。macOS 资产由 GitHub Actions 在
-self-hosted build-runner 容器中构建后，也必须下载回发布流程并参与同一校验、上传和
-下载 smoke。
+`/downloads/latest/*` 指向新资产后，才算完成发版。通过 GitHub Actions
+self-hosted build-runner 容器产出的 LXC / macOS 资产，也必须下载回发布流程并参与
+同一校验、上传和下载 smoke。
 
 ## 本地 release gate
 
@@ -93,9 +101,18 @@ CCBG_RELEASE_BUILD_OPENWRT=true \
 scripts/release-local.sh v0.1.7
 ```
 
-macOS `x86_64` / `arm64` 当前由 GitHub Actions 在 self-hosted build-runner 容器中产出，
-并按社区/实验包发布。它们未签名、未公证、未经过本项目控制的 macOS 真机 smoke。
-发布人必须下载 GitHub Actions 产物并合并回本地 release 目录：
+如果 `.47` 本地 Linux 构建正常，继续直接在 `.47` 生成官方 LXC 包。如果 `.47`
+本地 Linux 构建不可用，可以先触发 GitHub Actions `release assets via build-runner`
+workflow 生成 `ccbg-lxc-package` artifact，下载后再合并回本地 release 目录：
+
+```bash
+CCBG_RELEASE_LXC_ASSET_DIR=/path/to/ccbg-lxc-package \
+scripts/release-local.sh v0.1.7
+```
+
+macOS `x86_64` / `arm64` 当前也由 GitHub Actions 在 self-hosted build-runner 容器中
+产出，并按社区/实验包发布。它们未签名、未公证、未经过本项目控制的 macOS 真机
+smoke。发布人必须下载 GitHub Actions 产物并合并回本地 release 目录：
 
 ```bash
 CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \
@@ -115,7 +132,9 @@ scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
 ```
 
 这一步的目的不是替代 `release-local.sh`，而是避免“新的 Windows EXE + 旧的 Linux ELF”
-并存时误把旧 Linux binary 打进 LXC 包。
+并存时误把旧 Linux binary 打进 LXC 包。若本机 release host 自身构建链损坏，也可以改走
+GitHub Actions self-hosted build-runner workflow 产出 `ccbg-lxc-package` artifact，
+再通过 `CCBG_RELEASE_LXC_ASSET_DIR` 合并回正式 release。
 
 如果确实需要把本地生成的资产上传到同一个 GitHub Release，显式打开：
 
@@ -136,7 +155,7 @@ runner，不走 GitHub Actions。当前构建收敛到 `192.168.1.47`：
 
 | 目标 | 构建主机 | 入口 |
 | --- | --- | --- |
-| PVE LXC `x86/x64` | `.47` | `scripts/release-local.sh <tag>` |
+| PVE LXC `x86/x64` | `.47`；如 `.47` 本地 Linux 构建不可用，手工触发 self-hosted build-runner workflow 后合并回 `.47` | `scripts/release-local.sh <tag>`；fallback: `CCBG_RELEASE_LXC_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
 | Docker `x86/x64` | `.47` | `docker build -f deploy/Dockerfile .` |
 | Podman `x86/x64` | `.47` | `podman build -f deploy/Containerfile .` |
 | Windows `x86_64` | `.47` | `CCBG_RELEASE_BUILD_WINDOWS=true scripts/release-local.sh <tag>` |
@@ -212,8 +231,8 @@ CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY=true scripts/deploy-cloudflare-public.sh producti
 - `192.168.1.43` 是 CCBG 验收测试机，用来跑发布候选版本和人工全量验收。
 - `192.168.1.47` 是 CCBG 默认发布构建主机，工作区为
   `C:\Users\walky\workspaces\carrier-cloud-blob-gateway`。
-- macOS 发布资产走 GitHub Actions self-hosted build-runner 容器入口，产物下载回 `.47`
-  后再进入统一发布链路。
+- LXC fallback 与 macOS 发布资产都可走 GitHub Actions self-hosted build-runner 容器入口，
+  产物下载回 `.47` 后再进入统一发布链路。
 - `192.168.1.46` 不再保留 CCBG 项目代码，也不再运行 CCBG 编译任务。
 
 ## 发布注意事项
