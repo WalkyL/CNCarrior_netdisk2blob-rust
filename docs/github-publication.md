@@ -112,12 +112,24 @@ source target/build-runner-assets/release-inputs/release-local.env.sh
 scripts/release-local.sh v0.1.7
 ```
 
+```powershell
+bash scripts/download-build-runner-release-assets.sh --run-id <github-run-id> --skip-macos
+. .\target\build-runner-assets\release-inputs\release-local.env.ps1
+bash scripts/release-local.sh v0.1.7
+```
+
 如果这一轮同时还要合并 macOS build-runner assets，用同一个下载整理脚本准备目录：
 
 ```bash
 scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
 source target/build-runner-assets/release-inputs/release-local.env.sh
 scripts/release-local.sh v0.1.7
+```
+
+```powershell
+bash scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+. .\target\build-runner-assets\release-inputs\release-local.env.ps1
+bash scripts/release-local.sh v0.1.7
 ```
 
 macOS `x86_64` / `arm64` 当前也由 GitHub Actions 在 self-hosted build-runner 容器中
@@ -128,6 +140,12 @@ smoke。发布人必须下载 GitHub Actions 产物并合并回本地 release �
 scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
 source target/build-runner-assets/release-inputs/release-local.env.sh
 scripts/release-local.sh v0.1.7
+```
+
+```powershell
+bash scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+. .\target\build-runner-assets\release-inputs\release-local.env.ps1
+bash scripts/release-local.sh v0.1.7
 ```
 
 如果已经手工拿到了 artifact 目录，也可以直接传环境变量：

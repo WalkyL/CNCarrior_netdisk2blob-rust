@@ -86,6 +86,12 @@ source target/build-runner-assets/release-inputs/release-local.env.sh
 scripts/release-local.sh v0.1.7
 ```
 
+```powershell
+bash scripts/download-build-runner-release-assets.sh --run-id <github-run-id> --skip-macos
+. .\target\build-runner-assets\release-inputs\release-local.env.ps1
+bash scripts/release-local.sh v0.1.7
+```
+
 macOS 资产也由 GitHub Actions 在 self-hosted build-runner 容器中构建；下载产物后用下面的
 方式合并回本 SOP 的校验、上传和 `/downloads/latest/*` smoke：
 
@@ -93,6 +99,12 @@ macOS 资产也由 GitHub Actions 在 self-hosted build-runner 容器中构建�
 scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
 source target/build-runner-assets/release-inputs/release-local.env.sh
 scripts/release-local.sh v0.1.7
+```
+
+```powershell
+bash scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+. .\target\build-runner-assets\release-inputs\release-local.env.ps1
+bash scripts/release-local.sh v0.1.7
 ```
 
 如果 artifacts 不是用脚本下载整理的，仍可手工设置：

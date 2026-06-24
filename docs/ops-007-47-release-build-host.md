@@ -74,6 +74,12 @@ source target/build-runner-assets/release-inputs/release-local.env.sh
 scripts/release-local.sh <tag>
 ```
 
+```powershell
+bash scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+. .\target\build-runner-assets\release-inputs\release-local.env.ps1
+bash scripts/release-local.sh <tag>
+```
+
 For embedded examples:
 
 ```bash
