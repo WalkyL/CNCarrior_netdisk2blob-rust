@@ -236,3 +236,8 @@ removes the full metadata set instead of leaving orphaned logical records behind
 
 - No new environment variables.
 - No secret handling changes.
+
+### Lessons Learned
+
+See [lessons-learned.md](lessons-learned.md) for the operational takeaways that were folded back
+into the project docs after the `.49` cleanup and deploy.
