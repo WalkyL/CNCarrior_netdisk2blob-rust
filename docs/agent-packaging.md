@@ -109,8 +109,11 @@ MCP 不应把所有内部细节暴露成工具。建议分成四类:
   - `resources/list`
   - `prompts/list`
   - tool: `mcp_feature_access_summary`
+  - tool: `mcp_storage_access_model_summary`
   - resource: `ccbg://public/feature-access-summary`
+  - resource: `ccbg://public/storage-access-model`
   - prompt: `discover_feature_access_model`
+  - prompt: `design_storage_access_mapping`
 - 已鉴权运维工具:
   - 只读: `provider_list`、`provider_health`、`replication_get_status`、`replication_list_failed_jobs`、`alerts_list_recent`、`admin_status_get`、`applications_get`、`content_policies_get`、`provider_credentials_get`、`auth_capture_policy_get`、`replication_dlq_list`
   - 修改: `applications_update`、`content_policies_update`、`topology_update`、`provider_credentials_update`、`auth_capture_policy_update`、`replication_retry_job`、`replication_dlq_replay_job`、`replication_dlq_replay_target`
@@ -184,6 +187,8 @@ Skill 的职责是给 Agent 提供:
 4. 删除和覆盖应优先确认对象状态，避免破坏尚未复制的数据。
 5. 当 provider 健康异常时，应优先调用状态与告警工具，而不是盲目重试写入。
 6. 本地数据面虽然兼容 S3 API，但不等于完整 AWS S3 控制面。
+7. 共享容器多租户应优先用 `bucket + prefix` 表达应用根和用户根，不要把运营商路由塞进 `region`。
+8. `region` 应保持 SigV4 兼容语义；运营商选择应走 endpoint、scoped credential 或 bucket/prefix policy。
 
 ### Skill 建议结构
 

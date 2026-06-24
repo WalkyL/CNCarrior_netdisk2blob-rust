@@ -256,6 +256,9 @@ GET /api/applications/{application_id}/credentials
       "access_key_id": "video-access-key",
       "secret_access_key": "video-secret-key",
       "enabled": true,
+      "affiliation": "telecom",
+      "application_root": "video-ingest",
+      "user_root_template": "video-ingest/{user_id}",
       "content_policy_id": "large-video"
     }
   ]
@@ -284,6 +287,15 @@ GET /api/applications/{application_id}/credentials
 
 这个显式导出接口只应该用于管理员的复制、恢复或回填场景，不应该替代常规的应用列表读取。
 
+应用字段补充说明:
+
+- `affiliation`: 运营商归属或新写入默认落点偏好，例如 `unicom` / `telecom` / `mobile`
+- `application_root`: 共享桶里的应用根前缀，例如 `course-harvest`
+- `user_root_template`: 共享桶里的用户根模板，例如 `course-harvest/{user_id}`
+
+这些字段用于控制面说明、接入片段生成和后续路由策略表达，不会改写 S3 SigV4 的 `region` 语义。
+如果同一对象写入命中了更具体的 `content_policy`，则以 `content_policy` 为准，`affiliation` 不会覆盖它。
+
 Admin UI 的 `显示 S3 凭据` / `复制 S3 凭据` 也是基于这个接口工作：
 
 - `显示 S3 凭据` 会回填当前应用的明文 `secret_access_key`
@@ -300,8 +312,10 @@ Admin UI 的 `显示 S3 凭据` / `复制 S3 凭据` 也是基于这个接口工
 
 - 单个允许桶: 直接作为 `CCBG_S3_BUCKET`
 - 多个允许桶: 保留允许列表注释，并优先默认到 `root` 或第一个允许桶
-- 单个允许前缀: 直接作为 `CCBG_S3_PREFIX`
+- 如果显式配置了 `application_root`: 优先作为 `CCBG_S3_PREFIX`
+- 单个允许前缀: 在没有显式 `application_root` 时直接作为 `CCBG_S3_PREFIX`
 - 多个允许前缀: 保留允许列表注释，并留空 `CCBG_S3_PREFIX` 让操作者按需填写
+- 如果显式配置了 `user_root_template`: 额外在注释里导出 `CCBG_S3_USER_ROOT_TEMPLATE`
 
 ### 5.2 内容策略
 

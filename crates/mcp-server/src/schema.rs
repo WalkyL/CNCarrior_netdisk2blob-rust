@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const TOOL_MCP_FEATURE_ACCESS_SUMMARY: &str = "mcp_feature_access_summary";
+pub const TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY: &str = "mcp_storage_access_model_summary";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +32,7 @@ pub struct ToolSchema {
 pub fn tool_registry() -> Vec<ToolSchema> {
     vec![
         mcp_feature_access_summary(),
+        mcp_storage_access_model_summary(),
         provider_list(),
         provider_health(),
         replication_get_status(),
@@ -66,6 +68,19 @@ fn mcp_feature_access_summary() -> ToolSchema {
         name: TOOL_MCP_FEATURE_ACCESS_SUMMARY,
         title: "Feature Access Summary",
         description: "Return MCP discovery and access requirements.",
+        input_schema: object_schema(vec![]),
+        output_schema: any_object_schema(),
+        auth_required: false,
+        access: McpAccess::PublicDiscovery,
+        mutating: false,
+    }
+}
+
+fn mcp_storage_access_model_summary() -> ToolSchema {
+    ToolSchema {
+        name: TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY,
+        title: "Storage Access Model Summary",
+        description: "Return public field-mapping guidance for S3-compatible application integrations.",
         input_schema: object_schema(vec![]),
         output_schema: any_object_schema(),
         auth_required: false,
@@ -439,7 +454,10 @@ fn integer_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpAccess, TOOL_MCP_FEATURE_ACCESS_SUMMARY, is_public_tool, tool_registry};
+    use super::{
+        McpAccess, TOOL_MCP_FEATURE_ACCESS_SUMMARY, TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY,
+        is_public_tool, tool_registry,
+    };
     use std::collections::HashSet;
 
     #[test]
@@ -447,8 +465,9 @@ mod tests {
         let registry = tool_registry();
         let names: HashSet<_> = registry.iter().map(|tool| tool.name).collect();
 
-        assert_eq!(registry.len(), 21);
+        assert_eq!(registry.len(), 22);
         assert!(names.contains(TOOL_MCP_FEATURE_ACCESS_SUMMARY));
+        assert!(names.contains(TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY));
         assert!(names.contains("provider_list"));
         assert!(names.contains("applications_update"));
         assert!(names.contains("replication_dlq_replay_target"));
@@ -477,6 +496,7 @@ mod tests {
     #[test]
     fn public_tool_lookup_matches_registry_metadata() {
         assert!(is_public_tool(TOOL_MCP_FEATURE_ACCESS_SUMMARY));
+        assert!(is_public_tool(TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY));
         assert!(!is_public_tool("provider_list"));
         assert!(!is_public_tool("missing"));
     }

@@ -2173,6 +2173,7 @@ Copyright (c) 2026 walky
         <button id="save-applications" type="button">保存 S3 应用账号</button>
       </div>
       <div class="application-toolbar-note">这里只放内部应用 ID、访问密钥 ID 和密码轮换；权限、路由和加密不要混进来。</div>
+      <div class="policy-execution-note compact-execution-note">共享容器场景下，应用根和用户根优先用 bucket + prefix 表达。`region` 保持 `us-east-1` 这类中性签名值；联通/电信/移动归属请放在“归属地”或路由策略里，不要塞进 `region`。</div>
       <div id="applications-list" class="provider-grid"></div>
       <details>
         <summary>原始应用负载</summary>
@@ -6604,6 +6605,9 @@ Copyright (c) 2026 walky
         advanced_open: false,
         enabled: seed.enabled !== false,
         secret_access_key_present: false,
+        affiliation: String(seed.affiliation || '').trim().toLowerCase(),
+        application_root: String(seed.application_root || `${baseId}/`).trim(),
+        user_root_template: String(seed.user_root_template || `${baseId}/{user_id}/`).trim(),
         permissions: {
           list_buckets: true,
           list_objects: true,
@@ -6635,11 +6639,14 @@ Copyright (c) 2026 walky
       const allowedBuckets = normalizeApplicationScopeValues(app?.permissions?.allowed_buckets);
       const allowedPrefixes = normalizeApplicationScopeValues(app?.permissions?.allowed_prefixes);
       const bucket = allowedBuckets.includes('root') ? 'root' : (allowedBuckets[0] || 'root');
-      const prefix = allowedPrefixes.length === 1 ? allowedPrefixes[0] : '';
+      const configuredApplicationRoot = String(app?.application_root || '').trim().replace(/^\/+|\/+$/g, '');
+      const configuredUserRootTemplate = String(app?.user_root_template || '').trim().replace(/^\/+|\/+$/g, '');
+      const prefix = configuredApplicationRoot || (allowedPrefixes.length === 1 ? allowedPrefixes[0] : '');
       const endpoint = desktopMountEndpoint();
       const region = String(desktopMountSeed?.region || '').trim() || 'us-east-1';
       const lines = [
         `# application_id=${String(app?.id || '').trim()}`,
+        `# affiliation=${String(app?.affiliation || '').trim() || 'none'}`,
         `CCBG_S3_ENDPOINT=${endpoint}`,
         `CCBG_S3_REGION=${region}`,
         'CCBG_S3_FORCE_PATH_STYLE=true',
@@ -6654,6 +6661,9 @@ Copyright (c) 2026 walky
         lines.push(`# allowed_prefixes=${allowedPrefixes.join(', ')}`);
       }
       lines.push(`CCBG_S3_PREFIX=${prefix}`);
+      if (configuredUserRootTemplate) {
+        lines.push(`# CCBG_S3_USER_ROOT_TEMPLATE=${configuredUserRootTemplate}`);
+      }
       lines.push(`CCBG_S3_ACCESS_KEY_ID=${String(app?.access_key_id || '').trim()}`);
       lines.push(`CCBG_S3_SECRET_ACCESS_KEY=${String(app?.secret_access_key || '').trim()}`);
       return lines.join('\n');
@@ -16328,6 +16338,7 @@ Copyright (c) 2026 walky
       });
     }
     function normalizeApplicationDraft(entry = {}, index = 0) {
+      const generated = generatedApplicationDraft(entry, index);
       return {
         id: String(entry.id || `app-${index + 1}`).trim(),
         label: String(entry.label || '').trim(),
@@ -16336,6 +16347,9 @@ Copyright (c) 2026 walky
         advanced_open: !!entry.advanced_open,
         enabled: entry.enabled !== false,
         secret_access_key_present: !!entry.secret_access_key_present,
+        affiliation: String(entry.affiliation || '').trim().toLowerCase(),
+        application_root: String(entry.application_root || generated.application_root || '').trim(),
+        user_root_template: String(entry.user_root_template || generated.user_root_template || '').trim(),
         permissions: {
           list_buckets: entry?.permissions?.list_buckets !== false,
           list_objects: entry?.permissions?.list_objects !== false,
@@ -17710,14 +17724,28 @@ Copyright (c) 2026 walky
               <label>${renderFieldLabel('显示名称', '给管理员看的名称，方便在后台区分不同应用，不参与实际鉴权。')}
                 <input data-application-field="label" type="text" value="${escapeHtmlAttr(app.label)}" placeholder="Video ingest service" />
               </label>
+              <label>${renderFieldLabel('归属地', '产品层面的运营商归属或路由偏好。用于说明或策略，不参与 S3 SigV4 签名。')}
+                <select data-application-field="affiliation">
+                  <option value="" ${!app.affiliation ? 'selected' : ''}>未指定</option>
+                  <option value="unicom" ${app.affiliation === 'unicom' ? 'selected' : ''}>unicom</option>
+                  <option value="telecom" ${app.affiliation === 'telecom' ? 'selected' : ''}>telecom</option>
+                  <option value="mobile" ${app.affiliation === 'mobile' ? 'selected' : ''}>mobile</option>
+                </select>
+              </label>
               <label>${renderFieldLabel('访问密钥密码', '应用访问 S3 网关时使用的密码。已有应用留空表示保持现有密码不变。')}
                 <input data-application-field="secret_access_key" type="text" value="${escapeHtmlAttr(app.secret_access_key)}" placeholder="${app.secret_access_key_present ? 'Leave blank to keep existing secret' : 'Required for new applications'}" />
+              </label>
+              <label>${renderFieldLabel('应用根', '推荐填应用在共享桶里的根前缀，例如 course-harvest/。接入片段会优先使用这里，而不是猜测 allowed_prefixes。')}
+                <input data-application-field="application_root" type="text" value="${escapeHtmlAttr(app.application_root)}" placeholder="course-harvest/" />
+              </label>
+              <label>${renderFieldLabel('用户根模板', '可选。用于约定应用内每个用户的子前缀模板，例如 course-harvest/{user_id}/。这只是接入约定，不会直接改写现有对象 Key。')}
+                <input data-application-field="user_root_template" type="text" value="${escapeHtmlAttr(app.user_root_template)}" placeholder="course-harvest/{user_id}/" />
               </label>
               <label class="application-editor-snippet">${renderFieldLabel('接入片段', '显示可直接粘贴给对方应用的 env 片段。显示或复制当前 S3 凭据后，这里会带上 endpoint、bucket、prefix 和完整 key。')}
                 <textarea data-application-preview="env" readonly placeholder="${app.secret_access_key_present ? '点击“显示 S3 凭据”或“复制 S3 凭据”后，这里会生成完整 env 片段。' : '生成或填写密码后，这里会自动生成完整 env 片段。'}">${escapeHtml(app.secret_access_key ? applicationConnectionSnippet(app) : '')}</textarea>
               </label>
             </div>
-            <div class="application-editor-secret-note">${app.secret_access_key_present ? '当前已经保存过访问密码。点击右上角“显示 S3 凭据”可回填当前密码并展开接入片段；点击“复制 S3 凭据”会额外把完整 env 片段复制到剪贴板。这里留空表示保持不变，填写新值表示轮换密码。' : '新应用在保存前必须填写访问密钥密码。生成后可直接显示或复制给对方应用。'}</div>
+            <div class="application-editor-secret-note">${app.secret_access_key_present ? '当前已经保存过访问密码。点击右上角“显示 S3 凭据”可回填当前密码并展开接入片段；点击“复制 S3 凭据”会额外把完整 env 片段复制到剪贴板。这里留空表示保持不变，填写新值表示轮换密码。应用根/用户根用于明确共享桶里的 prefix 约定；归属地用于路由说明，不会改掉 S3 region。' : '新应用在保存前必须填写访问密钥密码。生成后可直接显示或复制给对方应用。建议同时填好应用根、用户根模板和归属地，避免下游把 region 当运营商选择器。'}</div>
           </details>
         </div>
       `).join('');
@@ -18256,6 +18284,9 @@ Copyright (c) 2026 walky
             ? !!credentialRow.querySelector('.application-editor-advanced')?.open
             : !!draft.advanced_open,
           enabled: credentialRow ? !!credentialRow.querySelector('[data-application-field="enabled"]')?.checked : draft.enabled !== false,
+          affiliation: credentialRow ? (credentialValue('affiliation') || null) : (draft.affiliation || null),
+          application_root: credentialRow ? (credentialValue('application_root') || null) : (draft.application_root || null),
+          user_root_template: credentialRow ? (credentialValue('user_root_template') || null) : (draft.user_root_template || null),
           secret_access_key_present: credentialRow
             ? credentialRow.dataset.applicationSecretPresent === 'true'
             : !!draft.secret_access_key_present,

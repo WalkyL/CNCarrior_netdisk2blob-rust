@@ -23,8 +23,11 @@ Public MCP methods:
 Public MCP features:
 
 - Tool: `mcp_feature_access_summary`
+- Tool: `mcp_storage_access_model_summary`
 - Resource: `ccbg://public/feature-access-summary`
+- Resource: `ccbg://public/storage-access-model`
 - Prompt: `discover_feature_access_model`
+- Prompt: `design_storage_access_mapping`
 
 Protected operator tools:
 
@@ -55,6 +58,50 @@ Protected operator tools:
 - `CCBG_MCP_*` aliases are accepted for the HTTP transport configuration.
 - HTTP bearer token stays externalized in env vars only.
 - No secret is written into repo docs, MCP public discovery payloads, or default config.
+
+## Public Storage Access Model
+
+### Objective
+
+Expose a no-auth MCP summary that teaches downstream applications how to map product fields such
+as application, container, region, access mode, and affiliation onto CCBG's S3-compatible surface
+without overloading S3 protocol fields.
+
+### Interface
+
+- Public MCP tool: `mcp_storage_access_model_summary`
+- Public MCP resource: `ccbg://public/storage-access-model`
+- Public MCP prompt: `design_storage_access_mapping`
+
+### Field Mapping Contract
+
+- `application` -> `application_id`
+- `container` -> S3 bucket
+- `region` -> SigV4 signing region only
+- `access_mode` -> bucket/prefix layout policy
+- `application_root` / `user_root` -> key prefix convention
+- `affiliation` -> carrier-affinity write-placement hint, not an S3 signing field
+
+### Control-Plane Surface
+
+- `GET /api/applications` returns `affiliation`, `application_root`, and `user_root_template`
+- `POST /api/applications` accepts the same fields
+- `GET /api/applications/{application_id}/credentials` includes the same mapping fields plus the plaintext secret for explicit export flows
+
+### Routing Semantics
+
+- `content_policy` remains the highest-priority write-routing control.
+- When no matching content policy exists, `affiliation` may bias new object home placement toward the matching primary-capable provider.
+- `affiliation` does not rewrite SigV4 region semantics and does not force retroactive migration of existing objects.
+- When the chosen home provider already matches the effective target provider, the persisted replication plan omits that self-target.
+
+### Guidance
+
+- Keep `region` stable and neutral, preferably `us-east-1`.
+- Do not encode carrier choice in `region` or `location_constraint`.
+- Use bucket + prefix for shared-container tenancy.
+- Use endpoint selection, scoped application credentials, or bucket/prefix policy for carrier
+  routing.
 
 ## Admin S3 Credential Export
 

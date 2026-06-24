@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const PROMPT_DISCOVER_FEATURE_ACCESS_MODEL: &str = "discover_feature_access_model";
+pub const PROMPT_DESIGN_STORAGE_ACCESS_MAPPING: &str = "design_storage_access_mapping";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptArgumentSchema {
@@ -31,6 +32,13 @@ pub fn prompt_registry() -> Vec<PromptSchema> {
         PromptSchema {
             name: PROMPT_DISCOVER_FEATURE_ACCESS_MODEL,
             description: "Explain which MCP features are public and which require authentication.",
+            arguments: None,
+            auth_required: false,
+            access: McpAccess::PublicDiscovery,
+        },
+        PromptSchema {
+            name: PROMPT_DESIGN_STORAGE_ACCESS_MAPPING,
+            description: "Explain how to map a downstream S3 form onto CCBG bucket, prefix, and routing semantics.",
             arguments: None,
             auth_required: false,
             access: McpAccess::PublicDiscovery,
@@ -95,6 +103,9 @@ pub fn get_prompt(name: &str, arguments: Option<&Value>) -> Result<Value, Server
         PROMPT_DISCOVER_FEATURE_ACCESS_MODEL => {
             "Discover CCBG MCP capabilities in two passes. First call tools/list, resources/list, and prompts/list. Then read ccbg://public/feature-access-summary or call mcp_feature_access_summary. Use the authRequired and access fields to separate public discovery from operator-only workflows.".to_string()
         }
+        PROMPT_DESIGN_STORAGE_ACCESS_MAPPING => {
+            "Explain CCBG storage integration in protocol-safe terms. First call mcp_storage_access_model_summary or read ccbg://public/storage-access-model. Map the downstream form to bucket plus key prefix. Keep region stable for SigV4 signing, do not encode carrier choice in region, and use endpoint selection, scoped application credentials, or bucket/prefix policy for routing.".to_string()
+        }
         "safe_object_read" => {
             let object_key = required_str(&args, "object_key")?;
             format!(
@@ -148,7 +159,10 @@ fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ServerError> 
 
 #[cfg(test)]
 mod tests {
-    use super::{PROMPT_DISCOVER_FEATURE_ACCESS_MODEL, is_public_prompt, prompt_registry};
+    use super::{
+        PROMPT_DESIGN_STORAGE_ACCESS_MAPPING, PROMPT_DISCOVER_FEATURE_ACCESS_MODEL,
+        is_public_prompt, prompt_registry,
+    };
     use crate::schema::McpAccess;
 
     #[test]
@@ -172,6 +186,7 @@ mod tests {
     #[test]
     fn public_prompt_lookup_matches_registry_metadata() {
         assert!(is_public_prompt(PROMPT_DISCOVER_FEATURE_ACCESS_MODEL));
+        assert!(is_public_prompt(PROMPT_DESIGN_STORAGE_ACCESS_MAPPING));
         assert!(!is_public_prompt("safe_object_read"));
         assert!(!is_public_prompt("missing"));
     }

@@ -1228,6 +1228,12 @@ struct DataPlaneApplication {
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
+    affiliation: Option<String>,
+    #[serde(default)]
+    application_root: Option<String>,
+    #[serde(default)]
+    user_root_template: Option<String>,
+    #[serde(default)]
     permissions: DataPlaneApplicationPermissions,
 }
 
@@ -1241,6 +1247,12 @@ struct DataPlaneApplicationInput {
     secret_access_key: Option<String>,
     #[serde(default = "default_true")]
     enabled: bool,
+    #[serde(default)]
+    affiliation: Option<String>,
+    #[serde(default)]
+    application_root: Option<String>,
+    #[serde(default)]
+    user_root_template: Option<String>,
     #[serde(default)]
     permissions: Option<DataPlaneApplicationPermissionsInput>,
 }
@@ -1257,6 +1269,9 @@ struct DataPlaneApplicationPayload {
     label: Option<String>,
     access_key_id: String,
     enabled: bool,
+    affiliation: Option<String>,
+    application_root: Option<String>,
+    user_root_template: Option<String>,
     secret_access_key_present: bool,
     permissions: DataPlaneApplicationPermissionsPayload,
 }
@@ -1268,6 +1283,9 @@ struct DataPlaneApplicationCredentialExportPayload {
     access_key_id: String,
     secret_access_key: String,
     enabled: bool,
+    affiliation: Option<String>,
+    application_root: Option<String>,
+    user_root_template: Option<String>,
 }
 
 fn default_smb_enabled() -> bool {
@@ -17591,6 +17609,8 @@ async fn select_home_write_provider(
     state: &AppState,
     bucket: &str,
     key: &str,
+    application: Option<&S3ApplicationIdentity>,
+    content_type: Option<&str>,
     size: u64,
 ) -> Result<(ProviderId, DynBackend), BlobError> {
     if let Some(provider) = placed_home_provider(state, bucket, key)? {
@@ -17611,6 +17631,21 @@ async fn select_home_write_provider(
 
     let (candidates, first_quota_error) =
         eligible_write_candidates_for_object(state, bucket, key, size).await?;
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    if let Some(preferred_provider) = preferred_affiliation_provider_for_application_write(
+        state,
+        application,
+        bucket,
+        key,
+        content_type,
+    ) {
+        if let Some(index) = candidates
+            .iter()
+            .position(|(provider, _)| *provider == preferred_provider)
+        {
+            candidates.rotate_left(index);
+        }
+    }
     candidates.into_iter().next().ok_or_else(|| {
         first_quota_error.unwrap_or_else(|| {
             BlobError::Configuration(format!(
@@ -19339,6 +19374,7 @@ async fn effective_topology_for_replication_put(
     application: Option<&S3ApplicationIdentity>,
     bucket: &str,
     key: &str,
+    home_provider: Option<ProviderId>,
     size: u64,
     content_type: Option<&str>,
 ) -> Result<TopologyPolicy, BlobError> {
@@ -19391,6 +19427,11 @@ async fn effective_topology_for_replication_put(
         }
     }
     topology.sync_targets = allowed_targets;
+    if let Some(home_provider) = home_provider {
+        topology
+            .sync_targets
+            .retain(|provider| *provider != home_provider);
+    }
     topology.fallback_read_order = topology
         .fallback_read_order
         .into_iter()
@@ -19452,6 +19493,7 @@ async fn enqueue_replication_put_for_object(
                     None,
                     bucket,
                     key,
+                    Some(source_provider),
                     object.size,
                     object.content_type.as_deref(),
                 )
@@ -26790,6 +26832,9 @@ impl From<DataPlaneApplication> for DataPlaneApplicationInput {
             access_key_id: value.access_key_id,
             secret_access_key: Some(value.secret_access_key),
             enabled: value.enabled,
+            affiliation: value.affiliation,
+            application_root: value.application_root,
+            user_root_template: value.user_root_template,
             permissions: Some(DataPlaneApplicationPermissionsInput {
                 list_buckets: value.permissions.list_buckets,
                 list_objects: value.permissions.list_objects,
@@ -26810,8 +26855,20 @@ fn default_data_plane_applications(config: &AppConfig) -> Vec<DataPlaneApplicati
         access_key_id: config.s3_access_key_id.clone(),
         secret_access_key: config.s3_secret_access_key.clone(),
         enabled: true,
+        affiliation: None,
+        application_root: None,
+        user_root_template: None,
         permissions: DataPlaneApplicationPermissions::default(),
     }]
+}
+
+fn normalize_application_prefix_field(value: Option<String>) -> Option<String> {
+    let values = value.into_iter().collect::<Vec<_>>();
+    normalize_prefix_list(&values).into_iter().next()
+}
+
+fn normalize_application_affiliation(value: Option<String>) -> Option<String> {
+    normalize_secret_field(value).map(|value| value.to_ascii_lowercase())
 }
 
 fn normalize_data_plane_application_permissions(
@@ -27357,6 +27414,9 @@ fn normalize_data_plane_applications_with_existing(
             access_key_id,
             secret_access_key,
             enabled: application.enabled,
+            affiliation: normalize_application_affiliation(application.affiliation),
+            application_root: normalize_application_prefix_field(application.application_root),
+            user_root_template: normalize_application_prefix_field(application.user_root_template),
             permissions: normalize_data_plane_application_permissions(application.permissions),
         });
     }
@@ -27789,6 +27849,9 @@ fn data_plane_application_payload(
         label: application.label.clone(),
         access_key_id: application.access_key_id.clone(),
         enabled: application.enabled,
+        affiliation: application.affiliation.clone(),
+        application_root: application.application_root.clone(),
+        user_root_template: application.user_root_template.clone(),
         secret_access_key_present: !application.secret_access_key.is_empty(),
         permissions: DataPlaneApplicationPermissionsPayload {
             list_buckets: application.permissions.list_buckets,
@@ -27811,6 +27874,9 @@ fn data_plane_application_credential_export_payload(
         access_key_id: application.access_key_id.clone(),
         secret_access_key: application.secret_access_key.clone(),
         enabled: application.enabled,
+        affiliation: application.affiliation.clone(),
+        application_root: application.application_root.clone(),
+        user_root_template: application.user_root_template.clone(),
     }
 }
 
@@ -28738,6 +28804,7 @@ fn matching_content_policy(
 struct S3ApplicationIdentity {
     application_id: String,
     access_key_id: String,
+    affiliation: Option<String>,
     permissions: DataPlaneApplicationPermissions,
 }
 
@@ -28753,11 +28820,41 @@ fn resolve_s3_application(
                 S3ApplicationIdentity {
                     application_id: application.id,
                     access_key_id: application.access_key_id,
+                    affiliation: application.affiliation,
                     permissions: application.permissions,
                 },
                 application.secret_access_key,
             )
         })
+}
+
+fn preferred_affiliation_provider_for_application_write(
+    state: &AppState,
+    application: Option<&S3ApplicationIdentity>,
+    bucket: &str,
+    key: &str,
+    content_type: Option<&str>,
+) -> Option<ProviderId> {
+    let application = application?;
+    if matching_content_policy(
+        state,
+        Some(application.application_id.as_str()),
+        bucket,
+        key,
+        content_type,
+    )
+    .is_some()
+    {
+        return None;
+    }
+
+    let affiliation = application.affiliation.as_deref()?;
+    let provider = ProviderId::parse(affiliation).ok()?;
+    if provider.can_be_primary() {
+        Some(provider)
+    } else {
+        None
+    }
 }
 
 fn normalize_probe_key_prefix(value: Option<&str>) -> String {
@@ -30637,10 +30734,16 @@ async fn execute_put_upload(
         &application,
     );
 
-    let (home_provider, home_backend) =
-        select_home_write_provider(state, &bucket, &key, stored_size)
-            .await
-            .map_err(|error| S3Error::insufficient_storage(error.to_string()))?;
+    let (home_provider, home_backend) = select_home_write_provider(
+        state,
+        &bucket,
+        &key,
+        Some(&application),
+        policy_content_type.as_deref(),
+        stored_size,
+    )
+    .await
+    .map_err(|error| S3Error::insufficient_storage(error.to_string()))?;
     if !home_backend.capabilities().streaming_put {
         ensure_object_within_in_memory_limit(&state.config, stored_size)?;
     }
@@ -30653,6 +30756,7 @@ async fn execute_put_upload(
         Some(&application),
         &bucket,
         &key,
+        Some(home_provider),
         stored_size,
         policy_content_type.as_deref(),
     )
@@ -35120,6 +35224,9 @@ mod tests {
             access_key_id: access_key_id.to_string(),
             secret_access_key: secret_access_key.to_string(),
             enabled: true,
+            affiliation: None,
+            application_root: None,
+            user_root_template: None,
             permissions: DataPlaneApplicationPermissions::default(),
         }];
         control_plane.content_policies = Vec::new();
@@ -42519,6 +42626,9 @@ mod tests {
         assert!(html.contains("Show S3 Credentials"));
         assert!(html.contains("Copy S3 Credentials"));
         assert!(html.contains("Connection Snippet"));
+        assert!(html.contains("应用根"));
+        assert!(html.contains("用户根模板"));
+        assert!(html.contains("归属地"));
         assert!(html.contains("Advanced"));
         assert!(html.contains("/api/applications"));
         assert!(html.contains("data-show-application-credentials"));
@@ -44123,6 +44233,9 @@ mod tests {
                     access_key_id: "copy-access".to_string(),
                     secret_access_key: Some("copy-secret".to_string()),
                     enabled: true,
+                    affiliation: None,
+                    application_root: None,
+                    user_root_template: None,
                     permissions: Some(DataPlaneApplicationPermissionsInput {
                         list_buckets: true,
                         list_objects: true,
@@ -45875,6 +45988,183 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn application_affiliation_prefers_matching_home_provider_for_new_puts() {
+        let mut state = test_state();
+        let telecom_backend: DynBackend = Arc::new(StubBackend::new());
+        let mobile_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend);
+        replace_backend(&mut state, ProviderId::Mobile, mobile_backend);
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology.primary_provider = ProviderId::Stub;
+            control_plane.topology.sync_targets = vec![ProviderId::Telecom, ProviderId::Mobile];
+            control_plane.topology.fallback_read_order =
+                vec![ProviderId::Telecom, ProviderId::Mobile];
+            control_plane.write_targets = vec![ProviderId::Mobile, ProviderId::Telecom];
+            control_plane.high_speed_providers = vec![ProviderId::Mobile, ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferHighSpeed;
+        }
+        let _ = update_data_plane_applications(
+            State(state.clone()),
+            Json(DataPlaneApplicationsInput {
+                applications: vec![DataPlaneApplicationInput {
+                    id: "aff-telecom".to_string(),
+                    label: Some("Aff Telecom".to_string()),
+                    access_key_id: "aff-telecom-access".to_string(),
+                    secret_access_key: Some("aff-telecom-secret".to_string()),
+                    enabled: true,
+                    affiliation: Some("telecom".to_string()),
+                    application_root: None,
+                    user_root_template: None,
+                    permissions: None,
+                }],
+            }),
+        )
+        .await
+        .expect("applications should update");
+
+        let bucket = "root".to_string();
+        let key = "videos/affiliation-home.mp4".to_string();
+        let body = Bytes::from_static(b"affiliation-home");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers_for_application(
+            &state.config,
+            "aff-telecom-access",
+            "aff-telecom-secret",
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "video/mp4")],
+        );
+
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect("affiliation put should succeed");
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should exist");
+        assert_eq!(placement.provider, "telecom");
+        let plan = load_object_protection_plan(&state, &bucket, &key)
+            .expect("protection plan should load")
+            .expect("protection plan should exist");
+        assert_eq!(plan.sync_targets, vec![ProviderId::Mobile]);
+        assert_eq!(plan.fallback_read_order, vec![ProviderId::Mobile]);
+    }
+
+    #[tokio::test]
+    async fn content_policy_keeps_priority_over_application_affiliation() {
+        let mut state = test_state();
+        let telecom_backend: DynBackend = Arc::new(StubBackend::new());
+        let mobile_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend);
+        replace_backend(&mut state, ProviderId::Mobile, mobile_backend);
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology.primary_provider = ProviderId::Stub;
+            control_plane.topology.sync_targets = vec![ProviderId::Telecom, ProviderId::Mobile];
+            control_plane.topology.fallback_read_order =
+                vec![ProviderId::Telecom, ProviderId::Mobile];
+            control_plane.write_targets = vec![ProviderId::Mobile, ProviderId::Telecom];
+            control_plane.high_speed_providers = vec![ProviderId::Mobile, ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferHighSpeed;
+        }
+        let _ = update_data_plane_applications(
+            State(state.clone()),
+            Json(DataPlaneApplicationsInput {
+                applications: vec![DataPlaneApplicationInput {
+                    id: "aff-telecom".to_string(),
+                    label: Some("Aff Telecom".to_string()),
+                    access_key_id: "aff-telecom-access".to_string(),
+                    secret_access_key: Some("aff-telecom-secret".to_string()),
+                    enabled: true,
+                    affiliation: Some("telecom".to_string()),
+                    application_root: None,
+                    user_root_template: None,
+                    permissions: None,
+                }],
+            }),
+        )
+        .await
+        .expect("applications should update");
+        let _ = update_content_policies(
+            State(state.clone()),
+            Json(ContentPoliciesInput {
+                policies: vec![ContentPolicyRule {
+                    id: "mobile-video".to_string(),
+                    label: Some("Mobile Video".to_string()),
+                    enabled: true,
+                    application_ids: vec!["aff-telecom".to_string()],
+                    buckets: vec!["root".to_string()],
+                    prefixes: vec!["videos/".to_string()],
+                    content_types: vec!["video/*".to_string()],
+                    encryption_profile_id: None,
+                    sync_targets: vec![ProviderId::Mobile],
+                    fallback_read_order: vec![ProviderId::Mobile],
+                }],
+            }),
+        )
+        .await
+        .expect("content policy should save");
+
+        let bucket = "root".to_string();
+        let key = "videos/policy-priority.mp4".to_string();
+        let body = Bytes::from_static(b"policy-priority");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers_for_application(
+            &state.config,
+            "aff-telecom-access",
+            "aff-telecom-secret",
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "video/mp4")],
+        );
+
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect("policy put should succeed");
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should exist");
+        assert_eq!(placement.provider, "mobile");
+        let plan = load_object_protection_plan(&state, &bucket, &key)
+            .expect("protection plan should load")
+            .expect("protection plan should exist");
+        assert!(plan.sync_targets.is_empty());
+        assert!(plan.fallback_read_order.is_empty());
     }
 
     #[tokio::test]
@@ -52497,6 +52787,9 @@ mod tests {
                     access_key_id: "enc-app-access".to_string(),
                     secret_access_key: Some("enc-app-secret".to_string()),
                     enabled: true,
+                    affiliation: None,
+                    application_root: None,
+                    user_root_template: None,
                     permissions: None,
                 }],
             }),
@@ -52539,6 +52832,9 @@ mod tests {
                     access_key_id: "media-access".to_string(),
                     secret_access_key: Some("media-secret".to_string()),
                     enabled: true,
+                    affiliation: None,
+                    application_root: None,
+                    user_root_template: None,
                     permissions: None,
                 }],
             }),
@@ -52953,6 +53249,9 @@ mod tests {
                         access_key_id: "app-access".to_string(),
                         secret_access_key: Some("app-secret".to_string()),
                         enabled: true,
+                        affiliation: None,
+                        application_root: None,
+                        user_root_template: None,
                         permissions: None,
                     },
                     DataPlaneApplicationInput {
@@ -52961,6 +53260,9 @@ mod tests {
                         access_key_id: "disabled-access".to_string(),
                         secret_access_key: Some("disabled-secret".to_string()),
                         enabled: false,
+                        affiliation: None,
+                        application_root: None,
+                        user_root_template: None,
                         permissions: None,
                     },
                 ],
@@ -52986,6 +53288,9 @@ mod tests {
                     access_key_id: "app-access".to_string(),
                     secret_access_key: None,
                     enabled: true,
+                    affiliation: None,
+                    application_root: None,
+                    user_root_template: None,
                     permissions: None,
                 }],
             }),
@@ -53022,6 +53327,9 @@ mod tests {
                     access_key_id: "ccbg_product-manager-agent_mqm9sjv0".to_string(),
                     secret_access_key: Some("product-manager-agent-secret".to_string()),
                     enabled: true,
+                    affiliation: Some("telecom".to_string()),
+                    application_root: Some("product-manager-agent".to_string()),
+                    user_root_template: Some("product-manager-agent/{user_id}".to_string()),
                     permissions: None,
                 }],
             }),
@@ -53042,6 +53350,15 @@ mod tests {
         );
         assert_eq!(exported.secret_access_key, "product-manager-agent-secret");
         assert!(exported.enabled);
+        assert_eq!(exported.affiliation.as_deref(), Some("telecom"));
+        assert_eq!(
+            exported.application_root.as_deref(),
+            Some("product-manager-agent")
+        );
+        assert_eq!(
+            exported.user_root_template.as_deref(),
+            Some("product-manager-agent/{user_id}")
+        );
 
         let Json(list_payload) = get_data_plane_applications(State(state.clone()))
             .await
@@ -53053,6 +53370,65 @@ mod tests {
                 .get("secret_access_key_present")
                 .and_then(serde_json::Value::as_bool),
             Some(true)
+        );
+        assert_eq!(
+            list_json[0]
+                .get("affiliation")
+                .and_then(serde_json::Value::as_str),
+            Some("telecom")
+        );
+        assert_eq!(
+            list_json[0]
+                .get("application_root")
+                .and_then(serde_json::Value::as_str),
+            Some("product-manager-agent")
+        );
+        assert_eq!(
+            list_json[0]
+                .get("user_root_template")
+                .and_then(serde_json::Value::as_str),
+            Some("product-manager-agent/{user_id}")
+        );
+    }
+
+    #[tokio::test]
+    async fn data_plane_application_storage_mapping_fields_round_trip() {
+        let state = test_state();
+        let payload = update_data_plane_applications(
+            State(state.clone()),
+            Json(DataPlaneApplicationsInput {
+                applications: vec![DataPlaneApplicationInput {
+                    id: "course-harvest".to_string(),
+                    label: Some("Course Harvest".to_string()),
+                    access_key_id: "course-harvest-access".to_string(),
+                    secret_access_key: Some("course-harvest-secret".to_string()),
+                    enabled: true,
+                    affiliation: Some("Telecom".to_string()),
+                    application_root: Some("/course-harvest/".to_string()),
+                    user_root_template: Some("/course-harvest/{user_id}/".to_string()),
+                    permissions: Some(DataPlaneApplicationPermissionsInput {
+                        list_buckets: true,
+                        list_objects: true,
+                        read_object: true,
+                        write_object: true,
+                        delete_object: true,
+                        allowed_buckets: vec!["root".to_string()],
+                        allowed_prefixes: vec!["course-harvest/".to_string()],
+                    }),
+                }],
+            }),
+        )
+        .await
+        .expect("applications should update")
+        .0;
+        assert_eq!(payload[0].affiliation.as_deref(), Some("telecom"));
+        assert_eq!(
+            payload[0].application_root.as_deref(),
+            Some("course-harvest")
+        );
+        assert_eq!(
+            payload[0].user_root_template.as_deref(),
+            Some("course-harvest/{user_id}")
         );
     }
 
@@ -53353,6 +53729,9 @@ mod tests {
                     access_key_id: "scoped-access".to_string(),
                     secret_access_key: Some("scoped-secret".to_string()),
                     enabled: true,
+                    affiliation: None,
+                    application_root: None,
+                    user_root_template: None,
                     permissions: Some(DataPlaneApplicationPermissionsInput {
                         list_buckets: true,
                         list_objects: true,
@@ -53453,6 +53832,9 @@ mod tests {
                     access_key_id: "scoped-list-access".to_string(),
                     secret_access_key: Some("scoped-list-secret".to_string()),
                     enabled: true,
+                    affiliation: None,
+                    application_root: None,
+                    user_root_template: None,
                     permissions: Some(DataPlaneApplicationPermissionsInput {
                         list_buckets: true,
                         list_objects: true,
@@ -53578,6 +53960,7 @@ mod tests {
         let app_a = S3ApplicationIdentity {
             application_id: "app-a".to_string(),
             access_key_id: "app-access".to_string(),
+            affiliation: None,
             permissions: DataPlaneApplicationPermissions::default(),
         };
         let matched = effective_topology_for_replication_put(
@@ -53585,6 +53968,7 @@ mod tests {
             Some(&app_a),
             "root",
             "videos/clip.mp4",
+            None,
             1024,
             Some("video/mp4"),
         )
@@ -53599,6 +53983,7 @@ mod tests {
         let other_app = S3ApplicationIdentity {
             application_id: "app-b".to_string(),
             access_key_id: "other-access".to_string(),
+            affiliation: None,
             permissions: DataPlaneApplicationPermissions::default(),
         };
         let unmatched = effective_topology_for_replication_put(
@@ -53606,6 +53991,7 @@ mod tests {
             Some(&other_app),
             "root",
             "videos/clip.mp4",
+            None,
             1024,
             Some("video/mp4"),
         )
@@ -53655,6 +54041,7 @@ mod tests {
         let app = S3ApplicationIdentity {
             application_id: "app-a".to_string(),
             access_key_id: "app-access".to_string(),
+            affiliation: None,
             permissions: DataPlaneApplicationPermissions::default(),
         };
         let topology = effective_topology_for_replication_put(
@@ -53662,6 +54049,7 @@ mod tests {
             Some(&app),
             "root",
             "videos/clip.mp4",
+            None,
             1024,
             Some("video/mp4"),
         )
@@ -53700,6 +54088,9 @@ mod tests {
                     access_key_id: "app-a-access".to_string(),
                     secret_access_key: Some("app-a-secret".to_string()),
                     enabled: true,
+                    affiliation: None,
+                    application_root: None,
+                    user_root_template: None,
                     permissions: None,
                 }],
             }),

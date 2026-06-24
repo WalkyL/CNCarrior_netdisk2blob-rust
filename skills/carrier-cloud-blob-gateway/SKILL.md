@@ -15,6 +15,7 @@ Use this skill for carrier-cloud-blob-gateway operations: local S3-compatible ob
 - The same HTTP transport also accepts `CCBG_MCP_HTTP_*` aliases.
 - Default HTTP endpoint is `http://127.0.0.1:61084/mcp`; no public exposure is required.
 - Without auth, use discovery only: `tools/list`, `resources/list`, `prompts/list`, `mcp_feature_access_summary`, and `ccbg://public/feature-access-summary`.
+- Without auth, storage-integration guidance is also public: `mcp_storage_access_model_summary`, `ccbg://public/storage-access-model`, and `design_storage_access_mapping`.
 - Operator actions over HTTP require the configured bearer token.
 - This endpoint is for `ccbg` itself only. If the task also needs the external `.51` coordination hub, use `http://192.168.1.51:8787/mcp` and expect service identity `agent-nats-redmine-hub`.
 
@@ -23,6 +24,11 @@ Use this skill for carrier-cloud-blob-gateway operations: local S3-compatible ob
 ### `mcp_feature_access_summary`
 - Purpose: return the MCP discovery map, auth boundary, and highlighted operator routes.
 - When to call: first contact, unknown auth state, or before choosing tools.
+- Key parameters: none.
+
+### `mcp_storage_access_model_summary`
+- Purpose: return public field-mapping guidance for downstream S3-compatible application forms.
+- When to call: application integration design, bucket/prefix layout questions, or any request about region versus carrier routing.
 - Key parameters: none.
 
 ### `provider_list`
@@ -70,20 +76,35 @@ Use this skill for carrier-cloud-blob-gateway operations: local S3-compatible ob
 ## Prompts As Optional Helpers
 
 Use prompts only after baseline state is known:
+- `design_storage_access_mapping`
 - `safe_object_read`
 - `check_replication_before_fallback`
 - `diagnose_provider_connection_failure`
 - `retry_replication_for_one_object`
 
+## Storage Integration Mapping
+
+Use `mcp_storage_access_model_summary` or `ccbg://public/storage-access-model` before giving
+integration advice for a downstream S3 form.
+
+- Treat bucket plus key prefix as the stable storage layout model.
+- Keep `region` for SigV4 signing compatibility. Default guidance is `us-east-1`.
+- Do not use `region` or `location_constraint` as the carrier selector.
+- Map "application root" to `{application_id}/`.
+- Map "application plus user root" to `{application_id}/{user_id}/`.
+- Map carrier choice to endpoint selection, scoped application credentials, or bucket/prefix policy.
+- If the caller only needs explanation and not operator changes, stay inside public MCP discovery.
+
 ## Default Invocation Order
 
-1. Fixed baseline sequence (always first): `provider_list` -> `replication_get_status` -> `alerts_list_recent`.
+1. For integration-design questions, start with `mcp_feature_access_summary` -> `mcp_storage_access_model_summary`.
+2. Fixed baseline sequence for operational checks: `provider_list` -> `replication_get_status` -> `alerts_list_recent`.
    If auth state is unknown on HTTP, prepend `mcp_feature_access_summary`.
-2. Provider-specific anomaly path: run `provider_health(provider_id)` only after step 1 identifies a target provider.
-3. Replication failure/retry path: run `replication_list_failed_jobs(limit=...)` when planning retries or investigating replication failures.
-4. S3 baseline path: run `s3_list_buckets` when bucket visibility/routing baseline is required.
-5. Then use prompt helpers to refine operator actions.
-6. End with risk-scoped output based on observed facts only.
+3. Provider-specific anomaly path: run `provider_health(provider_id)` only after step 2 identifies a target provider.
+4. Replication failure/retry path: run `replication_list_failed_jobs(limit=...)` when planning retries or investigating replication failures.
+5. S3 baseline path: run `s3_list_buckets` when bucket visibility/routing baseline is required.
+6. Then use prompt helpers to refine operator actions.
+7. End with risk-scoped output based on observed facts only.
 
 Do not infer hidden internal state. If data is missing, state uncertainty explicitly.
 

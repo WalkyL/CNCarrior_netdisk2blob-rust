@@ -6,8 +6,12 @@ use crate::error::{ErrorCode, McpErrorPayload, ServerError};
 use crate::prompts::{get_prompt, is_public_prompt, prompt_registry};
 use crate::resources::{
     feature_access_summary, is_public_resource, read_resource, resource_registry,
+    storage_access_model_summary,
 };
-use crate::schema::{TOOL_MCP_FEATURE_ACCESS_SUMMARY, is_public_tool, tool_registry};
+use crate::schema::{
+    TOOL_MCP_FEATURE_ACCESS_SUMMARY, TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY, is_public_tool,
+    tool_registry,
+};
 use crate::{MCP_PROTOCOL_VERSION, MCP_SERVER_NAME};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -113,6 +117,7 @@ impl<C: ControlPlaneClient> McpServer<C> {
 
         let result = match name {
             TOOL_MCP_FEATURE_ACCESS_SUMMARY => feature_access_summary(),
+            TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY => storage_access_model_summary(),
             "provider_list" => to_value(self.client.provider_list()?),
             "provider_health" => to_value(
                 self.client
@@ -363,9 +368,11 @@ mod tests {
         ProviderSummary, ReplicationStatusResult, StubControlPlaneClient,
     };
     use crate::error::ServerError;
-    use crate::prompts::PROMPT_DISCOVER_FEATURE_ACCESS_MODEL;
-    use crate::resources::URI_PUBLIC_FEATURE_ACCESS_SUMMARY;
-    use crate::schema::TOOL_MCP_FEATURE_ACCESS_SUMMARY;
+    use crate::prompts::{
+        PROMPT_DESIGN_STORAGE_ACCESS_MAPPING, PROMPT_DISCOVER_FEATURE_ACCESS_MODEL,
+    };
+    use crate::resources::{URI_PUBLIC_FEATURE_ACCESS_SUMMARY, URI_PUBLIC_STORAGE_ACCESS_MODEL};
+    use crate::schema::{TOOL_MCP_FEATURE_ACCESS_SUMMARY, TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY};
     use serde_json::{Value, json};
 
     struct TestControlPlaneClient;
@@ -596,6 +603,24 @@ mod tests {
     }
 
     #[test]
+    fn public_tool_call_returns_storage_access_model_summary() {
+        let server = McpServer::new(StubControlPlaneClient);
+        let input = format!(
+            r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"{}","arguments":{{}}}}}}"#,
+            TOOL_MCP_STORAGE_ACCESS_MODEL_SUMMARY
+        );
+        let mut out = Vec::new();
+        server
+            .serve_stdio(input.as_bytes(), &mut out)
+            .expect("stdio works");
+        let response: Value = serde_json::from_slice(&out).expect("json response");
+        assert_eq!(
+            response["result"]["structuredContent"]["s3Compatibility"]["recommendedRegion"],
+            "us-east-1"
+        );
+    }
+
+    #[test]
     fn tools_call_returns_content_and_structured_content() {
         let server = McpServer::new(StubControlPlaneClient);
         let input = br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"provider_list","arguments":{}}}
@@ -676,6 +701,24 @@ mod tests {
     }
 
     #[test]
+    fn public_resource_read_returns_storage_access_model_summary() {
+        let server = McpServer::new(StubControlPlaneClient);
+        let input = format!(
+            r#"{{"jsonrpc":"2.0","id":18,"method":"resources/read","params":{{"uri":"{}"}}}}"#,
+            URI_PUBLIC_STORAGE_ACCESS_MODEL
+        );
+        let mut out = Vec::new();
+        server
+            .serve_stdio(input.as_bytes(), &mut out)
+            .expect("stdio works");
+        let response: Value = serde_json::from_slice(&out).expect("json response");
+        let text = response["result"]["contents"][0]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.contains("bucket plus key prefix"));
+    }
+
+    #[test]
     fn resources_read_unknown_uri_returns_not_found() {
         let server = McpServer::new(StubControlPlaneClient);
         let input =
@@ -724,6 +767,25 @@ mod tests {
         assert_eq!(first_message["role"], "user");
         assert_eq!(first_message["content"]["type"], "text");
         assert!(first_message["content"]["text"].is_string());
+    }
+
+    #[test]
+    fn public_prompt_get_returns_storage_mapping_guidance() {
+        let server = McpServer::new(StubControlPlaneClient);
+        let input = format!(
+            r#"{{"jsonrpc":"2.0","id":19,"method":"prompts/get","params":{{"name":"{}","arguments":{{}}}}}}"#,
+            PROMPT_DESIGN_STORAGE_ACCESS_MAPPING
+        );
+        let mut out = Vec::new();
+        server
+            .serve_stdio(input.as_bytes(), &mut out)
+            .expect("stdio works");
+        let response: Value = serde_json::from_slice(&out).expect("json response");
+        let text = response["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.contains("mcp_storage_access_model_summary"));
+        assert!(text.contains("do not encode carrier choice in region"));
     }
 
     #[test]
