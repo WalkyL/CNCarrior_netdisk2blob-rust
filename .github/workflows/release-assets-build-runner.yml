@@ -112,26 +112,26 @@ jobs:
           $scriptPath = Join-Path $workspace "target\ci-build\build-ccbg-macos-x86_64.sh"
 
           $script = @'
-set -euo pipefail
+          set -euo pipefail
 
-cargo install cargo-zigbuild --locked --version "${CCBG_CARGO_ZIGBUILD_VERSION}"
+          cargo install cargo-zigbuild --locked --version "${CCBG_CARGO_ZIGBUILD_VERSION}"
 
-zig_url="https://ziglang.org/download/${CCBG_ZIG_VERSION}/zig-x86_64-linux-${CCBG_ZIG_VERSION}.tar.xz"
-zig_root="/tmp/zig"
-mkdir -p "${zig_root}"
-curl -fsSL "${zig_url}" -o /tmp/zig.tar.xz
-tar -C "${zig_root}" -xJf /tmp/zig.tar.xz --strip-components=1
-export PATH="${zig_root}:$PATH"
-"${zig_root}/zig" version
+          zig_url="https://ziglang.org/download/${CCBG_ZIG_VERSION}/zig-x86_64-linux-${CCBG_ZIG_VERSION}.tar.xz"
+          zig_root="/tmp/zig"
+          mkdir -p "${zig_root}"
+          curl -fsSL "${zig_url}" -o /tmp/zig.tar.xz
+          tar -C "${zig_root}" -xJf /tmp/zig.tar.xz --strip-components=1
+          export PATH="${zig_root}:$PATH"
+          "${zig_root}/zig" version
 
-rustup target add "__TARGET__"
-cargo zigbuild --release --locked --target "__TARGET__" -p gatewayd
-scripts/build-native-package.sh \
-  --skip-build \
-  --target "__TARGET__" \
-  --package-name "__PACKAGE__"
-sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
-'@
+          rustup target add "__TARGET__"
+          cargo zigbuild --release --locked --target "__TARGET__" -p gatewayd
+          scripts/build-native-package.sh \
+            --skip-build \
+            --target "__TARGET__" \
+            --package-name "__PACKAGE__"
+          sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
+          '@
 
           $script = $script.Replace('__TARGET__', 'x86_64-apple-darwin').Replace('__PACKAGE__', 'ccbg-macos-x86_64')
           [System.IO.Directory]::CreateDirectory((Split-Path -Parent $scriptPath)) | Out-Null
@@ -188,26 +188,26 @@ sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
           $scriptPath = Join-Path $workspace "target\ci-build\build-ccbg-macos-arm64.sh"
 
           $script = @'
-set -euo pipefail
+          set -euo pipefail
 
-cargo install cargo-zigbuild --locked --version "${CCBG_CARGO_ZIGBUILD_VERSION}"
+          cargo install cargo-zigbuild --locked --version "${CCBG_CARGO_ZIGBUILD_VERSION}"
 
-zig_url="https://ziglang.org/download/${CCBG_ZIG_VERSION}/zig-x86_64-linux-${CCBG_ZIG_VERSION}.tar.xz"
-zig_root="/tmp/zig"
-mkdir -p "${zig_root}"
-curl -fsSL "${zig_url}" -o /tmp/zig.tar.xz
-tar -C "${zig_root}" -xJf /tmp/zig.tar.xz --strip-components=1
-export PATH="${zig_root}:$PATH"
-"${zig_root}/zig" version
+          zig_url="https://ziglang.org/download/${CCBG_ZIG_VERSION}/zig-x86_64-linux-${CCBG_ZIG_VERSION}.tar.xz"
+          zig_root="/tmp/zig"
+          mkdir -p "${zig_root}"
+          curl -fsSL "${zig_url}" -o /tmp/zig.tar.xz
+          tar -C "${zig_root}" -xJf /tmp/zig.tar.xz --strip-components=1
+          export PATH="${zig_root}:$PATH"
+          "${zig_root}/zig" version
 
-rustup target add "__TARGET__"
-cargo zigbuild --release --locked --target "__TARGET__" -p gatewayd
-scripts/build-native-package.sh \
-  --skip-build \
-  --target "__TARGET__" \
-  --package-name "__PACKAGE__"
-sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
-'@
+          rustup target add "__TARGET__"
+          cargo zigbuild --release --locked --target "__TARGET__" -p gatewayd
+          scripts/build-native-package.sh \
+            --skip-build \
+            --target "__TARGET__" \
+            --package-name "__PACKAGE__"
+          sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
+          '@
 
           $script = $script.Replace('__TARGET__', 'aarch64-apple-darwin').Replace('__PACKAGE__', 'ccbg-macos-arm64')
           [System.IO.Directory]::CreateDirectory((Split-Path -Parent $scriptPath)) | Out-Null
