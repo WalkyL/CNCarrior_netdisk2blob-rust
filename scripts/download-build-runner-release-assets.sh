@@ -118,6 +118,15 @@ MACOS_DIR="${RELEASE_INPUTS_DIR}/macos"
 ENV_FILE="${RELEASE_INPUTS_DIR}/release-local.env.sh"
 ENV_FILE_PS1="${RELEASE_INPUTS_DIR}/release-local.env.ps1"
 
+cli_download_path() {
+  local path="$1"
+  if [[ "${GH_BIN}" == *.exe ]] && command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "${path}"
+    return 0
+  fi
+  printf '%s\n' "${path}"
+}
+
 safe_reset_dir() {
   local dir="$1"
   if [ -z "${dir}" ] || [ "${dir}" = "/" ] || [ "${dir}" = "." ]; then
@@ -140,15 +149,33 @@ normalize_download_dir() {
   fi
 }
 
+copy_first_matching_file() {
+  local search_dir="$1"
+  local pattern="$2"
+  local dest_dir="$3"
+  local match
+
+  match="$(find "${search_dir}" -type f -name "${pattern}" | head -n 1)"
+  if [ -z "${match}" ]; then
+    echo "missing expected artifact file matching ${pattern} under ${search_dir}" >&2
+    exit 1
+  fi
+  cp "${match}" "${dest_dir}/"
+}
+
 download_artifact() {
   local artifact="$1"
   local required="${2:-true}"
   local dest="${RAW_DIR}/${artifact}"
-  local cmd=("${GH_BIN}" run download "${RUN_ID}" -n "${artifact}" -D "${dest}")
+  local dest_cli
+  local cmd
+
+  dest_cli="$(cli_download_path "${dest}")"
+  cmd=("${GH_BIN}" run download "${RUN_ID}" -n "${artifact}" -D "${dest_cli}")
 
   safe_reset_dir "${dest}"
   if [ -n "${REPO}" ]; then
-    cmd=("${GH_BIN}" run download "${RUN_ID}" --repo "${REPO}" -n "${artifact}" -D "${dest}")
+    cmd=("${GH_BIN}" run download "${RUN_ID}" --repo "${REPO}" -n "${artifact}" -D "${dest_cli}")
   fi
   if ! "${cmd[@]}"; then
     if [ "${required}" = "true" ]; then
@@ -178,8 +205,8 @@ safe_reset_dir "${RELEASE_INPUTS_DIR}"
 if [ "${DOWNLOAD_LXC}" = true ]; then
   download_artifact "ccbg-lxc-package" true
   mkdir -p "${LXC_DIR}"
-  copy_required_file "${RAW_DIR}/ccbg-lxc-package/ccbg-lxc-package.tar.gz" "${LXC_DIR}"
-  copy_required_file "${RAW_DIR}/ccbg-lxc-package/ccbg-lxc-package.tar.gz.sha256" "${LXC_DIR}"
+  copy_first_matching_file "${RAW_DIR}/ccbg-lxc-package" "ccbg-lxc-package.tar.gz" "${LXC_DIR}"
+  copy_first_matching_file "${RAW_DIR}/ccbg-lxc-package" "ccbg-lxc-package.tar.gz.sha256" "${LXC_DIR}"
 fi
 
 if [ "${DOWNLOAD_MACOS}" = true ]; then
@@ -190,12 +217,12 @@ if [ "${DOWNLOAD_MACOS}" = true ]; then
   if [ "${macos_x86_downloaded}" = true ] || [ "${macos_arm64_downloaded}" = true ]; then
     mkdir -p "${MACOS_DIR}"
     if [ "${macos_x86_downloaded}" = true ]; then
-      copy_required_file "${RAW_DIR}/ccbg-macos-x86_64/ccbg-macos-x86_64.tar.gz" "${MACOS_DIR}"
-      copy_required_file "${RAW_DIR}/ccbg-macos-x86_64/ccbg-macos-x86_64.tar.gz.sha256" "${MACOS_DIR}"
+      copy_first_matching_file "${RAW_DIR}/ccbg-macos-x86_64" "ccbg-macos-x86_64.tar.gz" "${MACOS_DIR}"
+      copy_first_matching_file "${RAW_DIR}/ccbg-macos-x86_64" "ccbg-macos-x86_64.tar.gz.sha256" "${MACOS_DIR}"
     fi
     if [ "${macos_arm64_downloaded}" = true ]; then
-      copy_required_file "${RAW_DIR}/ccbg-macos-arm64/ccbg-macos-arm64.tar.gz" "${MACOS_DIR}"
-      copy_required_file "${RAW_DIR}/ccbg-macos-arm64/ccbg-macos-arm64.tar.gz.sha256" "${MACOS_DIR}"
+      copy_first_matching_file "${RAW_DIR}/ccbg-macos-arm64" "ccbg-macos-arm64.tar.gz" "${MACOS_DIR}"
+      copy_first_matching_file "${RAW_DIR}/ccbg-macos-arm64" "ccbg-macos-arm64.tar.gz.sha256" "${MACOS_DIR}"
     fi
   fi
 fi
