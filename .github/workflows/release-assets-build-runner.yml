@@ -31,6 +31,10 @@ env:
   CCBG_CARGO_ZIGBUILD_VERSION: 0.22.3
   CCBG_ZIG_VERSION: 0.16.0
   CCBG_LINUX_TARGET: x86_64-unknown-linux-gnu
+  http_proxy: http://127.0.0.1:10808
+  https_proxy: http://127.0.0.1:10808
+  HTTP_PROXY: http://127.0.0.1:10808
+  HTTPS_PROXY: http://127.0.0.1:10808
 
 jobs:
   linux_lxc:
@@ -69,6 +73,10 @@ jobs:
 
           podman run --rm `
             --pull=never `
+            -e http_proxy=$env:http_proxy `
+            -e https_proxy=$env:https_proxy `
+            -e HTTP_PROXY=$env:HTTP_PROXY `
+            -e HTTPS_PROXY=$env:HTTPS_PROXY `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
@@ -149,6 +157,10 @@ jobs:
             --pull=never `
             -e CCBG_CARGO_ZIGBUILD_VERSION=$env:CCBG_CARGO_ZIGBUILD_VERSION `
             -e CCBG_ZIG_VERSION=$env:CCBG_ZIG_VERSION `
+            -e http_proxy=$env:http_proxy `
+            -e https_proxy=$env:https_proxy `
+            -e HTTP_PROXY=$env:HTTP_PROXY `
+            -e HTTPS_PROXY=$env:HTTPS_PROXY `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
@@ -229,6 +241,10 @@ jobs:
             --pull=never `
             -e CCBG_CARGO_ZIGBUILD_VERSION=$env:CCBG_CARGO_ZIGBUILD_VERSION `
             -e CCBG_ZIG_VERSION=$env:CCBG_ZIG_VERSION `
+            -e http_proxy=$env:http_proxy `
+            -e https_proxy=$env:https_proxy `
+            -e HTTP_PROXY=$env:HTTP_PROXY `
+            -e HTTPS_PROXY=$env:HTTPS_PROXY `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
