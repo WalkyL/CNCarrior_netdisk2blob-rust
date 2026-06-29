@@ -163,3 +163,26 @@ sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
             target/native-packages/${{ matrix.package }}.tar.gz.sha256
           if-no-files-found: error
           retention-days: 14
+
+  summary:
+    name: build-runner-summary
+    needs:
+      - linux_lxc
+      - build_macos
+    if: ${{ always() }}
+    runs-on: [self-hosted, windows, x64]
+    steps:
+      - name: Summarize artifact-only boundary
+        shell: powershell
+        run: |
+          @"
+          release assets via build-runner completed.
+
+          Boundary:
+          - This workflow only produces GitHub Actions artifacts.
+          - It does not create or publish a GitHub Release.
+          - It does not deploy Cloudflare assets.
+          - Download artifacts back to the local release host and merge them with:
+            scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
+            scripts/release-local.sh <tag>
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

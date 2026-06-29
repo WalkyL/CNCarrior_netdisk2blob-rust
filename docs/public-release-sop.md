@@ -1,6 +1,6 @@
 # CCBG Public Release SOP
 
-这份 SOP 只覆盖 `.47` 发版主机上的公网交付链路：
+这份 SOP 只覆盖 `.52` 发版主机上的公网交付链路：
 
 - 生成本地 release 包
 - 补传 GitHub release 资产作为回源兜底
@@ -11,9 +11,10 @@
 发版完成定义：
 
 - GitHub 默认只保存分支、tag、issue、可选 Release 页面和发布记录。
-- Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认走 `.47` 或受控局域网 runner。
-- 当 `.47` 本地 Linux 构建不可用时，LXC fallback 包和 macOS 资产可走 GitHub Actions
-  self-hosted build-runner 容器入口，不再依赖 GitHub-hosted runner 做实际编译。
+- Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认走 `.52` 或受控局域网 runner。
+- 当 `.52` 本地 Linux 构建不可用时，LXC fallback 包和 macOS 资产可走 GitHub Actions
+  self-hosted build-runner 容器入口 `release-assets-build-runner.yml`，不再依赖
+  GitHub-hosted runner 做实际编译。
 - 只打 tag 或只创建 GitHub Release 页面不算发版完成。
 - 必须确认 `/downloads/latest/*` 已指向本轮新资产，并通过下载 smoke，才算发版完成。
 - provider 能力文案也属于 release 的一部分。没有新的 limit-probe 或隔离实测证据时，不得把中国移动的 `04010319 / Insufficient Rights` 已知限制写成“超大文件已验证通过”。
@@ -22,11 +23,11 @@
 
 - [github-publication.md](github-publication.md)
 - [release-checklist.md](release-checklist.md)
-- [ops-007-47-release-build-host.md](ops-007-47-release-build-host.md)
+- [ops-007-52-release-build-host.md](ops-007-52-release-build-host.md)
 
 ## 1. 前提
 
-在 `.47` 上确认这些环境变量已经存在：
+在 `.52` 上确认这些环境变量已经存在：
 
 ```bash
 CLOUDFLARE_API_TOKEN
@@ -73,11 +74,11 @@ CCBG_RELEASE_BUILD_OPENWRT=true \
 scripts/release-local.sh v0.1.7
 ```
 
-Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认都在 `.47` 或受控局域网 runner 上
+Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认都在 `.52` 或受控局域网 runner 上
 生成，不把 GitHub Actions 当默认构建入口。
 
-如果 `.47` 本地 Linux 构建不可用，先手工触发 GitHub Actions `release assets via build-runner`
-workflow，下载 `ccbg-lxc-package` artifact 后合并回本 SOP 的校验、上传和
+如果 `.52` 本地 Linux 构建不可用，先手工触发 GitHub Actions `release assets via build-runner`
+workflow `release-assets-build-runner.yml`，下载 `ccbg-lxc-package` artifact 后合并回本 SOP 的校验、上传和
 `/downloads/latest/*` smoke：
 
 ```bash
@@ -92,8 +93,9 @@ bash scripts/download-build-runner-release-assets.sh --run-id <github-run-id> --
 bash scripts/release-local.sh v0.1.7
 ```
 
-macOS 资产也由 GitHub Actions 在 self-hosted build-runner 容器中构建；下载产物后用下面的
-方式合并回本 SOP 的校验、上传和 `/downloads/latest/*` smoke：
+macOS 资产也由 GitHub Actions 在 self-hosted build-runner 容器中构建；这条 workflow
+只产出 artifact，不直接发布。下载产物后用下面的方式合并回本 SOP 的校验、上传和
+`/downloads/latest/*` smoke：
 
 ```bash
 scripts/download-build-runner-release-assets.sh --run-id <github-run-id>

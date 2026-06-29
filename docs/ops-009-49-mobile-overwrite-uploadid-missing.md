@@ -223,7 +223,7 @@ set +a
 
 参考:
 
-- [ops-007-47-release-build-host.md](ops-007-47-release-build-host.md)
+- [ops-007-52-release-build-host.md](ops-007-52-release-build-host.md)
 
 ## 10. 关联背景
 

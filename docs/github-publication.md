@@ -4,11 +4,11 @@
 
 GitHub 在 CCBG 项目里默认只承担版本管理职责：保存源码、分支、tag、issue 模板和
 可选 GitHub Release 页面记录。Linux、OpenWrt、Windows、容器 tar/镜像二进制和
-Cloudflare 公开站点部署不依赖 GitHub Actions 自动执行，统一由 `.47` 发布构建主机
+Cloudflare 公开站点部署不依赖 GitHub Actions 自动执行，统一由 `.52` 发布构建主机
 或受控局域网 runner 运行脚本。
 
-当 `.47` 本地 Linux 构建不可用时，允许手工触发 GitHub Actions 的 self-hosted
-build-runner workflow；实际编译仍在本地容器
+当 `.52` 本地 Linux 构建不可用时，允许手工触发 GitHub Actions 的 self-hosted
+build-runner workflow `release-assets-build-runner.yml`；实际编译仍在本地容器
 `localhost/product-build-runner:latest` 内完成。当前这个入口只允许产出：
 
 - Linux LXC fallback 包 `ccbg-lxc-package`
@@ -16,7 +16,7 @@ build-runner workflow；实际编译仍在本地容器
 - macOS 社区/实验包 `ccbg-macos-arm64`
 
 它不恢复通用 GitHub CI，也不接管 Windows / OpenWrt / Cloudflare 发版。所有通过
-workflow 产出的资产仍必须下载回 `.47`，并进入同一 release 校验和
+workflow 产出的资产仍必须下载回 `.52`，并进入同一 release 校验和
 `/downloads/latest/*` 发布链路。
 
 源码一期按公开仓库交付，但仓库不是 MIT 开源仓库。它采用商业核心、公开材料、
@@ -87,7 +87,7 @@ CCBG_CHECK_NATIVE_PACKAGE_SMOKE=true scripts/check-release-ready.sh
 scripts/release-local.sh v0.1.7
 ```
 
-在 `.47` 上默认生成 LXC 包、`ccbg-checksums.txt`、`release-provenance.json` 和
+在 `.52` 上默认生成 LXC 包、`ccbg-checksums.txt`、`release-provenance.json` 和
 `release-provenance.md`，输出到：
 
 ```text
@@ -102,7 +102,7 @@ CCBG_RELEASE_BUILD_OPENWRT=true \
 scripts/release-local.sh v0.1.7
 ```
 
-如果 `.47` 本地 Linux 构建正常，继续直接在 `.47` 生成官方 LXC 包。如果 `.47`
+如果 `.52` 本地 Linux 构建正常，继续直接在 `.52` 生成官方 LXC 包。如果 `.52`
 本地 Linux 构建不可用，可以先触发 GitHub Actions `release assets via build-runner`
 workflow 生成 `ccbg-lxc-package` artifact，下载后再合并回本地 release 目录：
 
@@ -155,7 +155,7 @@ CCBG_RELEASE_MACOS_ASSET_DIR=/path/to/macos-assets \
 scripts/release-local.sh v0.1.7
 ```
 
-`CCBG_RELEASE_BUILD_MACOS=true` 现在不会默认在 `.47` 构建 macOS 包；除非已有文档记录的
+`CCBG_RELEASE_BUILD_MACOS=true` 现在不会默认在 `.52` 构建 macOS 包；除非已有文档记录的
 本机/局域网 macOS 构建器或 Darwin 交叉工具链，并显式设置
 `CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD=true`。
 
@@ -169,7 +169,8 @@ scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
 
 这一步的目的不是替代 `release-local.sh`，而是避免“新的 Windows EXE + 旧的 Linux ELF”
 并存时误把旧 Linux binary 打进 LXC 包。若本机 release host 自身构建链损坏，也可以改走
-GitHub Actions self-hosted build-runner workflow 产出 `ccbg-lxc-package` artifact，
+GitHub Actions self-hosted build-runner workflow `release-assets-build-runner.yml`
+产出 `ccbg-lxc-package` artifact，
 再通过 `CCBG_RELEASE_LXC_ASSET_DIR` 合并回正式 release。
 
 如果确实需要把本地生成的资产上传到同一个 GitHub Release，显式打开：
@@ -178,29 +179,29 @@ GitHub Actions self-hosted build-runner workflow 产出 `ccbg-lxc-package` artif
 CCBG_RELEASE_UPLOAD_GITHUB=true scripts/release-local.sh v0.1.7
 ```
 
-脚本会通过 `scripts/resolve-gh.sh` 查找 GitHub CLI；在 `.47` 上即使 Git Bash 默认
+脚本会通过 `scripts/resolve-gh.sh` 查找 GitHub CLI；在 `.52` 上即使 Git Bash 默认
 `PATH` 没有裸 `gh`，也会使用 `C:\Program Files\GitHub CLI\gh.exe`。
 
 这个开关不是默认流程；只有公网安装 catalog 仍指向 GitHub release download URL 时
 才需要使用。
 
-## `.47` 构建主机
+## `.52` 构建主机
 
-Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认走本机 `.47` 或受控局域网
-runner，不走 GitHub Actions。当前构建收敛到 `192.168.1.47`：
+Linux / OpenWrt / Windows / 容器 tar 或镜像二进制默认走本机 `.52` 或受控局域网
+runner，不走 GitHub Actions。当前构建收敛到 `192.168.1.52`：
 
 | 目标 | 构建主机 | 入口 |
 | --- | --- | --- |
-| PVE LXC `x86/x64` | `.47`；如 `.47` 本地 Linux 构建不可用，手工触发 self-hosted build-runner workflow 后合并回 `.47` | `scripts/release-local.sh <tag>`；fallback: `CCBG_RELEASE_LXC_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
-| Docker `x86/x64` | `.47` | `docker build -f deploy/Dockerfile .` |
-| Podman `x86/x64` | `.47` | `podman build -f deploy/Containerfile .` |
-| Windows `x86_64` | `.47` | `CCBG_RELEASE_BUILD_WINDOWS=true scripts/release-local.sh <tag>` |
-| OpenWrt `arm64` | `.47` | `CCBG_RELEASE_BUILD_OPENWRT=true scripts/release-local.sh <tag>` |
-| macOS `x86_64/arm64` | self-hosted build-runner container on the configured LAN runner, then merged on `.47` | `CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
-| STM32 client-only 示例 | `.47` | `scripts/check-stm32-client-example.sh` |
-| ESP32-S3 client-only 示例 | `.47` | `scripts/check-esp32-s3-client-example.py`；如需要 ESP-IDF 真编译，也只在 `.47` 上执行 |
+| PVE LXC `x86/x64` | `.52`；如 `.52` 本地 Linux 构建不可用，手工触发 self-hosted build-runner workflow `release-assets-build-runner.yml` 后合并回 `.52` | `scripts/release-local.sh <tag>`；fallback: `CCBG_RELEASE_LXC_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
+| Docker `x86/x64` | `.52` | `docker build -f deploy/Dockerfile .` |
+| Podman `x86/x64` | `.52` | `podman build -f deploy/Containerfile .` |
+| Windows `x86_64` | `.52` | `CCBG_RELEASE_BUILD_WINDOWS=true scripts/release-local.sh <tag>` |
+| OpenWrt `arm64` | `.52` | `CCBG_RELEASE_BUILD_OPENWRT=true scripts/release-local.sh <tag>` |
+| macOS `x86_64/arm64` | self-hosted build-runner container on the configured LAN runner, then merged on `.52` | `CCBG_RELEASE_MACOS_ASSET_DIR=<downloaded-artifacts> scripts/release-local.sh <tag>` |
+| STM32 client-only 示例 | `.52` | `scripts/check-stm32-client-example.sh` |
+| ESP32-S3 client-only 示例 | `.52` | `scripts/check-esp32-s3-client-example.py`；如需要 ESP-IDF 真编译，也只在 `.52` 上执行 |
 
-更完整的主机边界见 [ops-007-47-release-build-host.md](ops-007-47-release-build-host.md)。
+更完整的主机边界见 [ops-007-52-release-build-host.md](ops-007-52-release-build-host.md)。
 
 ## Cloudflare 公开站部署
 
@@ -265,10 +266,11 @@ CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY=true scripts/deploy-cloudflare-public.sh producti
 ## 机器边界
 
 - `192.168.1.43` 是 CCBG 验收测试机，用来跑发布候选版本和人工全量验收。
-- `192.168.1.47` 是 CCBG 默认发布构建主机，工作区为
+- `192.168.1.52` 是 CCBG 默认发布构建主机，工作区为
   `C:\Users\walky\workspaces\carrier-cloud-blob-gateway`。
-- LXC fallback 与 macOS 发布资产都可走 GitHub Actions self-hosted build-runner 容器入口，
-  产物下载回 `.47` 后再进入统一发布链路。
+- LXC fallback 与 macOS 发布资产都可走 GitHub Actions self-hosted build-runner 容器入口
+  `release-assets-build-runner.yml`，
+  产物下载回 `.52` 后再进入统一发布链路。
 - `192.168.1.46` 不再保留 CCBG 项目代码，也不再运行 CCBG 编译任务。
 
 ## 发布注意事项
@@ -285,3 +287,5 @@ CCBG_CF_SMOKE_DOMAIN_ON_DEPLOY=true scripts/deploy-cloudflare-public.sh producti
    当前正式流程优先同步 R2，并保留 GitHub release 资产作为回源兜底。
 7. 只打 tag、只推分支、只创建 GitHub Release 页面、或只上传 GitHub 资产都不算发版完成。
    完成条件是公网安装页和 `/downloads/latest/*` 已经指向本轮新资产，并通过下载 smoke。
+8. `release-assets-build-runner.yml` 只负责产出 GitHub Actions artifact；它不直接创建
+   GitHub Release，不直接部署 Cloudflare，也不替代 `.52` 的本地 release gate。

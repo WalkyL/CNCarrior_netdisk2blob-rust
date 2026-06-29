@@ -27,6 +27,9 @@
   build-runner image instead of relying on `cargo build --release` on the host.
 - Deploy `gatewayd` and `assets/admin/index.html` together, then verify both remote hashes and
   service health before considering the deploy complete.
+- The documented release host must match the actual active build machine. When the build host moves
+  from one LAN node to another, update the release SOP, checklist, host-boundary ADR, and workflow
+  entrypoint notes in the same change; stale host labels will send operators down the wrong path.
 
 ## S3 Compatibility Gaps
 

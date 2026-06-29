@@ -28,26 +28,26 @@ macOS 构建和 GitHub Release 汇总放在同一个 GitHub Actions release work
 GitHub 对 CCBG 只承担版本管理职责：源码、分支、tag、issue 模板和 release 记录。
 通用 CI、Linux/Windows/OpenWrt 组包、Cloudflare 公开站部署不再由 GitHub Actions 自动触发。
 
-`192.168.1.47` 是 CCBG 默认发布构建主机。Linux LXC、OpenWrt、Windows、STM32 示例、
-ESP32-S3 示例，以及后续新增的嵌入式或固件构建，都必须从 `.47` 的项目工作区执行。
+`192.168.1.52` 是 CCBG 默认发布构建主机。Linux LXC、OpenWrt、Windows、STM32 示例、
+ESP32-S3 示例，以及后续新增的嵌入式或固件构建，都必须从 `.52` 的项目工作区执行。
 `.46` 不再保留项目代码，也不再运行 CCBG 编译任务。
 
 macOS `x86_64` / `arm64` 仍然是社区/实验包，但现在由 GitHub Actions 在 self-hosted
 build-runner 容器内产出；这些包未签名、未公证、未经过本项目控制的 macOS 真机 smoke，
-不按官方宿主承诺。产物必须下载回 `.47`，进入同一 checksum、R2/GitHub fallback 和
+不按官方宿主承诺。产物必须下载回 `.52`，进入同一 checksum、R2/GitHub fallback 和
 `/downloads/latest/*` smoke 链路。
 
-当 `.47` 本地 Linux 构建链临时不可用时，允许一个手工触发的例外：GitHub Actions 的
-self-hosted build-runner workflow 可以在本地 Podman 镜像
+当 `.52` 本地 Linux 构建链临时不可用时，允许一个手工触发的例外：GitHub Actions 的
+self-hosted build-runner workflow `release-assets-build-runner.yml` 可以在本地 Podman 镜像
 `localhost/product-build-runner:latest` 内生成 Linux LXC fallback 包。这个 workflow
-只负责受控产出 artifact，不直接发布，不替代 `.47` 的 release gate，也不扩展成
-Windows / OpenWrt / Cloudflare 的通用发版入口。该 LXC artifact 仍必须下载回 `.47`
+只负责受控产出 artifact，不直接发布，不替代 `.52` 的 release gate，也不扩展成
+Windows / OpenWrt / Cloudflare 的通用发版入口。该 LXC artifact 仍必须下载回 `.52`
 并通过 `CCBG_RELEASE_LXC_ASSET_DIR` 合并进正式 release。
 
 本地流程改为：
 
 - `scripts/check-release-ready.sh` 执行 release gate。
-- `scripts/release-local.sh <tag>` 在 `.47` 生成本地发布物、checksums 和 provenance。
+- `scripts/release-local.sh <tag>` 在 `.52` 生成本地发布物、checksums 和 provenance。
 - `scripts/deploy-cloudflare-public.sh test|production` 部署 Cloudflare Worker + Assets。
 
 ## Alternatives Considered
@@ -67,11 +67,12 @@ Cloudflare 部署和公网 smoke 绑定在一起，任何一环的环境差异�
 
 - 推送 `main` 或 `test` 不会自动部署。
 - release 前必须显式运行本地质量门并留存结果。
-- Cloudflare 部署使用 `.47` Cloudflare 凭据，发布人需要确认当前 shell 环境。
+- Cloudflare 部署使用 `.52` Cloudflare 凭据，发布人需要确认当前 shell 环境。
 - macOS 包是社区/实验包；当前由 GitHub Actions self-hosted build-runner 容器产出，并
-  下载回 `.47` 进入统一发布链路。
-- 如果 `.47` 本地 Linux 构建临时不可用，Linux LXC 包也可由同一个 self-hosted
-  build-runner workflow 产出 artifact，再下载回 `.47` 进入统一发布链路。
+  下载回 `.52` 进入统一发布链路。
+- 如果 `.52` 本地 Linux 构建临时不可用，Linux LXC 包也可由同一个 self-hosted
+  build-runner workflow `release-assets-build-runner.yml` 产出 artifact，再下载回 `.52`
+  进入统一发布链路。
 - 如果公网安装 catalog 继续指向 GitHub release download URL，发布人必须手动保证
   对应资产已上传到 GitHub Release。
 - 新增任何构建主机前，必须先在项目文档里记录机器、目录、凭据边界和清理方案。

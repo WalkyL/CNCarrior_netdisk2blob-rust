@@ -5,6 +5,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAG="${1:-}"
+RELEASE_HOST_LABEL="${CCBG_RELEASE_HOST_LABEL:-local release host}"
 
 usage() {
   echo "usage: scripts/release-local.sh <release-tag>"
@@ -101,7 +102,7 @@ if [ -n "${CCBG_RELEASE_LXC_ASSET_DIR:-}" ]; then
     "${CCBG_RELEASE_LXC_ASSET_DIR}/ccbg-lxc-package.tar.gz" \
     "${CCBG_RELEASE_LXC_ASSET_DIR}/ccbg-lxc-package.tar.gz.sha256"
 else
-  echo "building Linux LXC package on .47 for ${LINUX_TARGET}"
+  echo "building Linux LXC package on ${RELEASE_HOST_LABEL} for ${LINUX_TARGET}"
   build_gatewayd "${LINUX_TARGET}"
   scripts/build-lxc-package.sh --skip-build --target "${LINUX_TARGET}"
   copy_required_artifacts \
@@ -110,7 +111,7 @@ else
 fi
 
 if [ "${CCBG_RELEASE_BUILD_WINDOWS:-false}" = "true" ]; then
-  echo "building Windows package on .47 for ${WINDOWS_TARGET}"
+  echo "building Windows package on ${RELEASE_HOST_LABEL} for ${WINDOWS_TARGET}"
   build_gatewayd "${WINDOWS_TARGET}"
   scripts/build-native-package.sh \
     --skip-build \
@@ -120,7 +121,7 @@ if [ "${CCBG_RELEASE_BUILD_WINDOWS:-false}" = "true" ]; then
 fi
 
 if [ "${CCBG_RELEASE_BUILD_OPENWRT:-false}" = "true" ]; then
-  echo "building OpenWrt lite package on .47 for ${OPENWRT_TARGET}"
+  echo "building OpenWrt lite package on ${RELEASE_HOST_LABEL} for ${OPENWRT_TARGET}"
   build_gatewayd_and_mcp "${OPENWRT_TARGET}"
   scripts/build-openwrt-lite-package.sh --skip-build --target "${OPENWRT_TARGET}"
   copy_artifacts "${ROOT_DIR}/target/openwrt-lite/ccbg-openwrt-lite.tar.gz"*

@@ -76,7 +76,7 @@
 
 - [openwrt-host-profile.md](openwrt-host-profile.md)
 - [resource-budget.md](resource-budget.md)
-- [ops-007-47-release-build-host.md](ops-007-47-release-build-host.md)
+- [ops-007-52-release-build-host.md](ops-007-52-release-build-host.md)
 
 ### 嵌入式客户端示例
 
