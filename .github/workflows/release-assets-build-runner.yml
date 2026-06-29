@@ -33,8 +33,6 @@ env:
   CCBG_LINUX_TARGET: x86_64-unknown-linux-gnu
   http_proxy: http://127.0.0.1:10808
   https_proxy: http://127.0.0.1:10808
-  HTTP_PROXY: http://127.0.0.1:10808
-  HTTPS_PROXY: http://127.0.0.1:10808
 
 jobs:
   linux_lxc:
@@ -75,8 +73,8 @@ jobs:
             --pull=never `
             -e http_proxy=$env:http_proxy `
             -e https_proxy=$env:https_proxy `
-            -e HTTP_PROXY=$env:HTTP_PROXY `
-            -e HTTPS_PROXY=$env:HTTPS_PROXY `
+            -e HTTP_PROXY=$env:http_proxy `
+            -e HTTPS_PROXY=$env:https_proxy `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
@@ -159,8 +157,8 @@ jobs:
             -e CCBG_ZIG_VERSION=$env:CCBG_ZIG_VERSION `
             -e http_proxy=$env:http_proxy `
             -e https_proxy=$env:https_proxy `
-            -e HTTP_PROXY=$env:HTTP_PROXY `
-            -e HTTPS_PROXY=$env:HTTPS_PROXY `
+            -e HTTP_PROXY=$env:http_proxy `
+            -e HTTPS_PROXY=$env:https_proxy `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
@@ -243,8 +241,8 @@ jobs:
             -e CCBG_ZIG_VERSION=$env:CCBG_ZIG_VERSION `
             -e http_proxy=$env:http_proxy `
             -e https_proxy=$env:https_proxy `
-            -e HTTP_PROXY=$env:HTTP_PROXY `
-            -e HTTPS_PROXY=$env:HTTPS_PROXY `
+            -e HTTP_PROXY=$env:http_proxy `
+            -e HTTPS_PROXY=$env:https_proxy `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
