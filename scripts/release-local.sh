@@ -18,6 +18,9 @@ fi
 
 cd "${ROOT_DIR}"
 PYTHON_BIN="$(bash scripts/resolve-python.sh)"
+CARGO_BIN="$(bash scripts/resolve-cargo.sh)"
+RUSTC_BIN="$(bash scripts/resolve-rustc.sh)"
+GIT_BIN="$(bash scripts/resolve-git.sh)"
 
 resolve_release_fingerprint() {
   if [ -n "${CCBG_RELEASE_FINGERPRINT:-}" ]; then
@@ -36,7 +39,7 @@ print(match.group(1))
 PY
 }
 
-if [ "${CCBG_RELEASE_ALLOW_DIRTY:-false}" != "true" ] && [ -n "$(git status --porcelain)" ]; then
+if [ "${CCBG_RELEASE_ALLOW_DIRTY:-false}" != "true" ] && [ -n "$("${GIT_BIN}" status --porcelain)" ]; then
   echo "working tree is dirty; commit changes or set CCBG_RELEASE_ALLOW_DIRTY=true" >&2
   exit 1
 fi
@@ -51,7 +54,7 @@ WINDOWS_TARGET="${CCBG_RELEASE_WINDOWS_TARGET:-x86_64-pc-windows-gnu}"
 OPENWRT_TARGET="${CCBG_RELEASE_OPENWRT_TARGET:-aarch64-unknown-linux-musl}"
 MACOS_X86_TARGET="${CCBG_RELEASE_MACOS_X86_TARGET:-x86_64-apple-darwin}"
 MACOS_ARM64_TARGET="${CCBG_RELEASE_MACOS_ARM64_TARGET:-aarch64-apple-darwin}"
-HOST_TRIPLE="$(rustc -vV | awk '/^host: / {print $2}')"
+HOST_TRIPLE="$("${RUSTC_BIN}" -vV | awk '/^host: / {print $2}')"
 
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
@@ -81,18 +84,18 @@ copy_required_artifacts() {
 build_gatewayd() {
   local target="$1"
   if [ "${target}" = "${HOST_TRIPLE}" ]; then
-    cargo build --release --locked --target "${target}" -p gatewayd
+    "${CARGO_BIN}" build --release --locked --target "${target}" -p gatewayd
   else
-    cargo zigbuild --release --locked --target "${target}" -p gatewayd
+    "${CARGO_BIN}" zigbuild --release --locked --target "${target}" -p gatewayd
   fi
 }
 
 build_gatewayd_and_mcp() {
   local target="$1"
   if [ "${target}" = "${HOST_TRIPLE}" ]; then
-    cargo build --release --locked --target "${target}" -p gatewayd -p mcp-server
+    "${CARGO_BIN}" build --release --locked --target "${target}" -p gatewayd -p mcp-server
   else
-    cargo zigbuild --release --locked --target "${target}" -p gatewayd -p mcp-server
+    "${CARGO_BIN}" zigbuild --release --locked --target "${target}" -p gatewayd -p mcp-server
   fi
 }
 

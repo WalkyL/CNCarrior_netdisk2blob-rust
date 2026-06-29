@@ -4,10 +4,11 @@
 set -euo pipefail
 
 for candidate in \
-  gh \
-  /mnt/c/Program\ Files/GitHub\ CLI/gh.exe \
-  /mnt/d/Program\ Files/GitHub\ CLI/gh.exe \
-  /c/Program\ Files/GitHub\ CLI/gh.exe
+  rustc \
+  rustc.exe \
+  /mnt/d/Rust/cargo/bin/rustc.exe \
+  /mnt/c/Users/*/.cargo/bin/rustc.exe \
+  /c/Users/*/.cargo/bin/rustc.exe
 do
   if command -v "${candidate}" >/dev/null 2>&1; then
     command -v "${candidate}"
@@ -19,5 +20,5 @@ do
   fi
 done
 
-echo "missing GitHub CLI; install gh or add it to PATH" >&2
+echo "missing rustc; install Rust or add rustc to PATH" >&2
 exit 1

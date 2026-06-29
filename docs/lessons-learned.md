@@ -39,6 +39,13 @@
 - Multipart completion must accept entity-encoded ETags, return response headers promptly, and
   persist the final S3-compatible multipart ETag; otherwise clients can time out or reject the
   upload as corrupted.
+- Public `HEAD` / `LIST` responses must prefer the gateway's persisted logical `ETag` over a
+  backend-native development `ETag`; otherwise multipart-complete objects can be written
+  correctly but later fail client-side verification.
+- Stub-provider smoke and real-client interoperability are different layers. `rclone` needs its
+  validated compatibility knobs (`use_unsigned_payload`, `use_multipart_etag`,
+  `disable_checksum`) in smoke and operator docs, or the harness will report false negatives that
+  do not match production S3 application flows.
 - Large-object smoke tests should stay explicit about the currently validated size boundary and
   provider capability flags; passing a stress test does not mean the provider has unlocked a larger
   permanent upload policy.

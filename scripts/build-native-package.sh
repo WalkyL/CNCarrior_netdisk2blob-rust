@@ -7,6 +7,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/target/native-packages"
 TARGET="${CCBG_NATIVE_TARGET:-}"
 PACKAGE_NAME="${CCBG_NATIVE_PACKAGE_NAME:-}"
+CARGO_BIN="$(bash "${ROOT_DIR}/scripts/resolve-cargo.sh")"
+GIT_BIN="$(bash "${ROOT_DIR}/scripts/resolve-git.sh")"
 SKIP_BUILD=false
 
 usage() {
@@ -85,7 +87,7 @@ target_dir="${ROOT_DIR}/target/${TARGET}/release"
 binary="${target_dir}/${binary_name}"
 
 if [ "${SKIP_BUILD}" != true ]; then
-  cargo build --release --target "${TARGET}" -p gatewayd
+  "${CARGO_BIN}" build --release --target "${TARGET}" -p gatewayd
 fi
 
 if [ ! -s "${binary}" ] && [ "${SKIP_BUILD}" = true ] && [ -s "${ROOT_DIR}/target/release/${binary_name}" ]; then
@@ -139,7 +141,7 @@ esac
   echo "built_at_unix=$(date +%s)"
   echo "gatewayd_sha256=$(sha256sum "${binary}" | awk '{print $1}')"
   echo "admin_html_sha256=$(sha256sum "${ROOT_DIR}/crates/gatewayd/assets/admin/index.html" | awk '{print $1}')"
-  git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
+  "${GIT_BIN}" -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
 } > "${package_root}/PACKAGE-METADATA"
 
 (

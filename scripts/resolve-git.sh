@@ -4,10 +4,11 @@
 set -euo pipefail
 
 for candidate in \
-  gh \
-  /mnt/c/Program\ Files/GitHub\ CLI/gh.exe \
-  /mnt/d/Program\ Files/GitHub\ CLI/gh.exe \
-  /c/Program\ Files/GitHub\ CLI/gh.exe
+  git \
+  git.exe \
+  /mnt/d/Git/cmd/git.exe \
+  /mnt/c/Program\ Files/Git/cmd/git.exe \
+  /c/Program\ Files/Git/cmd/git.exe
 do
   if command -v "${candidate}" >/dev/null 2>&1; then
     command -v "${candidate}"
@@ -19,5 +20,5 @@ do
   fi
 done
 
-echo "missing GitHub CLI; install gh or add it to PATH" >&2
+echo "missing git; install Git or add git to PATH" >&2
 exit 1

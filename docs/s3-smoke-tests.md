@@ -42,6 +42,20 @@ python3 scripts/s3-smoke.py
 默认模式下可选客户端缺失会记为 `skipped`，不会导致失败；`--require-clients` 可切换成严格模式。
 内置 `internal-sigv4` 默认严格校验已完成的 range/multipart/virtual-hosted-style 行为；只有显式传入 `--allow-protocol-skips` 时，未完成协议项才会被记录为 `skipped`。
 
+`rclone` smoke 固定带上以下 S3 backend 兼容项：
+
+- `use_unsigned_payload = true`
+- `use_multipart_etag = true`
+- `disable_checksum = true`
+
+原因：
+
+- `use_unsigned_payload` 避免 AWS SDK 在单段 `PutObject` 时回退到需要 seek 的 payload hash 路径。
+- `use_multipart_etag` 要求 multipart 校验按标准 S3 multipart `ETag` 语义进行。
+- `disable_checksum` 避免把开发 stub 后端的单段对象 `ETag` 当成 MD5 校验值。
+
+这三项是当前 CCBG S3 smoke 对 `rclone` 的已验证接入契约，不应在回归测试里省略。
+
 ### 可选客户端 expected step names
 
 - `aws-cli`:

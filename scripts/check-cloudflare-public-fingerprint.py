@@ -37,8 +37,10 @@ NON_DEPLOYED_REMOTE_FILES = {"_headers"}
 
 def resolve_bash() -> str:
     candidates = [
+        Path(r"D:\Git\bin\bash.exe"),
         Path(r"D:\Apps\Git\bin\bash.exe"),
         Path(r"C:\Program Files\Git\bin\bash.exe"),
+        Path(r"C:\Users\Walky\AppData\Local\Programs\Git\bin\bash.exe"),
         Path(r"C:\Users\walky\AppData\Local\Programs\Git\bin\bash.exe"),
     ]
     for candidate in candidates:

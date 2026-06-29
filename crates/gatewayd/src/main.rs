@@ -28674,7 +28674,7 @@ fn public_object_info(
     let Some(logical) = logical else {
         return object;
     };
-    let etag = object.etag.clone().or_else(|| logical.etag.clone());
+    let etag = logical.etag.clone().or_else(|| object.etag.clone());
     if !logical.encrypted {
         return blob_core::ObjectInfo { etag, ..object };
     }
@@ -33549,6 +33549,40 @@ mod tests {
             key: "smoke/direct-side.txt".to_string(),
             size: 10,
             etag: None,
+            content_type: Some("text/plain".to_string()),
+            last_modified: Some("2026-06-04T20:53:22.000Z".to_string()),
+        };
+        let logical = LogicalObjectRecord {
+            bucket: "root".to_string(),
+            key: "smoke/direct-side.txt".to_string(),
+            etag: Some("multipart-etag-3".to_string()),
+            application_id: Some("default".to_string()),
+            encrypted: false,
+            encryption_profile_id: None,
+            algorithm: None,
+            key_id: None,
+            key_source_kind: None,
+            key_source_ref: None,
+            chunk_plaintext_bytes: None,
+            plaintext_size: 10,
+            stored_size: 10,
+            logical_content_type: Some("text/plain".to_string()),
+            updated_at_unix_ms: 123,
+        };
+        let public = public_object_info(object, Some(&logical));
+        assert_eq!(public.etag.as_deref(), Some("multipart-etag-3"));
+        assert_eq!(
+            object_http_etag(&public).as_deref(),
+            Some("multipart-etag-3")
+        );
+    }
+
+    #[test]
+    fn public_object_info_prefers_logical_etag_over_backend_etag() {
+        let object = blob_core::ObjectInfo {
+            key: "smoke/direct-side.txt".to_string(),
+            size: 10,
+            etag: Some("backend-fnv-etag".to_string()),
             content_type: Some("text/plain".to_string()),
             last_modified: Some("2026-06-04T20:53:22.000Z".to_string()),
         };

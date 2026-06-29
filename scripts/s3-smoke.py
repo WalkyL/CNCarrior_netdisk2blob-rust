@@ -543,6 +543,9 @@ def rclone_smoke(endpoint: str, access: str, secret: str):
                 "acl = private",
                 "no_check_bucket = true",
                 "force_path_style = true",
+                "use_unsigned_payload = true",
+                "use_multipart_etag = true",
+                "disable_checksum = true",
             ]
         )
         + "\n",

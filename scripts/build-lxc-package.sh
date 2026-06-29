@@ -8,6 +8,8 @@ DIST_DIR="${ROOT_DIR}/target/lxc-package"
 PACKAGE_NAME="${CCBG_LXC_PACKAGE_NAME:-ccbg-lxc-package}"
 TARGET="${CCBG_LXC_TARGET:-}"
 BINARY_OVERRIDE="${CCBG_LXC_BINARY:-}"
+CARGO_BIN="$(bash "${ROOT_DIR}/scripts/resolve-cargo.sh")"
+GIT_BIN="$(bash "${ROOT_DIR}/scripts/resolve-git.sh")"
 SKIP_BUILD=false
 
 usage() {
@@ -51,9 +53,9 @@ done
 
 if [ "${SKIP_BUILD}" != true ]; then
   if [ -n "${TARGET}" ]; then
-    cargo build --release --target "${TARGET}" -p gatewayd
+    "${CARGO_BIN}" build --release --target "${TARGET}" -p gatewayd
   else
-    cargo build --release -p gatewayd
+    "${CARGO_BIN}" build --release -p gatewayd
   fi
 fi
 
@@ -126,7 +128,7 @@ sed -i 's/\r$//' \
   echo "rust_target=${TARGET:-host}"
   echo "built_at_unix=$(date +%s)"
   echo "gatewayd_sha256=$(sha256sum "${BINARY}" | awk '{print $1}')"
-  git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
+  "${GIT_BIN}" -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null | sed 's/^/git_commit=/' || true
 } > "${DIST_DIR}/${PACKAGE_NAME}/PACKAGE-METADATA"
 
 (
