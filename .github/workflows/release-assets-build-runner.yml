@@ -49,7 +49,11 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          podman machine start | Out-Null
+          $machines = podman machine list --format json | ConvertFrom-Json
+          $running = $machines | Where-Object { $_.Default -and $_.Running }
+          if (-not $running) {
+            podman machine start | Out-Null
+          }
 
       - name: Verify build runner image
         shell: powershell
@@ -96,7 +100,11 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          podman machine start | Out-Null
+          $machines = podman machine list --format json | ConvertFrom-Json
+          $running = $machines | Where-Object { $_.Default -and $_.Running }
+          if (-not $running) {
+            podman machine start | Out-Null
+          }
 
       - name: Verify build runner image
         shell: powershell
@@ -172,7 +180,11 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          podman machine start | Out-Null
+          $machines = podman machine list --format json | ConvertFrom-Json
+          $running = $machines | Where-Object { $_.Default -and $_.Running }
+          if (-not $running) {
+            podman machine start | Out-Null
+          }
 
       - name: Verify build runner image
         shell: powershell
