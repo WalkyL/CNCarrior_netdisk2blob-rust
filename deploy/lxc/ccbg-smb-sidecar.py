@@ -85,16 +85,25 @@ def read_json(path: pathlib.Path) -> Any:
         return json.load(handle)
 
 
-def write_json(path: pathlib.Path, payload: Any) -> None:
+def atomic_write_text(path: pathlib.Path, contents: str, mode: int = 0o600) -> None:
     ensure_dir(path.parent)
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=True)
-        handle.write("\n")
+    temp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        handle.write(contents)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temp_path, mode)
+    os.replace(temp_path, path)
+    os.chmod(path, mode)
 
 
-def write_text(path: pathlib.Path, contents: str) -> None:
-    ensure_dir(path.parent)
-    path.write_text(contents, encoding="utf-8")
+def write_json(path: pathlib.Path, payload: Any, mode: int = 0o600) -> None:
+    serialized = json.dumps(payload, indent=2, ensure_ascii=True) + "\n"
+    atomic_write_text(path, serialized, mode)
+
+
+def write_text(path: pathlib.Path, contents: str, mode: int = 0o600) -> None:
+    atomic_write_text(path, contents, mode)
 
 
 def pid_exists(pid: int | None) -> bool:

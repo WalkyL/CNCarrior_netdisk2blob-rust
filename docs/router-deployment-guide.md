@@ -120,6 +120,8 @@ RUST_LOG=warn
 3. 再去软路由上的 Admin 页面填写 `Browser / CDP`
 4. 用 `Probe Preferred` 或 `Probe All` 验证
 
+这两个脚本都是幂等的，可在浏览器主机重启后直接重复执行。它们只在本机 CDP 不可达时才启动浏览器实例，并会重建防火墙和端口代理状态。
+
 更完整的逐步操作见 [docs/auth-step-by-step.md](/home/walky/workspaces/carrier-cloud-blob-gateway/docs/auth-step-by-step.md:146) 里的“软路由 + 管理员电脑的 CDP 认证模型”章节。
 
 ## 7. 当前运行时提醒

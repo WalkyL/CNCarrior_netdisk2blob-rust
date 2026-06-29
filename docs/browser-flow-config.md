@@ -17,7 +17,7 @@
 - 页面与控制面之间的 provider-specific 绑定，优先改 `config/provider-bridges/*.json`
 - 页面小改版时，优先改 `config/browser-flows/*.json`
 - provider crate 继续只负责稳定的对象存储语义和上游协议
-- 后续 `auth-capture` sidecar / CDP 执行层可以共享同一套流程描述
+- 后续 `auth-capture` sidecar / 真实 CDP 执行层可以共享同一套流程描述；这仍然只是可插拔 capture 层，不是 core 的长期常驻依赖
 
 ## 这层明确不负责什么
 
@@ -57,7 +57,7 @@
 - `blob-core::BrowserFlowCatalog::bind_flow(...)` / `BrowserFlowCatalogCollection::bind_flow(...)` 可以把 `flows[].inputs`、`runtime.*` 和 `preset_refs` 绑定成一份已解析模板的执行计划
 - `blob-core::DryRunBrowserFlowExecutor` 可以把绑定后的执行计划展开成逐步的 `Planned` 报告，方便在接入真实 CDP 执行层之前先验证 catalog、输入绑定和预期请求
 - `blob-core::BrowserFlowSession` / `BrowserFlowSessionExecutor` 已经定义了真实执行时需要的通用浏览器动作边界，例如 `navigate`、`click`、`set_input`、`set_files`、`wait_for_request`、`wait_for_page`
-- `gatewayd` 的 auth-capture 控制面现在已经能保存 CDP 配置字段，例如 `cdp_endpoint_url`、`cdp_target_selector`、`cdp_target_timeout_ms`，后续真实 transport 将优先消费这些字段，而不是写死某个浏览器
+- `gatewayd` 的 auth-capture 控制面现在已经能保存 CDP 配置字段，例如 `cdp_endpoint_url`、`cdp_target_selector`、`cdp_target_timeout_ms`，后续真实 transport 将优先消费这些字段，而不是写死某个浏览器或把浏览器宿主机常驻进 core
 - `gatewayd` 只读暴露:
   - `GET /api/browser-flows/catalogs`
   - `GET /api/browser-flows/catalog?provider=unicom&surface=pan.wo.cn-web`
@@ -246,7 +246,7 @@
 2. 让 `auth-capture` sidecar 把待输入手机号、短信码、验证码统一映射到 `flows[].inputs`。
 3. 继续补联通 family space 的网页 flow catalog 变体，以及后续电信/移动 provider 的网页 flow catalog。当前 native provider 已支持 `family` bucket，但浏览器流程样例仍以 personal space 为主。
 
-目前仓库已经有最小可用的真实 CDP transport 和 session 执行链，但还没有完整的 auth-capture 编排层。
+目前仓库已经有最小可用的真实 CDP transport 和 session 执行链，但它仍然是可插拔的 capture 组件，不是必须常驻的 core 运行时；还没有完整的 auth-capture 编排层。
 
 换句话说:
 

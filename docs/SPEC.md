@@ -58,6 +58,9 @@ Protected operator tools:
 - `CCBG_MCP_*` aliases are accepted for the HTTP transport configuration.
 - HTTP bearer token stays externalized in env vars only.
 - No secret is written into repo docs, MCP public discovery payloads, or default config.
+- Public discovery remains unauthenticated, and protected operator tools stay behind auth.
+- Optional capability entry scripts must stay idempotent and low-memory so browser/CDP helpers do
+  not become core runtime dependencies.
 
 ## Public Storage Access Model
 
@@ -237,7 +240,54 @@ removes the full metadata set instead of leaving orphaned logical records behind
 - No new environment variables.
 - No secret handling changes.
 
+### Residual Risks
+
+- Missing placement metadata must not silently degrade into a current-primary fallback.
+- Orphan `logical_objects` and `object_protection_plans` rows need a dedicated scan or repair
+  path; placement-driven views cannot find them.
+- Replication-delete enqueue failures can leave replica cleanup pending even when the primary
+  delete has already succeeded.
+- WAL replay and backup restore improve recovery, but they do not make delete atomic.
+- Multipart upload cleanup remains a separate consistency boundary and needs its own expiry
+  handling.
+
 ### Lessons Learned
 
 See [lessons-learned.md](lessons-learned.md) for the operational takeaways that were folded back
 into the project docs after the `.49` cleanup and deploy.
+
+## Provider Credential Lease Keepalive
+
+### Objective
+
+Keep carrier provider credential verification alive with the smallest possible runtime surface
+while keeping it independent from webhook delivery and CDP/browser availability.
+
+### Interface
+
+- Background loop: `credential_lease_loop`
+- Worker helper: `probe_provider_credential_leases`
+- Target providers: `unicom`, `telecom`, `mobile`
+- Persisted lease summary: `provider_credentials/*.lease.json`
+
+### Data Flow
+
+1. `gatewayd` starts the dedicated credential lease loop only once.
+2. The loop iterates over the active carrier providers and calls their direct `health()` methods.
+3. Successful or failed lease checks are written back to the per-provider lease file.
+4. The loop sleeps for `CCBG_PROVIDER_LEASE_POLL_INTERVAL_SECONDS` and repeats, but saved
+   credentials can wake it early so verification happens immediately after a fresh save.
+5. `notify` webhook delivery, when enabled, runs in a separate loop and does not drive lease probing.
+
+### Error Handling
+
+- If a provider has no supported lease inputs, the loop skips it.
+- If a direct health probe fails, the error is logged and the next scheduled pass retries.
+- `requires_reauth` shortens the next probe interval to keep stale credentials from lingering.
+
+### Configuration
+
+- `CCBG_PROVIDER_LEASE_POLL_INTERVAL_SECONDS` controls the lease loop cadence.
+- `CCBG_NOTIFY_POLL_INTERVAL_SECONDS` only controls webhook alert evaluation.
+- No CDP transport is required for active provider lease verification.
+- OneDrive remains parked and is excluded from the active keepalive path.

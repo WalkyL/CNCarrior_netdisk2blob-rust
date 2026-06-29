@@ -14,6 +14,7 @@
 ## 1. 协议概览
 
 配置 `CCBG_NOTIFY_WEBHOOK_URL` 后，`gatewayd` 会按 `CCBG_NOTIFY_POLL_INTERVAL_SECONDS` 周期评估当前 alerts。
+这个周期只控制 webhook 告警评估，不控制 provider credential lease keepalive；后者使用单独的 `CCBG_PROVIDER_LEASE_POLL_INTERVAL_SECONDS`。
 
 当前行为:
 
@@ -131,6 +132,7 @@ python3 ./scripts/notify-webhook-receiver-example.py \
 CCBG_NOTIFY_WEBHOOK_URL=http://127.0.0.1:61110/
 CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET=replace-with-notify-secret
 CCBG_NOTIFY_POLL_INTERVAL_SECONDS=15
+CCBG_PROVIDER_LEASE_POLL_INTERVAL_SECONDS=30
 ```
 
 如果你只想先做联调、不启用验签，可以只配:

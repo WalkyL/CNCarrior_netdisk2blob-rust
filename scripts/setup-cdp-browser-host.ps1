@@ -15,7 +15,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $LocalUrl = "http://127.0.0.1:$Port/json/version"
-$LanUrl = "http://$HostIp:$Port/json/version"
+$LanUrl = "http://${HostIp}:$Port/json/version"
+$BrowserArguments = @(
+    "--remote-debugging-port=$Port",
+    "--user-data-dir=$ProfileDir",
+    "--no-first-run",
+    "--no-default-browser-check"
+)
 
 if ($HostIp -match '^(127\.|localhost$)') {
     throw "HostIp must be the browser host LAN IP, not localhost or 127.0.0.1."
@@ -50,6 +56,35 @@ function Wait-CdpUrl {
         Start-Sleep -Seconds 1
     }
     throw "$Label did not become reachable: $Url"
+}
+
+function Test-BrowserStartupInProgress {
+    param(
+        [string]$ExecutableName,
+        [string]$ProfilePath,
+        [int]$PortNumber
+    )
+
+    $processes = Get-CimInstance Win32_Process -Filter "Name = '$ExecutableName'" -ErrorAction SilentlyContinue
+    foreach ($process in $processes) {
+        if (-not $process.CommandLine) {
+            continue
+        }
+
+        if ($process.CommandLine -notmatch "--remote-debugging-port=$PortNumber") {
+            continue
+        }
+
+        if ($process.CommandLine -notmatch [regex]::Escape("--user-data-dir=$ProfilePath")) {
+            continue
+        }
+
+        if ($process.CommandLine -match [regex]::Escape($ExecutableName)) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Resolve-BrowserExecutable {
@@ -117,13 +152,14 @@ if ($service -and $service.Status -ne "Running") {
 Write-Host "3) Ensuring loopback CDP is up on $LocalUrl"
 if (-not (Test-CdpUrl -Url $LocalUrl)) {
     $browserExecutable = Resolve-BrowserExecutable
+    $browserProcessName = [IO.Path]::GetFileName($browserExecutable)
     New-Item -ItemType Directory -Path $ProfileDir -Force | Out-Null
-    Start-Process -FilePath $browserExecutable -ArgumentList @(
-        "--remote-debugging-port=$Port",
-        "--user-data-dir=$ProfileDir",
-        "--no-first-run",
-        "--no-default-browser-check"
-    ) | Out-Null
+    if (-not (Test-BrowserStartupInProgress -ExecutableName $browserProcessName -ProfilePath $ProfileDir -PortNumber $Port)) {
+        Start-Process -FilePath $browserExecutable -ArgumentList $BrowserArguments | Out-Null
+    }
+    else {
+        Write-Host "Browser startup already in progress for $browserProcessName with profile $ProfileDir"
+    }
     Wait-CdpUrl -Url $LocalUrl -Label "Loopback CDP"
 }
 else {

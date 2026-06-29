@@ -2,14 +2,14 @@
 // Copyright (c) 2026 walky
 
 #[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
 use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    env,
-    ffi::CString,
-    fs,
+    env, fs,
     io::{BufReader, BufWriter, Cursor, Read, Write},
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
@@ -19,6 +19,8 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
+
+use tokio::sync::Notify;
 
 use admin_api::{
     ADMIN_API_VERSION, AdminAlertSuppressionInput, AdminApiErrorCode, AdminApiErrorResponse,
@@ -124,8 +126,6 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tar::{Builder as TarBuilder, Header as TarHeader};
-#[cfg(test)]
-use tokio::sync::Notify;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::time::{Duration, Instant, sleep, timeout, timeout_at};
 use tokio::{
@@ -214,6 +214,7 @@ const DEFAULT_ADMIN_LOG_LINE_MAX_BYTES: usize = 2 * 1024;
 const DEFAULT_ADMIN_LOG_QUERY_LIMIT: usize = 80;
 const MAX_ADMIN_LOG_QUERY_LIMIT: usize = 200;
 const MAX_ADMIN_LOG_KEYWORD_BYTES: usize = 120;
+const MAX_S3_REQUEST_TIME_SKEW_SECS: u64 = 15 * 60;
 #[cfg(test)]
 const AUTH_CAPTURE_LLM_REQUEST_TIMEOUT_SECS: u64 = 1;
 #[cfg(not(test))]
@@ -239,6 +240,7 @@ struct AppState {
     gateway_write_ahead_log_runtime: Arc<Mutex<GatewayWriteAheadLogRuntimeState>>,
     notify_state: Arc<Mutex<NotifyState>>,
     credential_lease_probe: Arc<Mutex<CredentialLeaseProbeState>>,
+    credential_lease_probe_wake: Arc<Notify>,
     admin_client_ip: Arc<Mutex<Option<String>>>,
     admin_sessions: Arc<Mutex<HashMap<String, AdminBrowserSession>>>,
     browser_flow_catalogs: Arc<BrowserFlowCatalogCollection>,
@@ -3888,6 +3890,28 @@ fn socket_addr_is_loopback(addr: &SocketAddr) -> bool {
     addr.ip().is_loopback()
 }
 
+fn validate_control_plane_api_exposure(config: &AppConfig) -> Result<()> {
+    if config.control_api_key.is_some() {
+        return Ok(());
+    }
+    if matches!(config.admin_mode, AdminMode::Off) {
+        return Ok(());
+    }
+    if !socket_addr_is_loopback(&config.admin_bind_addr) {
+        anyhow::bail!(
+            "CCBG_CONTROL_API_KEY is required when admin_bind_addr={} is exposed beyond loopback",
+            config.admin_bind_addr
+        );
+    }
+    if !socket_addr_is_loopback(&config.metrics_bind_addr) {
+        anyhow::bail!(
+            "CCBG_CONTROL_API_KEY is required when metrics_bind_addr={} is exposed beyond loopback",
+            config.metrics_bind_addr
+        );
+    }
+    Ok(())
+}
+
 fn snapshot_data_plane_rate_limiter(
     state: &AppState,
     now_unix_ms: u64,
@@ -4581,6 +4605,7 @@ struct AppConfig {
     notify_webhook_url: Option<String>,
     notify_webhook_signing_secret: Option<String>,
     notify_poll_interval_seconds: u64,
+    provider_lease_poll_interval_seconds: u64,
     replication_failed_alert_threshold: usize,
     replication_failed_alert_min_age_ms: u64,
     control_plane_file: String,
@@ -5644,6 +5669,11 @@ impl AppConfig {
                 "CCBG_NOTIFY_WEBHOOK_SIGNING_SECRET_FILE",
             ),
             notify_poll_interval_seconds: env_u64("CCBG_NOTIFY_POLL_INTERVAL_SECONDS", 15).max(5),
+            provider_lease_poll_interval_seconds: env_u64(
+                "CCBG_PROVIDER_LEASE_POLL_INTERVAL_SECONDS",
+                30,
+            )
+            .max(5),
             replication_failed_alert_threshold: env_usize(
                 "CCBG_REPLICATION_FAILED_ALERT_THRESHOLD",
                 1,
@@ -6791,12 +6821,10 @@ macro_rules! gateway_http_trace_layer {
         TraceLayer::new_for_http()
             .make_span_with(|request: &AxumRequest<Body>| {
                 let route = request_route_label(request);
-                let query = request.uri().query().unwrap_or("");
                 info_span!(
                     "http_request",
                     method = %request.method(),
-                    route = %route,
-                    query = %query
+                    route = %route
                 )
             })
             .on_response(|response: &Response, latency: Duration, span: &Span| {
@@ -6873,6 +6901,8 @@ async fn main() -> Result<()> {
         .init();
 
     let mut config = AppConfig::from_env()?;
+    validate_control_plane_api_exposure(&config)
+        .context("refusing to expose control-plane listeners without CCBG_CONTROL_API_KEY")?;
     let control_plane = load_control_plane_state(
         &config.control_plane_file,
         &config.credentials_dir,
@@ -6981,6 +7011,7 @@ async fn main() -> Result<()> {
         credential_lease_probe: Arc::new(Mutex::new(CredentialLeaseProbeState {
             next_probe_at_unix_ms_by_provider: BTreeMap::new(),
         })),
+        credential_lease_probe_wake: Arc::new(Notify::new()),
         admin_client_ip: Arc::new(Mutex::new(None)),
         admin_sessions: Arc::new(Mutex::new(HashMap::new())),
         browser_flow_catalogs,
@@ -7006,7 +7037,10 @@ async fn main() -> Result<()> {
         .await
         .context("failed to replay gateway write-ahead log on startup")?;
     spawn_replication_workers(state.clone(), config.replication_workers);
-    tokio::spawn(notify_loop(state.clone()));
+    tokio::spawn(credential_lease_loop(state.clone()));
+    if config.notify_webhook_url.is_some() {
+        tokio::spawn(notify_webhook_loop(state.clone()));
+    }
     tokio::spawn(gateway_backup_loop(state.clone()));
     spawn_admin_services(state.clone())
         .await
@@ -7055,6 +7089,7 @@ async fn main() -> Result<()> {
         notify_webhook_enabled = config.notify_webhook_url.is_some(),
         notify_webhook_signature_enabled = config.notify_webhook_signing_secret.is_some(),
         notify_poll_interval_seconds = config.notify_poll_interval_seconds,
+        provider_lease_poll_interval_seconds = config.provider_lease_poll_interval_seconds,
         control_plane_file = %config.control_plane_file,
         instance_id_file = %config.instance_id_file,
         managed_root_base = %config.managed_root_base,
@@ -7531,12 +7566,6 @@ fn control_api_key_matches_headers(headers: &HeaderMap, expected_api_key: &str) 
     false
 }
 
-fn control_api_key_matches(headers: &HeaderMap, expected_api_key: &str) -> bool {
-    control_api_key_matches_headers(headers, expected_api_key)
-        || cookie_value_from_headers(headers, CONTROL_API_KEY_COOKIE)
-            .is_some_and(|value| value == expected_api_key)
-}
-
 fn admin_browser_login_configured(config: &AppConfig) -> bool {
     config.admin_username.is_some()
         || config.admin_password_hash.is_some()
@@ -7797,21 +7826,6 @@ async fn require_admin_password_rotation_completed(
     Ok(next.run(req).await)
 }
 
-fn cookie_value_from_query(uri: &Uri, key: &str) -> Option<String> {
-    let query = uri.query()?;
-    for pair in query.split('&') {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if name == key {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn query_api_key_matches(uri: &Uri, expected_api_key: &str) -> bool {
-    cookie_value_from_query(uri, "api_key").is_some_and(|value| value == expected_api_key)
-}
-
 async fn require_control_api_key(
     State(state): State<AppState>,
     req: AxumRequest<Body>,
@@ -7821,26 +7835,13 @@ async fn require_control_api_key(
         return Ok(next.run(req).await);
     };
 
-    let query_match = query_api_key_matches(req.uri(), expected_api_key);
-    let header_or_cookie_match = control_api_key_matches(req.headers(), expected_api_key);
-    if !query_match && !header_or_cookie_match {
+    if !control_api_key_matches_headers(req.headers(), expected_api_key) {
         return Err(ControlApiError::unauthorized(
             "control-plane api key required",
         ));
     }
 
-    let mut response = next.run(req).await;
-    if query_match {
-        response.headers_mut().insert(
-            SET_COOKIE,
-            HeaderValue::from_str(&format!(
-                "{}={}; Path=/; HttpOnly; SameSite=Strict",
-                CONTROL_API_KEY_COOKIE, expected_api_key
-            ))
-            .expect("set-cookie should be valid"),
-        );
-    }
-    Ok(response)
+    Ok(next.run(req).await)
 }
 
 async fn capture_admin_client_ip(
@@ -12381,6 +12382,9 @@ fn provider_has_credential_lease_inputs(
     }
 }
 
+const PROVIDER_CREDENTIAL_LEASE_PROBE_TARGETS: [ProviderId; 3] =
+    [ProviderId::Unicom, ProviderId::Telecom, ProviderId::Mobile];
+
 async fn maybe_probe_provider_credential_lease(
     state: &AppState,
     provider: ProviderId,
@@ -12451,24 +12455,43 @@ async fn maybe_probe_provider_credential_lease(
     Ok(())
 }
 
+async fn probe_provider_credential_leases(state: &AppState) {
+    for provider in PROVIDER_CREDENTIAL_LEASE_PROBE_TARGETS {
+        if let Err(error) = maybe_probe_provider_credential_lease(state, provider).await {
+            warn!(
+                error = %error,
+                provider = provider.as_str(),
+                "provider credential lease probe failed"
+            );
+        }
+    }
+}
+
+// Keep lease verification separate from webhook delivery so alerting can be disabled without
+// stopping credential refresh for active providers.
+async fn credential_lease_loop(state: AppState) {
+    loop {
+        probe_provider_credential_leases(&state).await;
+        let sleep = sleep(Duration::from_secs(
+            state.config.provider_lease_poll_interval_seconds,
+        ));
+        tokio::pin!(sleep);
+        tokio::select! {
+            _ = &mut sleep => {}
+            _ = state.credential_lease_probe_wake.notified() => {}
+        }
+    }
+}
+
 fn sign_notify_payload(secret: &str, timestamp: u64, body: &[u8]) -> String {
     let payload_hash = sha256_hex(body);
     let string_to_sign = format!("{timestamp}.{payload_hash}");
     hex::encode(hmac_sha256(secret.as_bytes(), string_to_sign.as_bytes()))
 }
 
-async fn notify_loop(state: AppState) {
+async fn notify_webhook_loop(state: AppState) {
     loop {
         let _ = current_process_memory_payload(&state);
-        for provider in [ProviderId::Unicom, ProviderId::Telecom, ProviderId::Mobile] {
-            if let Err(error) = maybe_probe_provider_credential_lease(&state, provider).await {
-                warn!(
-                    error = %error,
-                    provider = provider.as_str(),
-                    "provider credential lease probe failed"
-                );
-            }
-        }
         if let Err(error) = process_notify_tick(&state).await {
             warn!(error = %error, "notify webhook tick failed");
             let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
@@ -12850,12 +12873,12 @@ fn admin_index_template_source() -> String {
     ADMIN_INDEX_TEMPLATE.to_string()
 }
 
-fn render_admin_index_html() -> String {
+fn render_admin_index_html_from_template_source(template_source: &str) -> String {
     let provider_credentials_template =
         ROUTE_PROVIDER_CREDENTIALS.replace("{provider}", "${encodeURIComponent(provider)}");
     let browser_flow_handoff_template = ROUTE_BROWSER_FLOW_SESSION_HANDOFF
         .replace("{session_id}", "${encodeURIComponent(sessionId)}");
-    admin_index_template_source()
+    template_source
         .replace("{admin_favicon}", &admin_favicon_data_url())
         .replace("{admin_api_version}", ADMIN_API_VERSION)
         .replace("{route_status}", ROUTE_STATUS)
@@ -12872,6 +12895,10 @@ fn render_admin_index_html() -> String {
             "{route_browser_flow_session_handoff_template}",
             &browser_flow_handoff_template,
         )
+}
+
+fn render_admin_index_html() -> String {
+    render_admin_index_html_from_template_source(&admin_index_template_source())
 }
 
 async fn admin_index() -> Html<String> {
@@ -16357,6 +16384,7 @@ async fn handoff_browser_flow_session(
             .expect("credential lease probe state poisoned")
             .next_probe_at_unix_ms_by_provider
             .insert(provider, handoff_at_unix_ms);
+        state.credential_lease_probe_wake.notify_one();
     }
     rebuild_backend_for_provider(&state, provider)?;
 
@@ -16822,6 +16850,7 @@ async fn update_provider_credentials(
             .expect("credential lease probe state poisoned")
             .next_probe_at_unix_ms_by_provider
             .insert(provider, current_unix_ms());
+        state.credential_lease_probe_wake.notify_one();
     }
     rebuild_backend_for_provider(&state, provider)?;
     Ok(Json(current_provider_credential_payload(&state, provider)?))
@@ -23610,16 +23639,10 @@ fn load_control_plane_state(
 }
 
 fn persist_control_plane_state(path: &str, state: &ControlPlaneState) -> Result<()> {
-    if let Some(parent) = FsPath::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create control plane dir {parent:?}"))?;
-        }
-    }
-
     let body =
         serde_json::to_string_pretty(state).context("failed to encode control plane JSON")?;
-    fs::write(path, body).with_context(|| format!("failed to write control plane file {path}"))?;
+    atomic_write_text_file(FsPath::new(path), &body, 0o600, "control plane")
+        .with_context(|| format!("failed to write control plane file {path}"))?;
     Ok(())
 }
 
@@ -23705,6 +23728,69 @@ fn provider_capability_catalog_path(
     ))
 }
 
+fn ensure_parent_dir(path: &FsPath, context: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {context} dir {parent:?}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn atomic_write_text_file(
+    path: &FsPath,
+    contents: &str,
+    #[cfg(unix)] unix_mode: u32,
+    #[cfg(not(unix))] _unix_mode: u32,
+    context: &str,
+) -> Result<()> {
+    ensure_parent_dir(path, context)?;
+    let parent = path.parent().unwrap_or_else(|| FsPath::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "failed to create temporary {context} file for {}",
+            path.display()
+        )
+    })?;
+    temp.write_all(contents.as_bytes()).with_context(|| {
+        format!(
+            "failed to write temporary {context} file {}",
+            path.display()
+        )
+    })?;
+    temp.flush().with_context(|| {
+        format!(
+            "failed to flush temporary {context} file {}",
+            path.display()
+        )
+    })?;
+    temp.as_file_mut()
+        .sync_all()
+        .with_context(|| format!("failed to sync temporary {context} file {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(unix_mode)).with_context(
+            || {
+                format!(
+                    "failed to protect temporary {context} file {}",
+                    path.display()
+                )
+            },
+        )?;
+    }
+    temp.persist(path).map_err(|error| {
+        anyhow::Error::new(error.error).context(format!(
+            "failed to persist {context} file {}",
+            path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(unix_mode))
+        .with_context(|| format!("failed to protect {context} file {}", path.display()))?;
+    Ok(())
+}
+
 fn resolve_gateway_instance_id(instance_id_file: &str, control_plane_file: &str) -> Result<String> {
     if let Some(value) = env_opt("CCBG_INSTANCE_ID") {
         return Ok(value);
@@ -23751,14 +23837,13 @@ fn generate_gateway_instance_id() -> String {
 }
 
 fn persist_gateway_instance_id(path: &str, value: &str) -> Result<()> {
-    if let Some(parent) = FsPath::new(path).parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create instance id dir {parent:?}"))?;
-        }
-    }
-    fs::write(path, format!("{value}\n"))
-        .with_context(|| format!("failed to write gateway instance id file {path}"))
+    atomic_write_text_file(
+        FsPath::new(path),
+        &format!("{value}\n"),
+        0o600,
+        "gateway instance id",
+    )
+    .with_context(|| format!("failed to write gateway instance id file {path}"))
 }
 
 fn machine_fingerprint_gateway_instance_id(control_plane_file: &str) -> Option<String> {
@@ -23932,16 +24017,9 @@ fn persist_provider_credential_record(
             path.display()
         ))
     })?;
-    fs::write(&path, body).map_err(|error| {
+    atomic_write_text_file(&path, &body, 0o600, "provider credential").map_err(|error| {
         BlobError::Configuration(format!(
             "failed to write provider credential file {}: {error}",
-            path.display()
-        ))
-    })?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-        BlobError::Configuration(format!(
-            "failed to protect provider credential file {}: {error}",
             path.display()
         ))
     })?;
@@ -24258,16 +24336,9 @@ fn persist_managed_encryption_key_record_to_credentials_dir(
             path.display()
         ))
     })?;
-    fs::write(&path, body).map_err(|error| {
+    atomic_write_text_file(&path, &body, 0o600, "managed encryption key").map_err(|error| {
         BlobError::Configuration(format!(
             "failed to write managed encryption key file {}: {error}",
-            path.display()
-        ))
-    })?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-        BlobError::Configuration(format!(
-            "failed to protect managed encryption key file {}: {error}",
             path.display()
         ))
     })?;
@@ -24622,19 +24693,14 @@ fn persist_gateway_backup_password(config: &AppConfig, password: &str) -> Result
             parent.display()
         ))
     })?;
-    fs::write(&path, password).map_err(|error| {
-        BlobError::Configuration(format!(
-            "failed to write gateway backup password file {}: {error}",
-            path.display()
-        ))
-    })?;
-    #[cfg(unix)]
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(|error| {
-        BlobError::Configuration(format!(
-            "failed to protect gateway backup password file {}: {error}",
-            path.display()
-        ))
-    })?;
+    atomic_write_text_file(&path, &password, 0o600, "gateway backup password").map_err(
+        |error| {
+            BlobError::Configuration(format!(
+                "failed to write gateway backup password file {}: {error}",
+                path.display()
+            ))
+        },
+    )?;
     Ok(())
 }
 
@@ -25452,6 +25518,128 @@ fn gateway_backup_archive_summary(
     }
 }
 
+fn validate_gateway_backup_metadata_payload(
+    metadata: &GatewayBackupMetadataPayload,
+) -> Result<(), BlobError> {
+    let placement_keys = metadata
+        .object_placements
+        .iter()
+        .map(|record| (record.bucket.clone(), record.key.clone()))
+        .collect::<HashSet<_>>();
+
+    let logical_keys = metadata
+        .logical_objects
+        .iter()
+        .map(|record| (record.bucket.clone(), record.key.clone()))
+        .collect::<HashSet<_>>();
+    if logical_keys.len() != metadata.logical_objects.len() {
+        return Err(BlobError::Configuration(
+            "backup bundle contains duplicate logical object records".to_string(),
+        ));
+    }
+    for record in &metadata.logical_objects {
+        if !placement_keys.contains(&(record.bucket.clone(), record.key.clone())) {
+            return Err(BlobError::Configuration(format!(
+                "logical object {}/{} has no matching object placement record",
+                record.bucket, record.key
+            )));
+        }
+    }
+
+    let protection_keys = metadata
+        .object_protection_plans
+        .iter()
+        .map(|record| (record.bucket.clone(), record.key.clone()))
+        .collect::<HashSet<_>>();
+    if protection_keys.len() != metadata.object_protection_plans.len() {
+        return Err(BlobError::Configuration(
+            "backup bundle contains duplicate object protection plan records".to_string(),
+        ));
+    }
+    for record in &metadata.object_protection_plans {
+        if !placement_keys.contains(&(record.bucket.clone(), record.key.clone())) {
+            return Err(BlobError::Configuration(format!(
+                "object protection plan {}/{} has no matching object placement record",
+                record.bucket, record.key
+            )));
+        }
+    }
+
+    if placement_keys.len() != metadata.object_placements.len() {
+        return Err(BlobError::Configuration(
+            "backup bundle contains duplicate object placement records".to_string(),
+        ));
+    }
+
+    let mut pending_job_ids = HashSet::new();
+    for job in &metadata.pending_replication_jobs {
+        if job.job_id == 0 {
+            return Err(BlobError::Configuration(
+                "replication jobs must have a non-zero job_id".to_string(),
+            ));
+        }
+        if !pending_job_ids.insert(job.job_id) {
+            return Err(BlobError::Configuration(format!(
+                "backup bundle contains duplicate replication job id {}",
+                job.job_id
+            )));
+        }
+        if job.target.trim().is_empty() {
+            return Err(BlobError::Configuration(format!(
+                "replication job {} has an empty target",
+                job.job_id
+            )));
+        }
+        if job.object.bucket.trim().is_empty() || job.object.key.trim().is_empty() {
+            return Err(BlobError::Configuration(format!(
+                "replication job {} references an empty bucket or key",
+                job.job_id
+            )));
+        }
+        if !matches!(
+            job.status,
+            ReplicationStatus::Pending | ReplicationStatus::RetryScheduled
+        ) {
+            return Err(BlobError::Configuration(format!(
+                "replication job {} has unsupported status {} in pending_replication_jobs",
+                job.job_id,
+                job.status.as_str()
+            )));
+        }
+        if matches!(job.operation, ReplicationOperation::Put) && job.object.size.is_none() {
+            return Err(BlobError::Configuration(format!(
+                "replication job {} is a put without object size",
+                job.job_id
+            )));
+        }
+    }
+
+    let wal = &metadata.gateway_write_ahead_log_state;
+    if wal.next_lsn == 0 {
+        return Err(BlobError::Configuration(
+            "gateway write-ahead log next_lsn must be greater than zero".to_string(),
+        ));
+    }
+    if wal
+        .last_checkpoint_lsn
+        .is_some_and(|value| value >= wal.next_lsn)
+    {
+        return Err(BlobError::Configuration(
+            "gateway write-ahead log last_checkpoint_lsn must be less than next_lsn".to_string(),
+        ));
+    }
+    if wal
+        .last_replayed_lsn
+        .is_some_and(|value| value >= wal.next_lsn)
+    {
+        return Err(BlobError::Configuration(
+            "gateway write-ahead log last_replayed_lsn must be less than next_lsn".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_gateway_backup_bundle_for_import(
     state: &AppState,
     bundle: GatewayBackupBundlePayload,
@@ -25481,6 +25669,7 @@ fn validate_gateway_backup_bundle_for_import(
         .into_iter()
         .map(normalize_managed_encryption_key_record)
         .collect::<Result<Vec<_>, _>>()?;
+    validate_gateway_backup_metadata_payload(&bundle.metadata)?;
 
     let temp_dir = backup_temp_dir()?;
     let temp_credentials_dir = temp_dir.path().join("provider-credentials");
@@ -31514,13 +31703,12 @@ async fn put_object(
                 ProviderWritePathKind::Streaming,
             )
         } else {
-            let spooled = spool_signed_request_body(&state, body, content_length).await?;
             let application = authorize_s3_with_verified_payload_hash(
                 &state,
                 &method,
                 &uri,
                 &headers,
-                &spooled.sha256_hex,
+                &payload_hash,
             )?;
             ensure_s3_application_permission(
                 &application,
@@ -31528,6 +31716,12 @@ async fn put_object(
                 Some(&bucket),
                 Some(&key),
             )?;
+            let spooled = spool_signed_request_body(&state, body, content_length).await?;
+            if spooled.sha256_hex != payload_hash {
+                return Err(S3Error::signature_mismatch(
+                    "x-amz-content-sha256 does not match the request body.",
+                ));
+            }
             (
                 application,
                 spooled.size,
@@ -32061,6 +32255,19 @@ async fn upload_multipart_part(
             "failed to create multipart spool directory: {error}"
         ))
     })?;
+    let authorization_result = if payload_hash == "UNSIGNED-PAYLOAD" {
+        authorize_s3(&state, &method, &uri, &headers, None)
+    } else {
+        authorize_s3_with_verified_payload_hash(&state, &method, &uri, &headers, &payload_hash)
+    };
+    let application = authorization_result?;
+    ensure_s3_application_permission(
+        &application,
+        S3ActionKind::WriteObject,
+        Some(&bucket),
+        Some(&key),
+    )?;
+
     let spool_result: Result<(u64, String), S3Error> = async {
         let mut file = TokioFile::create(&temp_path).await.map_err(|error| {
             S3Error::internal_error(format!("failed to create multipart spool file: {error}"))
@@ -32097,26 +32304,11 @@ async fn upload_multipart_part(
             return Err(error);
         }
     };
-    let authorization_result = if payload_hash == "UNSIGNED-PAYLOAD" {
-        authorize_s3(&state, &method, &uri, &headers, None)
-    } else {
-        authorize_s3_with_verified_payload_hash(&state, &method, &uri, &headers, &etag)
-    };
-    let application = match authorization_result {
-        Ok(application) => application,
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(error);
-        }
-    };
-    if let Err(error) = ensure_s3_application_permission(
-        &application,
-        S3ActionKind::WriteObject,
-        Some(&bucket),
-        Some(&key),
-    ) {
+    if payload_hash != "UNSIGNED-PAYLOAD" && etag != payload_hash {
         let _ = tokio::fs::remove_file(&temp_path).await;
-        return Err(error);
+        return Err(S3Error::signature_mismatch(
+            "x-amz-content-sha256 does not match the request body.",
+        ));
     }
     let mut rollback_path = None;
     match tokio::fs::try_exists(&path).await {
@@ -32688,6 +32880,7 @@ fn authorize_s3_header_auth(
         .ok_or_else(|| S3Error::access_denied("Missing x-amz-date header."))?
         .to_str()
         .map_err(|_| S3Error::access_denied("x-amz-date header is not valid UTF-8."))?;
+    validate_signed_request_time_window(amz_date)?;
     let payload_hash = headers
         .get("x-amz-content-sha256")
         .ok_or_else(|| S3Error::access_denied("Missing x-amz-content-sha256 header."))?
@@ -32950,8 +33143,27 @@ fn validate_presigned_signed_headers(signed_headers: &[String]) -> Result<(), S3
 fn validate_presigned_time_window(amz_date: &str, expires: u64) -> Result<(), S3Error> {
     let issued_at = parse_amz_datetime_to_unix(amz_date)?;
     let now = current_unix_ms() / 1000;
+    if issued_at > now.saturating_add(MAX_S3_REQUEST_TIME_SKEW_SECS) {
+        return Err(S3Error::access_denied(
+            "Request timestamp is too far in the future.",
+        ));
+    }
     if now > issued_at.saturating_add(expires) {
         return Err(S3Error::access_denied("Request has expired."));
+    }
+    Ok(())
+}
+
+fn validate_signed_request_time_window(amz_date: &str) -> Result<(), S3Error> {
+    let signed_at = parse_amz_datetime_to_unix(amz_date)?;
+    let now = current_unix_ms() / 1000;
+    if signed_at > now.saturating_add(MAX_S3_REQUEST_TIME_SKEW_SECS) {
+        return Err(S3Error::access_denied(
+            "Request timestamp is too far in the future.",
+        ));
+    }
+    if now > signed_at.saturating_add(MAX_S3_REQUEST_TIME_SKEW_SECS) {
+        return Err(S3Error::access_denied("Request timestamp is too old."));
     }
     Ok(())
 }
@@ -34746,6 +34958,7 @@ mod tests {
             notify_webhook_url: None,
             notify_webhook_signing_secret: None,
             notify_poll_interval_seconds: 15,
+            provider_lease_poll_interval_seconds: 30,
             replication_failed_alert_threshold: 1,
             replication_failed_alert_min_age_ms: 0,
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
@@ -34990,6 +35203,7 @@ mod tests {
             credential_lease_probe: Arc::new(Mutex::new(CredentialLeaseProbeState {
                 next_probe_at_unix_ms_by_provider: BTreeMap::new(),
             })),
+            credential_lease_probe_wake: Arc::new(Notify::new()),
             admin_client_ip: Arc::new(Mutex::new(None)),
             admin_sessions: Arc::new(Mutex::new(HashMap::new())),
             browser_flow_catalogs,
@@ -35375,6 +35589,15 @@ mod tests {
         )
     }
 
+    fn test_amz_date_offset(offset_secs: i64) -> String {
+        let unix_secs = (current_unix_ms() / 1000) as i64 + offset_secs;
+        Utc.timestamp_opt(unix_secs, 0)
+            .single()
+            .expect("test timestamp should be valid")
+            .format("%Y%m%dT%H%M%SZ")
+            .to_string()
+    }
+
     fn signed_headers_for_application(
         config: &AppConfig,
         access_key_id: &str,
@@ -35406,8 +35629,31 @@ mod tests {
         extra_headers: &[(&str, &str)],
         host: &str,
     ) -> HeaderMap {
-        let amz_date = "20260424T120000Z";
-        let short_date = "20260424";
+        signed_headers_for_application_with_host_at_time(
+            config,
+            access_key_id,
+            secret_access_key,
+            method,
+            uri,
+            body,
+            extra_headers,
+            host,
+            &test_amz_date_offset(0),
+        )
+    }
+
+    fn signed_headers_for_application_with_host_at_time(
+        config: &AppConfig,
+        access_key_id: &str,
+        secret_access_key: &str,
+        method: &Method,
+        uri: &Uri,
+        body: &[u8],
+        extra_headers: &[(&str, &str)],
+        host: &str,
+        amz_date: &str,
+    ) -> HeaderMap {
+        let short_date = amz_date[0..8].to_string();
         let payload_hash = sha256_hex(body);
 
         let mut headers = HeaderMap::new();
@@ -35415,7 +35661,10 @@ mod tests {
             HOST,
             HeaderValue::from_str(host).expect("host should be a valid header value"),
         );
-        headers.insert("x-amz-date", HeaderValue::from_static("20260424T120000Z"));
+        headers.insert(
+            "x-amz-date",
+            HeaderValue::from_str(&amz_date).expect("x-amz-date should be valid"),
+        );
         headers.insert(
             "x-amz-content-sha256",
             HeaderValue::from_str(&payload_hash).expect("payload hash should be valid"),
@@ -35461,7 +35710,7 @@ mod tests {
 
         let signature = sign_v4(
             secret_access_key,
-            short_date,
+            &short_date,
             &config.s3_region,
             "s3",
             &string_to_sign,
@@ -35490,13 +35739,16 @@ mod tests {
         content_length: u64,
         extra_headers: &[(&str, &str)],
     ) -> HeaderMap {
-        let amz_date = "20260424T120000Z";
-        let short_date = "20260424";
+        let amz_date = test_amz_date_offset(0);
+        let short_date = amz_date[0..8].to_string();
         let payload_hash = "UNSIGNED-PAYLOAD";
 
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("127.0.0.1:61080"));
-        headers.insert("x-amz-date", HeaderValue::from_static("20260424T120000Z"));
+        headers.insert(
+            "x-amz-date",
+            HeaderValue::from_str(&amz_date).expect("x-amz-date should be valid"),
+        );
         headers.insert(
             "x-amz-content-sha256",
             HeaderValue::from_static(payload_hash),
@@ -35548,7 +35800,7 @@ mod tests {
 
         let signature = sign_v4(
             &config.s3_secret_access_key,
-            short_date,
+            &short_date,
             &config.s3_region,
             "s3",
             &string_to_sign,
@@ -35902,12 +36154,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_api_key_middleware_accepts_header_bearer_cookie_and_query_bootstrap() {
+    async fn control_api_key_middleware_accepts_header_and_bearer_only() {
         let mut state = test_state();
         Arc::make_mut(&mut state.config).control_api_key = Some("secret-admin-key".to_string());
         let app = Router::new()
             .route("/api/status", get(|| async { StatusCode::OK }))
-            .route("/", get(|| async { StatusCode::OK }))
             .with_state(state.clone())
             .layer(middleware::from_fn_with_state(
                 state,
@@ -35939,6 +36190,20 @@ mod tests {
             .await
             .expect("bearer request should complete");
         assert_eq!(bearer_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn control_api_key_middleware_rejects_cookie_and_query_bootstrap() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).control_api_key = Some("secret-admin-key".to_string());
+        let app = Router::new()
+            .route("/api/status", get(|| async { StatusCode::OK }))
+            .route("/", get(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(
+                state,
+                require_control_api_key,
+            ));
 
         let cookie_response = app
             .clone()
@@ -35951,7 +36216,7 @@ mod tests {
             )
             .await
             .expect("cookie request should complete");
-        assert_eq!(cookie_response.status(), StatusCode::OK);
+        assert_eq!(cookie_response.status(), StatusCode::UNAUTHORIZED);
 
         let query_response = app
             .oneshot(
@@ -35962,14 +36227,32 @@ mod tests {
             )
             .await
             .expect("query request should complete");
-        assert_eq!(query_response.status(), StatusCode::OK);
-        assert_eq!(
-            query_response
-                .headers()
-                .get(SET_COOKIE)
-                .and_then(|value| value.to_str().ok()),
-            Some("ccbg_admin_api_key=secret-admin-key; Path=/; HttpOnly; SameSite=Strict")
-        );
+        assert_eq!(query_response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn startup_validation_rejects_exposed_control_plane_without_api_key() {
+        let state = test_state();
+        let mut config = (*state.config).clone();
+        config.admin_bind_addr = "0.0.0.0:61081".parse().expect("addr should parse");
+        config.metrics_bind_addr = "0.0.0.0:61083".parse().expect("addr should parse");
+        config.control_api_key = None;
+
+        let error = validate_control_plane_api_exposure(&config)
+            .expect_err("validation should reject exposed listeners without a key");
+        assert!(error.to_string().contains("CCBG_CONTROL_API_KEY"));
+    }
+
+    #[test]
+    fn startup_validation_allows_exposed_control_plane_with_api_key() {
+        let state = test_state();
+        let mut config = (*state.config).clone();
+        config.admin_bind_addr = "0.0.0.0:61081".parse().expect("addr should parse");
+        config.metrics_bind_addr = "0.0.0.0:61083".parse().expect("addr should parse");
+        config.control_api_key = Some("secret-admin-key".to_string());
+
+        validate_control_plane_api_exposure(&config)
+            .expect("validation should allow exposed listeners with a key");
     }
 
     #[tokio::test]
@@ -36309,31 +36592,25 @@ mod tests {
 
     #[test]
     fn admin_index_can_render_runtime_template_override() {
-        let dir = tempfile::tempdir().expect("tempdir should create");
-        let template_path = dir.path().join("admin-index.html");
-        fs::write(
-            &template_path,
+        let html = render_admin_index_html_from_template_source(
             r#"<!doctype html><title>{admin_api_version}</title><script>const route="{route_status}";</script>"#,
-        )
-        .expect("template should write");
-
-        let previous = std::env::var("CCBG_ADMIN_INDEX_TEMPLATE").ok();
-        unsafe {
-            std::env::set_var("CCBG_ADMIN_INDEX_TEMPLATE", &template_path);
-        }
-        let html = render_admin_index_html();
-        match previous {
-            Some(value) => unsafe {
-                std::env::set_var("CCBG_ADMIN_INDEX_TEMPLATE", value);
-            },
-            None => unsafe {
-                std::env::remove_var("CCBG_ADMIN_INDEX_TEMPLATE");
-            },
-        }
+        );
 
         assert!(html.contains(&format!("<title>{ADMIN_API_VERSION}</title>")));
         assert!(html.contains(&format!("const route=\"{ROUTE_STATUS}\";")));
         assert!(!html.contains("{route_status}"));
+    }
+
+    #[test]
+    fn admin_browser_help_template_keeps_idempotent_windows_startup_script() {
+        let html = render_admin_index_html();
+
+        assert!(html.contains("Get-CimInstance Win32_Process"));
+        assert!(html.contains("$browserPattern = [regex]::Escape($browserProcessName)"));
+        assert!(html.contains("$startupInProgress = Get-CimInstance Win32_Process"));
+        assert!(html.contains("Start-Process \"${executable}\" -ArgumentList @("));
+        assert!(html.contains("\"--remote-debugging-port=${port}\","));
+        assert!(html.contains("--no-default-browser-check"));
     }
 
     #[tokio::test]
@@ -41081,6 +41358,56 @@ mod tests {
         assert!(lease.last_verified_at_unix_ms.is_none());
     }
 
+    #[test]
+    fn provider_credential_lease_probe_targets_cover_active_carriers_only() {
+        assert_eq!(
+            PROVIDER_CREDENTIAL_LEASE_PROBE_TARGETS,
+            [ProviderId::Unicom, ProviderId::Telecom, ProviderId::Mobile]
+        );
+        assert!(!PROVIDER_CREDENTIAL_LEASE_PROBE_TARGETS.contains(&ProviderId::Onedrive));
+        assert!(!PROVIDER_CREDENTIAL_LEASE_PROBE_TARGETS.contains(&ProviderId::Stub));
+    }
+
+    #[tokio::test]
+    async fn saving_supported_provider_credentials_wakes_lease_probe_loop() {
+        let state = test_state();
+        let wake = state.credential_lease_probe_wake.clone();
+        let waiter = tokio::spawn(async move {
+            wake.notified().await;
+        });
+
+        let _ = update_provider_credentials(
+            State(state.clone()),
+            Path("unicom".to_string()),
+            Json(ProviderCredentialInput {
+                token: Some("wake-test-token".to_string()),
+                browser_id: None,
+                cookie_header: None,
+                family_id: None,
+                root_folder_id: None,
+                user_domain_id: None,
+                client_id: None,
+                tenant: None,
+                drive_id: None,
+                redirect_url: None,
+                quota_min_free: None,
+                quota_max_used: None,
+                personal_quota_min_free: None,
+                personal_quota_max_used: None,
+                family_quota_min_free: None,
+                family_quota_max_used: None,
+                browser_profile: None,
+            }),
+        )
+        .await
+        .expect("credential update should succeed");
+
+        timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("lease probe wake should be delivered in time")
+            .expect("lease probe waiter task should complete");
+    }
+
     #[tokio::test]
     async fn object_actions_api_rename_copy_and_move_against_primary_backend() {
         let mut state = test_state();
@@ -42646,7 +42973,7 @@ mod tests {
         assert!(html.contains("用户根模板"));
         assert!(html.contains("归属地"));
         assert!(html.contains("不参与 S3 SigV4 签名"));
-        assert!(html.contains("region 保持 us-east-1 这类中性签名值"));
+        assert!(html.contains("`region` 保持 `us-east-1` 这类中性签名值"));
         assert!(html.contains("不要塞进 `region`"));
         assert!(html.contains("bucket + prefix"));
         assert!(html.contains("CCBG_S3_USER_ROOT_TEMPLATE"));
@@ -44728,6 +45055,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn signed_payload_put_without_content_length_rejects_before_reading_body_when_auth_fails()
+    {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 64;
+
+        let bucket = "placeholder".to_string();
+        let key = "notes/no-content-length-auth-fail.txt".to_string();
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let mut headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            b"declared-body",
+            &[("content-type", "text/plain")],
+        );
+        let authorization = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("authorization header should exist")
+            .to_string();
+        let mut tampered = authorization;
+        let last = tampered.pop().expect("signature should not be empty");
+        tampered.push(if last == '0' { '1' } else { '0' });
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&tampered).expect("tampered authorization should be valid"),
+        );
+
+        let reads = Arc::new(AtomicU64::new(0));
+        let read_counter = reads.clone();
+        let body = Body::from_stream(stream::once(async move {
+            read_counter.fetch_add(1, Ordering::SeqCst);
+            Ok::<Bytes, std::io::Error>(Bytes::from_static(b"actual-body"))
+        }));
+
+        let response = put_object(
+            State(state),
+            Path((bucket, key)),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body,
+        )
+        .await
+        .expect_err("tampered signature should fail")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn signed_payload_put_without_content_length_rejects_body_hash_mismatch_after_spooling() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 64;
+
+        let bucket = "placeholder".to_string();
+        let key = "notes/no-content-length-mismatch.txt".to_string();
+        let body = Bytes::from_static(b"actual-body");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            b"declared-body",
+            &[("content-type", "text/plain")],
+        );
+
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            Body::from(body),
+        )
+        .await
+        .expect_err("mismatched body hash should fail")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be utf-8");
+        assert!(response_body.contains("x-amz-content-sha256 does not match the request body."));
+        assert!(
+            state
+                .metadata_store
+                .object_placement(&bucket, &key)
+                .expect("placement query should succeed")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn signed_payload_put_still_rejects_oversized_body_for_non_streaming_backend() {
         let mut state = test_state();
         Arc::make_mut(&mut state.config).max_in_memory_object_bytes = 8;
@@ -45282,7 +45708,7 @@ mod tests {
             complete_xml.as_bytes(),
             &[],
         );
-        post_object(
+        let complete_response = post_object(
             State(state.clone()),
             Path((bucket.clone(), key.clone())),
             Method::POST,
@@ -45292,6 +45718,7 @@ mod tests {
         )
         .await
         .expect("complete should still use original part");
+        assert_complete_multipart_upload_succeeded(complete_response).await;
 
         let get_uri: Uri = format!("/{bucket}/{key}").parse().expect("uri");
         let get_headers = signed_headers(&state.config, &Method::GET, &get_uri, &[], &[]);
@@ -45406,7 +45833,7 @@ mod tests {
             complete_xml.as_bytes(),
             &[],
         );
-        post_object(
+        let complete_response = post_object(
             State(state.clone()),
             Path((bucket.clone(), key.clone())),
             Method::POST,
@@ -45416,6 +45843,7 @@ mod tests {
         )
         .await
         .expect("complete should still use original part bytes");
+        assert_complete_multipart_upload_succeeded(complete_response).await;
 
         let get_uri: Uri = format!("/{bucket}/{key}").parse().expect("uri");
         let get_headers = signed_headers(&state.config, &Method::GET, &get_uri, &[], &[]);
@@ -48680,6 +49108,7 @@ mod tests {
             credential_lease_probe: Arc::new(Mutex::new(CredentialLeaseProbeState {
                 next_probe_at_unix_ms_by_provider: BTreeMap::new(),
             })),
+            credential_lease_probe_wake: Arc::new(Notify::new()),
             admin_client_ip: Arc::new(Mutex::new(None)),
             admin_sessions: Arc::new(Mutex::new(HashMap::new())),
             browser_flow_catalogs,
@@ -51487,6 +51916,27 @@ mod tests {
         );
     }
 
+    fn test_gateway_backup_bundle(state: &AppState) -> GatewayBackupBundlePayload {
+        GatewayBackupBundlePayload {
+            backup_format_version: GATEWAY_BACKUP_FORMAT_VERSION,
+            exported_at_unix_ms: 1,
+            gateway_version: "test".to_string(),
+            provenance: release_provenance_payload(),
+            instance_id: "test-instance".to_string(),
+            control_plane: control_plane_snapshot(state),
+            provider_credentials: BTreeMap::new(),
+            provider_credential_leases: BTreeMap::new(),
+            managed_encryption_keys: Vec::new(),
+            metadata: GatewayBackupMetadataPayload {
+                object_placements: Vec::new(),
+                logical_objects: Vec::new(),
+                object_protection_plans: Vec::new(),
+                pending_replication_jobs: Vec::new(),
+                gateway_write_ahead_log_state: GatewayWriteAheadLogStateRecord::default(),
+            },
+        }
+    }
+
     #[test]
     fn gateway_backup_archive_round_trip_restores_credentials_keys_and_metadata() {
         let state = test_state();
@@ -51697,6 +52147,80 @@ mod tests {
         );
         assert_eq!(summary.object_placement_count, 1);
         assert_eq!(summary.pending_replication_job_count, 1);
+    }
+
+    #[test]
+    fn gateway_backup_import_rejects_metadata_without_matching_placement() {
+        let state = test_state();
+        let mut bundle = test_gateway_backup_bundle(&state);
+        bundle.metadata.logical_objects.push(LogicalObjectRecord {
+            bucket: "root".to_string(),
+            key: "docs/missing-placement.txt".to_string(),
+            etag: None,
+            application_id: Some("default".to_string()),
+            encrypted: false,
+            encryption_profile_id: None,
+            algorithm: None,
+            key_id: None,
+            key_source_kind: None,
+            key_source_ref: None,
+            chunk_plaintext_bytes: None,
+            plaintext_size: 1,
+            stored_size: 1,
+            logical_content_type: Some("text/plain".to_string()),
+            updated_at_unix_ms: 1,
+        });
+
+        let error = validate_gateway_backup_bundle_for_import(&state, bundle)
+            .expect_err("bundle should reject logical objects without placements");
+        assert!(error.to_string().contains("matching object placement"));
+    }
+
+    #[test]
+    fn gateway_backup_import_rejects_invalid_wal_state() {
+        let state = test_state();
+        let mut bundle = test_gateway_backup_bundle(&state);
+        bundle.metadata.gateway_write_ahead_log_state = GatewayWriteAheadLogStateRecord {
+            next_lsn: 5,
+            last_checkpoint_lsn: Some(5),
+            last_replayed_lsn: Some(1),
+            updated_at_unix_ms: 1,
+        };
+
+        let error = validate_gateway_backup_bundle_for_import(&state, bundle)
+            .expect_err("bundle should reject invalid wal state");
+        assert!(error.to_string().contains("last_checkpoint_lsn"));
+    }
+
+    #[test]
+    fn gateway_backup_import_rejects_invalid_pending_replication_job() {
+        let state = test_state();
+        let mut bundle = test_gateway_backup_bundle(&state);
+        bundle
+            .metadata
+            .pending_replication_jobs
+            .push(ReplicationJob {
+                job_id: 7,
+                target: "mobile".to_string(),
+                source_provider: Some("telecom".to_string()),
+                operation: ReplicationOperation::Put,
+                object: replication_engine::ReplicationObjectRef {
+                    bucket: "root".to_string(),
+                    key: "docs/placed.txt".to_string(),
+                    etag: None,
+                    size: None,
+                    content_type: Some("text/plain".to_string()),
+                },
+                status: ReplicationStatus::Pending,
+                attempts: 0,
+                enqueued_at_unix_ms: 1,
+                next_attempt_at_unix_ms: None,
+                last_error: None,
+            });
+
+        let error = validate_gateway_backup_bundle_for_import(&state, bundle)
+            .expect_err("bundle should reject put jobs without object size");
+        assert!(error.to_string().contains("without object size"));
     }
 
     #[test]
@@ -53665,6 +54189,7 @@ mod tests {
     #[tokio::test]
     async fn presigned_get_object_succeeds_before_expiry() {
         let state = test_state();
+        let amz_date = test_amz_date_offset(0);
         let bucket = "root".to_string();
         let key = "presigned/get-ok.txt".to_string();
         let put_uri: Uri = format!("/{bucket}/{key}")
@@ -53689,7 +54214,7 @@ mod tests {
             &state.config.s3_secret_access_key,
             &Method::GET,
             &format!("/{bucket}/{key}"),
-            "20991231T235959Z",
+            &amz_date,
             60,
             &["host"],
             &[],
@@ -53709,6 +54234,7 @@ mod tests {
     #[tokio::test]
     async fn presigned_put_object_succeeds_before_expiry_without_payload_hash_header() {
         let state = test_state();
+        let amz_date = test_amz_date_offset(0);
         let bucket = "root".to_string();
         let key = "presigned/put-ok.txt".to_string();
         let body = Bytes::from_static(b"presigned-put");
@@ -53719,7 +54245,7 @@ mod tests {
             &state.config.s3_secret_access_key,
             &Method::PUT,
             &format!("/{bucket}/{key}"),
-            "20991231T235959Z",
+            &amz_date,
             120,
             &["content-length", "host"],
             &[("content-length", content_length.as_str())],
@@ -53741,6 +54267,7 @@ mod tests {
     #[tokio::test]
     async fn presigned_multipart_upload_part_and_complete_succeeds_without_payload_hash_header() {
         let mut state = test_state();
+        let amz_date = test_amz_date_offset(0);
         Arc::make_mut(&mut state.config).max_spooled_object_bytes = 64;
         let bucket = "root".to_string();
         let key = "presigned/multipart-put-ok.txt".to_string();
@@ -53751,7 +54278,7 @@ mod tests {
             &state.config.s3_secret_access_key,
             &Method::POST,
             &format!("/{bucket}/{key}?uploads"),
-            "20991231T235959Z",
+            &amz_date,
             120,
             &["host"],
             &[],
@@ -53781,7 +54308,7 @@ mod tests {
             &state.config.s3_secret_access_key,
             &Method::PUT,
             &part_path,
-            "20991231T235959Z",
+            &amz_date,
             120,
             &["content-length", "host"],
             &[("content-length", part_length.as_str())],
@@ -53849,13 +54376,14 @@ mod tests {
     #[tokio::test]
     async fn presigned_url_tampering_fails_signature_verification() {
         let state = test_state();
+        let amz_date = test_amz_date_offset(0);
         let (uri, headers) = presigned_object_request(
             &state.config,
             &state.config.s3_access_key_id,
             &state.config.s3_secret_access_key,
             &Method::GET,
             "/root/presigned/tamper-a.txt",
-            "20991231T235959Z",
+            &amz_date,
             60,
             &["host"],
             &[],
@@ -53874,13 +54402,14 @@ mod tests {
     #[tokio::test]
     async fn expired_presigned_url_fails() {
         let state = test_state();
+        let amz_date = test_amz_date_offset(-120);
         let (uri, headers) = presigned_object_request(
             &state.config,
             &state.config.s3_access_key_id,
             &state.config.s3_secret_access_key,
             &Method::GET,
             "/root/presigned/expired.txt",
-            "19700101T000000Z",
+            &amz_date,
             1,
             &["host"],
             &[],
@@ -53892,15 +54421,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn future_presigned_url_fails() {
+        let state = test_state();
+        let amz_date = test_amz_date_offset(MAX_S3_REQUEST_TIME_SKEW_SECS as i64 + 30);
+        let (uri, headers) = presigned_object_request(
+            &state.config,
+            &state.config.s3_access_key_id,
+            &state.config.s3_secret_access_key,
+            &Method::GET,
+            "/root/presigned/future.txt",
+            &amz_date,
+            60,
+            &["host"],
+            &[],
+        );
+        let error = authorize_s3(&state, &Method::GET, &uri, &headers, None)
+            .expect_err("future presigned url should fail");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert!(error.message.contains("future"));
+    }
+
+    #[tokio::test]
     async fn presigned_expires_too_long_fails() {
         let state = test_state();
+        let amz_date = test_amz_date_offset(0);
         let (uri, headers) = presigned_object_request(
             &state.config,
             &state.config.s3_access_key_id,
             &state.config.s3_secret_access_key,
             &Method::GET,
             "/root/presigned/expires-too-long.txt",
-            "20991231T235959Z",
+            &amz_date,
             604_801,
             &["host"],
             &[],
@@ -53914,13 +54465,14 @@ mod tests {
     #[tokio::test]
     async fn presigned_security_token_is_not_supported() {
         let state = test_state();
+        let amz_date = test_amz_date_offset(0);
         let (uri, headers) = presigned_object_request(
             &state.config,
             &state.config.s3_access_key_id,
             &state.config.s3_secret_access_key,
             &Method::GET,
             "/root/presigned/security-token.txt",
-            "20991231T235959Z",
+            &amz_date,
             60,
             &["host"],
             &[],
@@ -53932,6 +54484,48 @@ mod tests {
             .expect_err("security token should not be supported");
         assert_eq!(error.status, StatusCode::NOT_IMPLEMENTED);
         assert!(error.message.contains("X-Amz-Security-Token"));
+    }
+
+    #[test]
+    fn signed_header_auth_rejects_old_timestamps() {
+        let state = test_state();
+        let uri: Uri = "/root/signed/old.txt".parse().expect("uri should parse");
+        let headers = signed_headers_for_application_with_host_at_time(
+            &state.config,
+            &state.config.s3_access_key_id,
+            &state.config.s3_secret_access_key,
+            &Method::GET,
+            &uri,
+            &[],
+            &[],
+            "127.0.0.1:61080",
+            &test_amz_date_offset(-(MAX_S3_REQUEST_TIME_SKEW_SECS as i64 + 30)),
+        );
+        let error = authorize_s3(&state, &Method::GET, &uri, &headers, None)
+            .expect_err("old header auth timestamp should fail");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert!(error.message.contains("too old"));
+    }
+
+    #[test]
+    fn signed_header_auth_rejects_future_timestamps() {
+        let state = test_state();
+        let uri: Uri = "/root/signed/future.txt".parse().expect("uri should parse");
+        let headers = signed_headers_for_application_with_host_at_time(
+            &state.config,
+            &state.config.s3_access_key_id,
+            &state.config.s3_secret_access_key,
+            &Method::GET,
+            &uri,
+            &[],
+            &[],
+            "127.0.0.1:61080",
+            &test_amz_date_offset(MAX_S3_REQUEST_TIME_SKEW_SECS as i64 + 30),
+        );
+        let error = authorize_s3(&state, &Method::GET, &uri, &headers, None)
+            .expect_err("future header auth timestamp should fail");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert!(error.message.contains("future"));
     }
 
     #[tokio::test]

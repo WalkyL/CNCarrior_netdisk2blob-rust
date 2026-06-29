@@ -13,6 +13,7 @@
 - 所有正式 provider 最终都必须支持流式读与流式写；若上游要求显式内容哈希或预分片，只允许使用有界磁盘 spool，不允许整对象内存缓冲。
 - provider 页面改版时，优先修改 `browser-flow` / `provider-capabilities` / `provider-probes` 等可替换事实层，不能因为页面细节变化就重写整个 Rust 数据面程序。
 - 对象动作执行器、客户端 bucket 派生策略、桶级加密写入策略必须保持可插拔，不能写死成某一家云盘的专有流程。
+- 所有可选入口层都必须保持幂等、低内存、可重复执行；浏览器/CDP、sidecar、运维探测只允许作为可插拔能力存在，不得变成 core 的长期常驻依赖。
 
 浏览器执行层当前统一收口到标准 CDP，而不是绑定某个浏览器品牌。`browser-cdp` crate 负责连接可配置的 CDP endpoint、选择 page target、执行基础页面动作，`gatewayd` 则提供 catalog 查询、dry-run 和最小真实 session 执行入口，便于后续把 auth-capture 编排继续外挂出来。
 

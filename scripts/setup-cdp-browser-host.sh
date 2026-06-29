@@ -197,6 +197,12 @@ launch_browser_if_needed() {
     return
   fi
 
+  if browser_startup_in_progress; then
+    echo "Browser startup already in progress for ${PROFILE_DIR}"
+    wait_for_probe "${LOCAL_URL}" "Loopback CDP"
+    return
+  fi
+
   mkdir -p "${PROFILE_DIR}"
 
   case "${OS_NAME}" in
@@ -235,6 +241,18 @@ launch_browser_if_needed() {
   esac
 
   wait_for_probe "${LOCAL_URL}" "Loopback CDP"
+}
+
+browser_startup_in_progress() {
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" == *"--user-data-dir=${PROFILE_DIR}"* ]] && \
+       [[ "${line}" == *"--remote-debugging-port=${PORT}"* ]]; then
+      return 0
+    fi
+  done < <(pgrep -af "${PROFILE_DIR}" 2>/dev/null || true)
+
+  return 1
 }
 
 install_socat_if_missing() {

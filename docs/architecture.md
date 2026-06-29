@@ -14,6 +14,8 @@
 10. 所有正式 provider 都必须最终达到流式读与流式写；若上游要求预哈希或预分片，只允许使用有界磁盘 spool，不允许整对象内存缓冲。
 11. provider 页面改版时，优先改 catalog / probe / flow / action executor 等可插拔层，不能因为页面细节变化就重写整个 Rust 数据面。
 12. 对象动作执行器、客户端 bucket 派生策略、桶级加密写入策略都必须保持可插拔，不能写死为某一家云盘或某一种动作流程。
+13. 可插拔能力的入口层应保持幂等、轻量、可重复执行；只在宿主机或管理入口做最小状态检查，不把浏览器、sidecar 或运维探测做成 core 的长期常驻依赖。
+14. 面向低内存宿主机时，优先把能力做成按需启动和短生命周期入口，不增加新的后台守护进程。
 
 ## 系统分层
 
@@ -107,6 +109,7 @@
 - Admin Web 现在也直接展示运行态 `runtime` 摘要，包括 uptime、监听地址、复制 worker 数量、control-plane / metadata 路径等，并支持自动刷新控制，已具备基础运行监控面板能力
 - `GET /api/status` 现已额外返回 `monitoring` 聚合摘要，并在 Admin Web 里展示 open alerts、provider 健康计数、复制失败数、对象动作失败数、最近对象动作时间和最近失败事件列表，便于日常值守时先看摘要再下钻原始表格
 - `GET /api/status` 现已额外返回 `notify` 状态摘要；若配置 `CCBG_NOTIFY_WEBHOOK_URL`，后台会按固定间隔评估 alerts，并仅在告警状态变化时向外发送 webhook
+- provider credential lease keepalive 现在是独立后台循环：`gatewayd` 只对 `unicom` / `telecom` / `mobile` 做直连 `health()` 探测，写入 `provider_credentials/*.lease.json`，不依赖 CDP，也不和 webhook notifier 共用定时器；`CCBG_PROVIDER_LEASE_POLL_INTERVAL_SECONDS` 只控制这条轻量 keepalive 路径，凭据保存会主动唤醒循环做一次即时验证
 - webhook 接收端的验签 / 时间窗 / 去重参考实现单独放在 [docs/notify-webhook-reference.md](/home/walky/carrier-cloud-blob-gateway/docs/notify-webhook-reference.md:1) 和 [scripts/notify-webhook-receiver-example.py](/home/walky/carrier-cloud-blob-gateway/scripts/notify-webhook-receiver-example.py:1)
 - 对象动作共享历史现在支持 `operator` / `ticket` / `notes` 审计字段，以及 operator / object / time-window 过滤与 CSV 导出
 - 这部分控制面的详细运维说明单独放在 [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)，避免把操作细节挤进架构文档

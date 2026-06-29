@@ -383,7 +383,7 @@ Included validation:
 - Temporary `rclone mount` of `root/stock-rag-bridge-rust/graph` passed mounted `ls/stat/head`.
 - Mounted write validation passed on `.49` for `small.txt`, `8 MiB`, and `32 MiB` objects.
 - Detailed live evidence is recorded in
-  [ops-010-49-s3-rclone-mount-listing.md](./ops-010-49-s3-rclone-mount-listing.md).
+  [docs/lessons-learned.md](lessons-learned.md).
 
 ## 2026-06-09 v0.1.9 formal public release
 
