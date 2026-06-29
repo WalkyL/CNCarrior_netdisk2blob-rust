@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to package
         required: true
-        default: v0.1.9
+        default: v0.1.10
       build_linux_lxc:
         description: Build Linux LXC package in the local Podman build-runner
         required: true
@@ -80,19 +80,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  build_macos:
-    name: ${{ matrix.package }}
-    if: ${{ (matrix.package == 'ccbg-macos-x86_64' && inputs.build_macos_x86_64) || (matrix.package == 'ccbg-macos-arm64' && inputs.build_macos_arm64) }}
+  build_macos_x86_64:
+    name: ccbg-macos-x86_64
+    if: ${{ inputs.build_macos_x86_64 }}
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - package: ccbg-macos-x86_64
-            target: x86_64-apple-darwin
-          - package: ccbg-macos-arm64
-            target: aarch64-apple-darwin
 
     steps:
       - name: Checkout release tag
@@ -117,7 +109,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
-          $scriptPath = Join-Path $workspace "target\ci-build\build-${{ matrix.package }}.sh"
+          $scriptPath = Join-Path $workspace "target\ci-build\build-ccbg-macos-x86_64.sh"
 
           $script = @'
 set -euo pipefail
@@ -141,7 +133,7 @@ scripts/build-native-package.sh \
 sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
 '@
 
-          $script = $script.Replace('__TARGET__', '${{ matrix.target }}').Replace('__PACKAGE__', '${{ matrix.package }}')
+          $script = $script.Replace('__TARGET__', 'x86_64-apple-darwin').Replace('__PACKAGE__', 'ccbg-macos-x86_64')
           [System.IO.Directory]::CreateDirectory((Split-Path -Parent $scriptPath)) | Out-Null
           [System.IO.File]::WriteAllText($scriptPath, ($script -replace "`r`n", "`n"), [System.Text.Encoding]::ASCII)
 
@@ -152,15 +144,91 @@ sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
-            bash "/workspace/target/ci-build/build-${{ matrix.package }}.sh"
+            bash "/workspace/target/ci-build/build-ccbg-macos-x86_64.sh"
 
       - name: Upload macOS asset
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.package }}
+          name: ccbg-macos-x86_64
           path: |
-            target/native-packages/${{ matrix.package }}.tar.gz
-            target/native-packages/${{ matrix.package }}.tar.gz.sha256
+            target/native-packages/ccbg-macos-x86_64.tar.gz
+            target/native-packages/ccbg-macos-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  build_macos_arm64:
+    name: ccbg-macos-arm64
+    if: ${{ inputs.build_macos_arm64 }}
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Ensure Podman machine is running
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          podman machine start | Out-Null
+
+      - name: Verify build runner image
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          podman image inspect $env:CCBG_BUILD_IMAGE | Out-Null
+
+      - name: Build gatewayd and package macOS asset in build runner
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+          $scriptPath = Join-Path $workspace "target\ci-build\build-ccbg-macos-arm64.sh"
+
+          $script = @'
+set -euo pipefail
+
+cargo install cargo-zigbuild --locked --version "${CCBG_CARGO_ZIGBUILD_VERSION}"
+
+zig_url="https://ziglang.org/download/${CCBG_ZIG_VERSION}/zig-x86_64-linux-${CCBG_ZIG_VERSION}.tar.xz"
+zig_root="/tmp/zig"
+mkdir -p "${zig_root}"
+curl -fsSL "${zig_url}" -o /tmp/zig.tar.xz
+tar -C "${zig_root}" -xJf /tmp/zig.tar.xz --strip-components=1
+export PATH="${zig_root}:$PATH"
+"${zig_root}/zig" version
+
+rustup target add "__TARGET__"
+cargo zigbuild --release --locked --target "__TARGET__" -p gatewayd
+scripts/build-native-package.sh \
+  --skip-build \
+  --target "__TARGET__" \
+  --package-name "__PACKAGE__"
+sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
+'@
+
+          $script = $script.Replace('__TARGET__', 'aarch64-apple-darwin').Replace('__PACKAGE__', 'ccbg-macos-arm64')
+          [System.IO.Directory]::CreateDirectory((Split-Path -Parent $scriptPath)) | Out-Null
+          [System.IO.File]::WriteAllText($scriptPath, ($script -replace "`r`n", "`n"), [System.Text.Encoding]::ASCII)
+
+          podman run --rm `
+            --pull=never `
+            -e CCBG_CARGO_ZIGBUILD_VERSION=$env:CCBG_CARGO_ZIGBUILD_VERSION `
+            -e CCBG_ZIG_VERSION=$env:CCBG_ZIG_VERSION `
+            -v "${workspace}:/workspace" `
+            -w /workspace `
+            $env:CCBG_BUILD_IMAGE `
+            bash "/workspace/target/ci-build/build-ccbg-macos-arm64.sh"
+
+      - name: Upload macOS asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccbg-macos-arm64
+          path: |
+            target/native-packages/ccbg-macos-arm64.tar.gz
+            target/native-packages/ccbg-macos-arm64.tar.gz.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -168,7 +236,8 @@ sha256sum -c "target/native-packages/__PACKAGE__.tar.gz.sha256"
     name: build-runner-summary
     needs:
       - linux_lxc
-      - build_macos
+      - build_macos_x86_64
+      - build_macos_arm64
     if: ${{ always() }}
     runs-on: [self-hosted, windows, x64]
     steps:
