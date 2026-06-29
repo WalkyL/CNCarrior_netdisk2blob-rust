@@ -15,6 +15,13 @@ build-runner workflow `release-assets-build-runner.yml`；实际编译仍在本�
 - macOS 社区/实验包 `ccbg-macos-x86_64`
 - macOS 社区/实验包 `ccbg-macos-arm64`
 
+截至 2026-06-30，`.52` 上当前使用的 `localhost/product-build-runner:latest` 已验证可稳定产出
+Linux LXC 包，但还不包含可用的 Darwin SDK 交叉链接环境。也就是说：
+
+- workflow 默认只打开 Linux LXC job
+- macOS 两个 input 默认关闭
+- 只有在 build-runner 镜像升级为包含 Darwin SDK 的版本后，才重新打开 macOS job
+
 它不恢复通用 GitHub CI，也不接管 Windows / OpenWrt / Cloudflare 发版。所有通过
 workflow 产出的资产仍必须下载回 `.52`，并进入同一 release 校验和
 `/downloads/latest/*` 发布链路。
@@ -132,9 +139,10 @@ bash scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
 bash scripts/release-local.sh v0.1.7
 ```
 
-macOS `x86_64` / `arm64` 当前也由 GitHub Actions 在 self-hosted build-runner 容器中
-产出，并按社区/实验包发布。它们未签名、未公证、未经过本项目控制的 macOS 真机
-smoke。发布人必须下载 GitHub Actions 产物并合并回本地 release 目录：
+macOS `x86_64` / `arm64` 仍保持社区/实验包定位。只有在 self-hosted build-runner
+镜像已经补齐 Darwin SDK 交叉链接环境后，才打开这两个 job。它们未签名、未公证、
+未经过本项目控制的 macOS 真机 smoke。发布人必须下载 GitHub Actions 产物并合并回本地
+release 目录：
 
 ```bash
 scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
@@ -156,7 +164,7 @@ scripts/release-local.sh v0.1.7
 ```
 
 `CCBG_RELEASE_BUILD_MACOS=true` 现在不会默认在 `.52` 构建 macOS 包；除非已有文档记录的
-本机/局域网 macOS 构建器或 Darwin 交叉工具链，并显式设置
+本机/局域网 macOS 构建器或 Darwin SDK / Darwin 交叉工具链，并显式设置
 `CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD=true`。
 
 如果当前发布主机是 Windows，但需要给 `.49` 这类 Linux LXC 目标生成新的 Linux ELF，

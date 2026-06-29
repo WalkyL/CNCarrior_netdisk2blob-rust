@@ -38,6 +38,9 @@ Examples:
   scripts/download-build-runner-release-assets.sh --run-id 12345678901 --skip-macos
   source target/build-runner-assets/release-inputs/release-local.env.sh
   scripts/release-local.sh v0.1.9
+
+If the workflow run did not publish macOS artifacts, this helper auto-skips them
+unless --skip-macos=false was effectively requested by local edits.
 EOF
 }
 
@@ -139,6 +142,7 @@ normalize_download_dir() {
 
 download_artifact() {
   local artifact="$1"
+  local required="${2:-true}"
   local dest="${RAW_DIR}/${artifact}"
   local cmd=("${GH_BIN}" run download "${RUN_ID}" -n "${artifact}" -D "${dest}")
 
@@ -146,7 +150,15 @@ download_artifact() {
   if [ -n "${REPO}" ]; then
     cmd=("${GH_BIN}" run download "${RUN_ID}" --repo "${REPO}" -n "${artifact}" -D "${dest}")
   fi
-  "${cmd[@]}"
+  if ! "${cmd[@]}"; then
+    if [ "${required}" = "true" ]; then
+      echo "failed to download required artifact: ${artifact}" >&2
+      exit 1
+    fi
+    rm -rf "${dest}"
+    printf 'optional artifact not present in run %s: %s\n' "${RUN_ID}" "${artifact}" >&2
+    return 1
+  fi
   normalize_download_dir "${dest}" "${artifact}"
 }
 
@@ -164,20 +176,28 @@ safe_reset_dir "${RAW_DIR}"
 safe_reset_dir "${RELEASE_INPUTS_DIR}"
 
 if [ "${DOWNLOAD_LXC}" = true ]; then
-  download_artifact "ccbg-lxc-package"
+  download_artifact "ccbg-lxc-package" true
   mkdir -p "${LXC_DIR}"
   copy_required_file "${RAW_DIR}/ccbg-lxc-package/ccbg-lxc-package.tar.gz" "${LXC_DIR}"
   copy_required_file "${RAW_DIR}/ccbg-lxc-package/ccbg-lxc-package.tar.gz.sha256" "${LXC_DIR}"
 fi
 
 if [ "${DOWNLOAD_MACOS}" = true ]; then
-  download_artifact "ccbg-macos-x86_64"
-  download_artifact "ccbg-macos-arm64"
-  mkdir -p "${MACOS_DIR}"
-  copy_required_file "${RAW_DIR}/ccbg-macos-x86_64/ccbg-macos-x86_64.tar.gz" "${MACOS_DIR}"
-  copy_required_file "${RAW_DIR}/ccbg-macos-x86_64/ccbg-macos-x86_64.tar.gz.sha256" "${MACOS_DIR}"
-  copy_required_file "${RAW_DIR}/ccbg-macos-arm64/ccbg-macos-arm64.tar.gz" "${MACOS_DIR}"
-  copy_required_file "${RAW_DIR}/ccbg-macos-arm64/ccbg-macos-arm64.tar.gz.sha256" "${MACOS_DIR}"
+  macos_x86_downloaded=false
+  macos_arm64_downloaded=false
+  download_artifact "ccbg-macos-x86_64" false && macos_x86_downloaded=true
+  download_artifact "ccbg-macos-arm64" false && macos_arm64_downloaded=true
+  if [ "${macos_x86_downloaded}" = true ] || [ "${macos_arm64_downloaded}" = true ]; then
+    mkdir -p "${MACOS_DIR}"
+    if [ "${macos_x86_downloaded}" = true ]; then
+      copy_required_file "${RAW_DIR}/ccbg-macos-x86_64/ccbg-macos-x86_64.tar.gz" "${MACOS_DIR}"
+      copy_required_file "${RAW_DIR}/ccbg-macos-x86_64/ccbg-macos-x86_64.tar.gz.sha256" "${MACOS_DIR}"
+    fi
+    if [ "${macos_arm64_downloaded}" = true ]; then
+      copy_required_file "${RAW_DIR}/ccbg-macos-arm64/ccbg-macos-arm64.tar.gz" "${MACOS_DIR}"
+      copy_required_file "${RAW_DIR}/ccbg-macos-arm64/ccbg-macos-arm64.tar.gz.sha256" "${MACOS_DIR}"
+    fi
+  fi
 fi
 
 {
@@ -185,7 +205,7 @@ fi
   if [ "${DOWNLOAD_LXC}" = true ]; then
     printf "export CCBG_RELEASE_LXC_ASSET_DIR='%s'\n" "${LXC_DIR}"
   fi
-  if [ "${DOWNLOAD_MACOS}" = true ]; then
+  if [ "${DOWNLOAD_MACOS}" = true ] && [ -d "${MACOS_DIR}" ]; then
     printf "export CCBG_RELEASE_MACOS_ASSET_DIR='%s'\n" "${MACOS_DIR}"
   fi
 } > "${ENV_FILE}"
@@ -195,7 +215,7 @@ fi
   if [ "${DOWNLOAD_LXC}" = true ]; then
     printf "\$env:CCBG_RELEASE_LXC_ASSET_DIR = '%s'\n" "${LXC_DIR}"
   fi
-  if [ "${DOWNLOAD_MACOS}" = true ]; then
+  if [ "${DOWNLOAD_MACOS}" = true ] && [ -d "${MACOS_DIR}" ]; then
     printf "\$env:CCBG_RELEASE_MACOS_ASSET_DIR = '%s'\n" "${MACOS_DIR}"
   fi
 } > "${ENV_FILE_PS1}"
@@ -204,7 +224,7 @@ printf 'prepared build-runner release inputs under %s\n' "${RELEASE_INPUTS_DIR}"
 if [ "${DOWNLOAD_LXC}" = true ]; then
   printf '  lxc: %s\n' "${LXC_DIR}"
 fi
-if [ "${DOWNLOAD_MACOS}" = true ]; then
+if [ "${DOWNLOAD_MACOS}" = true ] && [ -d "${MACOS_DIR}" ]; then
   printf '  macos: %s\n' "${MACOS_DIR}"
 fi
 printf '  env: %s\n' "${ENV_FILE}"

@@ -46,6 +46,8 @@ macOS packages are community / experimental packages. They are unsigned, unnotar
 
 Current state: macOS assets are produced by the GitHub Actions workflow `release-assets-build-runner.yml` running inside the configured self-hosted build-runner container. When `.52` local Linux build is unavailable, the same workflow may also produce the Linux LXC package. Download those artifacts and merge them on `.52` with `CCBG_RELEASE_MACOS_ASSET_DIR` and, if needed, `CCBG_RELEASE_LXC_ASSET_DIR`. This does not restore GitHub Actions as a general CI/release system. The resulting assets must still enter the same checksum, R2/GitHub fallback, and `/downloads/latest/*` smoke path.
 
+As of 2026-06-30, the current `.52` image `localhost/product-build-runner:latest` has been validated for Linux LXC artifact builds through the local proxy `http://192.168.1.52:10808`, but it does not yet provide a Darwin SDK-capable link environment. Leave the macOS workflow inputs disabled unless that image is replaced with a Darwin SDK-enabled variant.
+
 ## Embedded Boundary
 
 STM32 and ESP32-S3 are not gateway hosts. They are client-only examples that call a nearby Linux/OpenWrt/Windows gateway through the local S3 data plane.

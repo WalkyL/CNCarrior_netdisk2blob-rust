@@ -13,14 +13,14 @@ on:
         default: true
         type: boolean
       build_macos_x86_64:
-        description: Build macOS x86_64 community asset
+        description: Build macOS x86_64 community asset (requires a Darwin SDK-enabled build-runner image)
         required: true
-        default: true
+        default: false
         type: boolean
       build_macos_arm64:
-        description: Build macOS arm64 community asset
+        description: Build macOS arm64 community asset (requires a Darwin SDK-enabled build-runner image)
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -31,8 +31,7 @@ env:
   CCBG_CARGO_ZIGBUILD_VERSION: 0.22.3
   CCBG_ZIG_VERSION: 0.16.0
   CCBG_LINUX_TARGET: x86_64-unknown-linux-gnu
-  http_proxy: http://127.0.0.1:10808
-  https_proxy: http://127.0.0.1:10808
+  CCBG_BUILD_HTTP_PROXY: http://192.168.1.52:10808
 
 jobs:
   linux_lxc:
@@ -71,10 +70,10 @@ jobs:
 
           podman run --rm `
             --pull=never `
-            -e http_proxy=$env:http_proxy `
-            -e https_proxy=$env:https_proxy `
-            -e HTTP_PROXY=$env:http_proxy `
-            -e HTTPS_PROXY=$env:https_proxy `
+            -e http_proxy=$env:CCBG_BUILD_HTTP_PROXY `
+            -e https_proxy=$env:CCBG_BUILD_HTTP_PROXY `
+            -e HTTP_PROXY=$env:CCBG_BUILD_HTTP_PROXY `
+            -e HTTPS_PROXY=$env:CCBG_BUILD_HTTP_PROXY `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
@@ -155,10 +154,10 @@ jobs:
             --pull=never `
             -e CCBG_CARGO_ZIGBUILD_VERSION=$env:CCBG_CARGO_ZIGBUILD_VERSION `
             -e CCBG_ZIG_VERSION=$env:CCBG_ZIG_VERSION `
-            -e http_proxy=$env:http_proxy `
-            -e https_proxy=$env:https_proxy `
-            -e HTTP_PROXY=$env:http_proxy `
-            -e HTTPS_PROXY=$env:https_proxy `
+            -e http_proxy=$env:CCBG_BUILD_HTTP_PROXY `
+            -e https_proxy=$env:CCBG_BUILD_HTTP_PROXY `
+            -e HTTP_PROXY=$env:CCBG_BUILD_HTTP_PROXY `
+            -e HTTPS_PROXY=$env:CCBG_BUILD_HTTP_PROXY `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
@@ -239,10 +238,10 @@ jobs:
             --pull=never `
             -e CCBG_CARGO_ZIGBUILD_VERSION=$env:CCBG_CARGO_ZIGBUILD_VERSION `
             -e CCBG_ZIG_VERSION=$env:CCBG_ZIG_VERSION `
-            -e http_proxy=$env:http_proxy `
-            -e https_proxy=$env:https_proxy `
-            -e HTTP_PROXY=$env:http_proxy `
-            -e HTTPS_PROXY=$env:https_proxy `
+            -e http_proxy=$env:CCBG_BUILD_HTTP_PROXY `
+            -e https_proxy=$env:CCBG_BUILD_HTTP_PROXY `
+            -e HTTP_PROXY=$env:CCBG_BUILD_HTTP_PROXY `
+            -e HTTPS_PROXY=$env:CCBG_BUILD_HTTP_PROXY `
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
@@ -277,6 +276,7 @@ jobs:
           - This workflow only produces GitHub Actions artifacts.
           - It does not create or publish a GitHub Release.
           - It does not deploy Cloudflare assets.
+          - Leave macOS jobs disabled unless the local build-runner image includes a Darwin SDK-capable toolchain.
           - Download artifacts back to the local release host and merge them with:
             scripts/download-build-runner-release-assets.sh --run-id <github-run-id>
             scripts/release-local.sh <tag>

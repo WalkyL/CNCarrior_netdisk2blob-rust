@@ -94,7 +94,9 @@ bash scripts/release-local.sh v0.1.7
 ```
 
 macOS 资产也由 GitHub Actions 在 self-hosted build-runner 容器中构建；这条 workflow
-只产出 artifact，不直接发布。下载产物后用下面的方式合并回本 SOP 的校验、上传和
+只产出 artifact，不直接发布。注意：截至 2026-06-30，`.52` 当前 build-runner 镜像
+还没有 Darwin SDK 交叉链接环境，因此 workflow 默认不打开 macOS 两个 job。只有在
+镜像升级后才重新打开。下载产物后用下面的方式合并回本 SOP 的校验、上传和
 `/downloads/latest/*` smoke：
 
 ```bash
