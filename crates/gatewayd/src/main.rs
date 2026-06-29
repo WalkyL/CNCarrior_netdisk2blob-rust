@@ -223,10 +223,10 @@ const CCBG_COPYRIGHT: &str = "Copyright (c) 2026 walky";
 const CCBG_LICENSE_ID: &str = "LicenseRef-CCBG-Commercial";
 const CCBG_CANONICAL_REPO: &str = "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust";
 const CCBG_RELEASE_CHANNEL: &str = "commercial-core";
-const CCBG_RELEASE_DATE: &str = "2026-06-09";
-const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.10-walky-20260609";
+const CCBG_RELEASE_DATE: &str = "2026-06-30";
+const DEFAULT_RELEASE_FINGERPRINT: &str = "ccbg-0.1.11-walky-20260630";
 const DEFAULT_RELEASE_FINGERPRINT_SHA256: &str =
-    "b386821f70e552c55ba5fe4a42a153a3b7def2b2b7cc456f3aff49bb70e1150a";
+    "ee3de511e6124345f2a34e42d265802650bfc36b8793c6d4c8f83063118351a1";
 
 #[derive(Clone)]
 struct AppState {
@@ -35415,7 +35415,7 @@ mod tests {
     #[test]
     fn gateway_version_text_exposes_release_provenance() {
         let text = gateway_version_text();
-        assert!(text.contains("gatewayd 0.1.10"));
+        assert!(text.contains("gatewayd 0.1.11"));
         assert!(text.contains(DEFAULT_RELEASE_FINGERPRINT));
         assert!(text.contains(CCBG_LICENSE_ID));
         assert!(text.contains(CCBG_CANONICAL_REPO));

@@ -6,7 +6,7 @@ on:
       tag:
         description: Release tag to package
         required: true
-        default: v0.1.10
+        default: v0.1.11
       build_linux_lxc:
         description: Build Linux LXC package in the local Podman build-runner
         required: true
