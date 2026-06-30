@@ -72,6 +72,9 @@ sudo scripts/install.sh
 
 从当前实现开始，`ccbg-smb-sidecar-sync.service` 只负责 reconcile；长时间运行的 `smbd` 和
 `rclone mount` 会被放进独立的 transient systemd units，不再留在 `sync.service` 的 cgroup 里。
+所以单独看到 `systemctl status ccbg-smb-sidecar-sync.service` 变成 `inactive (dead)` 并不表示 sidecar
+没起来；要看 `python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status` 是否为 `state=running`，以及
+`systemctl list-units 'ccbg-smb-sidecar-*.service'` 里是否有运行中的 `smbd` / `rclone` units。
 
 SMB sidecar 默认挂载根目录是 `/mnt/ccbg/smb/mounts`，配置和 runtime data 位于 `/var/lib/ccbg/smb-sidecar/`。这个挂载点避开 Ubuntu/Debian LXC 中 `fusermount3` AppArmor profile 对 `/srv`、`/var/lib` 等自定义 mount point 的常见拦截。
 

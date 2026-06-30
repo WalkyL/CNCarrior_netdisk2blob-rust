@@ -27,6 +27,9 @@
   build-runner image instead of relying on `cargo build --release` on the host.
 - Deploy `gatewayd` and `assets/admin/index.html` together, then verify both remote hashes and
   service health before considering the deploy complete.
+- For SMB sidecar host-process mode, do not use `ccbg-smb-sidecar-sync.service` as the liveness
+  signal. It is intentionally short-lived; the real checks are `python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status`
+  plus the transient `ccbg-smb-sidecar-*.service` units.
 - The documented release host must match the actual active build machine. When the build host moves
   from one LAN node to another, update the release SOP, checklist, host-boundary ADR, and workflow
   entrypoint notes in the same change; stale host labels will send operators down the wrong path.
@@ -43,6 +46,9 @@
 - On mixed Windows environments, full quality gates and final asset merge/upload do not need to use
   the same shell. Use the shell that gives stable test behavior for the gate, and the shell that
   gives correct CLI path semantics for the artifact merge.
+- When launching long-running sidecar processes under `systemd-run`, prefer `StandardOutput=` /
+  `StandardError=` properties over shell redirection. It avoids transient-unit escape warnings and
+  keeps runtime logs attached to the unit cleanly.
 
 ## S3 Compatibility Gaps
 

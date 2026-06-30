@@ -9,7 +9,6 @@ import json
 import os
 import pathlib
 import pwd
-import shlex
 import shutil
 import signal
 import socket
@@ -171,21 +170,17 @@ def stop_systemd_unit(unit_name: str | None) -> None:
 def start_transient_unit(unit_name: str, command: list[str], log_path: pathlib.Path) -> int:
     ensure_dir(log_path.parent)
     stop_systemd_unit(unit_name)
-    shell_command = (
-        f"exec >>{shlex.quote(str(log_path))} 2>&1; exec "
-        + " ".join(shlex.quote(part) for part in command)
-    )
     run_checked(
         [
             "systemd-run",
             "--collect",
             "--quiet",
             "--service-type=exec",
+            f"--property=StandardOutput=append:{log_path}",
+            f"--property=StandardError=append:{log_path}",
             "--unit",
             unit_name,
-            "/bin/bash",
-            "-lc",
-            shell_command,
+            *command,
         ]
     )
     time.sleep(1.0)
