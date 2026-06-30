@@ -22,6 +22,15 @@ CARGO_BIN="$(bash scripts/resolve-cargo.sh)"
 RUSTC_BIN="$(bash scripts/resolve-rustc.sh)"
 GIT_BIN="$(bash scripts/resolve-git.sh)"
 
+python_cli_path() {
+  local path="$1"
+  if [[ "${PYTHON_BIN}" == *.exe ]] && command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "${path}"
+    return 0
+  fi
+  printf '%s\n' "${path}"
+}
+
 resolve_release_fingerprint() {
   if [ -n "${CCBG_RELEASE_FINGERPRINT:-}" ]; then
     printf '%s\n' "${CCBG_RELEASE_FINGERPRINT}"
@@ -181,13 +190,13 @@ provenance_args=(
   --release-name "CCBG ${TAG}"
   --tag "${TAG}"
   --fingerprint "$(resolve_release_fingerprint)"
-  --out-dir "${OUT_DIR}"
+  --out-dir "$(python_cli_path "${OUT_DIR}")"
   --build-step "scripts/check-release-ready.sh"
   --build-step "scripts/release-local.sh ${TAG}"
 )
 
 while IFS= read -r file; do
-  provenance_args+=(--artifact "${OUT_DIR}/${file}")
+  provenance_args+=(--artifact "$(python_cli_path "${OUT_DIR}/${file}")")
 done < <(find "${OUT_DIR}" -maxdepth 1 -type f ! -name 'release-provenance.*' -printf '%f\n' | LC_ALL=C sort)
 
 "${provenance_args[@]}"

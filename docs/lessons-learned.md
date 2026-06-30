@@ -30,6 +30,19 @@
 - The documented release host must match the actual active build machine. When the build host moves
   from one LAN node to another, update the release SOP, checklist, host-boundary ADR, and workflow
   entrypoint notes in the same change; stale host labels will send operators down the wrong path.
+- A containerized build on the same Windows host cannot use `127.0.0.1:10808` as its proxy; the
+  build-runner container must use the host LAN IP (`192.168.1.52:10808` in the current setup).
+- Keep release workflow defaults aligned with the image that actually exists. If the current
+  build-runner image cannot link Darwin targets, macOS jobs should stay disabled by default rather
+  than failing every manual release run.
+- GitHub Actions artifact downloads are not guaranteed to keep one fixed directory shape. Release
+  helper scripts must tolerate both `dest/<files>` and `dest/<artifact>/<files>` layouts.
+- When Bash/WSL launches Windows CLIs such as `gh.exe` or `python.exe`, convert absolute POSIX
+  paths before handing them over. Otherwise `/mnt/d/...` can be misread as `D:\mnt\d\...` and
+  release helper scripts fail for path reasons instead of real build reasons.
+- On mixed Windows environments, full quality gates and final asset merge/upload do not need to use
+  the same shell. Use the shell that gives stable test behavior for the gate, and the shell that
+  gives correct CLI path semantics for the artifact merge.
 
 ## S3 Compatibility Gaps
 

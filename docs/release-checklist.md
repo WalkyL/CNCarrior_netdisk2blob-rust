@@ -23,6 +23,15 @@
 - 完整验收记录见 [ops-006-43-acceptance.md](ops-006-43-acceptance.md) 的
   `2026-06-09 v0.1.9 formal public release` 小节。
 
+最近完成的内部/LAN release 与 `.49` 部署：
+
+- `v0.1.12` 于 2026-06-30 完成 GitHub Release 与 `.49` LXC 部署，release tag 指向
+  `ae91751bb6fa36291aef8444d1e64186ea248a59`。
+- 这轮没有做 Cloudflare 公网发布，也没有发布 macOS / Windows / OpenWrt 资产。
+- 这轮使用 GitHub Actions self-hosted build-runner workflow 产出 Linux LXC artifact，
+  再由 `.52` 合并进正式 release 并部署到 `.49`。
+- 记录见 [ops-015-v0.1.12-build-runner-release-and-49-deploy.md](ops-015-v0.1.12-build-runner-release-and-49-deploy.md)。
+
 ## 1. Release 产物
 
 - [x] Git 工作区干净
