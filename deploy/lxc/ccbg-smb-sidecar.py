@@ -395,6 +395,11 @@ def build_share_models(
     region = str(env_values.get("CCBG_S3_REGION", "us-east-1")).strip() or "us-east-1"
     bind_addr = str(smb.get("bind_addr") or "0.0.0.0").strip() or "0.0.0.0"
     server_string = str(smb.get("server_string") or "").strip() or "CCBG SMB Sidecar"
+    requested_vfs_objects = [
+        str(value).strip()
+        for value in (smb.get("vfs_objects") or [])
+        if str(value).strip()
+    ]
     base = {
         "mount_root": mount_root,
         "config_root": config_root,
@@ -412,11 +417,7 @@ def build_share_models(
         "create_mask": str(smb.get("create_mask") or "0660").strip() or "0660",
         "directory_mask": str(smb.get("directory_mask") or "0770").strip() or "0770",
         "disable_splice": bool(smb.get("disable_splice")),
-        "vfs_objects": [
-            str(value).strip()
-            for value in (smb.get("vfs_objects") or [])
-            if str(value).strip()
-        ],
+        "vfs_objects": supported_vfs_objects(requested_vfs_objects),
         "gateway_endpoint": gateway_endpoint,
         "region": region,
     }
@@ -557,6 +558,20 @@ def runtime_spec_payload(model: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def supported_vfs_objects(vfs_objects: list[str]) -> list[str]:
+    requested = list(dict.fromkeys(vfs_objects or ["streams_xattr", "catia", "fruit"]))
+    builtins = {"streams_xattr", "catia"}
+    module_root = pathlib.Path("/usr/lib/x86_64-linux-gnu/samba/vfs")
+    supported: list[str] = []
+    for name in requested:
+        if name in builtins:
+            supported.append(name)
+            continue
+        if (module_root / f"{name}.so").exists():
+            supported.append(name)
+    return supported
+
+
 def desired_hash_for_model(model: dict[str, Any]) -> str:
     serialized = json.dumps(runtime_spec_payload(model), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
@@ -608,13 +623,9 @@ def generate_smb_conf(model: dict[str, Any]) -> str:
         f"   create mask = {model['create_mask']}",
         f"   directory mask = {model['directory_mask']}",
         "   vfs objects = "
-        + (" ".join(model["vfs_objects"]) if model["vfs_objects"] else "streams_xattr catia fruit"),
+        + (" ".join(model["vfs_objects"]) if model["vfs_objects"] else "streams_xattr catia"),
         "   ea support = yes",
         "   store dos attributes = yes",
-        "   fruit:metadata = stream",
-        "   fruit:model = MacSamba",
-        "   fruit:posix_rename = yes",
-        "   fruit:veto_appledouble = no",
         f"   use sendfile = {'no' if model['disable_splice'] else 'yes'}",
         f"   pid directory = {run_dir}",
         f"   lock directory = {lock_dir}",
@@ -625,6 +636,15 @@ def generate_smb_conf(model: dict[str, Any]) -> str:
         "   max log size = 10000",
         f"   smb ports = {model['port']}",
     ]
+    if "fruit" in model["vfs_objects"]:
+        global_lines.extend(
+            [
+                "   fruit:metadata = stream",
+                "   fruit:model = MacSamba",
+                "   fruit:posix_rename = yes",
+                "   fruit:veto_appledouble = no",
+            ]
+        )
     bind_addr = str(model["bind_addr"]).strip()
     if bind_addr in ("0.0.0.0", "*"):
         global_lines.append(f"   interfaces = {' '.join(local_ipv4_interface_specs())}")

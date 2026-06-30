@@ -27,6 +27,9 @@
   build-runner image instead of relying on `cargo build --release` on the host.
 - Deploy `gatewayd` and `assets/admin/index.html` together, then verify both remote hashes and
   service health before considering the deploy complete.
+- SMB sidecar host-process mode needs its optional Samba VFS modules to match the generated
+  `smb.conf`. If `fruit` is enabled in config but `samba-vfs-modules` is missing, the sidecar can
+  still look `running` while client login fails at `IPC$`.
 - For SMB sidecar host-process mode, do not use `ccbg-smb-sidecar-sync.service` as the liveness
   signal. It is intentionally short-lived; the real checks are `python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status`
   plus the transient `ccbg-smb-sidecar-*.service` units.
@@ -49,6 +52,9 @@
 - When launching long-running sidecar processes under `systemd-run`, prefer `StandardOutput=` /
   `StandardError=` properties over shell redirection. It avoids transient-unit escape warnings and
   keeps runtime logs attached to the unit cleanly.
+- Sidecar runtime generation should tolerate missing optional VFS plugins and degrade to the
+  modules actually present on the host instead of producing a false-healthy SMB listener that
+  rejects all sessions.
 
 ## S3 Compatibility Gaps
 

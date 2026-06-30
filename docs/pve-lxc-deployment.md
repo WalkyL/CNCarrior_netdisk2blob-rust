@@ -67,6 +67,8 @@ sudo scripts/install.sh
 
 - `sudo scripts/install.sh --s3-only`: 只安装并启动 S3 gateway。这是默认模式。
 - `sudo scripts/install.sh --enable-smb-sidecar`: 安装 `rclone`、`samba`、`fuse3` 等 SMB sidecar 依赖，写入 sidecar 脚本与 systemd units，把 `/etc/ccbg/ccbg.env` 和已有 control-plane 中的 SMB 开关打开，并立即运行一次 reconcile。
+- `--enable-smb-sidecar` profile 还会安装 `samba-vfs-modules`，这样默认的 `fruit` / `catia` /
+  `streams_xattr` 组合在 Debian/Ubuntu 宿主上可直接工作。
 
 `--enable-smb-sidecar` 会把 Admin 里的 SMB 能力打开并准备自动挂接。安装后即使还没有 SMB 用户或 share，sidecar 也会先启动一个由 CCBG 管理的 `smbd`，默认监听 `0.0.0.0:445`。第一次使用时，用户进入 Admin 的 SMB 页面添加一个 SMB 用户即可；如果没有手工创建 share，控制面会自动生成 `CCBGRoot` 默认 root 共享，保存后由 systemd path/timer 自动重试并收敛到可用共享。
 
@@ -75,6 +77,8 @@ sudo scripts/install.sh
 所以单独看到 `systemctl status ccbg-smb-sidecar-sync.service` 变成 `inactive (dead)` 并不表示 sidecar
 没起来；要看 `python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status` 是否为 `state=running`，以及
 `systemctl list-units 'ccbg-smb-sidecar-*.service'` 里是否有运行中的 `smbd` / `rclone` units。
+如果 `status` 是 `running`，但 Windows/macOS 仍然连不上，第一时间查
+`/var/lib/ccbg/smb-sidecar/data/runtime/logs/smbd.log`，确认是否有 `fruit.so` 这类 VFS 模块缺失。
 
 SMB sidecar 默认挂载根目录是 `/mnt/ccbg/smb/mounts`，配置和 runtime data 位于 `/var/lib/ccbg/smb-sidecar/`。这个挂载点避开 Ubuntu/Debian LXC 中 `fusermount3` AppArmor profile 对 `/srv`、`/var/lib` 等自定义 mount point 的常见拦截。
 

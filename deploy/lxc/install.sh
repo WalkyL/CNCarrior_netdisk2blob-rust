@@ -136,6 +136,9 @@ install_smb_dependencies() {
       esac
     done
   fi
+  if [ "${INSTALL_PROFILE}" = "enable-smb-sidecar" ]; then
+    packages+=("samba-vfs-modules")
+  fi
 
   mapfile -t packages < <(printf '%s\n' "${packages[@]}" | awk 'NF && !seen[$0]++')
   if [ "${#packages[@]}" -gt 0 ]; then
