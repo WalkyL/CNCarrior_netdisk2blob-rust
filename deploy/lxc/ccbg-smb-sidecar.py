@@ -913,6 +913,8 @@ def start_rclone_mounts(model: dict[str, Any], group_entry: grp.struct_group) ->
             "0",
             "--gid",
             str(group_entry.gr_gid),
+            "--umask",
+            "007",
             "--dir-perms",
             "0770",
             "--file-perms",

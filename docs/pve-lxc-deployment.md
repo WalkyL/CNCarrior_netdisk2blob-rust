@@ -69,6 +69,8 @@ sudo scripts/install.sh
 - `sudo scripts/install.sh --enable-smb-sidecar`: 安装 `rclone`、`samba`、`fuse3` 等 SMB sidecar 依赖，写入 sidecar 脚本与 systemd units，把 `/etc/ccbg/ccbg.env` 和已有 control-plane 中的 SMB 开关打开，并立即运行一次 reconcile。
 - `--enable-smb-sidecar` profile 还会安装 `samba-vfs-modules`，这样默认的 `fruit` / `catia` /
   `streams_xattr` 组合在 Debian/Ubuntu 宿主上可直接工作。
+- sidecar 挂载 rclone share 时显式使用 `--umask 007`，保证 SMB 共享最终权限保持
+  `dir=0770`、`file=0660`；否则默认 `umask 022` 会把它们裁成只读组权限，出现“能看不能删/不能写”。
 
 `--enable-smb-sidecar` 会把 Admin 里的 SMB 能力打开并准备自动挂接。安装后即使还没有 SMB 用户或 share，sidecar 也会先启动一个由 CCBG 管理的 `smbd`，默认监听 `0.0.0.0:445`。第一次使用时，用户进入 Admin 的 SMB 页面添加一个 SMB 用户即可；如果没有手工创建 share，控制面会自动生成 `CCBGRoot` 默认 root 共享，保存后由 systemd path/timer 自动重试并收敛到可用共享。
 

@@ -30,6 +30,9 @@
 - SMB sidecar host-process mode needs its optional Samba VFS modules to match the generated
   `smb.conf`. If `fruit` is enabled in config but `samba-vfs-modules` is missing, the sidecar can
   still look `running` while client login fails at `IPC$`.
+- `rclone mount` permission flags alone are not enough for SMB group write access. Without an
+  explicit `--umask 007`, `--dir-perms 0770` / `--file-perms 0660` are masked down to
+  `0750` / `0640`, which lets SMB users read but blocks create/delete.
 - For SMB sidecar host-process mode, do not use `ccbg-smb-sidecar-sync.service` as the liveness
   signal. It is intentionally short-lived; the real checks are `python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status`
   plus the transient `ccbg-smb-sidecar-*.service` units.
