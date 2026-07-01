@@ -149,23 +149,23 @@ Keep `ccbg-smb-sidecar-sync.service` as a short-lived reconcile trigger while mo
 
 ### Interface
 
-- `deploy/lxc/ccbg-smb-sidecar.py sync` still owns reconcile logic and `status.json` updates.
+- `smb-sidecar-host sync` now owns reconcile logic and `status.json` updates.
 - Long-running SMB sidecar processes are launched as dedicated transient systemd service units.
 - Runtime status continues to expose `pid`, `running`, `mounted`, and log file paths for each
   managed process/share.
 
 ### Data Flow
 
-1. `ccbg-smb-sidecar-sync.service` runs `ccbg-smb-sidecar.py sync`.
-2. The script computes the desired sidecar runtime spec and compares it with the stored metadata.
-3. When reconciliation is needed, the script stops prior managed runtime units, unmounts stale
+1. `ccbg-smb-sidecar-sync.service` runs `smb-sidecar-host sync`.
+2. The helper computes the desired sidecar runtime spec and compares it with the stored metadata.
+3. When reconciliation is needed, the helper stops prior managed runtime units, unmounts stale
    shares, and launches fresh transient units for `smbd` and each `rclone mount`.
 4. `status.json` and `managed-runtime.json` record the new runtime state without leaving the child
    processes inside the `sync.service` cgroup.
 
 ### Error Handling
 
-- If `systemd-run` is unavailable, the script falls back to the previous direct-process launch
+- If `systemd-run` is unavailable, the helper falls back to the previous direct-process launch
   behavior.
 - A runtime-spec version bump forces one post-upgrade reconcile so older direct-process deployments
   are migrated to transient units on the next sync pass.
@@ -174,6 +174,46 @@ Keep `ccbg-smb-sidecar-sync.service` as a short-lived reconcile trigger while mo
 
 - No new operator-facing environment variables.
 - Transient unit names are derived from share ids and do not require manual configuration.
+
+## SMB Sidecar Host Rust Migration
+
+### Objective
+
+Replace the Python SMB sidecar host helper with a small Rust binary while keeping the current
+`gatewayd` privilege boundary and on-disk/runtime contract stable.
+
+### Interface
+
+- New helper crate: `crates/smb-sidecar-host`
+- CLI contract stays `sync | stop | status`
+- Existing files stay authoritative:
+  - `control-plane.json`
+  - `smb-sidecar/status.json`
+  - `smb-sidecar/managed-runtime.json`
+  - generated `smb.conf`
+  - generated `rclone.conf`
+
+### Data Flow
+
+1. `ccbg-smb-sidecar-sync.service` invokes the host helper as `root`.
+2. The helper resolves `/etc/ccbg/ccbg.env`, derives the control-plane path, and loads the current
+   SMB sidecar model.
+3. `status` reads the existing runtime status contract and prints JSON compatible with the current
+   Admin/API reader.
+4. `sync` and `stop` run fully inside the Rust helper without changing the status file schema or
+   the transient-unit naming contract.
+
+### Error Handling
+
+- The Rust helper must preserve the current fallback `status` shape when `status.json` is absent:
+  `state=unknown`, `mode=host_process`, `auto_managed=true`, and `runtime_root`.
+
+### Configuration
+
+- No new required operator-facing environment variables.
+- The helper must continue reading `CCBG_ENV_FILE` override first, then `/etc/ccbg/ccbg.env`.
+- Runtime status files must remain readable by `gatewayd` running as user/group `ccbg`.
+- Validation expectations live in `docs/smb-sidecar-host-test-matrix.md`.
 
 ## HTTP 5xx Diagnostic Logging
 

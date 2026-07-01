@@ -26,7 +26,7 @@ scripts/build-lxc-package.sh --binary target/gatewayd-linux-x86_64
 如果 Windows 主机本地已经准备好 `Podman` 和 `localhost/product-build-runner:latest`，优先走这个两段式流程，避免把新的 `gatewayd.exe` 和旧的 Linux ELF 混在一起:
 
 ```bash
-scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd
+scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd --package smb-sidecar-host
 scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
 ```
 
@@ -77,7 +77,7 @@ sudo scripts/install.sh
 从当前实现开始，`ccbg-smb-sidecar-sync.service` 只负责 reconcile；长时间运行的 `smbd` 和
 `rclone mount` 会被放进独立的 transient systemd units，不再留在 `sync.service` 的 cgroup 里。
 所以单独看到 `systemctl status ccbg-smb-sidecar-sync.service` 变成 `inactive (dead)` 并不表示 sidecar
-没起来；要看 `python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status` 是否为 `state=running`，以及
+没起来；要看 `/opt/ccbg/bin/smb-sidecar-host status` 是否为 `state=running`，以及
 `systemctl list-units 'ccbg-smb-sidecar-*.service'` 里是否有运行中的 `smbd` / `rclone` units。
 如果 `status` 是 `running`，但 Windows/macOS 仍然连不上，第一时间查
 `/var/lib/ccbg/smb-sidecar/data/runtime/logs/smbd.log`，确认是否有 `fruit.so` 这类 VFS 模块缺失。
@@ -104,7 +104,7 @@ pct start 104
 ```bash
 mkdir -p /run/samba/ncalrpc
 systemctl start ccbg-smb-sidecar-sync.service
-python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status
+/opt/ccbg/bin/smb-sidecar-host status
 ```
 
 安装脚本会:
@@ -177,7 +177,7 @@ sudo systemctl list-units 'ccbg-smb-sidecar-*.service' --no-pager
 Windows + Podman 本地构建主机的推荐升级流程:
 
 ```bash
-scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd
+scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd --package smb-sidecar-host
 scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
 scp target/lxc-package/ccbg-lxc-package.tar.gz root@<guest-ip>:/tmp/ccbg-lxc-package.tar.gz
 ssh root@<guest-ip>

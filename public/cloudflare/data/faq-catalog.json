@@ -97,7 +97,7 @@
         "在 Admin 的 SMB Runtime 确认现象：listener 就绪但 state=degraded、Shares 0/1 或 mounted_share_count=0",
         "在 PVE 宿主机停止对应 CTID，给 /etc/pve/lxc/<CTID>.conf 增加 fuse=1、cgroup2 设备允许和 /dev/fuse bind mount",
         "重启 LXC 后在容器内确认 ls -l /dev/fuse 可见，再运行 systemctl start ccbg-smb-sidecar-sync.service",
-        "用 python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status 验证 state=running、listener_ready=true、mounted_share_count 等于 enabled_share_count"
+        "用 /opt/ccbg/bin/smb-sidecar-host status 验证 state=running、listener_ready=true、mounted_share_count 等于 enabled_share_count"
       ],
       "doc_url": "https://github.com/WalkyL/CNCarrior_netdisk2blob-rust/blob/main/docs/pve-lxc-deployment.md"
     },

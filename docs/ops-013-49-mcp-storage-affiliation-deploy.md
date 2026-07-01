@@ -25,7 +25,7 @@ That means `cargo build --release -p gatewayd` on Windows is not a safe `.49` de
 This deploy used the local Podman build-runner image to build the Linux ELF explicitly:
 
 ```bash
-scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd
+scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd --package smb-sidecar-host
 scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
 ```
 

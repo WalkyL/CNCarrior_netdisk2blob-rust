@@ -12,6 +12,11 @@ on:
         required: true
         default: true
         type: boolean
+      run_smb_sidecar_tests:
+        description: Run smb-sidecar-host aggregated tests inside the Linux build-runner before packaging
+        required: true
+        default: true
+        type: boolean
       build_macos_x86_64:
         description: Build macOS x86_64 community asset (requires a Darwin SDK-enabled build-runner image)
         required: true
@@ -62,6 +67,24 @@ jobs:
           $ErrorActionPreference = 'Stop'
           podman image inspect $env:CCBG_BUILD_IMAGE | Out-Null
 
+      - name: Run smb-sidecar-host aggregated tests in build runner
+        if: ${{ inputs.run_smb_sidecar_tests }}
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $workspace = (Resolve-Path $env:GITHUB_WORKSPACE).Path
+
+          podman run --rm `
+            --pull=never `
+            -e http_proxy=$env:CCBG_BUILD_HTTP_PROXY `
+            -e https_proxy=$env:CCBG_BUILD_HTTP_PROXY `
+            -e HTTP_PROXY=$env:CCBG_BUILD_HTTP_PROXY `
+            -e HTTPS_PROXY=$env:CCBG_BUILD_HTTP_PROXY `
+            -v "${workspace}:/workspace" `
+            -w /workspace `
+            $env:CCBG_BUILD_IMAGE `
+            bash -lc "scripts/test-smb-sidecar-host-all.sh"
+
       - name: Build Linux LXC package in build runner
         shell: powershell
         run: |
@@ -77,7 +100,7 @@ jobs:
             -v "${workspace}:/workspace" `
             -w /workspace `
             $env:CCBG_BUILD_IMAGE `
-            bash -lc "cargo build --release --locked --target '${env:CCBG_LINUX_TARGET}' -p gatewayd && scripts/build-lxc-package.sh --skip-build --target '${env:CCBG_LINUX_TARGET}' && sha256sum -c target/lxc-package/ccbg-lxc-package.tar.gz.sha256"
+            bash -lc "cargo build --release --locked --target '${env:CCBG_LINUX_TARGET}' -p gatewayd -p smb-sidecar-host && scripts/build-lxc-package.sh --skip-build --target '${env:CCBG_LINUX_TARGET}' && sha256sum -c target/lxc-package/ccbg-lxc-package.tar.gz.sha256"
 
       - name: Upload Linux LXC package
         uses: actions/upload-artifact@v4

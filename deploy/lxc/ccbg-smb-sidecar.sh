@@ -3,7 +3,7 @@
 # Copyright (c) 2026 walky
 set -euo pipefail
 
-PYTHON_SCRIPT="/opt/ccbg/scripts/ccbg-smb-sidecar.py"
+RUST_HELPER="/opt/ccbg/bin/smb-sidecar-host"
 DEBIAN_FRONTEND=noninteractive
 
 command_exists() {
@@ -21,7 +21,6 @@ install_missing_dependencies() {
   local missing=()
   local packages=()
 
-  command_exists python3 || missing+=("python3")
   command_exists rclone || missing+=("rclone")
   command_exists smbd || missing+=("smbd")
   command_exists smbpasswd || missing+=("smbpasswd")
@@ -38,9 +37,6 @@ install_missing_dependencies() {
 
   for item in "${missing[@]}"; do
     case "${item}" in
-      python3)
-        packages+=("python3")
-        ;;
       rclone)
         packages+=("rclone")
         ;;
@@ -69,7 +65,11 @@ main() {
   case "${action}" in
     sync|stop|status)
       install_missing_dependencies
-      exec python3 "${PYTHON_SCRIPT}" "${action}"
+      if [ -x "${RUST_HELPER}" ]; then
+        exec "${RUST_HELPER}" "${action}"
+      fi
+      echo "missing SMB sidecar helper: ${RUST_HELPER}" >&2
+      exit 1
       ;;
     *)
       echo "usage: $0 [sync|stop|status]" >&2

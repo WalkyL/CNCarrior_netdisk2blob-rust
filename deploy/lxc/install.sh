@@ -263,8 +263,9 @@ PY
 install_smb_sidecar_components() {
   local control_plane_file
   install_smb_dependencies
+  install -d -m 0755 /opt/ccbg/bin
+  install -m 0755 "${PACKAGE_ROOT}/bin/smb-sidecar-host" /opt/ccbg/bin/smb-sidecar-host
   install -m 0755 "${PACKAGE_ROOT}/scripts/ccbg-smb-sidecar.sh" /opt/ccbg/scripts/ccbg-smb-sidecar.sh
-  install -m 0755 "${PACKAGE_ROOT}/scripts/ccbg-smb-sidecar.py" /opt/ccbg/scripts/ccbg-smb-sidecar.py
   install -m 0644 "${PACKAGE_ROOT}/systemd/ccbg-smb-sidecar-sync.service" /etc/systemd/system/ccbg-smb-sidecar-sync.service
   install -m 0644 "${PACKAGE_ROOT}/systemd/ccbg-smb-sidecar.timer" /etc/systemd/system/ccbg-smb-sidecar.timer
   control_plane_file="$(env_value /etc/ccbg/ccbg.env CCBG_CONTROL_PLANE_FILE /var/lib/ccbg/control-plane.json)"
@@ -283,7 +284,7 @@ Unit=ccbg-smb-sidecar-sync.service
 [Install]
 WantedBy=multi-user.target
 EOF
-  chown root:root /opt/ccbg/scripts/ccbg-smb-sidecar.sh /opt/ccbg/scripts/ccbg-smb-sidecar.py
+  chown root:root /opt/ccbg/bin/smb-sidecar-host /opt/ccbg/scripts/ccbg-smb-sidecar.sh
 }
 
 start_service() {
@@ -298,8 +299,8 @@ start_service() {
       ;;
     s3-only)
       if [ "${PROFILE_EXPLICIT}" = true ]; then
-        if [ -x /opt/ccbg/scripts/ccbg-smb-sidecar.py ]; then
-          /opt/ccbg/scripts/ccbg-smb-sidecar.py stop 2>/dev/null || true
+        if [ -x /opt/ccbg/bin/smb-sidecar-host ]; then
+          /opt/ccbg/bin/smb-sidecar-host stop 2>/dev/null || true
         fi
         systemctl disable --now ccbg-smb-sidecar.path ccbg-smb-sidecar.timer 2>/dev/null || true
         systemctl stop ccbg-smb-sidecar-sync.service 2>/dev/null || true

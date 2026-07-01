@@ -6,17 +6,25 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="${CCBG_PODMAN_BUILD_IMAGE:-localhost/product-build-runner:latest}"
 TARGET="${CCBG_LINUX_TARGET:-x86_64-unknown-linux-gnu}"
-PACKAGE="${CCBG_LINUX_BUILD_PACKAGE:-gatewayd}"
+PACKAGES=()
 CONTAINER_WORKDIR="/workspace"
+
+if [ -n "${CCBG_LINUX_BUILD_PACKAGE:-}" ]; then
+  PACKAGES=("${CCBG_LINUX_BUILD_PACKAGE}")
+else
+  PACKAGES=(gatewayd)
+fi
 
 usage() {
   cat <<'EOF'
-usage: scripts/build-linux-release-in-podman.sh [--target <rust-target>] [--package <cargo-package>] [--image <podman-image>]
+usage: scripts/build-linux-release-in-podman.sh [--target <rust-target>] [--package <cargo-package>]... [--image <podman-image>]
 
 Build a Linux release binary from a Windows host by running cargo inside the
 local Podman build-runner image. The resulting ELF is written to:
 
   target/<rust-target>/release/<binary>
+
+Repeat `--package` to build multiple binaries in one run.
 
 Default image:
   localhost/product-build-runner:latest
@@ -38,7 +46,10 @@ while [ "$#" -gt 0 ]; do
         echo "--package requires a cargo package name" >&2
         exit 2
       fi
-      PACKAGE="$2"
+      if [ "${#PACKAGES[@]}" -eq 1 ] && [ "${PACKAGES[0]}" = "${CCBG_LINUX_BUILD_PACKAGE:-gatewayd}" ]; then
+        PACKAGES=()
+      fi
+      PACKAGES+=("$2")
       shift 2
       ;;
     --image)
@@ -77,19 +88,26 @@ if command -v cygpath >/dev/null 2>&1; then
   workspace_mount="$(cygpath -w "${ROOT_DIR}")"
 fi
 
+build_args=()
+for package in "${PACKAGES[@]}"; do
+  build_args+=( -p "${package}" )
+done
+
 podman run --rm \
   -v "${workspace_mount}:${CONTAINER_WORKDIR}" \
   -w "${CONTAINER_WORKDIR}" \
   "${IMAGE}" \
-  bash -lc "cargo build --release --locked --target '${TARGET}' -p '${PACKAGE}'"
+  bash -lc "cargo build --release --locked --target '${TARGET}' ${build_args[*]}"
 
-binary_path="${ROOT_DIR}/target/${TARGET}/release/${PACKAGE}"
-if [ ! -s "${binary_path}" ]; then
-  echo "expected output was not produced: ${binary_path}" >&2
-  exit 1
-fi
+for package in "${PACKAGES[@]}"; do
+  binary_path="${ROOT_DIR}/target/${TARGET}/release/${package}"
+  if [ ! -s "${binary_path}" ]; then
+    echo "expected output was not produced: ${binary_path}" >&2
+    exit 1
+  fi
 
-if command -v file >/dev/null 2>&1; then
-  file -b "${binary_path}"
-fi
-sha256sum "${binary_path}"
+  if command -v file >/dev/null 2>&1; then
+    file -b "${binary_path}"
+  fi
+  sha256sum "${binary_path}"
+done

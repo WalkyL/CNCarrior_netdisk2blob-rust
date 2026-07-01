@@ -24,6 +24,7 @@ run "${PYTHON_BIN}" scripts/check-onedrive-restore-checklist.py
 run "${PYTHON_BIN}" scripts/check-backup-restore-drill.py \
   --drill-root target/backup-restore-drill-release \
   --write-sample
+run env SMB_SIDECAR_SKIP_UNIT=1 scripts/test-smb-sidecar-host-all.sh
 run "${PYTHON_BIN}" scripts/s3-smoke.py
 
 if [ "${CCBG_CHECK_NATIVE_PACKAGE_SMOKE:-false}" = "true" ]; then

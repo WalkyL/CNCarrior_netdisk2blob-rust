@@ -114,7 +114,7 @@ Root cause:
 
 Code repair:
 
-- `deploy/lxc/ccbg-smb-sidecar.py` now creates `/run/samba` and `/run/samba/ncalrpc` before
+- `smb-sidecar-host` now creates `/run/samba` and `/run/samba/ncalrpc` before
   launching managed `smbd`
 
 PVE host change used to expose FUSE to CT `104`:
@@ -134,7 +134,7 @@ Guest-side reconcile after the host change:
 ```bash
 mkdir -p /run/samba/ncalrpc
 systemctl start ccbg-smb-sidecar-sync.service
-python3 /opt/ccbg/scripts/ccbg-smb-sidecar.py status
+/opt/ccbg/bin/smb-sidecar-host status
 ```
 
 Validated final runtime state on `.49`:
@@ -164,7 +164,6 @@ Run on the build workspace:
 
 ```bash
 node admin-js-parse-check
-python -m py_compile deploy/lxc/ccbg-smb-sidecar.py
 bash -n deploy/lxc/install.sh deploy/lxc/ccbg-smb-sidecar.sh scripts/build-lxc-package.sh
 python scripts/check-cloudflare-public-fingerprint.py --out-dir target/cloudflare-fingerprint-check
 git diff --check

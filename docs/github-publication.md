@@ -171,7 +171,7 @@ scripts/release-local.sh v0.1.7
 优先使用本地 Podman build-runner 容器而不是直接依赖 Windows `target/release/gatewayd.exe`:
 
 ```bash
-scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd
+scripts/build-linux-release-in-podman.sh --target x86_64-unknown-linux-gnu --package gatewayd --package smb-sidecar-host
 scripts/build-lxc-package.sh --skip-build --target x86_64-unknown-linux-gnu
 ```
 

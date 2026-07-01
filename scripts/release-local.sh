@@ -99,6 +99,15 @@ build_gatewayd() {
   fi
 }
 
+build_lxc_binaries() {
+  local target="$1"
+  if [ "${target}" = "${HOST_TRIPLE}" ]; then
+    "${CARGO_BIN}" build --release --locked --target "${target}" -p gatewayd -p smb-sidecar-host
+  else
+    "${CARGO_BIN}" zigbuild --release --locked --target "${target}" -p gatewayd -p smb-sidecar-host
+  fi
+}
+
 build_gatewayd_and_mcp() {
   local target="$1"
   if [ "${target}" = "${HOST_TRIPLE}" ]; then
@@ -115,7 +124,7 @@ if [ -n "${CCBG_RELEASE_LXC_ASSET_DIR:-}" ]; then
     "${CCBG_RELEASE_LXC_ASSET_DIR}/ccbg-lxc-package.tar.gz.sha256"
 else
   echo "building Linux LXC package on ${RELEASE_HOST_LABEL} for ${LINUX_TARGET}"
-  build_gatewayd "${LINUX_TARGET}"
+  build_lxc_binaries "${LINUX_TARGET}"
   scripts/build-lxc-package.sh --skip-build --target "${LINUX_TARGET}"
   copy_required_artifacts \
     "${ROOT_DIR}/target/lxc-package/ccbg-lxc-package.tar.gz" \

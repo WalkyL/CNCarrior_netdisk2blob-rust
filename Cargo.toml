@@ -16,6 +16,7 @@ members = [
     "crates/provider-telecom",
     "crates/provider-unicom",
     "crates/replication-engine",
+    "crates/smb-sidecar-host",
 ]
 resolver = "3"
 

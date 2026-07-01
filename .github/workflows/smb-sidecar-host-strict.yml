@@ -1,0 +1,41 @@
+name: smb-sidecar-host strict
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'crates/smb-sidecar-host/**'
+      - 'deploy/lxc/ccbg-smb-sidecar.sh'
+      - 'deploy/lxc/install.sh'
+      - 'scripts/test-smb-sidecar-host-*.sh'
+      - 'scripts/check-smb-sidecar-test-host.sh'
+      - 'docs/smb-sidecar-host-test-matrix.md'
+      - '.github/workflows/smb-sidecar-host-strict.yml'
+  pull_request:
+    paths:
+      - 'crates/smb-sidecar-host/**'
+      - 'deploy/lxc/ccbg-smb-sidecar.sh'
+      - 'deploy/lxc/install.sh'
+      - 'scripts/test-smb-sidecar-host-*.sh'
+      - 'scripts/check-smb-sidecar-test-host.sh'
+      - 'docs/smb-sidecar-host-test-matrix.md'
+      - '.github/workflows/smb-sidecar-host-strict.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  strict:
+    name: strict-mode sidecar gate
+    runs-on: [self-hosted, linux, x64, smb-sidecar-test]
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify strict-mode host capabilities
+        run: scripts/check-smb-sidecar-test-host.sh strict
+
+      - name: Run strict-mode aggregated tests
+        run: SMB_SIDECAR_TEST_REQUIRE_FULL=1 scripts/test-smb-sidecar-host-all.sh
