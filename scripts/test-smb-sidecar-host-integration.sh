@@ -11,12 +11,6 @@ if [ "$(uname -s)" != "Linux" ]; then
   exit 1
 fi
 
-if [ ! -x "${HELPER_BIN}" ]; then
-  echo "missing smb-sidecar-host binary: ${HELPER_BIN}" >&2
-  echo "build it first with: cargo build -p smb-sidecar-host" >&2
-  exit 1
-fi
-
 workspace_tmp="${SMB_SIDECAR_TEST_TMPDIR:-$(mktemp -d)}"
 cleanup() {
   rm -rf "${workspace_tmp}"
