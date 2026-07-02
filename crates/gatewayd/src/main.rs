@@ -6171,6 +6171,7 @@ struct ObjectReconcilePreviewRowPayload {
     key: String,
     home_provider: String,
     home_label: String,
+    has_home_placement: bool,
     desired_home_provider: String,
     desired_home_label: String,
     application_id: Option<String>,
@@ -6318,6 +6319,7 @@ struct ObjectReconcileExecuteEntryPayload {
     action: &'static str,
     message: String,
     preview_status: &'static str,
+    has_home_placement: bool,
     add_sync_targets: Vec<String>,
     remove_sync_targets: Vec<String>,
     old_home_provider: String,
@@ -20489,10 +20491,13 @@ async fn object_reconcile_preview_payload(
     let fetch_limit = limit
         .saturating_mul(4)
         .clamp(limit, MAX_OBJECT_PLACEMENT_RECORD_LIMIT);
-    let records = state
-        .metadata_store
-        .list_object_placements(provider_filter, bucket_filter, prefix_filter, fetch_limit)
-        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+    let records = object_reconcile_candidate_records(
+        state,
+        provider_filter,
+        bucket_filter,
+        prefix_filter,
+        fetch_limit,
+    )?;
 
     let mut rows = Vec::with_capacity(limit);
     let mut no_change_count = 0usize;
@@ -20501,9 +20506,6 @@ async fn object_reconcile_preview_payload(
     let mut skipped_count = 0usize;
 
     for record in records {
-        if !admin_user_visible_provider_name(&record.provider) {
-            continue;
-        }
         let row = object_reconcile_preview_row_payload(state, &record).await?;
         match row.status {
             "no_change" => no_change_count += 1,
@@ -20535,42 +20537,83 @@ async fn object_reconcile_preview_payload(
 
 async fn object_reconcile_preview_row_payload(
     state: &AppState,
-    record: &ObjectPlacementRecord,
+    record: &ObjectReconcileCandidateRecord,
 ) -> Result<ObjectReconcilePreviewRowPayload, BlobError> {
-    let current_plan = load_object_protection_plan(state, &record.bucket, &record.key)?;
-    let logical = load_logical_object_record(state, &record.bucket, &record.key)?;
+    let has_home_placement = record.placement.is_some();
+    let current_plan = record.protection_plan.as_ref();
+    let logical = record.logical.as_ref();
+
+    if record.placement.is_none() {
+        let current_sync_targets = current_plan
+            .map(|plan| {
+                plan.sync_targets
+                    .iter()
+                    .map(|provider| provider.as_str().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let note = if logical.is_some() && current_plan.is_some() {
+            "当前对象缺少 home placement，但仍残留 logical object 与 protection plan 元数据；可以执行 metadata cleanup 清掉 orphan 记录。"
+        } else if logical.is_some() {
+            "当前对象缺少 home placement，但仍残留 logical object 元数据；可以执行 metadata cleanup 清掉 orphan 记录。"
+        } else {
+            "当前对象缺少 home placement，但仍残留 protection plan 元数据；可以执行 metadata cleanup 清掉 orphan 记录。"
+        };
+        return Ok(ObjectReconcilePreviewRowPayload {
+            bucket: record.bucket.clone(),
+            key: record.key.clone(),
+            home_provider: "metadata-orphan".to_string(),
+            home_label: "Orphan metadata".to_string(),
+            has_home_placement,
+            desired_home_provider: "metadata-cleanup".to_string(),
+            desired_home_label: "Metadata cleanup".to_string(),
+            application_id: logical.and_then(|value| value.application_id.clone()),
+            logical_content_type: logical.and_then(|value| value.logical_content_type.clone()),
+            encrypted: logical.is_some_and(|value| value.encrypted),
+            desired_encrypted: false,
+            current_encryption_profile_id: logical.and_then(|value| value.encryption_profile_id.clone()),
+            desired_encryption_profile_id: None,
+            current_sync_targets: current_sync_targets.clone(),
+            desired_sync_targets: Vec::new(),
+            add_sync_targets: Vec::new(),
+            remove_sync_targets: current_sync_targets,
+            capacity_required_bytes: None,
+            provider_peak_required_bytes: None,
+            local_spool_required_bytes: None,
+            status: "needs_changes",
+            status_label: "需要清理",
+            note: note.to_string(),
+            next_step: "先点 Dry-run 确认这条 orphan 元数据只会做 metadata cleanup；确认无误后执行，系统会在一个事务里同时删除 placement/logical/protection plan 残留记录。".to_string(),
+        });
+    }
+
+    let placement = record.placement.as_ref().expect("placement checked above");
     let current_sync_targets = current_plan
-        .as_ref()
         .map(|plan| plan.sync_targets.clone())
         .unwrap_or_default();
 
     let desired = desired_reconcile_preview_for_existing_object(
         state,
-        record,
-        current_plan.as_ref(),
-        logical.as_ref(),
+        placement,
+        current_plan,
+        logical,
     )
     .await?;
 
     let next_step = object_reconcile_next_step_note(&desired);
     Ok(ObjectReconcilePreviewRowPayload {
-        bucket: record.bucket.clone(),
-        key: record.key.clone(),
-        home_provider: record.provider.clone(),
-        home_label: provider_display_name(&record.provider),
+        bucket: placement.bucket.clone(),
+        key: placement.key.clone(),
+        home_provider: placement.provider.clone(),
+        home_label: provider_display_name(&placement.provider),
+        has_home_placement,
         desired_home_provider: desired.desired_home_provider.as_str().to_string(),
         desired_home_label: provider_label(desired.desired_home_provider).to_string(),
-        application_id: logical
-            .as_ref()
-            .and_then(|value| value.application_id.clone()),
-        logical_content_type: logical
-            .as_ref()
-            .and_then(|value| value.logical_content_type.clone()),
-        encrypted: logical.as_ref().is_some_and(|value| value.encrypted),
+        application_id: logical.and_then(|value| value.application_id.clone()),
+        logical_content_type: logical.and_then(|value| value.logical_content_type.clone()),
+        encrypted: logical.is_some_and(|value| value.encrypted),
         desired_encrypted: desired.desired_encrypted,
-        current_encryption_profile_id: logical
-            .as_ref()
-            .and_then(|value| value.encryption_profile_id.clone()),
+        current_encryption_profile_id: logical.and_then(|value| value.encryption_profile_id.clone()),
         desired_encryption_profile_id: desired.desired_encryption_profile_id.clone(),
         current_sync_targets: current_sync_targets
             .iter()
@@ -20648,6 +20691,99 @@ fn object_reconcile_next_step_note(desired: &DesiredObjectReconcilePlan) -> Stri
     }
 }
 
+fn object_reconcile_candidate_records(
+    state: &AppState,
+    provider_filter: Option<&str>,
+    bucket_filter: Option<&str>,
+    prefix_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<ObjectReconcileCandidateRecord>, BlobError> {
+    let placements = state
+        .metadata_store
+        .list_object_placements(provider_filter, bucket_filter, prefix_filter, limit)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+    let logical_records = state
+        .metadata_store
+        .all_logical_objects()
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+    let protection_plans = state
+        .metadata_store
+        .all_object_protection_plans()
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+
+    let bucket_matches = |bucket: &str| bucket_filter.is_none_or(|filter| bucket == filter);
+    let prefix_matches = |key: &str| prefix_filter.is_none_or(|prefix| key.starts_with(prefix));
+
+    let mut by_key = BTreeMap::<(String, String), ObjectReconcileCandidateRecord>::new();
+    for placement in placements {
+        if !admin_user_visible_provider_name(&placement.provider) {
+            continue;
+        }
+        let key = (placement.bucket.clone(), placement.key.clone());
+        by_key.insert(
+            key,
+            ObjectReconcileCandidateRecord {
+                bucket: placement.bucket.clone(),
+                key: placement.key.clone(),
+                placement: Some(placement),
+                logical: None,
+                protection_plan: None,
+            },
+        );
+    }
+
+    for logical in logical_records {
+        if !bucket_matches(&logical.bucket) || !prefix_matches(&logical.key) {
+            continue;
+        }
+        let key = (logical.bucket.clone(), logical.key.clone());
+        let entry = by_key.entry(key).or_insert_with(|| ObjectReconcileCandidateRecord {
+            bucket: logical.bucket.clone(),
+            key: logical.key.clone(),
+            placement: None,
+            logical: None,
+            protection_plan: None,
+        });
+        entry.logical = Some(logical);
+    }
+
+    for plan in protection_plans {
+        if !bucket_matches(&plan.bucket) || !prefix_matches(&plan.key) {
+            continue;
+        }
+        let key = (plan.bucket.clone(), plan.key.clone());
+        let entry = by_key.entry(key).or_insert_with(|| ObjectReconcileCandidateRecord {
+            bucket: plan.bucket.clone(),
+            key: plan.key.clone(),
+            placement: None,
+            logical: None,
+            protection_plan: None,
+        });
+        let sync_targets = parse_provider_csv(&plan.sync_targets_csv)?;
+        let fallback_read_order = sanitize_fallback_order_for_sync_targets(
+            &sync_targets,
+            &parse_provider_csv(&plan.fallback_read_order_csv)?,
+        );
+        entry.protection_plan = Some(PersistedObjectProtectionPlan {
+            sync_targets,
+            fallback_read_order,
+            updated_at_unix_ms: plan.updated_at_unix_ms,
+        });
+    }
+
+    Ok(by_key.into_values().take(limit).collect())
+}
+
+fn object_reconcile_candidate_for_key(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<ObjectReconcileCandidateRecord>, BlobError> {
+    Ok(object_reconcile_candidate_records(state, None, Some(bucket), None, 32)?
+        .into_iter()
+        .find(|record| record.bucket == bucket && record.key == key))
+}
+
 fn object_reconcile_record_id(bucket: &str, key: &str) -> String {
     format!("{bucket}/{key}")
 }
@@ -20688,6 +20824,7 @@ async fn execute_object_reconcile_payload(
                 action: "invalid",
                 message: "bucket 和 key 都不能为空".to_string(),
                 preview_status: "invalid",
+                has_home_placement: false,
                 add_sync_targets: Vec::new(),
                 remove_sync_targets: Vec::new(),
                 old_home_provider: String::new(),
@@ -20724,6 +20861,7 @@ async fn execute_object_reconcile_payload(
                     action: "error",
                     message: error.to_string(),
                     preview_status: "failed",
+                    has_home_placement: false,
                     add_sync_targets: Vec::new(),
                     remove_sync_targets: Vec::new(),
                     old_home_provider: String::new(),
@@ -20821,32 +20959,16 @@ async fn dry_run_object_reconcile_row(
     bucket: &str,
     key: &str,
 ) -> Result<ObjectReconcileExecuteEntryPayload, BlobError> {
-    let record = state
-        .metadata_store
-        .object_placement(bucket, key)
-        .map_err(|error| BlobError::Upstream(error.to_string()))?
-        .ok_or_else(|| BlobError::NotFound(format!("没有找到 {bucket}/{key} 的 placement 记录")))?;
-    if !admin_user_visible_provider_name(&record.provider) {
-        return Err(BlobError::Configuration(format!(
-            "{bucket}/{key} 当前归属的是隐藏提供方 {}，不能在这个管理页里执行历史对象收敛",
-            record.provider
-        )));
-    }
-    let current_plan = load_object_protection_plan(state, bucket, key)?;
-    let logical = load_logical_object_record(state, bucket, key)?;
-    let desired = desired_reconcile_preview_for_existing_object(
-        state,
-        &record,
-        current_plan.as_ref(),
-        logical.as_ref(),
-    )
-    .await?;
-    let outcome = match desired.status {
+    let candidate = object_reconcile_candidate_for_key(state, bucket, key)?
+        .ok_or_else(|| BlobError::NotFound(format!("没有找到 {bucket}/{key} 的对象元数据记录")))?;
+    let preview = object_reconcile_preview_row_payload(state, &candidate).await?;
+    let outcome = match preview.status {
         "blocked" | "skipped" => "failed",
         _ => "dry_run",
     };
-    let action = match desired.status {
-        "needs_changes" => "dry_run",
+    let action = match preview.status {
+        "needs_changes" if preview.has_home_placement => "dry_run",
+        "needs_changes" => "metadata_cleanup_dry_run",
         "no_change" => "no_change",
         "blocked" => "blocked",
         "skipped" => "skipped",
@@ -20857,27 +20979,18 @@ async fn dry_run_object_reconcile_row(
         key: key.to_string(),
         outcome,
         action,
-        message: desired.note,
-        preview_status: desired.status,
-        add_sync_targets: desired
-            .add_sync_targets
-            .iter()
-            .map(|provider| provider.as_str().to_string())
-            .collect(),
-        remove_sync_targets: desired
-            .remove_sync_targets
-            .iter()
-            .map(|provider| provider.as_str().to_string())
-            .collect(),
-        old_home_provider: record.provider.clone(),
-        new_home_provider: desired.desired_home_provider.as_str().to_string(),
-        old_encryption_profile_id: logical
-            .as_ref()
-            .and_then(|value| value.encryption_profile_id.clone()),
-        new_encryption_profile_id: desired.desired_encryption_profile_id.clone(),
-        capacity_required_bytes: desired.capacity_required_bytes,
-        provider_peak_required_bytes: desired.provider_peak_required_bytes,
-        local_spool_required_bytes: desired.local_spool_required_bytes,
+        message: preview.note.clone(),
+        preview_status: preview.status,
+        has_home_placement: preview.has_home_placement,
+        add_sync_targets: preview.add_sync_targets,
+        remove_sync_targets: preview.remove_sync_targets,
+        old_home_provider: preview.home_provider,
+        new_home_provider: preview.desired_home_provider,
+        old_encryption_profile_id: preview.current_encryption_profile_id,
+        new_encryption_profile_id: preview.desired_encryption_profile_id,
+        capacity_required_bytes: preview.capacity_required_bytes,
+        provider_peak_required_bytes: preview.provider_peak_required_bytes,
+        local_spool_required_bytes: preview.local_spool_required_bytes,
     })
 }
 
@@ -20886,6 +20999,31 @@ async fn execute_object_reconcile_row(
     bucket: &str,
     key: &str,
 ) -> Result<ObjectReconcileExecuteEntryPayload, BlobError> {
+    let candidate = object_reconcile_candidate_for_key(state, bucket, key)?
+        .ok_or_else(|| BlobError::NotFound(format!("没有找到 {bucket}/{key} 的对象元数据记录")))?;
+    if candidate.placement.is_none() {
+        let preview = object_reconcile_preview_row_payload(state, &candidate).await?;
+        delete_object_metadata_records(state, bucket, key)?;
+        return Ok(ObjectReconcileExecuteEntryPayload {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+            outcome: "success",
+            action: "metadata_cleanup",
+            message: "已删除 orphan object metadata；底层云盘文件未删除。".to_string(),
+            preview_status: preview.status,
+            has_home_placement: false,
+            add_sync_targets: preview.add_sync_targets,
+            remove_sync_targets: preview.remove_sync_targets,
+            old_home_provider: preview.home_provider,
+            new_home_provider: preview.desired_home_provider,
+            old_encryption_profile_id: preview.current_encryption_profile_id,
+            new_encryption_profile_id: preview.desired_encryption_profile_id,
+            capacity_required_bytes: preview.capacity_required_bytes,
+            provider_peak_required_bytes: preview.provider_peak_required_bytes,
+            local_spool_required_bytes: preview.local_spool_required_bytes,
+        });
+    }
+
     let record = state
         .metadata_store
         .object_placement(bucket, key)
@@ -20932,6 +21070,7 @@ async fn execute_object_reconcile_row(
             action: "skipped",
             message: desired.note,
             preview_status: desired.status,
+            has_home_placement: true,
             add_sync_targets,
             remove_sync_targets,
             old_home_provider,
@@ -20951,6 +21090,7 @@ async fn execute_object_reconcile_row(
             action: "blocked",
             message: desired.note,
             preview_status: desired.status,
+            has_home_placement: true,
             add_sync_targets,
             remove_sync_targets,
             old_home_provider,
@@ -20970,6 +21110,7 @@ async fn execute_object_reconcile_row(
             action: "no_change",
             message: "当前历史对象已经符合现行策略，不需要执行收敛。".to_string(),
             preview_status: desired.status,
+            has_home_placement: true,
             add_sync_targets,
             remove_sync_targets,
             old_home_provider,
@@ -21016,6 +21157,7 @@ async fn execute_object_reconcile_row(
             message: "同一云盘同一对象 key 的加密/解密重写还没有两阶段安全实现，当前先阻断。"
                 .to_string(),
             preview_status: desired.status,
+            has_home_placement: true,
             add_sync_targets,
             remove_sync_targets,
             old_home_provider,
@@ -21038,6 +21180,7 @@ async fn execute_object_reconcile_row(
                 provider_label(desired.desired_home_provider)
             ),
             preview_status: desired.status,
+            has_home_placement: true,
             add_sync_targets,
             remove_sync_targets,
             old_home_provider,
@@ -21060,6 +21203,7 @@ async fn execute_object_reconcile_row(
                 provider_label(current_home_provider)
             ),
             preview_status: desired.status,
+            has_home_placement: true,
             add_sync_targets,
             remove_sync_targets,
             old_home_provider,
@@ -21088,6 +21232,7 @@ async fn execute_object_reconcile_row(
             action: "replica_plan_only",
             message: "已更新历史对象保护计划，并排入新增副本 / 删旧副本任务。".to_string(),
             preview_status: desired.status,
+            has_home_placement: true,
             add_sync_targets,
             remove_sync_targets,
             old_home_provider,
@@ -21116,6 +21261,7 @@ async fn execute_object_reconcile_row(
         action: rewrite.action,
         message: rewrite.message,
         preview_status: desired.status,
+        has_home_placement: true,
         add_sync_targets,
         remove_sync_targets,
         old_home_provider,
@@ -21131,6 +21277,15 @@ async fn execute_object_reconcile_row(
 struct ObjectReconcileRewriteOutcome {
     action: &'static str,
     message: String,
+}
+
+#[derive(Debug, Clone)]
+struct ObjectReconcileCandidateRecord {
+    bucket: String,
+    key: String,
+    placement: Option<ObjectPlacementRecord>,
+    logical: Option<LogicalObjectRecord>,
+    protection_plan: Option<PersistedObjectProtectionPlan>,
 }
 
 async fn apply_reconcile_replica_plan_only(
@@ -55226,6 +55381,120 @@ mod tests {
             .expect("replayed protection plan should exist");
         assert_eq!(replayed_plan.sync_targets, vec![ProviderId::Mobile]);
         assert_eq!(replayed_plan.fallback_read_order, vec![ProviderId::Mobile]);
+    }
+
+    #[tokio::test]
+    async fn object_reconcile_preview_includes_orphan_metadata_rows() {
+        let state = test_state();
+        state
+            .metadata_store
+            .upsert_logical_object(&LogicalObjectRecord {
+                bucket: "root".to_string(),
+                key: "orphan/logical.txt".to_string(),
+                etag: None,
+                application_id: Some("cleanup-app".to_string()),
+                encrypted: false,
+                encryption_profile_id: None,
+                algorithm: None,
+                key_id: None,
+                key_source_kind: None,
+                key_source_ref: None,
+                chunk_plaintext_bytes: None,
+                plaintext_size: 16,
+                stored_size: 16,
+                logical_content_type: Some("text/plain".to_string()),
+                updated_at_unix_ms: 100,
+            })
+            .expect("logical metadata should persist");
+        state
+            .metadata_store
+            .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
+                bucket: "root".to_string(),
+                key: "orphan/logical.txt".to_string(),
+                sync_targets_csv: "mobile".to_string(),
+                fallback_read_order_csv: "mobile".to_string(),
+                updated_at_unix_ms: 100,
+            })
+            .expect("plan should persist");
+
+        let payload = object_reconcile_preview_payload(&state, None, Some("root"), Some("orphan/"), 50)
+            .await
+            .expect("preview should load");
+
+        assert_eq!(payload.rows.len(), 1);
+        let row = &payload.rows[0];
+        assert_eq!(row.home_provider, "metadata-orphan");
+        assert!(!row.has_home_placement);
+        assert_eq!(row.status, "needs_changes");
+        assert!(row.note.contains("orphan"));
+        assert_eq!(payload.summary.needs_changes_count, 1);
+    }
+
+    #[tokio::test]
+    async fn object_reconcile_execute_cleans_orphan_metadata_rows() {
+        let state = test_state();
+        state
+            .metadata_store
+            .upsert_logical_object(&LogicalObjectRecord {
+                bucket: "root".to_string(),
+                key: "orphan/cleanup.txt".to_string(),
+                etag: None,
+                application_id: Some("cleanup-app".to_string()),
+                encrypted: false,
+                encryption_profile_id: None,
+                algorithm: None,
+                key_id: None,
+                key_source_kind: None,
+                key_source_ref: None,
+                chunk_plaintext_bytes: None,
+                plaintext_size: 32,
+                stored_size: 32,
+                logical_content_type: Some("text/plain".to_string()),
+                updated_at_unix_ms: 100,
+            })
+            .expect("logical metadata should persist");
+        state
+            .metadata_store
+            .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
+                bucket: "root".to_string(),
+                key: "orphan/cleanup.txt".to_string(),
+                sync_targets_csv: "mobile".to_string(),
+                fallback_read_order_csv: "mobile".to_string(),
+                updated_at_unix_ms: 100,
+            })
+            .expect("plan should persist");
+
+        let payload = execute_object_reconcile_payload(
+            &state,
+            vec![ObjectReconcileExecuteRowInput {
+                bucket: "root".to_string(),
+                key: "orphan/cleanup.txt".to_string(),
+            }],
+            false,
+            ObjectActionAuditFields {
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect("execute payload should return");
+
+        assert_eq!(payload.executed_count, 1);
+        assert_eq!(payload.failed_count, 0);
+        assert_eq!(payload.entries[0].action, "metadata_cleanup");
+        assert!(!payload.entries[0].has_home_placement);
+        assert!(load_logical_object_record(&state, "root", "orphan/cleanup.txt")
+            .expect("logical metadata load should succeed")
+            .is_none());
+        assert!(load_object_protection_plan(&state, "root", "orphan/cleanup.txt")
+            .expect("plan load should succeed")
+            .is_none());
+        assert!(state
+            .metadata_store
+            .object_placement("root", "orphan/cleanup.txt")
+            .expect("placement load should succeed")
+            .is_none());
     }
 
     #[tokio::test]

@@ -84,7 +84,7 @@
 
 - 分别封装联通、电信、移动云盘网页接口访问逻辑
 - 管理 token 来源、请求头拼装、错误归类
-- 联通当前已支持目录遍历、文件下载、上传、对象删除，以及对象级 rename/copy/move，并把 personal/family scope 映射成 `root` / `family` 容器；电信当前已支持 personal 目录遍历、流式下载、受控根目录 multipart 上传、回收站软删除，并可在配置 Family ID + Access Token 后把家庭云映射成只读写删中的读/删 `family` 容器；移动当前已支持 native `file/list`、`file/create`、`file/complete`、`file/getDownloadUrl` 驱动下的对象列举、真实上传与真实下载，且对象动作已覆盖 native `delete/rename/move` 与受能力开关约束的 `copy`；其中上传链路已按上游约束改成“`file/create` 首批最多 100 个 `partInfos`，剩余分片再通过 `file/getUploadUrl` 补齐”，并兼容同名旧对象导致的 `exist=true` / `uploadId=null` 返回，会先删除受控根目录下的同名旧对象并短暂重试 `file/create`；但 `.49` 在 2026-06-05 的 16 GiB 隔离实测仍返回 `04010319 / Insufficient Rights`，因此超大文件能力仍须按最新实测保守表述
+- 联通当前已支持目录遍历、文件下载、上传、对象删除，以及对象级 rename/copy/move，并把 personal/family scope 映射成 `root` / `family` 容器；电信当前已支持 personal 目录遍历、流式下载、受控根目录 multipart 上传、回收站软删除，并可在配置 Family ID + Access Token 后把家庭云映射成只读写删中的读/删 `family` 容器；移动当前已支持 native `file/list`、`file/create`、`file/complete`、`file/getDownloadUrl` 驱动下的对象列举、真实上传与真实下载，且对象动作已覆盖 native `delete/rename/move` 与受能力开关约束的 `copy`；其中上传链路已按上游约束改成“`file/create` 首批最多 100 个 `partInfos`，剩余分片再通过 `file/getUploadUrl` 补齐”，并兼容同名旧对象导致的 `exist=true` / `uploadId=null` 返回，会先删除受控根目录下的同名旧对象并短暂重试 `file/create`；但 `.49` 在 2026-07-02 的隔离 `limit-probe` 仍显示 `8 GiB` 被上游 `04010319` 拒绝，而 `16 GiB` 在当前部署形态下会先撞到本地 `No space left on device`，因此超大文件能力仍须按最新实测保守表述
 - 后续继续扩展写入、分片上传、断点续传
 - provider 正式写路径必须使用程序内稳定实现，不得把“CDP 页面里点击上传”当成最终交付能力本身
 - provider 正式读写路径最终都必须流式化；若上游需要显式内容哈希或预分片，可使用有界 spool，但不能把整对象先收进内存

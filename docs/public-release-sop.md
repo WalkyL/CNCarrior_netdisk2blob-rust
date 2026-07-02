@@ -17,7 +17,7 @@
   GitHub-hosted runner 做实际编译。
 - 只打 tag 或只创建 GitHub Release 页面不算发版完成。
 - 必须确认 `/downloads/latest/*` 已指向本轮新资产，并通过下载 smoke，才算发版完成。
-- provider 能力文案也属于 release 的一部分。没有新的 limit-probe 或隔离实测证据时，不得把中国移动的 `04010319 / Insufficient Rights` 已知限制写成“超大文件已验证通过”。
+- provider 能力文案也属于 release 的一部分。没有新的 limit-probe 或隔离实测证据时，不得把中国移动的已知大文件限制写成“超大文件已验证通过”。
 
 更完整的背景、边界和历史记录见：
 
@@ -61,8 +61,9 @@ scripts/check-release-ready.sh
 
 如果中国移动没有新的大文件放行证据，继续沿用当前已验证结论：
 
-- `.49` 于 2026-06-05 的 16 GiB 隔离实测仍返回 `code=04010319`
-- `message=Insufficient Rights`
+- `.49` 于 2026-07-02 的隔离 `limit-probe` 仍显示 `8 GiB` 被上游以 `code=04010319` 拒绝
+- `.49` 于 2026-07-02 的 `16 GiB` 隔离 probe 在当前部署形态下先撞到本地 `No space left on device`
+- 因此当前仍没有中国移动“超大文件已验证通过”的证据
 
 ## 3. 生成 release 包
 
