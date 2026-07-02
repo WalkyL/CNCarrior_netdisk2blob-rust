@@ -87,7 +87,7 @@
 ## CI-001: 发布和验收门
 
 **优先级:** P1
-**状态:** pending
+**状态:** in-progress
 **目标:** CI 至少覆盖 catalog、Cloudflare public fingerprint、原生打包脚本 smoke。
 **Coding 指导:** 先做不依赖交叉编译工具链的 smoke；Windows/macOS 真机运行作为 release checklist gate。
 **验收方法:** `.52` 本地 release gate 能跑通；macOS `x86_64` 与 `arm64` 社区/实验包由 GitHub Actions self-hosted build-runner workflow 生成，下载后通过 `CCBG_RELEASE_MACOS_ASSET_DIR` 合并回 `.52` release 目录。
@@ -114,17 +114,13 @@
 python3 scripts/check-cloudflare-public-fingerprint.py
 python3 scripts/license-check.py --skip-cargo-metadata
 git diff --check
-
-mkdir -p target/release
-printf '#!/bin/sh\nexit 0\n' > target/release/gatewayd
-chmod +x target/release/gatewayd
-scripts/build-native-package.sh --skip-build --target x86_64-unknown-linux-gnu
+scripts/check-native-package-smoke.sh
 ```
 
 ## Release Gate
 
 - [ ] 首页和 `/install/` 安装入口通过人工浏览器验收
-- [ ] Windows/macOS 包结构包含 `gatewayd` 与 Admin HTML
+- [x] Windows/macOS 包结构 smoke 已进入 `scripts/check-release-ready.sh`
 - [ ] LXC/OpenWrt/container 既有包结构未回归
 - [ ] `.43` release candidate smoke 通过
 - [ ] Windows 真机后台常驻路径通过
