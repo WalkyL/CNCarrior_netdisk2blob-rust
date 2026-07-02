@@ -151,6 +151,23 @@ esac
 
 POWERSHELL_BIN="${POWERSHELL_BIN:-/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
 
+if [ ! -x "${POWERSHELL_BIN}" ] && [ -x "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" ]; then
+  POWERSHELL_BIN="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+fi
+
+to_windows_path() {
+  local path="$1"
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "${path}"
+    return 0
+  fi
+  if command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "${path}"
+    return 0
+  fi
+  return 1
+}
+
 if [ "${platform}" = "windows" ] && command -v zip >/dev/null 2>&1; then
   artifact="${DIST_DIR}/${PACKAGE_NAME}.zip"
   rm -f "${artifact}"
@@ -158,13 +175,17 @@ if [ "${platform}" = "windows" ] && command -v zip >/dev/null 2>&1; then
     cd "${DIST_DIR}"
     zip -qr "${artifact}" "${PACKAGE_NAME}"
   )
-elif [ "${platform}" = "windows" ] && [ -x "${POWERSHELL_BIN}" ] && command -v cygpath >/dev/null 2>&1; then
+elif [ "${platform}" = "windows" ] && [ -x "${POWERSHELL_BIN}" ]; then
   artifact="${DIST_DIR}/${PACKAGE_NAME}.zip"
   rm -f "${artifact}"
-  artifact_win="$(cygpath -w "${artifact}")"
-  package_root_win="$(cygpath -w "${package_root}")"
+  artifact_win="$(to_windows_path "${artifact}")"
+  package_root_win="$(to_windows_path "${package_root}")"
   "${POWERSHELL_BIN}" -NoProfile -ExecutionPolicy Bypass -Command \
     "Compress-Archive -Path '${package_root_win}' -DestinationPath '${artifact_win}' -Force" >/dev/null
+elif [ "${platform}" = "windows" ]; then
+  echo "Windows native package requires zip or a usable PowerShell Compress-Archive path" >&2
+  echo "missing zip and no executable PowerShell path conversion fallback was found" >&2
+  exit 1
 else
   artifact="${DIST_DIR}/${PACKAGE_NAME}.tar.gz"
   tar -C "${DIST_DIR}" -czf "${artifact}" "${PACKAGE_NAME}"
