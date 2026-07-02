@@ -17810,6 +17810,69 @@ fn restore_previous_object_metadata_state(
     Ok(())
 }
 
+fn ensure_previous_object_metadata_state(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    previous_placement: Option<ObjectPlacementRecord>,
+    previous_logical_record: Option<LogicalObjectRecord>,
+    previous_protection_plan: Option<ObjectProtectionPlanRecord>,
+) -> Result<(), BlobError> {
+    restore_previous_object_metadata_state(
+        state,
+        bucket,
+        key,
+        previous_placement.clone(),
+        previous_logical_record.clone(),
+        previous_protection_plan.clone(),
+    )?;
+
+    let restored_placement = state
+        .metadata_store
+        .object_placement(bucket, key)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+    let restored_logical = load_logical_object_record(state, bucket, key)?;
+    let restored_plan = state
+        .metadata_store
+        .object_protection_plan(bucket, key)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+
+    if restored_placement != previous_placement
+        || restored_logical != previous_logical_record
+        || restored_plan != previous_protection_plan
+    {
+        restore_previous_object_metadata_state(
+            state,
+            bucket,
+            key,
+            previous_placement.clone(),
+            previous_logical_record.clone(),
+            previous_protection_plan.clone(),
+        )?;
+
+        let retry_placement = state
+            .metadata_store
+            .object_placement(bucket, key)
+            .map_err(|error| BlobError::Upstream(error.to_string()))?;
+        let retry_logical = load_logical_object_record(state, bucket, key)?;
+        let retry_plan = state
+            .metadata_store
+            .object_protection_plan(bucket, key)
+            .map_err(|error| BlobError::Upstream(error.to_string()))?;
+
+        if retry_placement != previous_placement
+            || retry_logical != previous_logical_record
+            || retry_plan != previous_protection_plan
+        {
+            return Err(BlobError::Upstream(format!(
+                "metadata rollback verification failed for {bucket}/{key}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn provider_has_persisted_objects(
     state: &AppState,
     provider: ProviderId,
@@ -20553,11 +20616,11 @@ async fn object_reconcile_preview_row_payload(
             })
             .unwrap_or_default();
         let note = if logical.is_some() && current_plan.is_some() {
-            "当前对象缺少 home placement，但仍残留 logical object 与 protection plan 元数据；可以执行 metadata cleanup 清掉 orphan 记录。"
+            "当前对象缺少 home placement，但仍残留 logical object 与 protection plan 元数据；这更像 placement 丢失或备份恢复不一致，当前不允许直接 cleanup。"
         } else if logical.is_some() {
-            "当前对象缺少 home placement，但仍残留 logical object 元数据；可以执行 metadata cleanup 清掉 orphan 记录。"
+            "当前对象缺少 home placement，但仍残留 logical object 元数据；这更像 placement 丢失或备份恢复不一致，当前不允许直接 cleanup。"
         } else {
-            "当前对象缺少 home placement，但仍残留 protection plan 元数据；可以执行 metadata cleanup 清掉 orphan 记录。"
+            "当前对象缺少 home placement，但仍残留 protection plan 元数据；这更像 placement 丢失或备份恢复不一致，当前不允许直接 cleanup。"
         };
         return Ok(ObjectReconcilePreviewRowPayload {
             bucket: record.bucket.clone(),
@@ -20565,8 +20628,8 @@ async fn object_reconcile_preview_row_payload(
             home_provider: "metadata-orphan".to_string(),
             home_label: "Orphan metadata".to_string(),
             has_home_placement,
-            desired_home_provider: "metadata-cleanup".to_string(),
-            desired_home_label: "Metadata cleanup".to_string(),
+            desired_home_provider: "metadata-repair-required".to_string(),
+            desired_home_label: "Metadata repair required".to_string(),
             application_id: logical.and_then(|value| value.application_id.clone()),
             logical_content_type: logical.and_then(|value| value.logical_content_type.clone()),
             encrypted: logical.is_some_and(|value| value.encrypted),
@@ -20580,10 +20643,10 @@ async fn object_reconcile_preview_row_payload(
             capacity_required_bytes: None,
             provider_peak_required_bytes: None,
             local_spool_required_bytes: None,
-            status: "needs_changes",
-            status_label: "需要清理",
+            status: "blocked",
+            status_label: "需要修复",
             note: note.to_string(),
-            next_step: "先点 Dry-run 确认这条 orphan 元数据只会做 metadata cleanup；确认无误后执行，系统会在一个事务里同时删除 placement/logical/protection plan 残留记录。".to_string(),
+            next_step: "当前先不要执行 cleanup。需要单独的 repair 路径去核对底层对象是否仍然存在、是否可以重建 placement，再决定是修复还是删除 orphan metadata。".to_string(),
         });
     }
 
@@ -20779,9 +20842,28 @@ fn object_reconcile_candidate_for_key(
     bucket: &str,
     key: &str,
 ) -> Result<Option<ObjectReconcileCandidateRecord>, BlobError> {
-    Ok(object_reconcile_candidate_records(state, None, Some(bucket), None, 32)?
-        .into_iter()
-        .find(|record| record.bucket == bucket && record.key == key))
+    let placement = state
+        .metadata_store
+        .object_placement(bucket, key)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+    if placement
+        .as_ref()
+        .is_some_and(|value| !admin_user_visible_provider_name(&value.provider))
+    {
+        return Ok(None);
+    }
+    let logical = load_logical_object_record(state, bucket, key)?;
+    let protection_plan = load_object_protection_plan(state, bucket, key)?;
+    if placement.is_none() && logical.is_none() && protection_plan.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ObjectReconcileCandidateRecord {
+        bucket: bucket.to_string(),
+        key: key.to_string(),
+        placement,
+        logical,
+        protection_plan,
+    }))
 }
 
 fn object_reconcile_record_id(bucket: &str, key: &str) -> String {
@@ -21003,13 +21085,12 @@ async fn execute_object_reconcile_row(
         .ok_or_else(|| BlobError::NotFound(format!("没有找到 {bucket}/{key} 的对象元数据记录")))?;
     if candidate.placement.is_none() {
         let preview = object_reconcile_preview_row_payload(state, &candidate).await?;
-        delete_object_metadata_records(state, bucket, key)?;
         return Ok(ObjectReconcileExecuteEntryPayload {
             bucket: bucket.to_string(),
             key: key.to_string(),
-            outcome: "success",
-            action: "metadata_cleanup",
-            message: "已删除 orphan object metadata；底层云盘文件未删除。".to_string(),
+            outcome: "failed",
+            action: "blocked_orphan_metadata",
+            message: preview.note.clone(),
             preview_status: preview.status,
             has_home_placement: false,
             add_sync_targets: preview.add_sync_targets,
@@ -21523,7 +21604,7 @@ async fn execute_historical_object_rewrite(
         )
     })();
     if let Err(error) = metadata_result {
-        let rollback_note = match restore_previous_object_metadata_state(
+        let rollback_note = match ensure_previous_object_metadata_state(
             state,
             &record.bucket,
             &record.key,
@@ -21601,7 +21682,7 @@ async fn execute_historical_object_rewrite(
         state
             .replication
             .replace_pending(previous_replication_pending);
-        let rollback_note = match restore_previous_object_metadata_state(
+        let rollback_note = match ensure_previous_object_metadata_state(
             state,
             &record.bucket,
             &record.key,
@@ -55425,13 +55506,13 @@ mod tests {
         let row = &payload.rows[0];
         assert_eq!(row.home_provider, "metadata-orphan");
         assert!(!row.has_home_placement);
-        assert_eq!(row.status, "needs_changes");
-        assert!(row.note.contains("orphan"));
-        assert_eq!(payload.summary.needs_changes_count, 1);
+        assert_eq!(row.status, "blocked");
+        assert!(row.note.contains("缺少 home placement"));
+        assert_eq!(payload.summary.blocked_count, 1);
     }
 
     #[tokio::test]
-    async fn object_reconcile_execute_cleans_orphan_metadata_rows() {
+    async fn object_reconcile_execute_blocks_orphan_metadata_rows() {
         let state = test_state();
         state
             .metadata_store
@@ -55480,16 +55561,16 @@ mod tests {
         .await
         .expect("execute payload should return");
 
-        assert_eq!(payload.executed_count, 1);
-        assert_eq!(payload.failed_count, 0);
-        assert_eq!(payload.entries[0].action, "metadata_cleanup");
+        assert_eq!(payload.executed_count, 0);
+        assert_eq!(payload.failed_count, 1);
+        assert_eq!(payload.entries[0].action, "blocked_orphan_metadata");
         assert!(!payload.entries[0].has_home_placement);
         assert!(load_logical_object_record(&state, "root", "orphan/cleanup.txt")
             .expect("logical metadata load should succeed")
-            .is_none());
+            .is_some());
         assert!(load_object_protection_plan(&state, "root", "orphan/cleanup.txt")
             .expect("plan load should succeed")
-            .is_none());
+            .is_some());
         assert!(state
             .metadata_store
             .object_placement("root", "orphan/cleanup.txt")

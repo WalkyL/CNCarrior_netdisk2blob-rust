@@ -338,6 +338,7 @@ pub struct ObjectReconcilePreviewRowPayload {
     pub key: String,
     pub home_provider: String,
     pub home_label: String,
+    pub has_home_placement: bool,
     pub desired_home_provider: String,
     pub desired_home_label: String,
     pub application_id: Option<String>,
@@ -356,6 +357,7 @@ pub struct ObjectReconcilePreviewRowPayload {
     pub status: String,
     pub status_label: String,
     pub note: String,
+    pub next_step: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -404,6 +406,7 @@ pub struct ObjectReconcileExecuteEntryPayload {
     pub action: String,
     pub message: String,
     pub preview_status: String,
+    pub has_home_placement: bool,
     pub add_sync_targets: Vec<String>,
     pub remove_sync_targets: Vec<String>,
     pub old_home_provider: String,

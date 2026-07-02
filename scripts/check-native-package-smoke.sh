@@ -8,6 +8,11 @@ WORK_DIR="${TMPDIR:-/tmp}/ccbg-native-package-smoke"
 DIST_DIR="${ROOT_DIR}/target/native-packages"
 BACKUP_DIR="${ROOT_DIR}/target/native-package-smoke-backup"
 POWERSHELL_BIN="${POWERSHELL_BIN:-/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
+SMOKE_PACKAGES=(
+  ccbg-windows-x86_64-smoke
+  ccbg-macos-x86_64-smoke
+  ccbg-macos-arm64-smoke
+)
 
 if [ ! -x "${POWERSHELL_BIN}" ] && [ -x "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe" ]; then
   POWERSHELL_BIN="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -119,6 +124,13 @@ cleanup() {
   restore_target_release_dir "x86_64-pc-windows-gnu"
   restore_target_release_dir "x86_64-apple-darwin"
   restore_target_release_dir "aarch64-apple-darwin"
+  for package_name in "${SMOKE_PACKAGES[@]}"; do
+    rm -rf "${DIST_DIR}/${package_name}" \
+           "${DIST_DIR}/${package_name}.zip" \
+           "${DIST_DIR}/${package_name}.zip.sha256" \
+           "${DIST_DIR}/${package_name}.tar.gz" \
+           "${DIST_DIR}/${package_name}.tar.gz.sha256"
+  done
   rm -rf "${WORK_DIR}" "${BACKUP_DIR}"
 }
 trap cleanup EXIT

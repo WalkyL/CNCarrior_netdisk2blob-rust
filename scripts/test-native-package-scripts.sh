@@ -7,6 +7,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK_DIR="${TMPDIR:-/tmp}/ccbg-native-package-script-tests"
 BUILD_SCRIPT="${ROOT_DIR}/scripts/build-native-package.sh"
 SMOKE_SCRIPT="${ROOT_DIR}/scripts/check-native-package-smoke.sh"
+BACKUP_DIR="${ROOT_DIR}/target/native-package-script-tests-backup"
+SCRIPT_SMOKE_PACKAGES=(
+  ccbg-windows-nozip-smoke
+  ccbg-macos-x86_64-script-smoke
+)
 
 require_file() {
   local path="$1"
@@ -16,13 +21,50 @@ require_file() {
   fi
 }
 
+backup_target_release_dir() {
+  local target="$1"
+  local backup_path="${BACKUP_DIR}/${target}"
+  local release_dir="${ROOT_DIR}/target/${target}/release"
+  rm -rf "${backup_path}"
+  mkdir -p "$(dirname "${backup_path}")"
+  if [ -d "${release_dir}" ]; then
+    cp -R "${release_dir}" "${backup_path}"
+  fi
+}
+
+restore_target_release_dir() {
+  local target="$1"
+  local backup_path="${BACKUP_DIR}/${target}"
+  local release_dir="${ROOT_DIR}/target/${target}/release"
+  rm -rf "${release_dir}"
+  if [ -d "${backup_path}" ]; then
+    mkdir -p "$(dirname "${release_dir}")"
+    cp -R "${backup_path}" "${release_dir}"
+  fi
+}
+
 cleanup() {
+  restore_target_release_dir "x86_64-pc-windows-gnu"
+  restore_target_release_dir "x86_64-apple-darwin"
+  restore_target_release_dir "aarch64-unknown-linux-musl"
+  for package_name in "${SCRIPT_SMOKE_PACKAGES[@]}"; do
+    rm -rf "${ROOT_DIR}/target/native-packages/${package_name}" \
+           "${ROOT_DIR}/target/native-packages/${package_name}.zip" \
+           "${ROOT_DIR}/target/native-packages/${package_name}.zip.sha256" \
+           "${ROOT_DIR}/target/native-packages/${package_name}.tar.gz" \
+           "${ROOT_DIR}/target/native-packages/${package_name}.tar.gz.sha256"
+  done
+  rm -rf "${BACKUP_DIR}"
   rm -rf "${WORK_DIR}"
 }
 trap cleanup EXIT
 
 rm -rf "${WORK_DIR}"
 mkdir -p "${WORK_DIR}"
+
+backup_target_release_dir "x86_64-pc-windows-gnu"
+backup_target_release_dir "x86_64-apple-darwin"
+backup_target_release_dir "aarch64-unknown-linux-musl"
 
 expect_fail() {
   local label="$1"
