@@ -27,6 +27,7 @@ run "${PYTHON_BIN}" scripts/check-backup-restore-drill.py \
 run env SMB_SIDECAR_SKIP_UNIT=1 scripts/test-smb-sidecar-host-all.sh
 run scripts/test-native-package-scripts.sh
 run scripts/check-native-package-smoke.sh
+run scripts/test-release-asset-merge-scripts.sh
 run "${PYTHON_BIN}" scripts/s3-smoke.py
 
 if [ "${CCBG_CHECK_NATIVE_PACKAGE_SMOKE:-false}" = "true" ]; then

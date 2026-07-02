@@ -90,6 +90,51 @@ copy_required_artifacts() {
   done
 }
 
+verify_release_artifact_sidecar() {
+  local artifact="$1"
+  local sidecar="$2"
+  local expected actual _rest
+
+  if [ ! -f "${artifact}" ]; then
+    echo "missing required artifact: ${artifact}" >&2
+    exit 1
+  fi
+  if [ ! -f "${sidecar}" ]; then
+    echo "missing required artifact: ${sidecar}" >&2
+    exit 1
+  fi
+
+  read -r expected _rest < "${sidecar}" || true
+  if [ -z "${expected:-}" ]; then
+    echo "invalid checksum sidecar: ${sidecar}" >&2
+    exit 1
+  fi
+
+  actual="$(sha256sum "${artifact}" | awk '{print $1}')"
+  if [ "${expected}" != "${actual}" ]; then
+    echo "checksum mismatch for ${artifact}" >&2
+    echo "expected ${expected} from ${sidecar}" >&2
+    echo "actual   ${actual}" >&2
+    exit 1
+  fi
+}
+
+copy_release_artifact_pair() {
+  local artifact="$1"
+  local sidecar="$2"
+  local copied_artifact copied_sidecar actual
+
+  verify_release_artifact_sidecar "${artifact}" "${sidecar}"
+  copied_artifact="${OUT_DIR}/$(basename "${artifact}")"
+  copied_sidecar="${OUT_DIR}/$(basename "${sidecar}")"
+
+  cp "${artifact}" "${copied_artifact}"
+  cp "${sidecar}" "${copied_sidecar}"
+
+  actual="$(sha256sum "${copied_artifact}" | awk '{print $1}')"
+  printf '%s  %s\n' "${actual}" "$(basename "${copied_artifact}")" > "${copied_sidecar}"
+}
+
 build_gatewayd() {
   local target="$1"
   if [ "${target}" = "${HOST_TRIPLE}" ]; then
@@ -119,14 +164,14 @@ build_gatewayd_and_mcp() {
 
 if [ -n "${CCBG_RELEASE_LXC_ASSET_DIR:-}" ]; then
   echo "copying external Linux LXC assets from ${CCBG_RELEASE_LXC_ASSET_DIR}"
-  copy_required_artifacts \
+  copy_release_artifact_pair \
     "${CCBG_RELEASE_LXC_ASSET_DIR}/ccbg-lxc-package.tar.gz" \
     "${CCBG_RELEASE_LXC_ASSET_DIR}/ccbg-lxc-package.tar.gz.sha256"
 else
   echo "building Linux LXC package on ${RELEASE_HOST_LABEL} for ${LINUX_TARGET}"
   build_lxc_binaries "${LINUX_TARGET}"
   scripts/build-lxc-package.sh --skip-build --target "${LINUX_TARGET}"
-  copy_required_artifacts \
+  copy_release_artifact_pair \
     "${ROOT_DIR}/target/lxc-package/ccbg-lxc-package.tar.gz" \
     "${ROOT_DIR}/target/lxc-package/ccbg-lxc-package.tar.gz.sha256"
 fi
@@ -138,14 +183,18 @@ if [ "${CCBG_RELEASE_BUILD_WINDOWS:-false}" = "true" ]; then
     --skip-build \
     --target "${WINDOWS_TARGET}" \
     --package-name ccbg-windows-x86_64
-  copy_artifacts "${ROOT_DIR}/target/native-packages/ccbg-windows-x86_64.zip"*
+  copy_release_artifact_pair \
+    "${ROOT_DIR}/target/native-packages/ccbg-windows-x86_64.zip" \
+    "${ROOT_DIR}/target/native-packages/ccbg-windows-x86_64.zip.sha256"
 fi
 
 if [ "${CCBG_RELEASE_BUILD_OPENWRT:-false}" = "true" ]; then
   echo "building OpenWrt lite package on ${RELEASE_HOST_LABEL} for ${OPENWRT_TARGET}"
   build_gatewayd_and_mcp "${OPENWRT_TARGET}"
   scripts/build-openwrt-lite-package.sh --skip-build --target "${OPENWRT_TARGET}"
-  copy_artifacts "${ROOT_DIR}/target/openwrt-lite/ccbg-openwrt-lite.tar.gz"*
+  copy_release_artifact_pair \
+    "${ROOT_DIR}/target/openwrt-lite/ccbg-openwrt-lite.tar.gz" \
+    "${ROOT_DIR}/target/openwrt-lite/ccbg-openwrt-lite.tar.gz.sha256"
 fi
 
 if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ] && [ "${CCBG_RELEASE_ALLOW_LOCAL_MACOS_BUILD:-false}" != "true" ]; then
@@ -167,7 +216,9 @@ if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ]; then
     --skip-build \
     --target "${MACOS_X86_TARGET}" \
     --package-name ccbg-macos-x86_64
-  copy_artifacts "${ROOT_DIR}/target/native-packages/ccbg-macos-x86_64.tar.gz"*
+  copy_release_artifact_pair \
+    "${ROOT_DIR}/target/native-packages/ccbg-macos-x86_64.tar.gz" \
+    "${ROOT_DIR}/target/native-packages/ccbg-macos-x86_64.tar.gz.sha256"
 
   echo "building community macOS arm64 package locally for ${MACOS_ARM64_TARGET}"
   build_gatewayd "${MACOS_ARM64_TARGET}"
@@ -175,14 +226,17 @@ if [ "${CCBG_RELEASE_BUILD_MACOS:-false}" = "true" ]; then
     --skip-build \
     --target "${MACOS_ARM64_TARGET}" \
     --package-name ccbg-macos-arm64
-  copy_artifacts "${ROOT_DIR}/target/native-packages/ccbg-macos-arm64.tar.gz"*
+  copy_release_artifact_pair \
+    "${ROOT_DIR}/target/native-packages/ccbg-macos-arm64.tar.gz" \
+    "${ROOT_DIR}/target/native-packages/ccbg-macos-arm64.tar.gz.sha256"
 fi
 
 if [ -n "${CCBG_RELEASE_MACOS_ASSET_DIR:-}" ]; then
   echo "copying external macOS assets from ${CCBG_RELEASE_MACOS_ASSET_DIR}"
-  copy_required_artifacts \
+  copy_release_artifact_pair \
     "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-x86_64.tar.gz" \
-    "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-x86_64.tar.gz.sha256" \
+    "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-x86_64.tar.gz.sha256"
+  copy_release_artifact_pair \
     "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-arm64.tar.gz" \
     "${CCBG_RELEASE_MACOS_ASSET_DIR}/ccbg-macos-arm64.tar.gz.sha256"
 fi

@@ -153,13 +153,21 @@ copy_first_matching_file() {
   local search_dir="$1"
   local pattern="$2"
   local dest_dir="$3"
-  local match
+  local matches match_count match
 
-  match="$(find "${search_dir}" -type f -name "${pattern}" | head -n 1)"
-  if [ -z "${match}" ]; then
+  mapfile -t matches < <(find "${search_dir}" -type f -name "${pattern}" | LC_ALL=C sort)
+  match_count="${#matches[@]}"
+  if [ "${match_count}" -eq 0 ]; then
     echo "missing expected artifact file matching ${pattern} under ${search_dir}" >&2
     exit 1
   fi
+  if [ "${match_count}" -gt 1 ]; then
+    echo "ambiguous artifact file matching ${pattern} under ${search_dir}" >&2
+    printf 'matches:\n' >&2
+    printf '  %s\n' "${matches[@]}" >&2
+    exit 1
+  fi
+  match="${matches[0]}"
   cp "${match}" "${dest_dir}/"
 }
 
