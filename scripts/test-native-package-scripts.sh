@@ -110,7 +110,17 @@ expect_fail \
   "missing release binary:" \
   bash "${BUILD_SCRIPT}" --skip-build --target aarch64-unknown-linux-musl --package-name ccbg-linux-missing-binary-smoke
 
-echo "[4/8] build-native-package still emits a Windows zip under restricted PATH"
+echo "[4/9] build-native-package does not fall back to host binary for a different target"
+mkdir -p "${ROOT_DIR}/target/release"
+printf '#!/bin/sh\nexit 0\n' > "${ROOT_DIR}/target/release/gatewayd"
+chmod +x "${ROOT_DIR}/target/release/gatewayd"
+rm -rf "${ROOT_DIR}/target/x86_64-apple-darwin/release"
+expect_fail \
+  "no-host-fallback" \
+  "missing release binary:" \
+  bash "${BUILD_SCRIPT}" --skip-build --target x86_64-apple-darwin --package-name ccbg-macos-host-fallback-smoke
+
+echo "[5/9] build-native-package still emits a Windows zip under restricted PATH"
 mkdir -p "${ROOT_DIR}/target/x86_64-pc-windows-gnu/release"
 printf 'fake windows gatewayd\n' > "${ROOT_DIR}/target/x86_64-pc-windows-gnu/release/gatewayd.exe"
 chmod +x "${ROOT_DIR}/target/x86_64-pc-windows-gnu/release/gatewayd.exe"
@@ -119,7 +129,7 @@ expect_pass \
   env PATH="/usr/bin:/bin" bash "${BUILD_SCRIPT}" --skip-build --target x86_64-pc-windows-gnu --package-name ccbg-windows-nozip-smoke
 require_file "${ROOT_DIR}/target/native-packages/ccbg-windows-nozip-smoke.zip"
 
-echo "[5/8] build-native-package emits macOS tarball when fake target binary is present"
+echo "[6/9] build-native-package emits macOS tarball when fake target binary is present"
 mkdir -p "${ROOT_DIR}/target/x86_64-apple-darwin/release"
 printf '#!/bin/sh\nexit 0\n' > "${ROOT_DIR}/target/x86_64-apple-darwin/release/gatewayd"
 chmod +x "${ROOT_DIR}/target/x86_64-apple-darwin/release/gatewayd"
@@ -127,17 +137,17 @@ expect_pass \
   "macos-tarball" \
   bash "${BUILD_SCRIPT}" --skip-build --target x86_64-apple-darwin --package-name ccbg-macos-x86_64-script-smoke
 
-echo "[6/8] native package smoke script passes in current host configuration"
+echo "[7/9] native package smoke script passes in current host configuration"
 expect_pass \
   "native-smoke-pass" \
   bash "${SMOKE_SCRIPT}"
 
-echo "[7/8] native package smoke still passes under restricted PATH on this host"
+echo "[8/9] native package smoke still passes under restricted PATH on this host"
 expect_pass \
   "native-smoke-restricted-path" \
   env PATH="/usr/bin:/bin" bash "${SMOKE_SCRIPT}"
 
-echo "[8/8] native package smoke restores pre-existing target release directories"
+echo "[9/9] native package smoke restores pre-existing target release directories"
 release_probe_dir="${ROOT_DIR}/target/x86_64-apple-darwin/release"
 mkdir -p "${release_probe_dir}"
 printf 'sentinel\n' > "${release_probe_dir}/sentinel-before-smoke.txt"

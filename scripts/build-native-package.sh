@@ -90,10 +90,6 @@ if [ "${SKIP_BUILD}" != true ]; then
   "${CARGO_BIN}" build --release --target "${TARGET}" -p gatewayd
 fi
 
-if [ ! -s "${binary}" ] && [ "${SKIP_BUILD}" = true ] && [ -s "${ROOT_DIR}/target/release/${binary_name}" ]; then
-  binary="${ROOT_DIR}/target/release/${binary_name}"
-fi
-
 if [ ! -s "${binary}" ]; then
   echo "missing release binary: ${binary}" >&2
   echo "run without --skip-build or build gatewayd for ${TARGET} first" >&2

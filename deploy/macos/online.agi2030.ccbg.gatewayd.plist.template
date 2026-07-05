@@ -11,19 +11,25 @@
   </array>
   <key>WorkingDirectory</key>
   <string>__DATA_DIR__</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>CCBG_ADMIN_MODE</key>
-    <string>web</string>
-    <key>CCBG_ADMIN_BIND_ADDR</key>
-    <string>0.0.0.0:61081</string>
-    <key>CCBG_ADMIN_ASSET_PATH</key>
-    <string>__INSTALL_DIR__/assets/admin/index.html</string>
-    <key>CCBG_CONFIG_DIR</key>
-    <string>__CONFIG_DIR__</string>
-    <key>CCBG_DATA_DIR</key>
-    <string>__DATA_DIR__</string>
-  </dict>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CCBG_ADMIN_MODE</key>
+        <string>web</string>
+        <key>CCBG_ADMIN_BIND_ADDR</key>
+        <string>0.0.0.0:61081</string>
+        <key>CCBG_ADMIN_ASSET_PATH</key>
+        <string>__INSTALL_DIR__/assets/admin/index.html</string>
+        <key>CCBG_CONFIG_DIR</key>
+        <string>__CONFIG_DIR__</string>
+        <key>CCBG_BROWSER_FLOW_CATALOG_DIR</key>
+        <string>__CONFIG_DIR__/browser-flows</string>
+        <key>CCBG_PROVIDER_BRIDGE_CATALOG_DIR</key>
+        <string>__CONFIG_DIR__/provider-bridges</string>
+        <key>CCBG_PROVIDER_CAPABILITY_CATALOG_DIR</key>
+        <string>__CONFIG_DIR__/provider-capabilities</string>
+        <key>CCBG_DATA_DIR</key>
+        <string>__DATA_DIR__</string>
+    </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

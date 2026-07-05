@@ -74,12 +74,18 @@ check_package_root() {
       require_file "${package_root}/bin/gatewayd.exe"
       require_file "${package_root}/deploy/windows/install.ps1"
       require_file "${package_root}/deploy/windows/uninstall.ps1"
+      grep -F -- 'CCBG_BROWSER_FLOW_CATALOG_DIR' "${package_root}/deploy/windows/install.ps1" >/dev/null
+      grep -F -- 'CCBG_PROVIDER_BRIDGE_CATALOG_DIR' "${package_root}/deploy/windows/install.ps1" >/dev/null
+      grep -F -- 'CCBG_PROVIDER_CAPABILITY_CATALOG_DIR' "${package_root}/deploy/windows/install.ps1" >/dev/null
       ;;
     macos)
       require_file "${package_root}/bin/gatewayd"
       require_file "${package_root}/deploy/macos/install.sh"
       require_file "${package_root}/deploy/macos/uninstall.sh"
       require_file "${package_root}/deploy/macos/online.agi2030.ccbg.gatewayd.plist.template"
+      grep -F -- 'CCBG_BROWSER_FLOW_CATALOG_DIR' "${package_root}/deploy/macos/online.agi2030.ccbg.gatewayd.plist.template" >/dev/null
+      grep -F -- 'CCBG_PROVIDER_BRIDGE_CATALOG_DIR' "${package_root}/deploy/macos/online.agi2030.ccbg.gatewayd.plist.template" >/dev/null
+      grep -F -- 'CCBG_PROVIDER_CAPABILITY_CATALOG_DIR' "${package_root}/deploy/macos/online.agi2030.ccbg.gatewayd.plist.template" >/dev/null
       ;;
     *)
       echo "unsupported platform: ${platform}" >&2
