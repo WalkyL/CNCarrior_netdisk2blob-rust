@@ -3119,28 +3119,14 @@ impl BlobBackend for TelecomBlobAdapter {
                 &request.destination_key,
             )
             .await?;
+        if entry.display_name() != Some(destination_name.as_str()) {
+            return Err(BlobError::NotImplemented(
+                "China Telecom copy_object currently requires keeping the same basename at the destination"
+                    .to_string(),
+            ));
+        }
         self.copy_file_for_scope(source_scope, &entry, &destination_parent_id)
             .await?;
-        if entry.display_name() != Some(destination_name.as_str()) {
-            let source_name = entry.display_name().ok_or_else(|| {
-                BlobError::Upstream(
-                    "China Telecom copy cannot run because source file name is missing".to_string(),
-                )
-            })?;
-            let destination_parent_path = self
-                .provider_object_key(&request.destination_container, &request.destination_key)?
-                .rsplit_once('/')
-                .map(|(parent, _)| parent.to_string());
-            let copied_key = destination_parent_path
-                .as_deref()
-                .map(|parent| join_relative_key(parent, source_name))
-                .unwrap_or_else(|| source_name.to_string());
-            let (copied_entry, _) = self
-                .resolve_provider_file_entry(source_scope, copied_key.as_str())
-                .await?;
-            self.rename_file_for_scope(source_scope, &copied_entry, &destination_name)
-                .await?;
-        }
         Ok(())
     }
 
@@ -3165,28 +3151,14 @@ impl BlobBackend for TelecomBlobAdapter {
                 &request.destination_key,
             )
             .await?;
+        if entry.display_name() != Some(destination_name.as_str()) {
+            return Err(BlobError::NotImplemented(
+                "China Telecom move_object currently requires keeping the same basename at the destination"
+                    .to_string(),
+            ));
+        }
         self.move_file_for_scope(source_scope, &entry, &destination_parent_id)
             .await?;
-        if entry.display_name() != Some(destination_name.as_str()) {
-            let source_name = entry.display_name().ok_or_else(|| {
-                BlobError::Upstream(
-                    "China Telecom move cannot run because source file name is missing".to_string(),
-                )
-            })?;
-            let destination_parent_path = self
-                .provider_object_key(&request.destination_container, &request.destination_key)?
-                .rsplit_once('/')
-                .map(|(parent, _)| parent.to_string());
-            let moved_key = destination_parent_path
-                .as_deref()
-                .map(|parent| join_relative_key(parent, source_name))
-                .unwrap_or_else(|| source_name.to_string());
-            let (moved_entry, _) = self
-                .resolve_provider_file_entry(source_scope, moved_key.as_str())
-                .await?;
-            self.rename_file_for_scope(source_scope, &moved_entry, &destination_name)
-                .await?;
-        }
         Ok(())
     }
 }
@@ -6075,12 +6047,35 @@ AwIDAQAB\n\
             })
             .await
             .expect("personal rename should succeed");
-        adapter
+
+        let copy_rename_error = adapter
             .copy_object(CopyObjectRequest {
                 source_container: TELECOM_ROOT_CONTAINER.to_string(),
                 source_key: "docs/alpha-renamed.txt".to_string(),
                 destination_container: TELECOM_ROOT_CONTAINER.to_string(),
                 destination_key: "media/alpha-copied.txt".to_string(),
+            })
+            .await
+            .expect_err("personal copy+rename should be blocked");
+        assert!(matches!(copy_rename_error, BlobError::NotImplemented(_)));
+
+        let move_rename_error = adapter
+            .move_object(MoveObjectRequest {
+                source_container: TELECOM_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha-renamed.txt".to_string(),
+                destination_container: TELECOM_ROOT_CONTAINER.to_string(),
+                destination_key: "media/alpha-moved.txt".to_string(),
+            })
+            .await
+            .expect_err("personal move+rename should be blocked");
+        assert!(matches!(move_rename_error, BlobError::NotImplemented(_)));
+
+        adapter
+            .copy_object(CopyObjectRequest {
+                source_container: TELECOM_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha-renamed.txt".to_string(),
+                destination_container: TELECOM_ROOT_CONTAINER.to_string(),
+                destination_key: "media/alpha-renamed.txt".to_string(),
             })
             .await
             .expect("personal copy should succeed");
@@ -6089,12 +6084,12 @@ AwIDAQAB\n\
                 source_container: TELECOM_ROOT_CONTAINER.to_string(),
                 source_key: "docs/alpha-renamed.txt".to_string(),
                 destination_container: TELECOM_ROOT_CONTAINER.to_string(),
-                destination_key: "media/alpha-moved.txt".to_string(),
+                destination_key: "media/alpha-renamed.txt".to_string(),
             })
             .await
             .expect("personal move should succeed");
         adapter
-            .delete_object(TELECOM_ROOT_CONTAINER, "media/alpha-moved.txt")
+            .delete_object(TELECOM_ROOT_CONTAINER, "media/alpha-renamed.txt")
             .await
             .expect("personal delete should succeed");
 
@@ -6152,12 +6147,35 @@ AwIDAQAB\n\
             })
             .await
             .expect("family rename should succeed");
-        adapter
+
+        let family_copy_rename_error = adapter
             .copy_object(CopyObjectRequest {
                 source_container: TELECOM_FAMILY_CONTAINER.to_string(),
                 source_key: "family-docs/alpha-renamed.txt".to_string(),
                 destination_container: TELECOM_FAMILY_CONTAINER.to_string(),
                 destination_key: "family-docs/alpha-copy.txt".to_string(),
+            })
+            .await
+            .expect_err("family copy+rename should be blocked");
+        assert!(matches!(family_copy_rename_error, BlobError::NotImplemented(_)));
+
+        let family_move_rename_error = adapter
+            .move_object(MoveObjectRequest {
+                source_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                source_key: "family-docs/alpha-renamed.txt".to_string(),
+                destination_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                destination_key: "family-docs/alpha-moved.txt".to_string(),
+            })
+            .await
+            .expect_err("family move+rename should be blocked");
+        assert!(matches!(family_move_rename_error, BlobError::NotImplemented(_)));
+
+        adapter
+            .copy_object(CopyObjectRequest {
+                source_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                source_key: "family-docs/alpha-renamed.txt".to_string(),
+                destination_container: TELECOM_FAMILY_CONTAINER.to_string(),
+                destination_key: "family-docs/alpha-renamed.txt".to_string(),
             })
             .await
             .expect("family copy should succeed");
@@ -6166,12 +6184,12 @@ AwIDAQAB\n\
                 source_container: TELECOM_FAMILY_CONTAINER.to_string(),
                 source_key: "family-docs/alpha-renamed.txt".to_string(),
                 destination_container: TELECOM_FAMILY_CONTAINER.to_string(),
-                destination_key: "family-docs/alpha-moved.txt".to_string(),
+                destination_key: "family-docs/alpha-renamed.txt".to_string(),
             })
             .await
             .expect("family move should succeed");
         adapter
-            .delete_object(TELECOM_FAMILY_CONTAINER, "family-docs/alpha-moved.txt")
+            .delete_object(TELECOM_FAMILY_CONTAINER, "family-docs/alpha-renamed.txt")
             .await
             .expect("family delete should succeed");
 
@@ -6188,9 +6206,9 @@ AwIDAQAB\n\
         let cross_move = adapter
             .move_object(MoveObjectRequest {
                 source_container: TELECOM_FAMILY_CONTAINER.to_string(),
-                source_key: "family-docs/alpha-moved.txt".to_string(),
+                source_key: "family-docs/alpha-renamed.txt".to_string(),
                 destination_container: TELECOM_ROOT_CONTAINER.to_string(),
-                destination_key: "docs/alpha-moved.txt".to_string(),
+                destination_key: "docs/alpha-renamed.txt".to_string(),
             })
             .await
             .expect_err("cross-scope move should not be implemented");
