@@ -12,6 +12,9 @@
   alone.
 - Missing placement metadata must be treated as a repair condition, not as a signal to fall back
   to the current primary provider.
+- Missing placement metadata must also not become an automatic cleanup path. If `logical_objects`
+  or `object_protection_plans` still exist, the safer default is to block and require a dedicated
+  repair flow that proves whether the backend object is gone or the placement row was lost.
 - Cleanup tooling needs an orphan view for `logical_objects` and `object_protection_plans`; a
   placement-only scan can hide real residue.
 - Replication-delete persistence and WAL replay are recovery mechanisms, not substitutes for an
@@ -52,6 +55,21 @@
 - On mixed Windows environments, full quality gates and final asset merge/upload do not need to use
   the same shell. Use the shell that gives stable test behavior for the gate, and the shell that
   gives correct CLI path semantics for the artifact merge.
+- Native Windows/macOS installs cannot rely on `CCBG_CONFIG_DIR` alone when the working directory is
+  moved to the data dir. They must also point `CCBG_BROWSER_FLOW_CATALOG_DIR`,
+  `CCBG_PROVIDER_BRIDGE_CATALOG_DIR`, and `CCBG_PROVIDER_CAPABILITY_CATALOG_DIR` at the installed
+  config tree, or `gatewayd` can fail startup validation on a clean host.
+- Native package `--skip-build` paths must not silently fall back to `target/release/gatewayd` for a
+  different target triple. If the requested target binary is missing, packaging should fail instead
+  of producing a structurally valid archive with the wrong executable inside.
+- Release merge helpers must validate externally downloaded artifacts against their `.sha256` sidecars
+  before copying them into the final release directory, and should rewrite copied checksum sidecars
+  to reference the local release filenames rather than stale build-host paths.
+- Release asset download helpers must treat duplicate filename matches as an error. Quietly taking
+  the first `find` result is not acceptable for formal release inputs.
+- Package smoke tests for critical release paths must restore any temporary `target/<triple>/release`
+  overrides and clean their own smoke artifacts. Otherwise the test harness itself can contaminate
+  later `--skip-build` release work.
 - When launching long-running sidecar processes under `systemd-run`, prefer `StandardOutput=` /
   `StandardError=` properties over shell redirection. It avoids transient-unit escape warnings and
   keeps runtime logs attached to the unit cleanly.
@@ -80,6 +98,9 @@
 - Cleanup after soak or recovery work must delete both cloud objects and local metadata rows; a
   successful backend delete is not enough if placement, logical object, or protection-plan residue
   remains.
+- China Mobile overwrite writes must not delete the old same-name object before a new upload plan is
+  actually required by the upstream `exist=true && uploadId missing` branch. If `file/create`
+  itself fails, eager deletion turns a recoverable write failure into real data loss.
 
 ## Provider Keepalive
 
