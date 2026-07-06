@@ -15189,43 +15189,200 @@ async fn run_object_action(
                         );
                         error
                     })?;
-                delete_persisted_object_home_provider(&state, &bucket, &key)?;
-                match renamed_logical.as_ref() {
-                    Some(record) => persist_logical_object_record(&state, record)?,
-                    None => delete_logical_object_record(&state, &bucket, &new_key)?,
+                if let Err(error) = delete_persisted_object_home_provider(&state, &bucket, &key) {
+                    let rollback_note = rollback_rename_after_failure_with_note(
+                        &state,
+                        &backend,
+                        &bucket,
+                        &key,
+                        &new_key,
+                        previous_source_placement_record.clone(),
+                        source_logical.clone(),
+                        source_protection_plan_record.clone(),
+                        previous_target_placement_record.clone(),
+                        previous_target_logical.clone(),
+                        previous_target_protection_plan_record.clone(),
+                    )
+                    .await;
+                    Err(BlobError::Upstream(format!(
+                        "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                        bucket, key, new_key
+                    )))?;
                 }
-                delete_logical_object_record(&state, &bucket, &key)?;
+                let destination_logical_result = match renamed_logical.as_ref() {
+                    Some(record) => persist_logical_object_record(&state, record),
+                    None => delete_logical_object_record(&state, &bucket, &new_key),
+                };
+                if let Err(error) = destination_logical_result {
+                    let rollback_note = rollback_rename_after_failure_with_note(
+                        &state,
+                        &backend,
+                        &bucket,
+                        &key,
+                        &new_key,
+                        previous_source_placement_record.clone(),
+                        source_logical.clone(),
+                        source_protection_plan_record.clone(),
+                        previous_target_placement_record.clone(),
+                        previous_target_logical.clone(),
+                        previous_target_protection_plan_record.clone(),
+                    )
+                    .await;
+                    Err(BlobError::Upstream(format!(
+                        "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                        bucket, key, new_key
+                    )))?;
+                }
+                if let Err(error) = delete_logical_object_record(&state, &bucket, &key) {
+                    let rollback_note = rollback_rename_after_failure_with_note(
+                        &state,
+                        &backend,
+                        &bucket,
+                        &key,
+                        &new_key,
+                        previous_source_placement_record.clone(),
+                        source_logical.clone(),
+                        source_protection_plan_record.clone(),
+                        previous_target_placement_record.clone(),
+                        previous_target_logical.clone(),
+                        previous_target_protection_plan_record.clone(),
+                    )
+                    .await;
+                    Err(BlobError::Upstream(format!(
+                        "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                        bucket, key, new_key
+                    )))?;
+                }
                 if let Some(ref plan) = source_protection_plan {
-                    persist_object_protection_plan(
+                    if let Err(error) = persist_object_protection_plan(
                         &state,
                         &bucket,
                         &new_key,
                         &plan.sync_targets,
                         &plan.fallback_read_order,
                         current_unix_ms(),
-                    )?;
-                } else {
-                    delete_object_protection_plan(&state, &bucket, &new_key)?;
-                }
-                delete_object_protection_plan(&state, &bucket, &key)?;
-                replication_jobs.extend(
-                    enqueue_replication_put_for_object(
+                    ) {
+                        let rollback_note = rollback_rename_after_failure_with_note(
+                            &state,
+                            &backend,
+                            &bucket,
+                            &key,
+                            &new_key,
+                            previous_source_placement_record.clone(),
+                            source_logical.clone(),
+                            source_protection_plan_record.clone(),
+                            previous_target_placement_record.clone(),
+                            previous_target_logical.clone(),
+                            previous_target_protection_plan_record.clone(),
+                        )
+                        .await;
+                        Err(BlobError::Upstream(format!(
+                            "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                            bucket, key, new_key
+                        )))?;
+                    }
+                } else if let Err(error) = delete_object_protection_plan(&state, &bucket, &new_key) {
+                    let rollback_note = rollback_rename_after_failure_with_note(
                         &state,
-                        home_provider,
+                        &backend,
                         &bucket,
+                        &key,
                         &new_key,
-                        &source_object,
-                        source_protection_plan.as_ref(),
+                        previous_source_placement_record.clone(),
+                        source_logical.clone(),
+                        source_protection_plan_record.clone(),
+                        previous_target_placement_record.clone(),
+                        previous_target_logical.clone(),
+                        previous_target_protection_plan_record.clone(),
                     )
-                    .await?,
-                );
-                replication_jobs.extend(enqueue_replication_delete_for_object(
+                    .await;
+                    Err(BlobError::Upstream(format!(
+                        "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                        bucket, key, new_key
+                    )))?;
+                }
+                if let Err(error) = delete_object_protection_plan(&state, &bucket, &key) {
+                    let rollback_note = rollback_rename_after_failure_with_note(
+                        &state,
+                        &backend,
+                        &bucket,
+                        &key,
+                        &new_key,
+                        previous_source_placement_record.clone(),
+                        source_logical.clone(),
+                        source_protection_plan_record.clone(),
+                        previous_target_placement_record.clone(),
+                        previous_target_logical.clone(),
+                        previous_target_protection_plan_record.clone(),
+                    )
+                    .await;
+                    Err(BlobError::Upstream(format!(
+                        "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                        bucket, key, new_key
+                    )))?;
+                }
+                let put_jobs = enqueue_replication_put_for_object(
+                    &state,
+                    home_provider,
+                    &bucket,
+                    &new_key,
+                    &source_object,
+                    source_protection_plan.as_ref(),
+                )
+                .await;
+                let put_jobs = match put_jobs {
+                    Ok(jobs) => jobs,
+                    Err(error) => {
+                        let rollback_note = rollback_rename_after_failure_with_note(
+                            &state,
+                            &backend,
+                            &bucket,
+                            &key,
+                            &new_key,
+                            previous_source_placement_record.clone(),
+                            source_logical.clone(),
+                            source_protection_plan_record.clone(),
+                            previous_target_placement_record.clone(),
+                            previous_target_logical.clone(),
+                            previous_target_protection_plan_record.clone(),
+                        )
+                        .await;
+                        Err(BlobError::Upstream(format!(
+                            "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                            bucket, key, new_key
+                        )))?
+                    }
+                };
+                replication_jobs.extend(put_jobs);
+                let delete_jobs = enqueue_replication_delete_for_object(
                     &state,
                     home_provider,
                     &bucket,
                     &key,
                     source_protection_plan.as_ref(),
-                )?);
+                );
+                if let Err(error) = delete_jobs {
+                    let rollback_note = rollback_rename_after_failure_with_note(
+                        &state,
+                        &backend,
+                        &bucket,
+                        &key,
+                        &new_key,
+                        previous_source_placement_record.clone(),
+                        source_logical.clone(),
+                        source_protection_plan_record.clone(),
+                        previous_target_placement_record.clone(),
+                        previous_target_logical.clone(),
+                        previous_target_protection_plan_record.clone(),
+                    )
+                    .await;
+                    Err(BlobError::Upstream(format!(
+                        "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                        bucket, key, new_key
+                    )))?;
+                } else if let Ok(jobs) = delete_jobs {
+                    replication_jobs.extend(jobs);
+                }
                 mark_gateway_write_ahead_log_committed_or_warn(
                     &state,
                     destination_gateway_write_ahead_log.as_ref(),
@@ -19637,6 +19794,26 @@ async fn enqueue_replication_put_for_object(
     object: &blob_core::ObjectInfo,
     protection_plan: Option<&PersistedObjectProtectionPlan>,
 ) -> Result<Vec<ReplicationJob>, BlobError> {
+    #[cfg(test)]
+    {
+        if let Some(gate) = ADMIN_OBJECT_ACTION_REPLICATION_PLAN_FAILURES_REMAINING.get() {
+            let mut gate = gate
+                .lock()
+                .expect("admin object-action replication plan failure gate lock should not be poisoned");
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
+                return Err(BlobError::Upstream(
+                    "injected admin object-action replication plan failure".to_string(),
+                ));
+            }
+        }
+    }
     let effective_topology = match protection_plan {
         Some(plan) => topology_policy_from_persisted_protection_plan(state, plan),
         None => {
@@ -30984,6 +31161,57 @@ async fn rollback_copy_destination_after_failure_with_note(
     }
 }
 
+async fn rollback_rename_after_failure_with_note(
+    state: &AppState,
+    backend: &DynBackend,
+    bucket: &str,
+    source_key: &str,
+    destination_key: &str,
+    previous_source_placement_record: Option<ObjectPlacementRecord>,
+    previous_source_logical: Option<LogicalObjectRecord>,
+    previous_source_protection_plan: Option<ObjectProtectionPlanRecord>,
+    previous_target_placement_record: Option<ObjectPlacementRecord>,
+    previous_target_logical: Option<LogicalObjectRecord>,
+    previous_target_protection_plan: Option<ObjectProtectionPlanRecord>,
+) -> String {
+    let remote_note = match backend
+        .rename_object(RenameObjectRequest {
+            container: bucket.to_string(),
+            key: destination_key.to_string(),
+            new_key: source_key.to_string(),
+        })
+        .await
+    {
+        Ok(()) => "remote rename rollback succeeded".to_string(),
+        Err(error) => format!("remote rename rollback failed: {error}"),
+    };
+
+    let source_note = match ensure_previous_object_metadata_state(
+        state,
+        bucket,
+        source_key,
+        previous_source_placement_record,
+        previous_source_logical,
+        previous_source_protection_plan,
+    ) {
+        Ok(()) => "source metadata rollback succeeded".to_string(),
+        Err(error) => format!("source metadata rollback failed: {error}"),
+    };
+    let target_note = match ensure_previous_object_metadata_state(
+        state,
+        bucket,
+        destination_key,
+        previous_target_placement_record,
+        previous_target_logical,
+        previous_target_protection_plan,
+    ) {
+        Ok(()) => "destination metadata rollback succeeded".to_string(),
+        Err(error) => format!("destination metadata rollback failed: {error}"),
+    };
+
+    format!("{remote_note}; {source_note}; {target_note}")
+}
+
 fn restore_copy_destination_metadata(
     state: &AppState,
     bucket: &str,
@@ -32332,6 +32560,10 @@ static COPY_OBJECT_REPLICATION_PLAN_FAILURES_REMAINING: std::sync::OnceLock<
 static COPY_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<
     Mutex<HashMap<String, u32>>,
 > = std::sync::OnceLock::new();
+#[cfg(test)]
+static ADMIN_OBJECT_ACTION_REPLICATION_PLAN_FAILURES_REMAINING: std::sync::OnceLock<
+    Mutex<HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 fn set_test_multipart_part_upsert_failures(upload_id: &str, remaining: u32) {
@@ -32373,6 +32605,25 @@ fn set_test_copy_object_replication_enqueue_failures(bucket: &str, key: &str, re
     let mut gate = gate
         .lock()
         .expect("copy-object replication enqueue failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
+}
+
+#[cfg(test)]
+fn set_test_admin_object_action_replication_plan_failures(
+    bucket: &str,
+    key: &str,
+    remaining: u32,
+) {
+    let gate = ADMIN_OBJECT_ACTION_REPLICATION_PLAN_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
+        .lock()
+        .expect("admin object-action replication plan failure gate lock should not be poisoned");
     let scope = copy_object_failure_scope_key(bucket, key);
     if remaining == 0 {
         gate.remove(scope.as_str());
@@ -42159,6 +42410,95 @@ mod tests {
         let home_provider = persisted_or_primary_home_provider(&state, &bucket, &source_key)
             .expect("source home provider should resolve");
         let backend = backend_for_provider(&state, home_provider).expect("backend should resolve");
+        let destination_lookup = backend.get_object(&bucket, &destination_key).await;
+        assert!(matches!(destination_lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn object_actions_rename_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let source_key = "notes/admin-rename-source.txt".to_string();
+        let destination_key = "notes/admin-rename-destination.txt".to_string();
+
+        let source_uri: Uri = format!("/{bucket}/{source_key}")
+            .parse()
+            .expect("source uri should parse");
+        let source_body = Bytes::from_static(b"admin rename source");
+        let source_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &source_uri,
+            &source_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), source_key.clone())),
+            Method::PUT,
+            OriginalUri(source_uri),
+            source_headers,
+            source_body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        persist_object_protection_plan(
+            &state,
+            &bucket,
+            &source_key,
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            current_unix_ms(),
+        )
+        .expect("source protection plan should persist");
+
+        set_test_admin_object_action_replication_plan_failures(&bucket, &destination_key, 1);
+        let error = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Rename {
+                bucket: bucket.clone(),
+                key: source_key.clone(),
+                new_key: destination_key.clone(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect_err("admin rename should fail when replication plan enqueue fails");
+        set_test_admin_object_action_replication_plan_failures(&bucket, &destination_key, 0);
+
+        let message = error.0.to_string();
+        assert!(message.contains("rename remote side effect may have occurred"));
+        assert!(message.contains("remote rename rollback succeeded"));
+        assert!(message.contains("source metadata rollback succeeded"));
+        assert!(message.contains("destination metadata rollback succeeded"));
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &source_key)
+            .expect("source placement should load")
+            .expect("source placement should exist");
+        assert_eq!(placement.provider, "stub");
+        assert!(state
+            .metadata_store
+            .object_placement(&bucket, &destination_key)
+            .expect("destination placement should load")
+            .is_none());
+        assert!(load_logical_object_record(&state, &bucket, &destination_key)
+            .expect("destination logical metadata should load")
+            .is_none());
+        assert!(load_object_protection_plan(&state, &bucket, &destination_key)
+            .expect("destination protection metadata should load")
+            .is_none());
+
+        let home_provider = persisted_or_primary_home_provider(&state, &bucket, &source_key)
+            .expect("source home provider should resolve");
+        let backend = backend_for_provider(&state, home_provider).expect("backend should resolve");
+        assert!(backend.get_object(&bucket, &source_key).await.is_ok());
         let destination_lookup = backend.get_object(&bucket, &destination_key).await;
         assert!(matches!(destination_lookup, Err(BlobError::NotFound(_))));
     }
