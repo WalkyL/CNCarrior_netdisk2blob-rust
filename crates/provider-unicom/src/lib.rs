@@ -2141,8 +2141,14 @@ impl BlobBackend for UnicomBlobAdapter {
             .await?;
         let provider_destination_key =
             self.provider_object_key(&request.destination_container, &request.destination_key)?;
-        let (target_parent_path, _, _) =
+        let (target_parent_path, target_name, _) =
             Self::upload_file_name_and_parent(&provider_destination_key)?;
+        if entry.display_name() != Some(target_name.as_str()) {
+            return Err(BlobError::NotImplemented(
+                "Unicom copy_object currently requires keeping the same basename at the destination"
+                    .to_string(),
+            ));
+        }
         let target_directory_id = match target_parent_path.as_deref() {
             Some(path) => {
                 self.ensure_directory_path_for_scope(&destination_scope, path)
@@ -5085,7 +5091,7 @@ mod tests {
                 source_container: UNICOM_ROOT_CONTAINER.to_string(),
                 source_key: "docs/alpha.txt".to_string(),
                 destination_container: UNICOM_ROOT_CONTAINER.to_string(),
-                destination_key: "media/copied-alpha.txt".to_string(),
+                destination_key: "media/alpha.txt".to_string(),
             })
             .await
             .expect("copy should succeed");
@@ -5103,6 +5109,31 @@ mod tests {
             copy_request["fileList"],
             Value::Array(vec![json!("file-alpha")])
         );
+    }
+
+    #[tokio::test]
+    async fn copy_object_rejects_destination_rename() {
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        let error = adapter
+            .copy_object(CopyObjectRequest {
+                source_container: UNICOM_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: UNICOM_ROOT_CONTAINER.to_string(),
+                destination_key: "media/copied-alpha.txt".to_string(),
+            })
+            .await
+            .expect_err("copy rename should be blocked");
+
+        assert!(error
+            .to_string()
+            .contains("keeping the same basename at the destination"));
+        let requests = server.requests();
+        assert!(requests
+            .iter()
+            .all(|request| request["__operation"] != COPY_FILE_OPERATION));
     }
 
     #[tokio::test]
