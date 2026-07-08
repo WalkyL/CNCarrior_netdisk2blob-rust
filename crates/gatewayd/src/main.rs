@@ -31154,17 +31154,21 @@ async fn execute_copy_object(
         None => delete_logical_object_record(state, &destination_bucket, &destination_key),
     };
     if let Err(error) = logical_result {
-        restore_copy_destination_metadata(
+        let rollback_note = rollback_copy_destination_after_failure_with_note(
             state,
             &destination_bucket,
             &destination_key,
+            &backend,
             previous_target_placement,
             previous_target_logical.clone(),
             previous_target_protection_plan.clone(),
-        );
-        return Err(map_backend_error_to_s3(BlobError::Upstream(
-            error.to_string(),
-        )));
+            destination_existed_before_copy,
+        )
+        .await;
+        return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+            "copy remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            destination_bucket, destination_key
+        ))));
     }
     if let Some(ref plan) = source_protection_plan {
         if let Err(error) = persist_object_protection_plan(
@@ -31175,29 +31179,41 @@ async fn execute_copy_object(
             &plan.fallback_read_order,
             current_unix_ms(),
         ) {
-            restore_copy_destination_metadata(
+            let rollback_note = rollback_copy_destination_after_failure_with_note(
                 state,
                 &destination_bucket,
                 &destination_key,
+                &backend,
                 previous_target_placement,
                 previous_target_logical.clone(),
                 previous_target_protection_plan.clone(),
-            );
-            return Err(map_backend_error_to_s3(error));
+                destination_existed_before_copy,
+            )
+            .await;
+            return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+                "copy remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+                destination_bucket, destination_key
+            ))));
         }
     } else {
         if let Err(error) =
             delete_object_protection_plan(state, &destination_bucket, &destination_key)
         {
-            restore_copy_destination_metadata(
+            let rollback_note = rollback_copy_destination_after_failure_with_note(
                 state,
                 &destination_bucket,
                 &destination_key,
+                &backend,
                 previous_target_placement,
                 previous_target_logical.clone(),
                 previous_target_protection_plan.clone(),
-            );
-            return Err(map_backend_error_to_s3(error));
+                destination_existed_before_copy,
+            )
+            .await;
+            return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+                "copy remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+                destination_bucket, destination_key
+            ))));
         }
     }
     let jobs = match enqueue_copy_object_replication_plan(
@@ -31212,37 +31228,41 @@ async fn execute_copy_object(
     {
         Ok(jobs) => jobs,
         Err(error) => {
-            rollback_copy_destination_after_failure(
+            let rollback_note = rollback_copy_destination_after_failure_with_note(
                 state,
-                &backend,
                 &destination_bucket,
                 &destination_key,
-                destination_existed_before_copy,
+                &backend,
                 previous_target_placement,
                 previous_target_logical.clone(),
                 previous_target_protection_plan.clone(),
+                destination_existed_before_copy,
             )
             .await;
-            return Err(map_backend_error_to_s3(error));
+            return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+                "copy remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+                destination_bucket, destination_key
+            ))));
         }
     };
     if let Err(error) =
         enqueue_copy_object_replication_jobs(state, &destination_bucket, &destination_key, &jobs)
     {
-        rollback_copy_destination_after_failure(
+        let rollback_note = rollback_copy_destination_after_failure_with_note(
             state,
-            &backend,
             &destination_bucket,
             &destination_key,
-            destination_existed_before_copy,
+            &backend,
             previous_target_placement,
             previous_target_logical.clone(),
             previous_target_protection_plan.clone(),
+            destination_existed_before_copy,
         )
         .await;
-        return Err(map_backend_error_to_s3(BlobError::Upstream(
-            error.to_string(),
-        )));
+            return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+                "copy remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+                destination_bucket, destination_key
+            ))));
     }
     if !jobs.is_empty() {
         info!(
