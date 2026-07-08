@@ -15007,7 +15007,6 @@ async fn run_object_action(
     let warnings = object_action_warnings(&input_for_history, default_provider);
     let refs = object_action_targets(&input_for_history);
     let before_snapshots = capture_object_action_snapshots(&state, &refs).await;
-    let mut replication_jobs = Vec::new();
     let audit = object_action_audit_fields(&input_for_history);
     let action_result: Result<(), BlobError> = match input {
         ObjectActionInput::Delete { bucket, key, .. } => {
@@ -15049,14 +15048,60 @@ async fn run_object_action(
                 Err(error) if should_treat_delete_not_found_as_success(&error) => {}
                 Err(error) => return Err(error.into()),
             }
-            delete_object_metadata_records(&state, &bucket, &key)?;
-            replication_jobs.extend(enqueue_replication_delete_for_object(
+            if let Err(error) = delete_object_metadata_records(&state, &bucket, &key) {
+                let rollback_note = rollback_delete_after_failure_with_note(
+                    &state,
+                    &bucket,
+                    &key,
+                    previous_placement_record.clone(),
+                    previous_logical_record.clone(),
+                    previous_protection_plan_record.clone(),
+                );
+                return Err(ApiError(BlobError::Upstream(format!(
+                    "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+                    bucket, key
+                ))));
+            }
+            match enqueue_replication_delete_for_object(
                 &state,
                 home_provider,
                 &bucket,
                 &key,
                 protection_plan.as_ref(),
-            )?);
+            ) {
+                Ok(jobs) => {
+                    enqueue_admin_object_action_replication_jobs(&state, &bucket, &key, &jobs)
+                        .map_err(|error| {
+                            ApiError(BlobError::Upstream(format!(
+                                "delete remote side effect may have occurred for {}/{}: {error}; {}",
+                                bucket,
+                                key,
+                                rollback_delete_after_failure_with_note(
+                                    &state,
+                                    &bucket,
+                                    &key,
+                                    previous_placement_record.clone(),
+                                    previous_logical_record.clone(),
+                                    previous_protection_plan_record.clone(),
+                                )
+                            )))
+                        })?;
+                }
+                Err(error) => {
+                    let rollback_note = rollback_delete_after_failure_with_note(
+                        &state,
+                        &bucket,
+                        &key,
+                        previous_placement_record,
+                        previous_logical_record,
+                        previous_protection_plan_record,
+                    );
+                    return Err(ApiError(BlobError::Upstream(format!(
+                        "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+                        bucket, key
+                    ))));
+                }
+            }
             mark_gateway_write_ahead_log_committed_or_warn(
                 &state,
                 gateway_write_ahead_log.as_ref(),
@@ -15281,7 +15326,8 @@ async fn run_object_action(
                             bucket, key, new_key
                         )))?;
                     }
-                } else if let Err(error) = delete_object_protection_plan(&state, &bucket, &new_key) {
+                } else if let Err(error) = delete_object_protection_plan(&state, &bucket, &new_key)
+                {
                     let rollback_note = rollback_rename_after_failure_with_note(
                         &state,
                         &backend,
@@ -15353,7 +15399,7 @@ async fn run_object_action(
                         )))?
                     }
                 };
-                replication_jobs.extend(put_jobs);
+                let mut replication_jobs = put_jobs;
                 let delete_jobs = enqueue_replication_delete_for_object(
                     &state,
                     home_provider,
@@ -15382,6 +15428,31 @@ async fn run_object_action(
                     )))?;
                 } else if let Ok(jobs) = delete_jobs {
                     replication_jobs.extend(jobs);
+                }
+                if let Err(error) = enqueue_admin_object_action_replication_jobs(
+                    &state,
+                    &bucket,
+                    &new_key,
+                    &replication_jobs,
+                ) {
+                    let rollback_note = rollback_rename_after_failure_with_note(
+                        &state,
+                        &backend,
+                        &bucket,
+                        &key,
+                        &new_key,
+                        previous_source_placement_record.clone(),
+                        source_logical.clone(),
+                        source_protection_plan_record.clone(),
+                        previous_target_placement_record.clone(),
+                        previous_target_logical.clone(),
+                        previous_target_protection_plan_record.clone(),
+                    )
+                    .await;
+                    Err(BlobError::Upstream(format!(
+                        "rename remote side effect may have occurred for {}/{} -> {}: {error}; {rollback_note}",
+                        bucket, key, new_key
+                    )))?;
                 }
                 mark_gateway_write_ahead_log_committed_or_warn(
                     &state,
@@ -15423,6 +15494,18 @@ async fn run_object_action(
                 .map_err(|error| BlobError::Upstream(error.to_string()))?;
             let previous_target_placement =
                 placed_home_provider_record(&state, &destination_bucket, &destination_key)?;
+            let destination_existed_before_copy = previous_target_placement.is_some();
+            let mut previous_remote_snapshot = if destination_existed_before_copy {
+                spool_existing_copy_destination_remote_snapshot(
+                    &state,
+                    &backend,
+                    &destination_bucket,
+                    &destination_key,
+                )
+                .await?
+            } else {
+                None
+            };
             let previous_target_logical =
                 load_logical_object_record(&state, &destination_bucket, &destination_key)?;
             let previous_target_protection_plan_record = state
@@ -15501,7 +15584,8 @@ async fn run_object_action(
                     previous_target_placement,
                     previous_target_logical.clone(),
                     previous_target_protection_plan.clone(),
-                    previous_target_placement_record.is_some(),
+                    destination_existed_before_copy,
+                    &mut previous_remote_snapshot,
                 )
                 .await;
                 Err(BlobError::Upstream(format!(
@@ -15525,7 +15609,8 @@ async fn run_object_action(
                         previous_target_placement,
                         previous_target_logical.clone(),
                         previous_target_protection_plan.clone(),
-                        previous_target_placement_record.is_some(),
+                        destination_existed_before_copy,
+                        &mut previous_remote_snapshot,
                     )
                     .await;
                     Err(BlobError::Upstream(format!(
@@ -15547,7 +15632,8 @@ async fn run_object_action(
                         previous_target_placement,
                         previous_target_logical.clone(),
                         previous_target_protection_plan.clone(),
-                        previous_target_placement_record.is_some(),
+                        destination_existed_before_copy,
+                        &mut previous_remote_snapshot,
                     )
                     .await;
                     Err(BlobError::Upstream(format!(
@@ -15578,7 +15664,8 @@ async fn run_object_action(
                         previous_target_placement,
                         previous_target_logical.clone(),
                         previous_target_protection_plan.clone(),
-                        previous_target_placement_record.is_some(),
+                        destination_existed_before_copy,
+                        &mut previous_remote_snapshot,
                     )
                     .await;
                     Err(BlobError::Upstream(format!(
@@ -15587,7 +15674,29 @@ async fn run_object_action(
                     )))?
                 }
             };
-            replication_jobs.extend(jobs);
+            if let Err(error) = enqueue_admin_object_action_replication_jobs(
+                &state,
+                &destination_bucket,
+                &destination_key,
+                &jobs,
+            ) {
+                let rollback_note = rollback_copy_destination_after_failure_with_note(
+                    &state,
+                    &destination_bucket,
+                    &destination_key,
+                    &backend,
+                    previous_target_placement,
+                    previous_target_logical.clone(),
+                    previous_target_protection_plan.clone(),
+                    destination_existed_before_copy,
+                    &mut previous_remote_snapshot,
+                )
+                .await;
+                Err(BlobError::Upstream(format!(
+                    "copy remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+                    destination_bucket, destination_key
+                )))?;
+            }
             mark_gateway_write_ahead_log_committed_or_warn(
                 &state,
                 gateway_write_ahead_log.as_ref(),
@@ -15748,7 +15857,9 @@ async fn run_object_action(
                         );
                         error
                     })?;
-                if let Err(error) = delete_persisted_object_home_provider(&state, &source_bucket, &source_key) {
+                if let Err(error) =
+                    delete_persisted_object_home_provider(&state, &source_bucket, &source_key)
+                {
                     let rollback_note = rollback_move_after_failure_with_note(
                         &state,
                         &backend,
@@ -15771,7 +15882,9 @@ async fn run_object_action(
                 }
                 let destination_logical_result = match moved_logical.as_ref() {
                     Some(record) => persist_logical_object_record(&state, record),
-                    None => delete_logical_object_record(&state, &destination_bucket, &destination_key),
+                    None => {
+                        delete_logical_object_record(&state, &destination_bucket, &destination_key)
+                    }
                 };
                 if let Err(error) = destination_logical_result {
                     let rollback_note = rollback_move_after_failure_with_note(
@@ -15794,7 +15907,9 @@ async fn run_object_action(
                         source_bucket, source_key, destination_bucket, destination_key
                     )))?;
                 }
-                if let Err(error) = delete_logical_object_record(&state, &source_bucket, &source_key) {
+                if let Err(error) =
+                    delete_logical_object_record(&state, &source_bucket, &source_key)
+                {
                     let rollback_note = rollback_move_after_failure_with_note(
                         &state,
                         &backend,
@@ -15844,7 +15959,9 @@ async fn run_object_action(
                             source_bucket, source_key, destination_bucket, destination_key
                         )))?;
                     }
-                } else if let Err(error) = delete_object_protection_plan(&state, &destination_bucket, &destination_key) {
+                } else if let Err(error) =
+                    delete_object_protection_plan(&state, &destination_bucket, &destination_key)
+                {
                     let rollback_note = rollback_move_after_failure_with_note(
                         &state,
                         &backend,
@@ -15865,7 +15982,9 @@ async fn run_object_action(
                         source_bucket, source_key, destination_bucket, destination_key
                     )))?;
                 }
-                if let Err(error) = delete_object_protection_plan(&state, &source_bucket, &source_key) {
+                if let Err(error) =
+                    delete_object_protection_plan(&state, &source_bucket, &source_key)
+                {
                     let rollback_note = rollback_move_after_failure_with_note(
                         &state,
                         &backend,
@@ -15919,7 +16038,7 @@ async fn run_object_action(
                         )))?
                     }
                 };
-                replication_jobs.extend(put_jobs);
+                let mut replication_jobs = put_jobs;
                 let delete_jobs = enqueue_replication_delete_for_object(
                     &state,
                     home_provider,
@@ -15949,6 +16068,32 @@ async fn run_object_action(
                     )))?;
                 } else if let Ok(jobs) = delete_jobs {
                     replication_jobs.extend(jobs);
+                }
+                if let Err(error) = enqueue_admin_object_action_replication_jobs(
+                    &state,
+                    &destination_bucket,
+                    &destination_key,
+                    &replication_jobs,
+                ) {
+                    let rollback_note = rollback_move_after_failure_with_note(
+                        &state,
+                        &backend,
+                        &source_bucket,
+                        &source_key,
+                        &destination_bucket,
+                        &destination_key,
+                        previous_source_placement_record.clone(),
+                        source_logical.clone(),
+                        source_protection_plan_record.clone(),
+                        previous_target_placement_record.clone(),
+                        previous_target_logical.clone(),
+                        previous_target_protection_plan_record.clone(),
+                    )
+                    .await;
+                    Err(BlobError::Upstream(format!(
+                        "move remote side effect may have occurred for {}/{} -> {}/{}: {error}; {rollback_note}",
+                        source_bucket, source_key, destination_bucket, destination_key
+                    )))?;
                 }
                 mark_gateway_write_ahead_log_committed_or_warn(
                     &state,
@@ -15997,7 +16142,6 @@ async fn run_object_action(
     );
 
     action_result?;
-    persist_replication_jobs(&state, &replication_jobs, "object action");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -18088,6 +18232,26 @@ fn delete_object_metadata_records(
     bucket: &str,
     key: &str,
 ) -> Result<(), BlobError> {
+    #[cfg(test)]
+    {
+        if let Some(gate) = DELETE_OBJECT_METADATA_FAILURES_REMAINING.get() {
+            let mut gate = gate
+                .lock()
+                .expect("delete-object metadata failure gate lock should not be poisoned");
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
+                return Err(BlobError::Upstream(format!(
+                    "failed to delete object metadata for {bucket}/{key}: injected delete metadata failure"
+                )));
+            }
+        }
+    }
     state
         .metadata_store
         .delete_object_metadata(bucket, key)
@@ -18486,6 +18650,17 @@ struct SpooledRequestBody {
     sha256_hex: String,
     usage: ActiveSpoolLease,
     provider_usage: Option<ActiveProviderSpoolLease>,
+}
+
+struct ExistingCopyDestinationRemoteSnapshot {
+    body: ExistingCopyDestinationRemoteSnapshotBody,
+    size: u64,
+    content_type: Option<String>,
+}
+
+enum ExistingCopyDestinationRemoteSnapshotBody {
+    Bytes(Bytes),
+    Spooled(SpooledRequestBody),
 }
 
 impl SpooledRequestBody {
@@ -19117,6 +19292,69 @@ fn delete_object_protection_plan(
                 "failed to delete object protection plan for {bucket}/{key}: {error}"
             ))
         })
+}
+
+async fn spool_existing_copy_destination_remote_snapshot(
+    state: &AppState,
+    backend: &DynBackend,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<ExistingCopyDestinationRemoteSnapshot>, BlobError> {
+    let payload = match backend.get_object(bucket, key).await {
+        Ok(payload) => payload,
+        Err(BlobError::NotFound(_)) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if payload.info.size <= state.config.max_in_memory_object_bytes as u64 {
+        let body = payload.body.collect().await?;
+        return Ok(Some(ExistingCopyDestinationRemoteSnapshot {
+            body: ExistingCopyDestinationRemoteSnapshotBody::Bytes(body),
+            size: payload.info.size,
+            content_type: payload.info.content_type,
+        }));
+    }
+
+    ensure_object_within_spool_limit(&state.config, payload.info.size)
+        .map_err(|error| BlobError::Upstream(error.message))?;
+
+    let mut file = create_spooled_request_body_file(&state.config)
+        .map_err(|error| BlobError::Upstream(error.message))?;
+    let mut usage = state.spool_usage.start_tracking();
+    let mut stream = payload.body.into_stream();
+    let mut size = 0u64;
+    let mut hasher = Sha256::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        size = size.saturating_add(chunk.len() as u64);
+        ensure_object_within_spool_limit(&state.config, size)
+            .map_err(|error| BlobError::Upstream(error.message))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| BlobError::Upstream(error.to_string()))?;
+        usage.update_tracked_bytes(size);
+        hasher.update(&chunk);
+        state.data_plane_stats.record_bytes_in(chunk.len() as u64);
+    }
+
+    file.flush()
+        .await
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|error| BlobError::Upstream(error.to_string()))?;
+
+    Ok(Some(ExistingCopyDestinationRemoteSnapshot {
+        body: ExistingCopyDestinationRemoteSnapshotBody::Spooled(SpooledRequestBody {
+            file,
+            size,
+            sha256_hex: hex::encode(hasher.finalize()),
+            usage,
+            provider_usage: None,
+        }),
+        size,
+        content_type: payload.info.content_type,
+    }))
 }
 
 fn gateway_write_ahead_log_matches_application(
@@ -19960,9 +20198,9 @@ async fn enqueue_replication_put_for_object(
     #[cfg(test)]
     {
         if let Some(gate) = ADMIN_OBJECT_ACTION_REPLICATION_PLAN_FAILURES_REMAINING.get() {
-            let mut gate = gate
-                .lock()
-                .expect("admin object-action replication plan failure gate lock should not be poisoned");
+            let mut gate = gate.lock().expect(
+                "admin object-action replication plan failure gate lock should not be poisoned",
+            );
             let scope = copy_object_failure_scope_key(bucket, key);
             if let Some(remaining) = gate.get_mut(scope.as_str()) {
                 if *remaining > 0 {
@@ -20063,6 +20301,70 @@ fn enqueue_copy_object_replication_jobs(
                     path: PathBuf::from("injected-copy-object-replication-enqueue-failure"),
                     source: std::io::Error::other(
                         "injected copy-object replication enqueue failure",
+                    ),
+                });
+            }
+        }
+    }
+    state.metadata_store.enqueue_jobs(jobs)
+}
+
+fn enqueue_delete_object_replication_jobs(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    jobs: &[ReplicationJob],
+) -> Result<(), metadata_store::MetadataError> {
+    #[cfg(test)]
+    {
+        if let Some(gate) = DELETE_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING.get() {
+            let mut gate = gate.lock().expect(
+                "delete-object replication enqueue failure gate lock should not be poisoned",
+            );
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
+                return Err(metadata_store::MetadataError::Io {
+                    path: PathBuf::from("injected-delete-object-replication-enqueue-failure"),
+                    source: std::io::Error::other(
+                        "injected delete-object replication enqueue failure",
+                    ),
+                });
+            }
+        }
+    }
+    state.metadata_store.enqueue_jobs(jobs)
+}
+
+fn enqueue_admin_object_action_replication_jobs(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    jobs: &[ReplicationJob],
+) -> Result<(), metadata_store::MetadataError> {
+    #[cfg(test)]
+    {
+        if let Some(gate) = ADMIN_OBJECT_ACTION_REPLICATION_ENQUEUE_FAILURES_REMAINING.get() {
+            let mut gate = gate.lock().expect(
+                "admin object-action replication enqueue failure gate lock should not be poisoned",
+            );
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
+                return Err(metadata_store::MetadataError::Io {
+                    path: PathBuf::from("injected-admin-object-action-replication-enqueue-failure"),
+                    source: std::io::Error::other(
+                        "injected admin object-action replication enqueue failure",
                     ),
                 });
             }
@@ -21035,13 +21337,9 @@ async fn object_reconcile_preview_row_payload(
         .map(|plan| plan.sync_targets.clone())
         .unwrap_or_default();
 
-    let desired = desired_reconcile_preview_for_existing_object(
-        state,
-        placement,
-        current_plan,
-        logical,
-    )
-    .await?;
+    let desired =
+        desired_reconcile_preview_for_existing_object(state, placement, current_plan, logical)
+            .await?;
 
     let next_step = object_reconcile_next_step_note(&desired);
     Ok(ObjectReconcilePreviewRowPayload {
@@ -21056,7 +21354,8 @@ async fn object_reconcile_preview_row_payload(
         logical_content_type: logical.and_then(|value| value.logical_content_type.clone()),
         encrypted: logical.is_some_and(|value| value.encrypted),
         desired_encrypted: desired.desired_encrypted,
-        current_encryption_profile_id: logical.and_then(|value| value.encryption_profile_id.clone()),
+        current_encryption_profile_id: logical
+            .and_then(|value| value.encryption_profile_id.clone()),
         desired_encryption_profile_id: desired.desired_encryption_profile_id.clone(),
         current_sync_targets: current_sync_targets
             .iter()
@@ -21180,13 +21479,15 @@ fn object_reconcile_candidate_records(
             continue;
         }
         let key = (logical.bucket.clone(), logical.key.clone());
-        let entry = by_key.entry(key).or_insert_with(|| ObjectReconcileCandidateRecord {
-            bucket: logical.bucket.clone(),
-            key: logical.key.clone(),
-            placement: None,
-            logical: None,
-            protection_plan: None,
-        });
+        let entry = by_key
+            .entry(key)
+            .or_insert_with(|| ObjectReconcileCandidateRecord {
+                bucket: logical.bucket.clone(),
+                key: logical.key.clone(),
+                placement: None,
+                logical: None,
+                protection_plan: None,
+            });
         entry.logical = Some(logical);
     }
 
@@ -21195,13 +21496,15 @@ fn object_reconcile_candidate_records(
             continue;
         }
         let key = (plan.bucket.clone(), plan.key.clone());
-        let entry = by_key.entry(key).or_insert_with(|| ObjectReconcileCandidateRecord {
-            bucket: plan.bucket.clone(),
-            key: plan.key.clone(),
-            placement: None,
-            logical: None,
-            protection_plan: None,
-        });
+        let entry = by_key
+            .entry(key)
+            .or_insert_with(|| ObjectReconcileCandidateRecord {
+                bucket: plan.bucket.clone(),
+                key: plan.key.clone(),
+                placement: None,
+                logical: None,
+                protection_plan: None,
+            });
         let sync_targets = parse_provider_csv(&plan.sync_targets_csv)?;
         let fallback_read_order = sanitize_fallback_order_for_sync_targets(
             &sync_targets,
@@ -31102,6 +31405,18 @@ async fn execute_copy_object(
         placed_home_provider_record(state, &destination_bucket, &destination_key)
             .map_err(map_backend_error_to_s3)?;
     let destination_existed_before_copy = previous_target_placement.is_some();
+    let mut previous_remote_snapshot = if destination_existed_before_copy {
+        spool_existing_copy_destination_remote_snapshot(
+            state,
+            &backend,
+            &destination_bucket,
+            &destination_key,
+        )
+        .await
+        .map_err(map_backend_error_to_s3)?
+    } else {
+        None
+    };
     let previous_target_logical =
         load_logical_object_record(state, &destination_bucket, &destination_key)
             .map_err(map_backend_error_to_s3)?;
@@ -31163,6 +31478,7 @@ async fn execute_copy_object(
             previous_target_logical.clone(),
             previous_target_protection_plan.clone(),
             destination_existed_before_copy,
+            &mut previous_remote_snapshot,
         )
         .await;
         return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
@@ -31188,6 +31504,7 @@ async fn execute_copy_object(
                 previous_target_logical.clone(),
                 previous_target_protection_plan.clone(),
                 destination_existed_before_copy,
+                &mut previous_remote_snapshot,
             )
             .await;
             return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
@@ -31208,6 +31525,7 @@ async fn execute_copy_object(
                 previous_target_logical.clone(),
                 previous_target_protection_plan.clone(),
                 destination_existed_before_copy,
+                &mut previous_remote_snapshot,
             )
             .await;
             return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
@@ -31237,6 +31555,7 @@ async fn execute_copy_object(
                 previous_target_logical.clone(),
                 previous_target_protection_plan.clone(),
                 destination_existed_before_copy,
+                &mut previous_remote_snapshot,
             )
             .await;
             return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
@@ -31257,12 +31576,13 @@ async fn execute_copy_object(
             previous_target_logical.clone(),
             previous_target_protection_plan.clone(),
             destination_existed_before_copy,
+            &mut previous_remote_snapshot,
         )
         .await;
-            return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
-                "copy remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
-                destination_bucket, destination_key
-            ))));
+        return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+            "copy remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            destination_bucket, destination_key
+        ))));
     }
     if !jobs.is_empty() {
         info!(
@@ -31290,6 +31610,7 @@ async fn rollback_copy_destination_after_failure(
     destination_bucket: &str,
     destination_key: &str,
     destination_existed_before_copy: bool,
+    previous_remote_snapshot: &mut Option<ExistingCopyDestinationRemoteSnapshot>,
     previous_placement: Option<(ProviderId, u64)>,
     previous_logical: Option<LogicalObjectRecord>,
     previous_protection_plan: Option<PersistedObjectProtectionPlan>,
@@ -31303,6 +31624,7 @@ async fn rollback_copy_destination_after_failure(
         previous_logical,
         previous_protection_plan,
         destination_existed_before_copy,
+        previous_remote_snapshot,
     )
     .await;
 }
@@ -31316,6 +31638,7 @@ async fn rollback_copy_destination_after_failure_with_note(
     previous_logical: Option<LogicalObjectRecord>,
     previous_protection_plan: Option<PersistedObjectProtectionPlan>,
     destination_existed_before_copy: bool,
+    previous_remote_snapshot: &mut Option<ExistingCopyDestinationRemoteSnapshot>,
 ) -> String {
     restore_copy_destination_metadata(
         state,
@@ -31326,10 +31649,41 @@ async fn rollback_copy_destination_after_failure_with_note(
         previous_protection_plan,
     );
     if destination_existed_before_copy {
-        return "metadata rollback completed, but the destination existed before copy so the remote object may still reflect the provider-side copy".to_string();
+        let Some(previous_remote_snapshot) = previous_remote_snapshot.take() else {
+            return "metadata rollback completed, but the destination existed before copy and the previous remote bytes were unavailable so the remote object may still reflect the provider-side copy".to_string();
+        };
+        return match backend
+            .put_object(PutObjectRequest {
+                container: destination_bucket.to_string(),
+                key: destination_key.to_string(),
+                body: match previous_remote_snapshot.body {
+                    ExistingCopyDestinationRemoteSnapshotBody::Bytes(body) => {
+                        ObjectBody::from_bytes(body)
+                    }
+                    ExistingCopyDestinationRemoteSnapshotBody::Spooled(body) => {
+                        body.into_object_body(state.config.spooled_body_chunk_bytes)
+                    }
+                },
+                size: Some(previous_remote_snapshot.size),
+                content_type: previous_remote_snapshot.content_type,
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+        {
+            Ok(_) => "metadata rollback succeeded and the previous destination object was restored"
+                .to_string(),
+            Err(error) => format!(
+                "metadata rollback succeeded, but restoring the previous destination object failed: {error}"
+            ),
+        };
     }
-    match backend.delete_object(destination_bucket, destination_key).await {
-        Ok(()) => "metadata rollback succeeded and the new copy destination was deleted".to_string(),
+    match backend
+        .delete_object(destination_bucket, destination_key)
+        .await
+    {
+        Ok(()) => {
+            "metadata rollback succeeded and the new copy destination was deleted".to_string()
+        }
         Err(error) => {
             warn!(
                 bucket = %destination_bucket,
@@ -31342,6 +31696,29 @@ async fn rollback_copy_destination_after_failure_with_note(
             )
         }
     }
+}
+
+fn rollback_delete_after_failure_with_note(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    previous_placement_record: Option<ObjectPlacementRecord>,
+    previous_logical: Option<LogicalObjectRecord>,
+    previous_protection_plan: Option<ObjectProtectionPlanRecord>,
+) -> String {
+    let metadata_note = match ensure_previous_object_metadata_state(
+        state,
+        bucket,
+        key,
+        previous_placement_record,
+        previous_logical,
+        previous_protection_plan,
+    ) {
+        Ok(()) => "metadata rollback succeeded".to_string(),
+        Err(error) => format!("metadata rollback failed: {error}"),
+    };
+
+    format!("remote delete already succeeded; {metadata_note}")
 }
 
 async fn rollback_rename_after_failure_with_note(
@@ -32602,7 +32979,20 @@ async fn delete_object(
         Err(error) => return Err(map_object_error(error, &bucket, &key)),
     }
 
-    delete_object_metadata_records(&state, &bucket, &key).map_err(map_backend_error_to_s3)?;
+    if let Err(error) = delete_object_metadata_records(&state, &bucket, &key) {
+        let rollback_note = rollback_delete_after_failure_with_note(
+            &state,
+            &bucket,
+            &key,
+            previous_placement_record.clone(),
+            previous_logical_record.clone(),
+            previous_protection_plan_record.clone(),
+        );
+        return Err(S3Error::internal_error(format!(
+            "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            bucket, key
+        )));
+    }
 
     let jobs = enqueue_replication_delete_for_object(
         &state,
@@ -32611,15 +33001,34 @@ async fn delete_object(
         &key,
         protection_plan.as_ref(),
     )
-    .map_err(map_backend_error_to_s3)?;
-    if let Err(error) = state.metadata_store.enqueue_jobs(&jobs) {
-        warn!(
-            bucket = %bucket,
-            key = %key,
-            error = %error,
-            "failed to persist replication jobs after delete"
+    .map_err(|error| {
+        let rollback_note = rollback_delete_after_failure_with_note(
+            &state,
+            &bucket,
+            &key,
+            previous_placement_record.clone(),
+            previous_logical_record.clone(),
+            previous_protection_plan_record.clone(),
         );
-    }
+        S3Error::internal_error(format!(
+            "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            bucket, key
+        ))
+    })?;
+    enqueue_delete_object_replication_jobs(&state, &bucket, &key, &jobs).map_err(|error| {
+        let rollback_note = rollback_delete_after_failure_with_note(
+            &state,
+            &bucket,
+            &key,
+            previous_placement_record,
+            previous_logical_record,
+            previous_protection_plan_record,
+        );
+        S3Error::internal_error(format!(
+            "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            bucket, key
+        ))
+    })?;
     if !jobs.is_empty() {
         info!(
             bucket = %bucket,
@@ -32800,6 +33209,17 @@ static COPY_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<
 static ADMIN_OBJECT_ACTION_REPLICATION_PLAN_FAILURES_REMAINING: std::sync::OnceLock<
     Mutex<HashMap<String, u32>>,
 > = std::sync::OnceLock::new();
+#[cfg(test)]
+static ADMIN_OBJECT_ACTION_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<
+    Mutex<HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
+#[cfg(test)]
+static DELETE_OBJECT_METADATA_FAILURES_REMAINING: std::sync::OnceLock<Mutex<HashMap<String, u32>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+static DELETE_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<
+    Mutex<HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 fn set_test_multipart_part_upsert_failures(upload_id: &str, remaining: u32) {
@@ -32850,16 +33270,60 @@ fn set_test_copy_object_replication_enqueue_failures(bucket: &str, key: &str, re
 }
 
 #[cfg(test)]
-fn set_test_admin_object_action_replication_plan_failures(
-    bucket: &str,
-    key: &str,
-    remaining: u32,
-) {
+fn set_test_admin_object_action_replication_plan_failures(bucket: &str, key: &str, remaining: u32) {
     let gate = ADMIN_OBJECT_ACTION_REPLICATION_PLAN_FAILURES_REMAINING
         .get_or_init(|| Mutex::new(HashMap::new()));
     let mut gate = gate
         .lock()
         .expect("admin object-action replication plan failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
+}
+
+#[cfg(test)]
+fn set_test_admin_object_action_replication_enqueue_failures(
+    bucket: &str,
+    key: &str,
+    remaining: u32,
+) {
+    let gate = ADMIN_OBJECT_ACTION_REPLICATION_ENQUEUE_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
+        .lock()
+        .expect("admin object-action replication enqueue failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
+}
+
+#[cfg(test)]
+fn set_test_delete_object_metadata_failures(bucket: &str, key: &str, remaining: u32) {
+    let gate = DELETE_OBJECT_METADATA_FAILURES_REMAINING.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
+        .lock()
+        .expect("delete-object metadata failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
+}
+
+#[cfg(test)]
+fn set_test_delete_object_replication_enqueue_failures(bucket: &str, key: &str, remaining: u32) {
+    let gate = DELETE_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
+        .lock()
+        .expect("delete-object replication enqueue failure gate lock should not be poisoned");
     let scope = copy_object_failure_scope_key(bucket, key);
     if remaining == 0 {
         gate.remove(scope.as_str());
@@ -42629,25 +43093,208 @@ mod tests {
 
         let message = error.0.to_string();
         assert!(message.contains("copy remote side effect may have occurred"));
-        assert!(message.contains("metadata rollback succeeded and the new copy destination was deleted"));
+        assert!(
+            message
+                .contains("metadata rollback succeeded and the new copy destination was deleted")
+        );
 
-        assert!(state
-            .metadata_store
-            .object_placement(&bucket, &destination_key)
-            .expect("placement should load")
-            .is_none());
-        assert!(load_logical_object_record(&state, &bucket, &destination_key)
-            .expect("logical metadata should load")
-            .is_none());
-        assert!(load_object_protection_plan(&state, &bucket, &destination_key)
-            .expect("protection metadata should load")
-            .is_none());
+        assert!(
+            state
+                .metadata_store
+                .object_placement(&bucket, &destination_key)
+                .expect("placement should load")
+                .is_none()
+        );
+        assert!(
+            load_logical_object_record(&state, &bucket, &destination_key)
+                .expect("logical metadata should load")
+                .is_none()
+        );
+        assert!(
+            load_object_protection_plan(&state, &bucket, &destination_key)
+                .expect("protection metadata should load")
+                .is_none()
+        );
 
         let home_provider = persisted_or_primary_home_provider(&state, &bucket, &source_key)
             .expect("source home provider should resolve");
         let backend = backend_for_provider(&state, home_provider).expect("backend should resolve");
         let destination_lookup = backend.get_object(&bucket, &destination_key).await;
         assert!(matches!(destination_lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn object_actions_copy_replication_enqueue_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let source_key = "notes/admin-copy-enqueue-source.txt".to_string();
+        let destination_key = "notes/admin-copy-enqueue-destination.txt".to_string();
+
+        let source_uri: Uri = format!("/{bucket}/{source_key}")
+            .parse()
+            .expect("source uri should parse");
+        let source_body = Bytes::from_static(b"admin copy source");
+        let source_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &source_uri,
+            &source_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), source_key.clone())),
+            Method::PUT,
+            OriginalUri(source_uri),
+            source_headers,
+            source_body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        persist_object_protection_plan(
+            &state,
+            &bucket,
+            &source_key,
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            current_unix_ms(),
+        )
+        .expect("source protection plan should persist");
+
+        set_test_admin_object_action_replication_enqueue_failures(&bucket, &destination_key, 1);
+        let error = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Copy {
+                source_bucket: bucket.clone(),
+                source_key: source_key.clone(),
+                destination_bucket: bucket.clone(),
+                destination_key: destination_key.clone(),
+                mode: ObjectActionMode::GatewayManaged,
+                source_provider: None,
+                destination_provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect_err("admin copy should fail when replication enqueue fails after remote copy");
+        set_test_admin_object_action_replication_enqueue_failures(&bucket, &destination_key, 0);
+
+        let message = error.0.to_string();
+        assert!(message.contains("copy remote side effect may have occurred"));
+        assert!(
+            message
+                .contains("metadata rollback succeeded and the new copy destination was deleted")
+        );
+
+        assert!(
+            state
+                .metadata_store
+                .object_placement(&bucket, &destination_key)
+                .expect("placement should load")
+                .is_none()
+        );
+        assert!(
+            load_logical_object_record(&state, &bucket, &destination_key)
+                .expect("logical metadata should load")
+                .is_none()
+        );
+        assert!(
+            load_object_protection_plan(&state, &bucket, &destination_key)
+                .expect("protection metadata should load")
+                .is_none()
+        );
+
+        let backend =
+            backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        let destination_lookup = backend.get_object(&bucket, &destination_key).await;
+        assert!(matches!(destination_lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn object_actions_copy_failure_restores_existing_destination_remote_object() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let source_key = "notes/admin-copy-existing-source.txt".to_string();
+        let destination_key = "notes/admin-copy-existing-destination.txt".to_string();
+
+        let source_uri: Uri = format!("/{bucket}/{source_key}")
+            .parse()
+            .expect("source uri should parse");
+        let source_body = Bytes::from_static(b"admin copy replacement");
+        let source_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &source_uri,
+            &source_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), source_key.clone())),
+            Method::PUT,
+            OriginalUri(source_uri),
+            source_headers,
+            source_body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        let destination_uri: Uri = format!("/{bucket}/{destination_key}")
+            .parse()
+            .expect("destination uri should parse");
+        let destination_body = Bytes::from_static(b"admin copy existing destination");
+        let destination_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &destination_uri,
+            &destination_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), destination_key.clone())),
+            Method::PUT,
+            OriginalUri(destination_uri),
+            destination_headers,
+            destination_body.into(),
+        )
+        .await
+        .expect("destination seed put should succeed");
+
+        set_test_admin_object_action_replication_plan_failures(&bucket, &destination_key, 1);
+        let _error = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Copy {
+                source_bucket: bucket.clone(),
+                source_key: source_key.clone(),
+                destination_bucket: bucket.clone(),
+                destination_key: destination_key.clone(),
+                mode: ObjectActionMode::GatewayManaged,
+                source_provider: None,
+                destination_provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect_err("admin copy should fail when replication plan enqueue fails");
+        set_test_admin_object_action_replication_plan_failures(&bucket, &destination_key, 0);
+
+        let restored = backend_for_provider(&state, ProviderId::Stub)
+            .expect("backend should resolve")
+            .get_object(&bucket, &destination_key)
+            .await
+            .expect("destination object should be restored");
+        let restored_body = restored
+            .body
+            .collect()
+            .await
+            .expect("restored body should read");
+        assert_eq!(restored_body.as_ref(), b"admin copy existing destination");
     }
 
     #[tokio::test]
@@ -42719,17 +43366,23 @@ mod tests {
             .expect("source placement should load")
             .expect("source placement should exist");
         assert_eq!(placement.provider, "stub");
-        assert!(state
-            .metadata_store
-            .object_placement(&bucket, &destination_key)
-            .expect("destination placement should load")
-            .is_none());
-        assert!(load_logical_object_record(&state, &bucket, &destination_key)
-            .expect("destination logical metadata should load")
-            .is_none());
-        assert!(load_object_protection_plan(&state, &bucket, &destination_key)
-            .expect("destination protection metadata should load")
-            .is_none());
+        assert!(
+            state
+                .metadata_store
+                .object_placement(&bucket, &destination_key)
+                .expect("destination placement should load")
+                .is_none()
+        );
+        assert!(
+            load_logical_object_record(&state, &bucket, &destination_key)
+                .expect("destination logical metadata should load")
+                .is_none()
+        );
+        assert!(
+            load_object_protection_plan(&state, &bucket, &destination_key)
+                .expect("destination protection metadata should load")
+                .is_none()
+        );
 
         let home_provider = persisted_or_primary_home_provider(&state, &bucket, &source_key)
             .expect("source home provider should resolve");
@@ -42819,23 +43472,36 @@ mod tests {
             .expect("source placement should load")
             .expect("source placement should exist");
         assert_eq!(placement.provider, "stub");
-        assert!(state
-            .metadata_store
-            .object_placement(&destination_bucket, &destination_key)
-            .expect("destination placement should load")
-            .is_none());
-        assert!(load_logical_object_record(&state, &destination_bucket, &destination_key)
-            .expect("destination logical metadata should load")
-            .is_none());
-        assert!(load_object_protection_plan(&state, &destination_bucket, &destination_key)
-            .expect("destination protection metadata should load")
-            .is_none());
+        assert!(
+            state
+                .metadata_store
+                .object_placement(&destination_bucket, &destination_key)
+                .expect("destination placement should load")
+                .is_none()
+        );
+        assert!(
+            load_logical_object_record(&state, &destination_bucket, &destination_key)
+                .expect("destination logical metadata should load")
+                .is_none()
+        );
+        assert!(
+            load_object_protection_plan(&state, &destination_bucket, &destination_key)
+                .expect("destination protection metadata should load")
+                .is_none()
+        );
 
         let home_provider = persisted_or_primary_home_provider(&state, &source_bucket, &source_key)
             .expect("source home provider should resolve");
         let backend = backend_for_provider(&state, home_provider).expect("backend should resolve");
-        assert!(backend.get_object(&source_bucket, &source_key).await.is_ok());
-        let destination_lookup = backend.get_object(&destination_bucket, &destination_key).await;
+        assert!(
+            backend
+                .get_object(&source_bucket, &source_key)
+                .await
+                .is_ok()
+        );
+        let destination_lookup = backend
+            .get_object(&destination_bucket, &destination_key)
+            .await;
         assert!(matches!(destination_lookup, Err(BlobError::NotFound(_))));
     }
 
@@ -43171,6 +43837,172 @@ mod tests {
                 .expect("logical should load")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn object_actions_delete_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "notes/admin-delete-source.txt".to_string();
+
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("delete uri should parse");
+        let body = Bytes::from_static(b"admin delete source");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        persist_object_protection_plan(
+            &state,
+            &bucket,
+            &key,
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            current_unix_ms(),
+        )
+        .expect("protection plan should persist");
+
+        set_test_delete_object_metadata_failures(&bucket, &key, 1);
+        let error = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Delete {
+                bucket: bucket.clone(),
+                key: key.clone(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect_err("admin delete should fail when metadata delete fails after remote delete");
+        set_test_delete_object_metadata_failures(&bucket, &key, 0);
+
+        let message = error.0.to_string();
+        assert!(message.contains("delete remote side effect may have occurred"));
+        assert!(message.contains("remote delete already succeeded"));
+        assert!(message.contains("metadata rollback succeeded"));
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should be restored");
+        assert_eq!(placement.provider, "stub");
+        assert!(
+            load_logical_object_record(&state, &bucket, &key)
+                .expect("logical metadata should load")
+                .is_some()
+        );
+        assert!(
+            load_object_protection_plan(&state, &bucket, &key)
+                .expect("protection metadata should load")
+                .is_some()
+        );
+
+        let backend =
+            backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        let lookup = backend.get_object(&bucket, &key).await;
+        assert!(matches!(lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn object_actions_delete_replication_enqueue_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "notes/admin-delete-enqueue-source.txt".to_string();
+
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("delete uri should parse");
+        let body = Bytes::from_static(b"admin delete source");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        persist_object_protection_plan(
+            &state,
+            &bucket,
+            &key,
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            current_unix_ms(),
+        )
+        .expect("protection plan should persist");
+
+        set_test_admin_object_action_replication_enqueue_failures(&bucket, &key, 1);
+        let error = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Delete {
+                bucket: bucket.clone(),
+                key: key.clone(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect_err("admin delete should fail when replication enqueue fails after remote delete");
+        set_test_admin_object_action_replication_enqueue_failures(&bucket, &key, 0);
+
+        let message = error.0.to_string();
+        assert!(message.contains("delete remote side effect may have occurred"));
+        assert!(message.contains("remote delete already succeeded"));
+        assert!(message.contains("metadata rollback succeeded"));
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should be restored");
+        assert_eq!(placement.provider, "stub");
+        assert!(
+            load_logical_object_record(&state, &bucket, &key)
+                .expect("logical metadata should load")
+                .is_some()
+        );
+        assert!(
+            load_object_protection_plan(&state, &bucket, &key)
+                .expect("protection metadata should load")
+                .is_some()
+        );
+
+        let backend =
+            backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        let lookup = backend.get_object(&bucket, &key).await;
+        assert!(matches!(lookup, Err(BlobError::NotFound(_))));
     }
 
     #[tokio::test]
@@ -45557,6 +46389,9 @@ mod tests {
         .into_response();
         set_test_copy_object_replication_plan_failures(&bucket, &destination_key, 0);
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let _ = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
 
         let after_placement = state
             .metadata_store
@@ -45574,6 +46409,17 @@ mod tests {
         assert_eq!(after_placement, before_placement);
         assert_eq!(after_logical, before_logical);
         assert_eq!(after_plan, before_plan);
+        let restored = backend_for_provider(&state, ProviderId::Stub)
+            .expect("backend should resolve")
+            .get_object(&bucket, &destination_key)
+            .await
+            .expect("destination object should be restored");
+        let restored_body = restored
+            .body
+            .collect()
+            .await
+            .expect("restored body should read");
+        assert_eq!(restored_body.as_ref(), b"existing destination");
     }
 
     #[tokio::test]
@@ -51085,6 +51931,176 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn s3_delete_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/s3-delete-source.txt".to_string();
+
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("delete uri should parse");
+        let body = Bytes::from_static(b"s3 delete source");
+        let put_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            put_headers,
+            body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        persist_object_protection_plan(
+            &state,
+            &bucket,
+            &key,
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            current_unix_ms(),
+        )
+        .expect("protection plan should persist");
+
+        let delete_headers = signed_headers(&state.config, &Method::DELETE, &uri, &[], &[]);
+        set_test_delete_object_metadata_failures(&bucket, &key, 1);
+        let error = delete_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::DELETE,
+            OriginalUri(uri),
+            delete_headers,
+        )
+        .await
+        .expect_err("s3 delete should fail when metadata delete fails after remote delete");
+        set_test_delete_object_metadata_failures(&bucket, &key, 0);
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be valid utf-8");
+        assert!(response_body.contains("delete remote side effect may have occurred"));
+        assert!(response_body.contains("remote delete already succeeded"));
+        assert!(response_body.contains("metadata rollback succeeded"));
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should be restored");
+        assert_eq!(placement.provider, "stub");
+        assert!(
+            load_logical_object_record(&state, &bucket, &key)
+                .expect("logical metadata should load")
+                .is_some()
+        );
+        assert!(
+            load_object_protection_plan(&state, &bucket, &key)
+                .expect("protection metadata should load")
+                .is_some()
+        );
+
+        let backend =
+            backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        let lookup = backend.get_object(&bucket, &key).await;
+        assert!(matches!(lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn s3_delete_replication_enqueue_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/s3-delete-enqueue-source.txt".to_string();
+
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("delete uri should parse");
+        let body = Bytes::from_static(b"s3 delete source");
+        let put_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            put_headers,
+            body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        persist_object_protection_plan(
+            &state,
+            &bucket,
+            &key,
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            current_unix_ms(),
+        )
+        .expect("protection plan should persist");
+
+        let delete_headers = signed_headers(&state.config, &Method::DELETE, &uri, &[], &[]);
+        set_test_delete_object_replication_enqueue_failures(&bucket, &key, 1);
+        let error = delete_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::DELETE,
+            OriginalUri(uri),
+            delete_headers,
+        )
+        .await
+        .expect_err("s3 delete should fail when replication enqueue fails after remote delete");
+        set_test_delete_object_replication_enqueue_failures(&bucket, &key, 0);
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be valid utf-8");
+        assert!(response_body.contains("delete remote side effect may have occurred"));
+        assert!(response_body.contains("remote delete already succeeded"));
+        assert!(response_body.contains("metadata rollback succeeded"));
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should be restored");
+        assert_eq!(placement.provider, "stub");
+        assert!(
+            load_logical_object_record(&state, &bucket, &key)
+                .expect("logical metadata should load")
+                .is_some()
+        );
+        assert!(
+            load_object_protection_plan(&state, &bucket, &key)
+                .expect("protection metadata should load")
+                .is_some()
+        );
+
+        let backend =
+            backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        let lookup = backend.get_object(&bucket, &key).await;
+        assert!(matches!(lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
     async fn containers_api_rejects_when_data_plane_concurrency_is_exhausted() {
         let mut state = test_state();
         Arc::make_mut(&mut state.config).data_plane_max_in_flight = 1;
@@ -56323,9 +57339,10 @@ mod tests {
             })
             .expect("plan should persist");
 
-        let payload = object_reconcile_preview_payload(&state, None, Some("root"), Some("orphan/"), 50)
-            .await
-            .expect("preview should load");
+        let payload =
+            object_reconcile_preview_payload(&state, None, Some("root"), Some("orphan/"), 50)
+                .await
+                .expect("preview should load");
 
         assert_eq!(payload.rows.len(), 1);
         let row = &payload.rows[0];
@@ -56390,17 +57407,23 @@ mod tests {
         assert_eq!(payload.failed_count, 1);
         assert_eq!(payload.entries[0].action, "blocked_orphan_metadata");
         assert!(!payload.entries[0].has_home_placement);
-        assert!(load_logical_object_record(&state, "root", "orphan/cleanup.txt")
-            .expect("logical metadata load should succeed")
-            .is_some());
-        assert!(load_object_protection_plan(&state, "root", "orphan/cleanup.txt")
-            .expect("plan load should succeed")
-            .is_some());
-        assert!(state
-            .metadata_store
-            .object_placement("root", "orphan/cleanup.txt")
-            .expect("placement load should succeed")
-            .is_none());
+        assert!(
+            load_logical_object_record(&state, "root", "orphan/cleanup.txt")
+                .expect("logical metadata load should succeed")
+                .is_some()
+        );
+        assert!(
+            load_object_protection_plan(&state, "root", "orphan/cleanup.txt")
+                .expect("plan load should succeed")
+                .is_some()
+        );
+        assert!(
+            state
+                .metadata_store
+                .object_placement("root", "orphan/cleanup.txt")
+                .expect("placement load should succeed")
+                .is_none()
+        );
     }
 
     #[tokio::test]

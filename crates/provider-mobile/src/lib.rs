@@ -231,6 +231,11 @@ struct MobileFolderPlan {
     file_id: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CreatedMobileFolder {
+    file_id: String,
+}
+
 #[derive(Debug)]
 struct TimedObjectBody {
     body: ObjectBody,
@@ -1275,18 +1280,23 @@ impl MobileBlobAdapter {
         &self,
         parent_file_id: &str,
         folder_name: &str,
-    ) -> Result<String, BlobError> {
+    ) -> Result<(String, Option<CreatedMobileFolder>), BlobError> {
         if let Some(existing) = self
             .find_child_folder_id(parent_file_id, folder_name)
             .await?
         {
-            return Ok(existing);
+            return Ok((existing, None));
         }
 
         let created = self
             .create_mobile_folder(folder_name, parent_file_id)
             .await?;
-        Ok(created.file_id)
+        Ok((
+            created.file_id.clone(),
+            Some(CreatedMobileFolder {
+                file_id: created.file_id,
+            }),
+        ))
     }
 
     async fn resolve_child_directory_path_if_exists(
@@ -1390,26 +1400,32 @@ impl MobileBlobAdapter {
         &self,
         container: &str,
         key: &str,
-    ) -> Result<(String, String), BlobError> {
+    ) -> Result<(String, String, Vec<CreatedMobileFolder>), BlobError> {
         let native_root = self.native_root_folder_id_for_container(container).await?;
         let managed_object_key = self.managed_object_key(container, key)?;
         let (parent_path, file_name) = match managed_object_key.rsplit_once('/') {
             Some((parent_path, file_name)) => (parent_path, file_name.to_string()),
             None => {
-                return Ok((native_root, managed_object_key));
+                return Ok((native_root, managed_object_key, Vec::new()));
             }
         };
 
         let mut parent_id = native_root;
+        let mut created_folders = Vec::new();
         for segment in parent_path
             .split('/')
             .map(str::trim)
             .filter(|segment| !segment.is_empty())
         {
-            parent_id = self.ensure_folder(parent_id.as_str(), segment).await?;
+            let (next_parent_id, created_folder) =
+                self.ensure_folder(parent_id.as_str(), segment).await?;
+            if let Some(created_folder) = created_folder {
+                created_folders.push(created_folder);
+            }
+            parent_id = next_parent_id;
         }
 
-        Ok((parent_id, file_name))
+        Ok((parent_id, file_name, created_folders))
     }
 
     async fn download_url_for_file(&self, file_id: &str) -> Result<String, BlobError> {
@@ -1543,6 +1559,23 @@ impl MobileBlobAdapter {
             "China Mobile file/batchCopy",
         )
         .await
+    }
+
+    async fn cleanup_created_folders(
+        &self,
+        created_folders: &[CreatedMobileFolder],
+    ) -> Result<(), BlobError> {
+        for created_folder in created_folders.iter().rev() {
+            if self
+                .list_page(created_folder.file_id.as_str(), None)
+                .await?
+                .items
+                .is_empty()
+            {
+                self.delete_file_id(created_folder.file_id.as_str()).await?;
+            }
+        }
+        Ok(())
     }
 
     async fn send_metadata_action(
@@ -2179,7 +2212,7 @@ impl BlobBackend for MobileBlobAdapter {
         } = request;
         let known_content_sha256_hex = body.known_content_sha256_hex().map(ToString::to_string);
 
-        let (parent_file_id, file_name) = self
+        let (parent_file_id, file_name, _created_folders) = self
             .ensure_managed_parent_folder_id(&container, &key)
             .await?;
         let content_type = content_type
@@ -2302,6 +2335,7 @@ impl BlobBackend for MobileBlobAdapter {
         let source_name = entry.display_name().map(str::to_string);
         let (source_parent, _) = split_parent_and_name(&request.key)?;
         let (target_parent, target_name) = split_parent_and_name(&request.new_key)?;
+        let mut created_target_folders = Vec::new();
         let source_parent_file_id = if source_parent == target_parent {
             None
         } else {
@@ -2312,29 +2346,55 @@ impl BlobBackend for MobileBlobAdapter {
             )
         };
         if source_parent != target_parent {
-            let (target_parent_file_id, _) = self
+            let (target_parent_file_id, _, new_created_folders) = self
                 .ensure_managed_parent_folder_id(&request.container, &request.new_key)
                 .await?;
+            created_target_folders = new_created_folders;
             self.move_file_id(file_id.as_str(), target_parent_file_id.as_str())
                 .await?;
         }
         if source_name.as_deref() != Some(target_name.as_str()) {
-            if let Err(error) = self.update_file_name(file_id.as_str(), target_name.as_str()).await {
+            if let Err(error) = self
+                .update_file_name(file_id.as_str(), target_name.as_str())
+                .await
+            {
                 if let Some(source_parent_file_id) = source_parent_file_id.as_deref() {
-                    match self.move_file_id(file_id.as_str(), source_parent_file_id).await {
+                    match self
+                        .move_file_id(file_id.as_str(), source_parent_file_id)
+                        .await
+                    {
                         Ok(()) => {
+                            let cleanup_note =
+                                match self.cleanup_created_folders(&created_target_folders).await {
+                                    Ok(()) => "created-folder cleanup succeeded".to_string(),
+                                    Err(cleanup_error) => {
+                                        format!("created-folder cleanup failed: {cleanup_error}")
+                                    }
+                                };
                             return Err(BlobError::Upstream(format!(
-                                "China Mobile rename partially moved the object before file/update failed: {error}; remote parent rollback succeeded"
+                                "China Mobile rename partially moved the object before file/update failed: {error}; remote parent rollback succeeded; {cleanup_note}"
                             )));
                         }
                         Err(rollback_error) => {
+                            let cleanup_note =
+                                match self.cleanup_created_folders(&created_target_folders).await {
+                                    Ok(()) => "created-folder cleanup succeeded".to_string(),
+                                    Err(cleanup_error) => {
+                                        format!("created-folder cleanup failed: {cleanup_error}")
+                                    }
+                                };
                             return Err(BlobError::Upstream(format!(
-                                "China Mobile rename partially moved the object before file/update failed: {error}; remote parent rollback also failed: {rollback_error}"
+                                "China Mobile rename partially moved the object before file/update failed: {error}; remote parent rollback also failed: {rollback_error}; {cleanup_note}"
                             )));
                         }
                     }
                 }
-                return Err(error);
+                let cleanup_note = match self.cleanup_created_folders(&created_target_folders).await
+                {
+                    Ok(()) => "created-folder cleanup succeeded".to_string(),
+                    Err(cleanup_error) => format!("created-folder cleanup failed: {cleanup_error}"),
+                };
+                return Err(BlobError::Upstream(format!("{error}; {cleanup_note}")));
             }
         }
         Ok(())
@@ -2382,14 +2442,22 @@ impl BlobBackend for MobileBlobAdapter {
         let source_file_id = entry.file_id().ok_or_else(|| {
             BlobError::Upstream("China Mobile file/list returned a file without an id".to_string())
         })?;
-        let (target_parent_file_id, _) = self
+        let (target_parent_file_id, _, created_target_folders) = self
             .ensure_managed_parent_folder_id(
                 &request.destination_container,
                 &request.destination_key,
             )
             .await?;
-        self.copy_file_id(source_file_id, target_parent_file_id.as_str())
-            .await?;
+        if let Err(error) = self
+            .copy_file_id(source_file_id, target_parent_file_id.as_str())
+            .await
+        {
+            let cleanup_note = match self.cleanup_created_folders(&created_target_folders).await {
+                Ok(()) => "created-folder cleanup succeeded".to_string(),
+                Err(cleanup_error) => format!("created-folder cleanup failed: {cleanup_error}"),
+            };
+            return Err(BlobError::Upstream(format!("{error}; {cleanup_note}")));
+        }
         Ok(())
     }
 
@@ -2408,13 +2476,17 @@ impl BlobBackend for MobileBlobAdapter {
         let source_name = entry.display_name().map(str::to_string);
         let (source_parent, _) = split_parent_and_name(&request.source_key)?;
         let (target_parent, target_name) = split_parent_and_name(&request.destination_key)?;
+        let mut created_target_folders = Vec::new();
         let source_parent_file_id = if request.source_container != request.destination_container
             || source_parent != target_parent
         {
             Some(
-                self.ensure_managed_parent_folder_id(&request.source_container, &request.source_key)
-                    .await?
-                    .0,
+                self.ensure_managed_parent_folder_id(
+                    &request.source_container,
+                    &request.source_key,
+                )
+                .await?
+                .0,
             )
         } else {
             None
@@ -2422,32 +2494,58 @@ impl BlobBackend for MobileBlobAdapter {
         if request.source_container != request.destination_container
             || source_parent != target_parent
         {
-            let (target_parent_file_id, _) = self
+            let (target_parent_file_id, _, new_created_folders) = self
                 .ensure_managed_parent_folder_id(
                     &request.destination_container,
                     &request.destination_key,
                 )
                 .await?;
+            created_target_folders = new_created_folders;
             self.move_file_id(file_id.as_str(), target_parent_file_id.as_str())
                 .await?;
         }
         if source_name.as_deref() != Some(target_name.as_str()) {
-            if let Err(error) = self.update_file_name(file_id.as_str(), target_name.as_str()).await {
+            if let Err(error) = self
+                .update_file_name(file_id.as_str(), target_name.as_str())
+                .await
+            {
                 if let Some(source_parent_file_id) = source_parent_file_id.as_deref() {
-                    match self.move_file_id(file_id.as_str(), source_parent_file_id).await {
+                    match self
+                        .move_file_id(file_id.as_str(), source_parent_file_id)
+                        .await
+                    {
                         Ok(()) => {
+                            let cleanup_note =
+                                match self.cleanup_created_folders(&created_target_folders).await {
+                                    Ok(()) => "created-folder cleanup succeeded".to_string(),
+                                    Err(cleanup_error) => {
+                                        format!("created-folder cleanup failed: {cleanup_error}")
+                                    }
+                                };
                             return Err(BlobError::Upstream(format!(
-                                "China Mobile move partially moved the object before file/update failed: {error}; remote parent rollback succeeded"
+                                "China Mobile move partially moved the object before file/update failed: {error}; remote parent rollback succeeded; {cleanup_note}"
                             )));
                         }
                         Err(rollback_error) => {
+                            let cleanup_note =
+                                match self.cleanup_created_folders(&created_target_folders).await {
+                                    Ok(()) => "created-folder cleanup succeeded".to_string(),
+                                    Err(cleanup_error) => {
+                                        format!("created-folder cleanup failed: {cleanup_error}")
+                                    }
+                                };
                             return Err(BlobError::Upstream(format!(
-                                "China Mobile move partially moved the object before file/update failed: {error}; remote parent rollback also failed: {rollback_error}"
+                                "China Mobile move partially moved the object before file/update failed: {error}; remote parent rollback also failed: {rollback_error}; {cleanup_note}"
                             )));
                         }
                     }
                 }
-                return Err(error);
+                let cleanup_note = match self.cleanup_created_folders(&created_target_folders).await
+                {
+                    Ok(()) => "created-folder cleanup succeeded".to_string(),
+                    Err(cleanup_error) => format!("created-folder cleanup failed: {cleanup_error}"),
+                };
+                return Err(BlobError::Upstream(format!("{error}; {cleanup_note}")));
             }
         }
         Ok(())
@@ -3815,12 +3913,15 @@ mod tests {
     #[derive(Clone)]
     struct MockMobileMetadataState {
         items_by_parent: BTreeMap<String, Vec<Value>>,
+        create_requests: Arc<Mutex<Vec<Value>>>,
         update_requests: Arc<Mutex<Vec<Value>>>,
         delete_requests: Arc<Mutex<Vec<Value>>>,
         move_requests: Arc<Mutex<Vec<Value>>>,
         copy_requests: Arc<Mutex<Vec<Value>>>,
         update_error_once: Option<(String, String)>,
         update_call_count: Arc<Mutex<u32>>,
+        copy_error_once: Option<(String, String)>,
+        copy_call_count: Arc<Mutex<u32>>,
     }
 
     async fn mock_file_list_metadata(
@@ -3883,6 +3984,37 @@ mod tests {
         }))
     }
 
+    async fn mock_file_create_metadata(
+        State(state): State<Arc<MockMobileMetadataState>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        state
+            .create_requests
+            .lock()
+            .expect("create requests poisoned")
+            .push(body.clone());
+        let file_id = format!(
+            "created-folder-{}",
+            state
+                .create_requests
+                .lock()
+                .expect("create requests poisoned")
+                .len()
+        );
+        Json(json!({
+            "success": true,
+            "code": "0000",
+            "message": "ok",
+            "data": {
+                "fileId": file_id,
+                "uploadId": null,
+                "rapidUpload": true,
+                "exist": false,
+                "partInfos": []
+            }
+        }))
+    }
+
     async fn mock_file_delete_metadata(
         State(state): State<Arc<MockMobileMetadataState>>,
         Json(body): Json<Value>,
@@ -3924,6 +4056,25 @@ mod tests {
             .lock()
             .expect("copy requests poisoned")
             .push(body);
+        let mut copy_call_count = state
+            .copy_call_count
+            .lock()
+            .expect("copy call count poisoned");
+        *copy_call_count += 1;
+        let current_copy_call = *copy_call_count;
+        drop(copy_call_count);
+        if let Some((code, message)) = state
+            .copy_error_once
+            .as_ref()
+            .filter(|_| current_copy_call == 1)
+            .cloned()
+        {
+            return Json(json!({
+                "success": false,
+                "code": code,
+                "message": message
+            }));
+        }
         Json(json!({
             "success": true,
             "code": "0000",
@@ -3948,6 +4099,16 @@ mod tests {
                             "orderBy": "updated_at",
                             "orderDirection": "DESC",
                             "imageThumbnailStyleList": ["Small", "Large"]
+                        }
+                    },
+                    {
+                        "id": "file_create",
+                        "method": "POST",
+                        "url": format!("{base_url}/hcy/file/create"),
+                        "signature_strategy": "mcloud_md5_v1",
+                        "body_defaults": {
+                            "fileRenameMode": "auto_rename",
+                            "contentHashAlgorithm": "md5"
                         }
                     },
                     {
@@ -4822,7 +4983,10 @@ mod tests {
             content_type: Some("text/plain".to_string()),
             preferred_upload_part_size_bytes: None,
         };
-        let error = adapter.put_object(request).await.expect_err("put object should fail");
+        let error = adapter
+            .put_object(request)
+            .await
+            .expect_err("put object should fail");
         assert!(error.to_string().contains("04010319"));
 
         let delete_requests = upload_state
@@ -4866,15 +5030,19 @@ mod tests {
                 ),
                 ("folder-media".to_string(), vec![]),
             ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
             update_requests: Arc::new(Mutex::new(Vec::new())),
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
             update_error_once: None,
             update_call_count: Arc::new(Mutex::new(0)),
+            copy_error_once: None,
+            copy_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/create", post(mock_file_create_metadata))
             .route("/hcy/file/update", post(mock_file_update_metadata))
             .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
             .route("/hcy/file/batchMove", post(mock_file_move_metadata))
@@ -5009,15 +5177,19 @@ mod tests {
                     vec![sample_file_item("file-alpha", "alpha.txt", 5)],
                 ),
             ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
             update_requests: Arc::new(Mutex::new(Vec::new())),
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
             update_error_once: None,
             update_call_count: Arc::new(Mutex::new(0)),
+            copy_error_once: None,
+            copy_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/create", post(mock_file_create_metadata))
             .route("/hcy/file/update", post(mock_file_update_metadata))
             .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
             .route("/hcy/file/batchMove", post(mock_file_move_metadata))
@@ -5098,15 +5270,19 @@ mod tests {
                 ),
                 ("folder-media".to_string(), vec![]),
             ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
             update_requests: Arc::new(Mutex::new(Vec::new())),
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
             update_error_once: Some(("04000010".to_string(), "rename failed".to_string())),
             update_call_count: Arc::new(Mutex::new(0)),
+            copy_error_once: None,
+            copy_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/create", post(mock_file_create_metadata))
             .route("/hcy/file/update", post(mock_file_update_metadata))
             .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
             .route("/hcy/file/batchMove", post(mock_file_move_metadata))
@@ -5156,6 +5332,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn move_object_cleans_up_created_target_folders_after_rename_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile partial move server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile partial move local addr");
+        let base_url = format!("http://{address}");
+
+        let state = MockMobileMetadataState {
+            items_by_parent: BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-managed", "ccbg-managed")],
+                ),
+                (
+                    "folder-managed".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![
+                        sample_folder_item("folder-docs", "docs"),
+                        sample_folder_item("folder-media", "media"),
+                    ],
+                ),
+                (
+                    "folder-docs".to_string(),
+                    vec![sample_file_item("file-alpha", "alpha.txt", 5)],
+                ),
+                ("folder-media".to_string(), vec![]),
+            ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
+            update_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            move_requests: Arc::new(Mutex::new(Vec::new())),
+            copy_requests: Arc::new(Mutex::new(Vec::new())),
+            update_error_once: Some(("04000010".to_string(), "rename failed".to_string())),
+            update_call_count: Arc::new(Mutex::new(0)),
+            copy_error_once: None,
+            copy_call_count: Arc::new(Mutex::new(0)),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/create", post(mock_file_create_metadata))
+            .route("/hcy/file/update", post(mock_file_update_metadata))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
+            .route("/hcy/file/batchMove", post(mock_file_move_metadata))
+            .route("/hcy/file/batchCopy", post(mock_file_copy_metadata))
+            .with_state(Arc::new(state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile partial move server");
+        });
+
+        let catalog = write_mobile_metadata_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let error = adapter
+            .move_object(MoveObjectRequest {
+                source_container: MOBILE_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: MOBILE_ROOT_CONTAINER.to_string(),
+                destination_key: "media/fresh/charlie.txt".to_string(),
+            })
+            .await
+            .expect_err("move should fail after rename step error");
+        assert!(
+            error
+                .to_string()
+                .contains("created-folder cleanup succeeded")
+        );
+
+        let create_requests = state
+            .create_requests
+            .lock()
+            .expect("create requests poisoned")
+            .clone();
+        assert_eq!(create_requests.len(), 1);
+        let delete_requests = state
+            .delete_requests
+            .lock()
+            .expect("delete requests poisoned")
+            .clone();
+        assert_eq!(
+            delete_requests,
+            vec![json!({ "fileIds": ["created-folder-1"] })]
+        );
+    }
+
+    #[tokio::test]
     async fn copy_object_rejects_cross_scope_copy_with_not_implemented() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -5192,15 +5463,19 @@ mod tests {
                     vec![sample_folder_item("folder-family", "family")],
                 ),
             ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
             update_requests: Arc::new(Mutex::new(Vec::new())),
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
             update_error_once: None,
             update_call_count: Arc::new(Mutex::new(0)),
+            copy_error_once: None,
+            copy_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/create", post(mock_file_create_metadata))
             .route("/hcy/file/update", post(mock_file_update_metadata))
             .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
             .route("/hcy/file/batchMove", post(mock_file_move_metadata))
@@ -5240,6 +5515,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copy_object_cleans_up_created_target_folders_when_copy_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile metadata server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile metadata local addr");
+        let base_url = format!("http://{address}");
+
+        let state = MockMobileMetadataState {
+            items_by_parent: BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-managed", "ccbg-managed")],
+                ),
+                (
+                    "folder-managed".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![sample_folder_item("folder-docs", "docs")],
+                ),
+                (
+                    "folder-docs".to_string(),
+                    vec![sample_file_item("file-alpha", "alpha.txt", 5)],
+                ),
+            ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
+            update_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            move_requests: Arc::new(Mutex::new(Vec::new())),
+            copy_requests: Arc::new(Mutex::new(Vec::new())),
+            update_error_once: None,
+            update_call_count: Arc::new(Mutex::new(0)),
+            copy_error_once: Some(("04000010".to_string(), "copy failed".to_string())),
+            copy_call_count: Arc::new(Mutex::new(0)),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/create", post(mock_file_create_metadata))
+            .route("/hcy/file/update", post(mock_file_update_metadata))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
+            .route("/hcy/file/batchMove", post(mock_file_move_metadata))
+            .route("/hcy/file/batchCopy", post(mock_file_copy_metadata))
+            .with_state(Arc::new(state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile metadata server");
+        });
+
+        let catalog = write_mobile_metadata_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+        let error = adapter
+            .copy_object(CopyObjectRequest {
+                source_container: MOBILE_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: MOBILE_ROOT_CONTAINER.to_string(),
+                destination_key: "fresh/alpha.txt".to_string(),
+            })
+            .await
+            .expect_err("copy should fail after native copy error");
+        assert!(
+            error
+                .to_string()
+                .contains("created-folder cleanup succeeded")
+        );
+
+        let create_requests = state
+            .create_requests
+            .lock()
+            .expect("create requests poisoned")
+            .clone();
+        assert_eq!(create_requests.len(), 1);
+        let delete_requests = state
+            .delete_requests
+            .lock()
+            .expect("delete requests poisoned")
+            .clone();
+        assert_eq!(
+            delete_requests,
+            vec![json!({ "fileIds": ["created-folder-1"] })]
+        );
+    }
+
+    #[tokio::test]
     async fn copy_object_rejects_copy_with_rename_using_stable_error() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -5272,15 +5637,19 @@ mod tests {
                 ),
                 ("folder-media".to_string(), vec![]),
             ]),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
             update_requests: Arc::new(Mutex::new(Vec::new())),
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
             update_error_once: None,
             update_call_count: Arc::new(Mutex::new(0)),
+            copy_error_once: None,
+            copy_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/create", post(mock_file_create_metadata))
             .route("/hcy/file/batchCopy", post(mock_file_copy_metadata))
             .with_state(Arc::new(state.clone()));
         tokio::spawn(async move {
