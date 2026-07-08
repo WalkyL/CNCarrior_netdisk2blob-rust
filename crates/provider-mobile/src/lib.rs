@@ -2302,6 +2302,15 @@ impl BlobBackend for MobileBlobAdapter {
         let source_name = entry.display_name().map(str::to_string);
         let (source_parent, _) = split_parent_and_name(&request.key)?;
         let (target_parent, target_name) = split_parent_and_name(&request.new_key)?;
+        let source_parent_file_id = if source_parent == target_parent {
+            None
+        } else {
+            Some(
+                self.ensure_managed_parent_folder_id(&request.container, &request.key)
+                    .await?
+                    .0,
+            )
+        };
         if source_parent != target_parent {
             let (target_parent_file_id, _) = self
                 .ensure_managed_parent_folder_id(&request.container, &request.new_key)
@@ -2310,8 +2319,23 @@ impl BlobBackend for MobileBlobAdapter {
                 .await?;
         }
         if source_name.as_deref() != Some(target_name.as_str()) {
-            self.update_file_name(file_id.as_str(), target_name.as_str())
-                .await?;
+            if let Err(error) = self.update_file_name(file_id.as_str(), target_name.as_str()).await {
+                if let Some(source_parent_file_id) = source_parent_file_id.as_deref() {
+                    match self.move_file_id(file_id.as_str(), source_parent_file_id).await {
+                        Ok(()) => {
+                            return Err(BlobError::Upstream(format!(
+                                "China Mobile rename partially moved the object before file/update failed: {error}; remote parent rollback succeeded"
+                            )));
+                        }
+                        Err(rollback_error) => {
+                            return Err(BlobError::Upstream(format!(
+                                "China Mobile rename partially moved the object before file/update failed: {error}; remote parent rollback also failed: {rollback_error}"
+                            )));
+                        }
+                    }
+                }
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -2384,6 +2408,17 @@ impl BlobBackend for MobileBlobAdapter {
         let source_name = entry.display_name().map(str::to_string);
         let (source_parent, _) = split_parent_and_name(&request.source_key)?;
         let (target_parent, target_name) = split_parent_and_name(&request.destination_key)?;
+        let source_parent_file_id = if request.source_container != request.destination_container
+            || source_parent != target_parent
+        {
+            Some(
+                self.ensure_managed_parent_folder_id(&request.source_container, &request.source_key)
+                    .await?
+                    .0,
+            )
+        } else {
+            None
+        };
         if request.source_container != request.destination_container
             || source_parent != target_parent
         {
@@ -2397,8 +2432,23 @@ impl BlobBackend for MobileBlobAdapter {
                 .await?;
         }
         if source_name.as_deref() != Some(target_name.as_str()) {
-            self.update_file_name(file_id.as_str(), target_name.as_str())
-                .await?;
+            if let Err(error) = self.update_file_name(file_id.as_str(), target_name.as_str()).await {
+                if let Some(source_parent_file_id) = source_parent_file_id.as_deref() {
+                    match self.move_file_id(file_id.as_str(), source_parent_file_id).await {
+                        Ok(()) => {
+                            return Err(BlobError::Upstream(format!(
+                                "China Mobile move partially moved the object before file/update failed: {error}; remote parent rollback succeeded"
+                            )));
+                        }
+                        Err(rollback_error) => {
+                            return Err(BlobError::Upstream(format!(
+                                "China Mobile move partially moved the object before file/update failed: {error}; remote parent rollback also failed: {rollback_error}"
+                            )));
+                        }
+                    }
+                }
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -3769,6 +3819,8 @@ mod tests {
         delete_requests: Arc<Mutex<Vec<Value>>>,
         move_requests: Arc<Mutex<Vec<Value>>>,
         copy_requests: Arc<Mutex<Vec<Value>>>,
+        update_error_once: Option<(String, String)>,
+        update_call_count: Arc<Mutex<u32>>,
     }
 
     async fn mock_file_list_metadata(
@@ -3804,6 +3856,26 @@ mod tests {
             .lock()
             .expect("update requests poisoned")
             .push(body);
+        let mut update_call_count = state
+            .update_call_count
+            .lock()
+            .expect("update call count poisoned");
+        *update_call_count += 1;
+        let current_update_call = *update_call_count;
+        drop(update_call_count);
+
+        if let Some((code, message)) = state
+            .update_error_once
+            .as_ref()
+            .filter(|_| current_update_call == 1)
+            .cloned()
+        {
+            return Json(json!({
+                "success": false,
+                "code": code,
+                "message": message
+            }));
+        }
         Json(json!({
             "success": true,
             "code": "0000",
@@ -4798,6 +4870,8 @@ mod tests {
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
+            update_error_once: None,
+            update_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
@@ -4939,6 +5013,8 @@ mod tests {
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
+            update_error_once: None,
+            update_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
@@ -4990,6 +5066,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn move_object_moves_back_when_mobile_rename_step_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile partial move server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile partial move local addr");
+        let base_url = format!("http://{address}");
+
+        let state = MockMobileMetadataState {
+            items_by_parent: BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-managed", "ccbg-managed")],
+                ),
+                (
+                    "folder-managed".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![
+                        sample_folder_item("folder-docs", "docs"),
+                        sample_folder_item("folder-media", "media"),
+                    ],
+                ),
+                (
+                    "folder-docs".to_string(),
+                    vec![sample_file_item("file-alpha", "alpha.txt", 5)],
+                ),
+                ("folder-media".to_string(), vec![]),
+            ]),
+            update_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            move_requests: Arc::new(Mutex::new(Vec::new())),
+            copy_requests: Arc::new(Mutex::new(Vec::new())),
+            update_error_once: Some(("04000010".to_string(), "rename failed".to_string())),
+            update_call_count: Arc::new(Mutex::new(0)),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_metadata))
+            .route("/hcy/file/update", post(mock_file_update_metadata))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_metadata))
+            .route("/hcy/file/batchMove", post(mock_file_move_metadata))
+            .route("/hcy/file/batchCopy", post(mock_file_copy_metadata))
+            .with_state(Arc::new(state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile partial move server");
+        });
+
+        let catalog = write_mobile_metadata_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let error = adapter
+            .move_object(MoveObjectRequest {
+                source_container: MOBILE_ROOT_CONTAINER.to_string(),
+                source_key: "docs/alpha.txt".to_string(),
+                destination_container: MOBILE_ROOT_CONTAINER.to_string(),
+                destination_key: "media/charlie.txt".to_string(),
+            })
+            .await
+            .expect_err("move should fail after rename step error");
+        assert!(error.to_string().contains("rename failed"));
+
+        let move_requests = state
+            .move_requests
+            .lock()
+            .expect("move requests poisoned")
+            .clone();
+        assert_eq!(
+            move_requests,
+            vec![
+                json!({
+                    "fileIds": ["file-alpha"],
+                    "toParentFileId": "folder-media"
+                }),
+                json!({
+                    "fileIds": ["file-alpha"],
+                    "toParentFileId": "folder-docs"
+                })
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn copy_object_rejects_cross_scope_copy_with_not_implemented() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -5030,6 +5196,8 @@ mod tests {
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
+            update_error_once: None,
+            update_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
@@ -5108,6 +5276,8 @@ mod tests {
             delete_requests: Arc::new(Mutex::new(Vec::new())),
             move_requests: Arc::new(Mutex::new(Vec::new())),
             copy_requests: Arc::new(Mutex::new(Vec::new())),
+            update_error_once: None,
+            update_call_count: Arc::new(Mutex::new(0)),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_metadata))
