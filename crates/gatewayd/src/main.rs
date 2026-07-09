@@ -241,6 +241,7 @@ struct AppState {
     notify_state: Arc<Mutex<NotifyState>>,
     credential_lease_probe: Arc<Mutex<CredentialLeaseProbeState>>,
     credential_lease_probe_wake: Arc<Notify>,
+    provider_cdp_keepalive: Arc<Mutex<ProviderCdpKeepaliveState>>,
     admin_client_ip: Arc<Mutex<Option<String>>>,
     admin_sessions: Arc<Mutex<HashMap<String, AdminBrowserSession>>>,
     browser_flow_catalogs: Arc<BrowserFlowCatalogCollection>,
@@ -2243,6 +2244,21 @@ struct NotifyState {
 #[derive(Debug, Clone)]
 struct CredentialLeaseProbeState {
     next_probe_at_unix_ms_by_provider: BTreeMap<ProviderId, u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProviderCdpKeepaliveStatusRecord {
+    last_attempt_at_unix_ms: Option<u64>,
+    last_success_at_unix_ms: Option<u64>,
+    last_error: Option<String>,
+    endpoint_url: Option<String>,
+    observed_url: Option<String>,
+    consecutive_failures: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProviderCdpKeepaliveState {
+    by_provider: BTreeMap<ProviderId, ProviderCdpKeepaliveStatusRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4606,6 +4622,8 @@ struct AppConfig {
     notify_webhook_signing_secret: Option<String>,
     notify_poll_interval_seconds: u64,
     provider_lease_poll_interval_seconds: u64,
+    provider_cdp_keepalive_enabled: bool,
+    provider_cdp_keepalive_interval_seconds: u64,
     replication_failed_alert_threshold: usize,
     replication_failed_alert_min_age_ms: u64,
     control_plane_file: String,
@@ -5674,6 +5692,12 @@ impl AppConfig {
                 30,
             )
             .max(5),
+            provider_cdp_keepalive_enabled: env_bool("CCBG_PROVIDER_CDP_KEEPALIVE_ENABLED", false),
+            provider_cdp_keepalive_interval_seconds: env_u64(
+                "CCBG_PROVIDER_CDP_KEEPALIVE_INTERVAL_SECONDS",
+                300,
+            )
+            .max(30),
             replication_failed_alert_threshold: env_usize(
                 "CCBG_REPLICATION_FAILED_ALERT_THRESHOLD",
                 1,
@@ -7014,6 +7038,7 @@ async fn main() -> Result<()> {
             next_probe_at_unix_ms_by_provider: BTreeMap::new(),
         })),
         credential_lease_probe_wake: Arc::new(Notify::new()),
+        provider_cdp_keepalive: Arc::new(Mutex::new(ProviderCdpKeepaliveState::default())),
         admin_client_ip: Arc::new(Mutex::new(None)),
         admin_sessions: Arc::new(Mutex::new(HashMap::new())),
         browser_flow_catalogs,
@@ -7040,6 +7065,7 @@ async fn main() -> Result<()> {
         .context("failed to replay gateway write-ahead log on startup")?;
     spawn_replication_workers(state.clone(), config.replication_workers);
     tokio::spawn(credential_lease_loop(state.clone()));
+    tokio::spawn(provider_cdp_keepalive_loop(state.clone()));
     if config.notify_webhook_url.is_some() {
         tokio::spawn(notify_webhook_loop(state.clone()));
     }
@@ -7092,6 +7118,8 @@ async fn main() -> Result<()> {
         notify_webhook_signature_enabled = config.notify_webhook_signing_secret.is_some(),
         notify_poll_interval_seconds = config.notify_poll_interval_seconds,
         provider_lease_poll_interval_seconds = config.provider_lease_poll_interval_seconds,
+        provider_cdp_keepalive_enabled = config.provider_cdp_keepalive_enabled,
+        provider_cdp_keepalive_interval_seconds = config.provider_cdp_keepalive_interval_seconds,
         control_plane_file = %config.control_plane_file,
         instance_id_file = %config.instance_id_file,
         managed_root_base = %config.managed_root_base,
@@ -12174,6 +12202,37 @@ fn build_admin_alerts(
         }
     }
 
+    if state.config.provider_cdp_keepalive_enabled {
+        let keepalive = state
+            .provider_cdp_keepalive
+            .lock()
+            .expect("provider cdp keepalive state poisoned")
+            .clone();
+        for provider in [ProviderId::Unicom, ProviderId::Telecom] {
+            let Some(record) = keepalive.by_provider.get(&provider) else {
+                continue;
+            };
+            if record.consecutive_failures == 0 {
+                continue;
+            }
+            push_alert(
+                &mut alerts,
+                AdminAlertPayload {
+                    id: format!("{}_cdp_keepalive_failing", provider.as_str()),
+                    severity: "warn",
+                    title: format!("{} CDP keepalive is failing", provider_label(provider)),
+                    detail: format!(
+                        "consecutive_failures={} | endpoint={} | observed_url={} | {}",
+                        record.consecutive_failures,
+                        record.endpoint_url.as_deref().unwrap_or("<unknown>"),
+                        record.observed_url.as_deref().unwrap_or("<unknown>"),
+                        record.last_error.as_deref().unwrap_or("no error detail")
+                    ),
+                },
+            );
+        }
+    }
+
     if gateway_backup_policy.enabled && !gateway_backup_password_present(&state.config) {
         push_alert(
             &mut alerts,
@@ -12482,6 +12541,142 @@ async fn credential_lease_loop(state: AppState) {
             _ = &mut sleep => {}
             _ = state.credential_lease_probe_wake.notified() => {}
         }
+    }
+}
+
+fn provider_supports_cdp_keepalive(provider: ProviderId) -> bool {
+    matches!(provider, ProviderId::Unicom | ProviderId::Telecom)
+}
+
+fn provider_cdp_keepalive_url_matches(provider: ProviderId, url: &str) -> bool {
+    let normalized = url.trim().to_ascii_lowercase();
+    match provider {
+        ProviderId::Unicom => normalized.contains("pan.wo.cn"),
+        ProviderId::Telecom => normalized.contains("cloud.189.cn"),
+        _ => false,
+    }
+}
+
+async fn maybe_run_provider_cdp_keepalive(
+    state: &AppState,
+    provider: ProviderId,
+) -> Result<(), BlobError> {
+    if !state.config.provider_cdp_keepalive_enabled || !provider_supports_cdp_keepalive(provider) {
+        return Ok(());
+    }
+
+    let endpoints = auth_capture_browser_endpoints_for_policy(&current_auth_capture_policy(state));
+    let enabled_endpoints = endpoints
+        .into_iter()
+        .filter(|entry| entry.enabled)
+        .collect::<Vec<_>>();
+    if enabled_endpoints.is_empty() {
+        let mut guard = state
+            .provider_cdp_keepalive
+            .lock()
+            .expect("provider cdp keepalive state poisoned");
+        let record = guard.by_provider.entry(provider).or_default();
+        record.last_attempt_at_unix_ms = Some(current_unix_ms());
+        record.last_error = Some("no enabled Browser/CDP endpoints configured".to_string());
+        record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+        return Ok(());
+    }
+
+    let now = current_unix_ms();
+    let mut failure_reasons = Vec::new();
+    for endpoint in enabled_endpoints {
+        let endpoint_url = endpoint.endpoint_url.clone();
+        let session = match CdpBrowserFlowSession::connect(&cdp_connection_config_from_browser_endpoint(&endpoint)).await {
+            Ok(session) => session,
+            Err(error) => {
+                failure_reasons.push(format!("{} connect failed: {error}", endpoint_url));
+                continue;
+            }
+        };
+        let before_url = match session.current_url().await? {
+            Some(url) => url,
+            None => {
+                failure_reasons.push(format!("{} has no current URL", endpoint_url));
+                continue;
+            }
+        };
+        if !provider_cdp_keepalive_url_matches(provider, &before_url) {
+            failure_reasons.push(format!(
+                "{} current URL is not a {} page: {}",
+                endpoint_url,
+                provider.as_str(),
+                before_url
+            ));
+            continue;
+        }
+
+        session.evaluate_value("location.reload(); 'ccbg-keepalive-reload'").await?;
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let after_url = session.current_url().await?.unwrap_or_default();
+        if !provider_cdp_keepalive_url_matches(provider, &after_url) {
+            failure_reasons.push(format!(
+                "{} reload left the expected {} page: {}",
+                endpoint_url,
+                provider.as_str(),
+                after_url
+            ));
+            continue;
+        }
+
+        {
+            let mut guard = state
+                .provider_cdp_keepalive
+                .lock()
+                .expect("provider cdp keepalive state poisoned");
+            let record = guard.by_provider.entry(provider).or_default();
+            record.last_attempt_at_unix_ms = Some(now);
+            record.last_success_at_unix_ms = Some(now);
+            record.last_error = None;
+            record.endpoint_url = Some(endpoint_url);
+            record.observed_url = Some(after_url);
+            record.consecutive_failures = 0;
+        }
+        state
+            .credential_lease_probe
+            .lock()
+            .expect("credential lease probe state poisoned")
+            .next_probe_at_unix_ms_by_provider
+            .insert(provider, now);
+        state.credential_lease_probe_wake.notify_one();
+        return Ok(());
+    }
+
+    let mut guard = state
+        .provider_cdp_keepalive
+        .lock()
+        .expect("provider cdp keepalive state poisoned");
+    let record = guard.by_provider.entry(provider).or_default();
+    record.last_attempt_at_unix_ms = Some(now);
+    record.last_error = Some(failure_reasons.join(" | "));
+    record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+    Ok(())
+}
+
+async fn provider_cdp_keepalive_loop(state: AppState) {
+    loop {
+        if state.config.provider_cdp_keepalive_enabled {
+            for provider in [ProviderId::Unicom, ProviderId::Telecom] {
+                if let Err(error) = maybe_run_provider_cdp_keepalive(&state, provider).await {
+                    let mut guard = state
+                        .provider_cdp_keepalive
+                        .lock()
+                        .expect("provider cdp keepalive state poisoned");
+                    let record = guard.by_provider.entry(provider).or_default();
+                    record.last_attempt_at_unix_ms = Some(current_unix_ms());
+                    record.last_error = Some(error.to_string());
+                    record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+                }
+            }
+        }
+        sleep(Duration::from_secs(
+            state.config.provider_cdp_keepalive_interval_seconds,
+        ))
+        .await;
     }
 }
 
@@ -36478,6 +36673,8 @@ mod tests {
             notify_webhook_signing_secret: None,
             notify_poll_interval_seconds: 15,
             provider_lease_poll_interval_seconds: 30,
+            provider_cdp_keepalive_enabled: false,
+            provider_cdp_keepalive_interval_seconds: 300,
             replication_failed_alert_threshold: 1,
             replication_failed_alert_min_age_ms: 0,
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
@@ -36723,6 +36920,7 @@ mod tests {
                 next_probe_at_unix_ms_by_provider: BTreeMap::new(),
             })),
             credential_lease_probe_wake: Arc::new(Notify::new()),
+            provider_cdp_keepalive: Arc::new(Mutex::new(ProviderCdpKeepaliveState::default())),
             admin_client_ip: Arc::new(Mutex::new(None)),
             admin_sessions: Arc::new(Mutex::new(HashMap::new())),
             browser_flow_catalogs,
@@ -38943,6 +39141,60 @@ mod tests {
                 && lease.status == "pending_verification"
                 && !lease.requires_reauth
         }));
+    }
+
+    #[test]
+    fn provider_cdp_keepalive_url_match_is_provider_scoped() {
+        assert!(provider_cdp_keepalive_url_matches(
+            ProviderId::Unicom,
+            "https://pan.wo.cn/web/root"
+        ));
+        assert!(!provider_cdp_keepalive_url_matches(
+            ProviderId::Unicom,
+            "https://cloud.189.cn/web/main/file"
+        ));
+        assert!(provider_cdp_keepalive_url_matches(
+            ProviderId::Telecom,
+            "https://cloud.189.cn/web/main/file"
+        ));
+        assert!(!provider_cdp_keepalive_url_matches(
+            ProviderId::Telecom,
+            "https://pan.wo.cn/"
+        ));
+    }
+
+    #[tokio::test]
+    async fn admin_status_surfaces_provider_cdp_keepalive_failures() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).provider_cdp_keepalive_enabled = true;
+        state
+            .provider_cdp_keepalive
+            .lock()
+            .expect("provider cdp keepalive state poisoned")
+            .by_provider
+            .insert(
+                ProviderId::Unicom,
+                ProviderCdpKeepaliveStatusRecord {
+                    last_attempt_at_unix_ms: Some(current_unix_ms()),
+                    last_success_at_unix_ms: None,
+                    last_error: Some("no matching CDP page".to_string()),
+                    endpoint_url: Some("http://192.168.1.36:9222".to_string()),
+                    observed_url: Some("https://example.com".to_string()),
+                    consecutive_failures: 2,
+                },
+            );
+
+        let Json(status) = admin_status(State(state), HeaderMap::new())
+            .await
+            .expect("admin status should succeed");
+        let alert = status
+            .alerts
+            .iter()
+            .find(|alert| alert.id == "unicom_cdp_keepalive_failing")
+            .expect("cdp keepalive alert should exist");
+        assert_eq!(alert.severity, "warn");
+        assert!(alert.detail.contains("consecutive_failures=2"));
+        assert!(alert.detail.contains("no matching CDP page"));
     }
 
     #[tokio::test]
@@ -51628,6 +51880,7 @@ mod tests {
                 next_probe_at_unix_ms_by_provider: BTreeMap::new(),
             })),
             credential_lease_probe_wake: Arc::new(Notify::new()),
+            provider_cdp_keepalive: Arc::new(Mutex::new(ProviderCdpKeepaliveState::default())),
             admin_client_ip: Arc::new(Mutex::new(None)),
             admin_sessions: Arc::new(Mutex::new(HashMap::new())),
             browser_flow_catalogs,
