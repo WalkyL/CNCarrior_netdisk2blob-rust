@@ -20373,6 +20373,38 @@ fn enqueue_admin_object_action_replication_jobs(
     state.metadata_store.enqueue_jobs(jobs)
 }
 
+fn enqueue_put_object_replication_jobs(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    jobs: &[ReplicationJob],
+) -> Result<(), metadata_store::MetadataError> {
+    #[cfg(test)]
+    {
+        if let Some(gate) = PUT_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING.get() {
+            let mut gate = gate
+                .lock()
+                .expect("put-object replication enqueue failure gate lock should not be poisoned");
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
+                return Err(metadata_store::MetadataError::Io {
+                    path: PathBuf::from("injected-put-object-replication-enqueue-failure"),
+                    source: std::io::Error::other(
+                        "injected put-object replication enqueue failure",
+                    ),
+                });
+            }
+        }
+    }
+    state.metadata_store.enqueue_jobs(jobs)
+}
+
 fn enqueue_replication_delete_for_object(
     state: &AppState,
     source_provider: ProviderId,
@@ -31982,6 +32014,41 @@ async fn maybe_cleanup_failed_put_object(
     }
 }
 
+async fn rollback_put_after_failure_with_note(
+    state: &AppState,
+    backend: &DynBackend,
+    home_provider: ProviderId,
+    bucket: &str,
+    key: &str,
+    previous_placement_record: Option<ObjectPlacementRecord>,
+    previous_placement: Option<(ProviderId, u64)>,
+    previous_logical: Option<LogicalObjectRecord>,
+    previous_protection_plan_record: Option<ObjectProtectionPlanRecord>,
+    failure_context: &'static str,
+) -> String {
+    let metadata_note = match ensure_previous_object_metadata_state(
+        state,
+        bucket,
+        key,
+        previous_placement_record,
+        previous_logical,
+        previous_protection_plan_record,
+    ) {
+        Ok(()) => "metadata rollback succeeded".to_string(),
+        Err(error) => format!("metadata rollback failed: {error}"),
+    };
+    maybe_cleanup_failed_put_object(
+        backend,
+        home_provider,
+        bucket,
+        key,
+        previous_placement,
+        failure_context,
+    )
+    .await;
+    format!("remote put already succeeded; {metadata_note}")
+}
+
 async fn mark_gateway_write_ahead_log_rolled_back(
     state: &AppState,
     context: &GatewayWriteAheadLogContext,
@@ -32351,19 +32418,53 @@ async fn execute_put_upload(
         Some(stored_size),
     );
 
-    persist_object_protection_plan(
+    if let Err(error) = persist_object_protection_plan(
         state,
         &bucket,
         &key,
         &effective_topology.sync_targets,
         &effective_topology.fallback_read_order,
         current_unix_ms(),
-    )
-    .map_err(map_backend_error_to_s3)?;
+    ) {
+        let rollback_note = rollback_put_after_failure_with_note(
+            state,
+            &home_backend,
+            home_provider,
+            &bucket,
+            &key,
+            previous_placement_record.clone(),
+            previous_placement,
+            previous_logical.clone(),
+            previous_protection_plan_record.clone(),
+            "persist object protection plan after put",
+        )
+        .await;
+        return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+            "put remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            bucket, key
+        ))));
+    }
     let mut finalized_logical_record = desired_logical_record.clone();
     finalized_logical_record.etag = effective_etag.clone();
-    persist_logical_object_record(state, &finalized_logical_record)
-        .map_err(map_backend_error_to_s3)?;
+    if let Err(error) = persist_logical_object_record(state, &finalized_logical_record) {
+        let rollback_note = rollback_put_after_failure_with_note(
+            state,
+            &home_backend,
+            home_provider,
+            &bucket,
+            &key,
+            previous_placement_record.clone(),
+            previous_placement,
+            previous_logical.clone(),
+            previous_protection_plan_record.clone(),
+            "persist logical metadata after put",
+        )
+        .await;
+        return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+            "put remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            bucket, key
+        ))));
+    }
     let mut jobs = state.replication.enqueue_put(
         &effective_topology,
         Some(home_provider.as_str().to_string()),
@@ -32392,13 +32493,24 @@ async fn execute_put_upload(
             key.clone(),
         ));
     }
-    if let Err(error) = state.metadata_store.enqueue_jobs(&jobs) {
-        warn!(
-            bucket = %bucket,
-            key = %key,
-            error = %error,
-            "failed to persist replication jobs after put"
-        );
+    if let Err(error) = enqueue_put_object_replication_jobs(state, &bucket, &key, &jobs) {
+        let rollback_note = rollback_put_after_failure_with_note(
+            state,
+            &home_backend,
+            home_provider,
+            &bucket,
+            &key,
+            previous_placement_record,
+            previous_placement,
+            previous_logical,
+            previous_protection_plan_record,
+            "persist replication jobs after put",
+        )
+        .await;
+        return Err(S3Error::internal_error(format!(
+            "put remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            bucket, key
+        )));
     }
     if !jobs.is_empty() {
         info!(
@@ -33220,6 +33332,10 @@ static DELETE_OBJECT_METADATA_FAILURES_REMAINING: std::sync::OnceLock<Mutex<Hash
 static DELETE_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<
     Mutex<HashMap<String, u32>>,
 > = std::sync::OnceLock::new();
+#[cfg(test)]
+static PUT_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<
+    Mutex<HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 fn set_test_multipart_part_upsert_failures(upload_id: &str, remaining: u32) {
@@ -33324,6 +33440,21 @@ fn set_test_delete_object_replication_enqueue_failures(bucket: &str, key: &str, 
     let mut gate = gate
         .lock()
         .expect("delete-object replication enqueue failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
+}
+
+#[cfg(test)]
+fn set_test_put_object_replication_enqueue_failures(bucket: &str, key: &str, remaining: u32) {
+    let gate = PUT_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
+        .lock()
+        .expect("put-object replication enqueue failure gate lock should not be poisoned");
     let scope = copy_object_failure_scope_key(bucket, key);
     if remaining == 0 {
         gate.remove(scope.as_str());
@@ -49161,6 +49292,64 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.contains("post-write head verification failed"))
         );
+    }
+
+    #[tokio::test]
+    async fn put_replication_enqueue_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/put-enqueue-failure.txt".to_string();
+        let body = Bytes::from_static(b"put enqueue failure");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        set_test_put_object_replication_enqueue_failures(&bucket, &key, 1);
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect_err("put should fail when replication enqueue fails after remote write")
+        .into_response();
+        set_test_put_object_replication_enqueue_failures(&bucket, &key, 0);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be utf-8");
+        assert!(response_body.contains("put remote side effect may have occurred"));
+        assert!(response_body.contains("remote put already succeeded"));
+        assert!(response_body.contains("metadata rollback succeeded"));
+
+        assert!(state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .is_none());
+        assert!(load_logical_object_record(&state, &bucket, &key)
+            .expect("logical metadata should load")
+            .is_none());
+        assert!(load_object_protection_plan(&state, &bucket, &key)
+            .expect("protection metadata should load")
+            .is_none());
+
+        let backend = backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        let lookup = backend.get_object(&bucket, &key).await;
+        assert!(matches!(lookup, Err(BlobError::NotFound(_))));
     }
 
     #[tokio::test]
