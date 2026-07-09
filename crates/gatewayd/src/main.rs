@@ -19263,6 +19263,26 @@ fn persist_object_protection_plan(
 ) -> Result<(), BlobError> {
     let sanitized_fallback =
         sanitize_fallback_order_for_sync_targets(sync_targets, fallback_read_order);
+    #[cfg(test)]
+    {
+        if let Some(gate) = OBJECT_PROTECTION_PLAN_PERSIST_FAILURES_REMAINING.get() {
+            let mut gate = gate
+                .lock()
+                .expect("object protection plan persist failure gate lock should not be poisoned");
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
+                return Err(BlobError::Upstream(format!(
+                    "failed to persist object protection plan for {bucket}/{key}: injected object protection plan persist failure"
+                )));
+            }
+        }
+    }
     state
         .metadata_store
         .upsert_object_protection_plan(&ObjectProtectionPlanRecord {
@@ -20403,6 +20423,30 @@ fn enqueue_put_object_replication_jobs(
         }
     }
     state.metadata_store.enqueue_jobs(jobs)
+}
+
+fn maybe_inject_post_put_logical_persist_failure(bucket: &str, key: &str) -> Result<(), BlobError> {
+    #[cfg(test)]
+    {
+        if let Some(gate) = POST_PUT_LOGICAL_OBJECT_PERSIST_FAILURES_REMAINING.get() {
+            let mut gate = gate
+                .lock()
+                .expect("post-put logical-object persist failure gate lock should not be poisoned");
+            let scope = copy_object_failure_scope_key(bucket, key);
+            if let Some(remaining) = gate.get_mut(scope.as_str()) {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                }
+                if *remaining == 0 {
+                    gate.remove(scope.as_str());
+                }
+                return Err(BlobError::Upstream(format!(
+                    "failed to persist logical object metadata for {bucket}/{key}: injected post-put logical metadata persist failure"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn enqueue_replication_delete_for_object(
@@ -32446,6 +32490,25 @@ async fn execute_put_upload(
     }
     let mut finalized_logical_record = desired_logical_record.clone();
     finalized_logical_record.etag = effective_etag.clone();
+    if let Err(error) = maybe_inject_post_put_logical_persist_failure(&bucket, &key) {
+        let rollback_note = rollback_put_after_failure_with_note(
+            state,
+            &home_backend,
+            home_provider,
+            &bucket,
+            &key,
+            previous_placement_record.clone(),
+            previous_placement,
+            previous_logical.clone(),
+            previous_protection_plan_record.clone(),
+            "persist logical metadata after put",
+        )
+        .await;
+        return Err(map_backend_error_to_s3(BlobError::Upstream(format!(
+            "put remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+            bucket, key
+        ))));
+    }
     if let Err(error) = persist_logical_object_record(state, &finalized_logical_record) {
         let rollback_note = rollback_put_after_failure_with_note(
             state,
@@ -33336,6 +33399,13 @@ static DELETE_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock
 static PUT_OBJECT_REPLICATION_ENQUEUE_FAILURES_REMAINING: std::sync::OnceLock<
     Mutex<HashMap<String, u32>>,
 > = std::sync::OnceLock::new();
+#[cfg(test)]
+static POST_PUT_LOGICAL_OBJECT_PERSIST_FAILURES_REMAINING: std::sync::OnceLock<Mutex<HashMap<String, u32>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
+static OBJECT_PROTECTION_PLAN_PERSIST_FAILURES_REMAINING: std::sync::OnceLock<
+    Mutex<HashMap<String, u32>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 fn set_test_multipart_part_upsert_failures(upload_id: &str, remaining: u32) {
@@ -33455,6 +33525,36 @@ fn set_test_put_object_replication_enqueue_failures(bucket: &str, key: &str, rem
     let mut gate = gate
         .lock()
         .expect("put-object replication enqueue failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
+}
+
+#[cfg(test)]
+fn set_test_post_put_logical_object_persist_failures(bucket: &str, key: &str, remaining: u32) {
+    let gate = POST_PUT_LOGICAL_OBJECT_PERSIST_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
+        .lock()
+        .expect("post-put logical-object persist failure gate lock should not be poisoned");
+    let scope = copy_object_failure_scope_key(bucket, key);
+    if remaining == 0 {
+        gate.remove(scope.as_str());
+    } else {
+        gate.insert(scope, remaining);
+    }
+}
+
+#[cfg(test)]
+fn set_test_object_protection_plan_persist_failures(bucket: &str, key: &str, remaining: u32) {
+    let gate = OBJECT_PROTECTION_PLAN_PERSIST_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()));
+    let mut gate = gate
+        .lock()
+        .expect("object protection plan persist failure gate lock should not be poisoned");
     let scope = copy_object_failure_scope_key(bucket, key);
     if remaining == 0 {
         gate.remove(scope.as_str());
@@ -43524,6 +43624,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn object_actions_rename_replication_enqueue_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let source_key = "notes/admin-rename-enqueue-source.txt".to_string();
+        let destination_key = "notes/admin-rename-enqueue-destination.txt".to_string();
+
+        let source_uri: Uri = format!("/{bucket}/{source_key}")
+            .parse()
+            .expect("source uri should parse");
+        let source_body = Bytes::from_static(b"admin rename source");
+        let source_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &source_uri,
+            &source_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), source_key.clone())),
+            Method::PUT,
+            OriginalUri(source_uri),
+            source_headers,
+            source_body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        persist_object_protection_plan(
+            &state,
+            &bucket,
+            &source_key,
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            current_unix_ms(),
+        )
+        .expect("source protection plan should persist");
+
+        set_test_admin_object_action_replication_enqueue_failures(&bucket, &destination_key, 1);
+        let error = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Rename {
+                bucket: bucket.clone(),
+                key: source_key.clone(),
+                new_key: destination_key.clone(),
+                mode: ObjectActionMode::GatewayManaged,
+                provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect_err("admin rename should fail when replication enqueue fails after remote rename");
+        set_test_admin_object_action_replication_enqueue_failures(&bucket, &destination_key, 0);
+
+        let message = error.0.to_string();
+        assert!(message.contains("rename remote side effect may have occurred"));
+        assert!(message.contains("remote rename rollback succeeded"));
+        assert!(message.contains("source metadata rollback succeeded"));
+        assert!(message.contains("destination metadata rollback succeeded"));
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &source_key)
+            .expect("source placement should load")
+            .expect("source placement should exist");
+        assert_eq!(placement.provider, "stub");
+        assert!(state
+            .metadata_store
+            .object_placement(&bucket, &destination_key)
+            .expect("destination placement should load")
+            .is_none());
+        let backend = backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        assert!(backend.get_object(&bucket, &source_key).await.is_ok());
+        let destination_lookup = backend.get_object(&bucket, &destination_key).await;
+        assert!(matches!(destination_lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
     async fn object_actions_move_failure_reports_remote_rollback_status() {
         let state = test_state();
         let source_bucket = "root".to_string();
@@ -43630,6 +43810,99 @@ mod tests {
                 .await
                 .is_ok()
         );
+        let destination_lookup = backend
+            .get_object(&destination_bucket, &destination_key)
+            .await;
+        assert!(matches!(destination_lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn object_actions_move_replication_enqueue_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let source_bucket = "root".to_string();
+        let source_key = "notes/admin-move-enqueue-source.txt".to_string();
+        let destination_bucket = "family".to_string();
+        let destination_key = "shared/admin-move-enqueue-destination.txt".to_string();
+
+        let source_uri: Uri = format!("/{source_bucket}/{source_key}")
+            .parse()
+            .expect("source uri should parse");
+        let source_body = Bytes::from_static(b"admin move source");
+        let source_headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &source_uri,
+            &source_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((source_bucket.clone(), source_key.clone())),
+            Method::PUT,
+            OriginalUri(source_uri),
+            source_headers,
+            source_body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+
+        persist_object_protection_plan(
+            &state,
+            &source_bucket,
+            &source_key,
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            current_unix_ms(),
+        )
+        .expect("source protection plan should persist");
+
+        set_test_admin_object_action_replication_enqueue_failures(
+            &destination_bucket,
+            &destination_key,
+            1,
+        );
+        let error = run_object_action(
+            State(state.clone()),
+            Json(ObjectActionInput::Move {
+                source_bucket: source_bucket.clone(),
+                source_key: source_key.clone(),
+                destination_bucket: destination_bucket.clone(),
+                destination_key: destination_key.clone(),
+                mode: ObjectActionMode::GatewayManaged,
+                source_provider: None,
+                destination_provider: None,
+                operator: None,
+                ticket: None,
+                notes: None,
+            }),
+        )
+        .await
+        .expect_err("admin move should fail when replication enqueue fails after remote move");
+        set_test_admin_object_action_replication_enqueue_failures(
+            &destination_bucket,
+            &destination_key,
+            0,
+        );
+
+        let message = error.0.to_string();
+        assert!(message.contains("move remote side effect may have occurred"));
+        assert!(message.contains("remote move rollback succeeded"));
+        assert!(message.contains("source metadata rollback succeeded"));
+        assert!(message.contains("destination metadata rollback succeeded"));
+
+        let placement = state
+            .metadata_store
+            .object_placement(&source_bucket, &source_key)
+            .expect("source placement should load")
+            .expect("source placement should exist");
+        assert_eq!(placement.provider, "stub");
+        assert!(state
+            .metadata_store
+            .object_placement(&destination_bucket, &destination_key)
+            .expect("destination placement should load")
+            .is_none());
+        let backend = backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        assert!(backend.get_object(&source_bucket, &source_key).await.is_ok());
         let destination_lookup = backend
             .get_object(&destination_bucket, &destination_key)
             .await;
@@ -49324,6 +49597,122 @@ mod tests {
         .expect_err("put should fail when replication enqueue fails after remote write")
         .into_response();
         set_test_put_object_replication_enqueue_failures(&bucket, &key, 0);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be utf-8");
+        assert!(response_body.contains("put remote side effect may have occurred"));
+        assert!(response_body.contains("remote put already succeeded"));
+        assert!(response_body.contains("metadata rollback succeeded"));
+
+        assert!(state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .is_none());
+        assert!(load_logical_object_record(&state, &bucket, &key)
+            .expect("logical metadata should load")
+            .is_none());
+        assert!(load_object_protection_plan(&state, &bucket, &key)
+            .expect("protection metadata should load")
+            .is_none());
+
+        let backend = backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        let lookup = backend.get_object(&bucket, &key).await;
+        assert!(matches!(lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn put_protection_plan_persist_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/put-plan-failure.txt".to_string();
+        let body = Bytes::from_static(b"put plan failure");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        set_test_object_protection_plan_persist_failures(&bucket, &key, 1);
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect_err("put should fail when protection plan persist fails after remote write")
+        .into_response();
+        set_test_object_protection_plan_persist_failures(&bucket, &key, 0);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be utf-8");
+        assert!(response_body.contains("put remote side effect may have occurred"));
+        assert!(response_body.contains("remote put already succeeded"));
+        assert!(response_body.contains("metadata rollback succeeded"));
+
+        assert!(state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .is_none());
+        assert!(load_logical_object_record(&state, &bucket, &key)
+            .expect("logical metadata should load")
+            .is_none());
+        assert!(load_object_protection_plan(&state, &bucket, &key)
+            .expect("protection metadata should load")
+            .is_none());
+
+        let backend = backend_for_provider(&state, ProviderId::Stub).expect("backend should resolve");
+        let lookup = backend.get_object(&bucket, &key).await;
+        assert!(matches!(lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn put_logical_metadata_persist_failure_reports_remote_rollback_status() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/put-logical-failure.txt".to_string();
+        let body = Bytes::from_static(b"put logical failure");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        set_test_post_put_logical_object_persist_failures(&bucket, &key, 1);
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect_err("put should fail when logical metadata persist fails after remote write")
+        .into_response();
+        set_test_post_put_logical_object_persist_failures(&bucket, &key, 0);
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let response_body = to_bytes(response.into_body(), usize::MAX)
