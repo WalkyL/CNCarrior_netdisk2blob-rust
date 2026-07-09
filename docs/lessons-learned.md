@@ -111,6 +111,22 @@
 - Separate polling knobs for webhook alerts and provider lease probes so one can be disabled or
   slowed without affecting the other.
 - OneDrive stays parked and does not participate in the active keepalive path.
+- Lease records need to preserve enough incident history to answer "auth died first, or service
+  stalled first" after a reboot. A single `last_verified_at_unix_ms` that is overwritten on every
+  poll is not enough; keep at least a first-failure or last-status-change timestamp.
+- Dogfood primary-provider auth expiry must be treated as a first-class availability incident, not
+  only an Admin warning. On `.49` in July 2026, both `unicom` and `telecom` leases had already lost
+  their last successful verification on `2026-07-06`, days before the manual reboot on
+  `2026-07-09 15:56:26Z`.
+- A clean reboot sequence is different from a crash. For the same `.49` incident, system logs showed
+  `systemd-logind: The system will reboot now!` and an orderly shutdown of `ccbg.service`, SMB,
+  and SSH, so the box was manually rebooted after the degraded state rather than rebooting because
+  of an OOM, kernel panic, or disk failure.
+- Current lease probing is only observability plus reauth signaling. It does not auto-refresh
+  `unicom` / `telecom`, demote a stale primary provider, or fast-fail request paths before they hit
+  slow upstream auth errors. If dogfood responsiveness matters more than preserving the stale
+  primary choice, the gateway needs an explicit policy for stale-primary fencing or automatic
+  fallback.
 
 ## Pluggable Entry Points
 

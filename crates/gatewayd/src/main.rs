@@ -2321,6 +2321,7 @@ struct OperationsOverviewPayload {
     notify_last_success_age_ms: Option<u64>,
     notify_last_error: Option<String>,
     provider_credential_leases: Vec<ProviderCredentialLeaseSummaryPayload>,
+    provider_cdp_keepalive: Vec<ProviderCdpKeepaliveSummaryPayload>,
     replication_failed_alert_threshold: usize,
     replication_failed_alert_min_age_ms: u64,
     data_plane_loopback_only: bool,
@@ -2339,6 +2340,18 @@ struct ProviderCredentialLeaseSummaryPayload {
     summary: String,
     last_verified_at_unix_ms: Option<u64>,
     last_success_at_unix_ms: Option<u64>,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProviderCdpKeepaliveSummaryPayload {
+    provider: &'static str,
+    enabled: bool,
+    last_attempt_at_unix_ms: Option<u64>,
+    last_success_at_unix_ms: Option<u64>,
+    endpoint_url: Option<String>,
+    observed_url: Option<String>,
+    consecutive_failures: u32,
     last_error: Option<String>,
 }
 
@@ -4014,6 +4027,7 @@ fn operations_overview_payload(
     let topology = runtime_topology(state);
     let onedrive_policy = current_onedrive_policy(state);
     let provider_credential_leases = visible_provider_credential_lease_summaries(&state.config);
+    let provider_cdp_keepalive = provider_cdp_keepalive_summaries(state);
     let data_plane_permits_available = state.data_plane_concurrency.semaphore.available_permits();
     let rate_limiter = snapshot_data_plane_rate_limiter(state, now_unix_ms);
     let data_plane_transfer = snapshot_data_plane_transfer(state);
@@ -4065,6 +4079,7 @@ fn operations_overview_payload(
             .map(|value| now_unix_ms.saturating_sub(value)),
         notify_last_error: notify.last_error.clone(),
         provider_credential_leases,
+        provider_cdp_keepalive,
         replication_failed_alert_threshold: state.config.replication_failed_alert_threshold,
         replication_failed_alert_min_age_ms: state.config.replication_failed_alert_min_age_ms,
         data_plane_loopback_only: socket_addr_is_loopback(&state.config.bind_addr),
@@ -28857,6 +28872,31 @@ fn smb_application_map(state: &AppState) -> HashMap<String, DataPlaneApplication
         .collect()
 }
 
+fn provider_cdp_keepalive_summaries(state: &AppState) -> Vec<ProviderCdpKeepaliveSummaryPayload> {
+    let runtime = state
+        .provider_cdp_keepalive
+        .lock()
+        .expect("provider cdp keepalive state poisoned")
+        .clone();
+    [ProviderId::Unicom, ProviderId::Telecom]
+        .into_iter()
+        .filter(|provider| provider_supports_cdp_keepalive(*provider))
+        .map(|provider| {
+            let record = runtime.by_provider.get(&provider).cloned().unwrap_or_default();
+            ProviderCdpKeepaliveSummaryPayload {
+                provider: provider.as_str(),
+                enabled: state.config.provider_cdp_keepalive_enabled,
+                last_attempt_at_unix_ms: record.last_attempt_at_unix_ms,
+                last_success_at_unix_ms: record.last_success_at_unix_ms,
+                endpoint_url: record.endpoint_url,
+                observed_url: record.observed_url,
+                consecutive_failures: record.consecutive_failures,
+                last_error: record.last_error,
+            }
+        })
+        .collect()
+}
+
 fn smb_share_mount_path(config: &SmbSidecarConfig, share: &SmbShare) -> String {
     format!("{}/{}", config.mount_root.trim_end_matches('/'), share.id)
 }
@@ -39187,6 +39227,15 @@ mod tests {
         let Json(status) = admin_status(State(state), HeaderMap::new())
             .await
             .expect("admin status should succeed");
+        let keepalive = status
+            .operations_overview
+            .provider_cdp_keepalive
+            .iter()
+            .find(|entry| entry.provider == "unicom")
+            .expect("unicom keepalive summary should exist");
+        assert!(keepalive.enabled);
+        assert_eq!(keepalive.consecutive_failures, 2);
+        assert_eq!(keepalive.endpoint_url.as_deref(), Some("http://192.168.1.36:9222"));
         let alert = status
             .alerts
             .iter()
