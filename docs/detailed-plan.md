@@ -591,7 +591,7 @@ skills/
 
 - `LICENSE`
 - `scripts/check-release-ready.sh`
-- `docs/ops-007-52-release-build-host.md`
+- `docs/lessons-learned.md`（原 ops-007-52-release-build-host.md 已删除，构建主机边界已并入经验文档）
 - Docker / Podman 构建入口
 - 明确区分“已实现”和“规划中”的文档
 

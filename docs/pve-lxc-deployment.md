@@ -216,7 +216,7 @@ OneDrive 仍是 parking provider。除非有真实需求和单独回归，不要
 
 ## 验收记录
 
-- 2026-06-03 `.49` LXC + SMB sidecar + no-stub 验收见 [ops-008-49-lxc-smb-stub-removal.md](ops-008-49-lxc-smb-stub-removal.md)。
+- 2026-06-03 `.49` LXC + SMB sidecar + no-stub 验收见 [docs/lessons-learned.md](lessons-learned.md)（原 ops-008-49-lxc-smb-stub-removal.md 已删除）。
 - 2026-06-09 `.49` `96 MiB` LXC 的明文/加密压力验证与压测脏数据清理，相关经验已并入 [docs/lessons-learned.md](lessons-learned.md)。
-- 2026-06-17 `.49` carrier login browser-flow LLM repair 部署见 [ops-012-49-browser-flow-llm-repair-deploy.md](ops-012-49-browser-flow-llm-repair-deploy.md)。
-- 2026-06-24 `.49` MCP 公开发现、应用存储映射字段和 affiliation 写入偏好部署见 [ops-013-49-mcp-storage-affiliation-deploy.md](ops-013-49-mcp-storage-affiliation-deploy.md)。
+- 2026-06-17 `.49` carrier login browser-flow LLM repair 部署见 [docs/lessons-learned.md](lessons-learned.md)（原 ops-012-49-browser-flow-llm-repair-deploy.md 已删除）。
+- 2026-06-24 `.49` MCP 公开发现、应用存储映射字段和 affiliation 写入偏好部署见 [docs/lessons-learned.md](lessons-learned.md)（原 ops-013-49-mcp-storage-affiliation-deploy.md 已删除）。

@@ -130,7 +130,7 @@ MCP：
 如果当前 Windows 宿主没有本地 `nats` CLI，也没有把 `.51` NATS 凭据直接落到本机 env，
 可以使用仓库内的 `.51` 远程运维脚本：
 
-- [ops-012-51-agent-bus-read-reply.md](D:\workspaces\ccbg\docs\ops-012-51-agent-bus-read-reply.md)
+- 远程运维脚本见 [docs/lessons-learned.md](lessons-learned.md)（原 ops-012-51-agent-bus-read-reply.md 已删除）
 
 这套脚本会通过 SSH 到 `.51`，复用 `/etc/nats/agent-bus.env` 里的 live
 `codex-ccbg` 身份做 JetStream 历史读取和 bounded 回执发布，不会把密码写入仓库。

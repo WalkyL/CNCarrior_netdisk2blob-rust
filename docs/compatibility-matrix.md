@@ -76,7 +76,7 @@
 
 - [openwrt-host-profile.md](openwrt-host-profile.md)
 - [resource-budget.md](resource-budget.md)
-- [ops-007-52-release-build-host.md](ops-007-52-release-build-host.md)
+- 构建主机边界见 [docs/lessons-learned.md](lessons-learned.md)（原 ops-007-52-release-build-host.md 已删除）
 
 ### 嵌入式客户端示例
 

@@ -127,6 +127,21 @@
   slow upstream auth errors. If dogfood responsiveness matters more than preserving the stale
   primary choice, the gateway needs an explicit policy for stale-primary fencing or automatic
   fallback.
+- Periodic direct health probes do not extend browser session TTL. Providers like Unicom and Telecom
+  expire session cookies based on browser-side activity, not API access. CDP page `Page.reload` is a
+  more promising keepalive strategy than direct health checks.
+- CDP keepalive must bind to the specific endpoint and target page used during credential capture.
+  Guessing the right endpoint across multiple CDP browsers leads to wrong-page reloads or no-ops.
+  Store `capture_cdp_endpoint_url` and `capture_cdp_target_selector` in provider credentials.
+- When saving captured credentials, the save path must include the session's CDP binding metadata.
+  The Provider Credential Input DTO and the front-end `collectProviderCredentialInput` must both
+  carry `capture_cdp_endpoint_url` and `capture_cdp_target_selector`, or keepalive cannot bind to
+  the correct browser target.
+- Operator-selectable CDP endpoint per carrier assistant is essential. Without explicit selection,
+  keepalive may target the wrong browser tab (e.g., a temp-mail page instead of the carrier page).
+- CDP keepalive using `Page.reload` is an experimental strategy. Its effectiveness varies by
+  provider: it works when the carrier's session TTL is extended by browser page activity, but
+  does not help if the session is purely time-based or if the CDP target page has navigated away.
 
 ## Pluggable Entry Points
 
@@ -140,5 +155,4 @@
 ## Related Docs
 
 - [Object Delete Convergence spec](SPEC.md#object-delete-convergence)
-- [`.49` object delete convergence deploy record](ops-014-49-object-delete-convergence-deploy.md)
 - [PVE/LXC deployment guide](pve-lxc-deployment.md)

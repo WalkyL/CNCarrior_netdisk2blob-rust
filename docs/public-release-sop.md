@@ -23,7 +23,7 @@
 
 - [github-publication.md](github-publication.md)
 - [release-checklist.md](release-checklist.md)
-- [ops-007-52-release-build-host.md](ops-007-52-release-build-host.md)
+- 构建主机边界见 [docs/lessons-learned.md](lessons-learned.md)（原 ops-007-52-release-build-host.md 已删除）
 
 ## 1. 前提
 
@@ -267,7 +267,7 @@ scripts/sync-cloudflare-release-cache.sh ccbg-release-assets
 
 推荐把结果补到：
 
-- [ops-006-43-acceptance.md](ops-006-43-acceptance.md)
+- ????? lessons-learned.md
 - [release-checklist.md](release-checklist.md)
 
 如果本轮对中国移动大文件能力有任何新的正向表述，留档里必须附带对应的探测命令、绝对日期和原始结果，不接受“代码已修”“登录已通”“AList 可以”这类间接推断。

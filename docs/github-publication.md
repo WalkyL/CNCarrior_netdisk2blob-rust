@@ -209,7 +209,7 @@ runner，不走 GitHub Actions。当前构建收敛到 `192.168.1.52`：
 | STM32 client-only 示例 | `.52` | `scripts/check-stm32-client-example.sh` |
 | ESP32-S3 client-only 示例 | `.52` | `scripts/check-esp32-s3-client-example.py`；如需要 ESP-IDF 真编译，也只在 `.52` 上执行 |
 
-更完整的主机边界见 [ops-007-52-release-build-host.md](ops-007-52-release-build-host.md)。
+更完整的主机边界见 docs/lessons-learned.md（原 ops-007-52-release-build-host.md 已删除）。
 
 ## Cloudflare 公开站部署
 

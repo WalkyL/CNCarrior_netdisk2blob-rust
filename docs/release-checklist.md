@@ -20,7 +20,7 @@
   `b48c3096-49a9-413b-9327-af5c36af9772`。
 - GitHub Release 已包含 LXC / Windows / macOS x86_64 / macOS arm64 / OpenWrt lite
   五类宿主包、SHA256 sidecar、`ccbg-checksums.txt` 和 provenance 文件。
-- 完整验收记录见 [ops-006-43-acceptance.md](ops-006-43-acceptance.md) 的
+- 完整验收记录见 docs/lessons-learned.md（原 ops-006-43-acceptance.md 已删除）的
   `2026-06-09 v0.1.9 formal public release` 小节。
 
 最近完成的内部/LAN release 与 `.49` 部署：
@@ -30,7 +30,7 @@
 - 这轮没有做 Cloudflare 公网发布，也没有发布 macOS / Windows / OpenWrt 资产。
 - 这轮使用 GitHub Actions self-hosted build-runner workflow 产出 Linux LXC artifact，
   再由 `.52` 合并进正式 release 并部署到 `.49`。
-- 记录见 [ops-015-v0.1.12-build-runner-release-and-49-deploy.md](ops-015-v0.1.12-build-runner-release-and-49-deploy.md)。
+- 记录见 docs/lessons-learned.md（原 ops-015-v0.1.12-build-runner-release-and-49-deploy.md 已删除）。
 
 ## 1. Release 产物
 
