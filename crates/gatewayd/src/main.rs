@@ -2341,6 +2341,7 @@ struct ProviderCredentialLeaseSummaryPayload {
     last_verified_at_unix_ms: Option<u64>,
     last_success_at_unix_ms: Option<u64>,
     last_error: Option<String>,
+    first_failure_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4763,6 +4764,8 @@ struct ProviderCredentialLeaseRecord {
     last_success_at_unix_ms: Option<u64>,
     #[serde(default)]
     last_error: Option<String>,
+    #[serde(default)]
+    first_failure_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -11833,6 +11836,15 @@ fn build_replication_target_status_payloads(
         .collect()
 }
 
+fn is_primary_stale(state: &AppState) -> bool {
+    let control_plane = control_plane_snapshot(state);
+    let primary = control_plane.topology.primary_provider;
+    let Ok(record) = load_provider_credential_lease_record(&state.config, primary) else {
+        return false;
+    };
+    record.requires_reauth.unwrap_or(false)
+}
+
 fn build_admin_alerts(
     state: &AppState,
     provider_health: &[BackendPayload],
@@ -12227,6 +12239,22 @@ fn build_admin_alerts(
         }
     }
 
+    if is_primary_stale(state) {
+        let primary = topology.primary_provider;
+        push_alert(
+            &mut alerts,
+            AdminAlertPayload {
+                id: "primary_fenced".to_string(),
+                severity: "error",
+                title: format!("{} primary provider is fenced", provider_label(primary)),
+                detail: format!(
+                    "primary={} | lease_status=reauth_required | auto-routed to write targets",
+                    primary.as_str()
+                ),
+            },
+        );
+    }
+
     if state.config.provider_cdp_keepalive_enabled {
         let keepalive = state
             .provider_cdp_keepalive
@@ -12515,6 +12543,11 @@ async fn maybe_probe_provider_credential_lease(
         } else {
             Some(now)
         };
+    let first_failure_at = if requires_reauth && previous.first_failure_at_unix_ms.is_none() {
+        Some(now)
+    } else {
+        previous.first_failure_at_unix_ms
+    };
     persist_provider_credential_lease_record(
         &state.config,
         provider,
@@ -12527,6 +12560,7 @@ async fn maybe_probe_provider_credential_lease(
             last_verified_at_unix_ms: Some(now),
             last_success_at_unix_ms: success_at,
             last_error,
+            first_failure_at_unix_ms: first_failure_at,
         },
     )?;
 
@@ -25722,6 +25756,7 @@ fn provider_credential_lease_payload(
         && record.last_success_at_unix_ms.is_none()
         && record.last_error.is_none()
         && record.requires_reauth.is_none()
+        && record.first_failure_at_unix_ms.is_none()
     {
         return Ok(None);
     }
@@ -25735,6 +25770,7 @@ fn provider_credential_lease_payload(
         last_verified_at_unix_ms: record.last_verified_at_unix_ms,
         last_success_at_unix_ms: record.last_success_at_unix_ms,
         last_error: record.last_error,
+        first_failure_at_unix_ms: record.first_failure_at_unix_ms,
     }))
 }
 
@@ -25762,6 +25798,7 @@ fn visible_provider_credential_lease_summaries(
         last_verified_at_unix_ms: lease.last_verified_at_unix_ms,
         last_success_at_unix_ms: lease.last_success_at_unix_ms,
         last_error: lease.last_error,
+        first_failure_at_unix_ms: lease.first_failure_at_unix_ms,
     })
     .collect()
 }
@@ -25786,6 +25823,7 @@ fn reset_provider_credential_lease_on_save(
             last_verified_at_unix_ms: None,
             last_success_at_unix_ms: None,
             last_error: None,
+            first_failure_at_unix_ms: None,
         },
     )
 }
@@ -39159,6 +39197,7 @@ mod tests {
                 last_verified_at_unix_ms: Some(1_700_000_000_321),
                 last_success_at_unix_ms: Some(1_699_999_999_999),
                 last_error: Some("HTTP 401 from upstream".to_string()),
+                first_failure_at_unix_ms: None,
             },
         )
         .expect("unicom lease record should persist");
@@ -39191,6 +39230,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn primary_fencing_alert_appears_when_primary_is_stale() {
+        let state = test_state();
+        // Change topology so Unicom is primary
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology.primary_provider = ProviderId::Unicom;
+            control_plane.write_targets = vec![ProviderId::Unicom];
+        }
+        persist_provider_credential_lease_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialLeaseRecord {
+                provider: Some("unicom".to_string()),
+                status: Some("reauth_required".to_string()),
+                summary: Some(
+                    "Gateway can no longer use the saved Unicom credentials directly."
+                        .to_string(),
+                ),
+                requires_reauth: Some(true),
+                captured_at_unix_ms: Some(1_700_000_000_000),
+                last_verified_at_unix_ms: Some(1_700_000_000_321),
+                last_success_at_unix_ms: Some(1_699_999_999_999),
+                last_error: Some("HTTP 401 from upstream".to_string()),
+                first_failure_at_unix_ms: None,
+            },
+        )
+        .expect("unicom lease record should persist");
+
+        let Json(status) = admin_status(State(state), HeaderMap::new())
+            .await
+            .expect("admin status should succeed");
+
+        let alert = status
+            .alerts
+            .iter()
+            .find(|alert| alert.id == "primary_fenced")
+            .expect("primary_fenced alert should exist");
+        assert_eq!(alert.severity, "error");
+        assert!(alert.title.contains("Unicom primary provider is fenced"));
+        assert!(alert.detail.contains("primary=unicom"));
+        assert!(alert.detail.contains("lease_status=reauth_required"));
+    }
+
+    #[tokio::test]
     async fn operations_overview_includes_multiple_provider_credential_leases() {
         let state = test_state();
         persist_provider_credential_lease_record(
@@ -39205,6 +39291,7 @@ mod tests {
                 last_verified_at_unix_ms: Some(1_700_000_000_100),
                 last_success_at_unix_ms: Some(1_700_000_000_100),
                 last_error: None,
+                first_failure_at_unix_ms: None,
             },
         )
         .expect("unicom lease record should persist");
@@ -39220,6 +39307,7 @@ mod tests {
                 last_verified_at_unix_ms: None,
                 last_success_at_unix_ms: None,
                 last_error: None,
+                first_failure_at_unix_ms: None,
             },
         )
         .expect("telecom lease record should persist");
@@ -39237,6 +39325,38 @@ mod tests {
                 && lease.status == "pending_verification"
                 && !lease.requires_reauth
         }));
+    }
+
+    #[tokio::test]
+    async fn first_failure_at_is_recorded() {
+        let state = test_state();
+        persist_provider_credential_lease_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialLeaseRecord {
+                provider: Some("unicom".to_string()),
+                status: Some("reauth_required".to_string()),
+                summary: Some("needs reauth".to_string()),
+                requires_reauth: Some(true),
+                captured_at_unix_ms: Some(1_700_000_000_000),
+                last_verified_at_unix_ms: Some(1_700_000_000_321),
+                last_success_at_unix_ms: Some(1_699_999_999_999),
+                last_error: Some("HTTP 401 from upstream".to_string()),
+                first_failure_at_unix_ms: Some(12345),
+            },
+        )
+        .expect("unicom lease should persist");
+
+        let Json(status) = admin_status(State(state), HeaderMap::new())
+            .await
+            .expect("admin status should succeed");
+
+        let leases = &status.operations_overview.provider_credential_leases;
+        let unicom = leases
+            .iter()
+            .find(|lease| lease.provider == "unicom")
+            .expect("unicom lease should be present");
+        assert_eq!(unicom.first_failure_at_unix_ms, Some(12345));
     }
 
     #[test]
@@ -55053,6 +55173,7 @@ mod tests {
                 last_verified_at_unix_ms: Some(200),
                 last_success_at_unix_ms: Some(200),
                 last_error: None,
+                first_failure_at_unix_ms: None,
             },
         )
         .expect("telecom lease should persist");

@@ -520,6 +520,7 @@ pub struct ProviderCredentialLeasePayload {
     pub last_verified_at_unix_ms: Option<u64>,
     pub last_success_at_unix_ms: Option<u64>,
     pub last_error: Option<String>,
+    pub first_failure_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
