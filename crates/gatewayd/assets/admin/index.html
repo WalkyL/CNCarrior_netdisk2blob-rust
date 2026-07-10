@@ -5209,6 +5209,7 @@ Copyright (c) 2026 walky
       session_expires_at_unix_ms: null,
       session_timeout_ms: null,
       window_open: false,
+      selected_browser_endpoint_id: '',
       focus_field: '',
       loading: false,
       action: '',
@@ -5222,6 +5223,7 @@ Copyright (c) 2026 walky
       upload_probe_snapshot_open: false,
       runtime_snapshot_open: false,
       window_open: false,
+      selected_browser_endpoint_id: '',
       focus_field: '',
       loading: false,
       action: '',
@@ -5236,6 +5238,7 @@ Copyright (c) 2026 walky
       upload_probe_snapshot_open: false,
       runtime_snapshot_open: false,
       window_open: false,
+      selected_browser_endpoint_id: '',
       focus_field: '',
       loading: false,
       action: '',
@@ -6065,6 +6068,13 @@ Copyright (c) 2026 walky
       syncAssistantFieldValues('data-unicom-assistant-field', 'sms_code', normalized);
       return normalized;
     }
+    function setUnicomAssistantSelectedBrowserEndpointId(endpointId) {
+      const normalized = String(endpointId || '').trim();
+      unicomAuthAssistantState.selected_browser_endpoint_id = normalized;
+      syncAssistantFieldValues('data-unicom-assistant-field', 'selected_browser_endpoint_id', normalized);
+      renderUnicomAuthAssistant();
+      return normalized;
+    }
     function syncAssistantFieldValues(attributeName, fieldName, value) {
       const normalizedAttribute = String(attributeName || '').trim();
       const normalizedField = String(fieldName || '').trim();
@@ -6221,6 +6231,13 @@ Copyright (c) 2026 walky
       syncAssistantFieldValues('data-telecom-assistant-field', 'sms_code', normalized);
       return normalized;
     }
+    function setTelecomAssistantSelectedBrowserEndpointId(endpointId) {
+      const normalized = String(endpointId || '').trim();
+      telecomAuthAssistantState.selected_browser_endpoint_id = normalized;
+      syncAssistantFieldValues('data-telecom-assistant-field', 'selected_browser_endpoint_id', normalized);
+      renderTelecomAuthAssistant();
+      return normalized;
+    }
     function setTelecomAssistantPanelToggle(toggleName, isOpen) {
       if (toggleName === 'upload_probe_snapshot_open') {
         telecomAuthAssistantState.upload_probe_snapshot_open = isOpen === true;
@@ -6366,6 +6383,13 @@ Copyright (c) 2026 walky
       const normalized = String(smsCode || '').trim();
       mobileAuthAssistantState.sms_code = normalized;
       syncAssistantFieldValues('data-mobile-assistant-field', 'sms_code', normalized);
+      return normalized;
+    }
+    function setMobileAssistantSelectedBrowserEndpointId(endpointId) {
+      const normalized = String(endpointId || '').trim();
+      mobileAuthAssistantState.selected_browser_endpoint_id = normalized;
+      syncAssistantFieldValues('data-mobile-assistant-field', 'selected_browser_endpoint_id', normalized);
+      renderMobileAuthAssistant();
       return normalized;
     }
     function setMobileAssistantUploadProbeFile(filePath) {
@@ -6761,8 +6785,8 @@ Copyright (c) 2026 walky
       }
       return String(fallbackSelector || '').trim();
     }
-    function telecomFlowTargetingContext(flowId, session = null) {
-      const endpoint = preferredAuthCaptureBrowserEndpoint();
+    function telecomFlowTargetingContext(flowId, session = null, selectedEndpointId = '') {
+      const endpoint = authAssistantSelectedBrowserEndpoint(selectedEndpointId) || preferredAuthCaptureBrowserEndpoint();
       const configuredSelector = String(endpoint?.target_selector || '').trim();
       const sessionSelector = String(session?.cdp_target_selector || '').trim();
       const flowTarget = telecomFlowTargetInfo(flowId);
@@ -6791,8 +6815,8 @@ Copyright (c) 2026 walky
         url: flowTarget?.url || '',
       };
     }
-    function telecomFlowTargetingHint(flowId, session = null) {
-      const context = telecomFlowTargetingContext(flowId, session);
+    function telecomFlowTargetingHint(flowId, session = null, selectedEndpointId = '') {
+      const context = telecomFlowTargetingContext(flowId, session, selectedEndpointId);
       if (!context.selector) {
         return tr('telecom.cdp.no_selector', {}, 'No effective CDP target selector is available yet.');
       }
@@ -6848,6 +6872,41 @@ Copyright (c) 2026 walky
     function preferredAuthCaptureBrowserEndpoint() {
       const preferred = authCaptureBrowserEndpointPreferredOrder().find(item => item.entry.enabled !== false && item.entry.endpoint_url);
       return preferred ? preferred.entry : null;
+    }
+    function authAssistantSelectableBrowserEndpoints() {
+      return authCaptureBrowserEndpointPreferredOrder()
+        .map(item => item.entry)
+        .filter(entry => entry?.enabled !== false && String(entry?.endpoint_url || '').trim());
+    }
+    function authAssistantSelectedBrowserEndpoint(selectedId = '') {
+      const normalizedSelectedId = String(selectedId || '').trim();
+      const endpoints = authAssistantSelectableBrowserEndpoints();
+      if (normalizedSelectedId) {
+        const matched = endpoints.find(entry => String(entry.id || '').trim() === normalizedSelectedId);
+        if (matched) {
+          return matched;
+        }
+      }
+      return endpoints[0] || null;
+    }
+    function authAssistantBrowserEndpointSelectMarkup(provider, selectedId = '') {
+      const endpoints = authAssistantSelectableBrowserEndpoints();
+      if (endpoints.length <= 1) {
+        return '';
+      }
+      const resolved = authAssistantSelectedBrowserEndpoint(selectedId);
+      const value = String(resolved?.id || '').trim();
+      return `
+        <label class="provider-note" style="display:block; margin-top: 6px;">浏览器 / CDP
+          <select data-${escapeHtmlAttr(provider)}-assistant-field="selected_browser_endpoint_id" style="margin-left: 8px; max-width: 320px;">
+            ${endpoints.map(entry => {
+              const optionValue = String(entry.id || '').trim();
+              const optionLabel = String(entry.label || entry.endpoint_url || optionValue).trim();
+              return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ? 'selected' : ''}>${escapeHtml(optionLabel)}</option>`;
+            }).join('')}
+          </select>
+        </label>
+      `;
     }
     restoreUnicomAuthAssistantState();
     restoreTelecomAuthAssistantState();
@@ -12422,7 +12481,7 @@ Copyright (c) 2026 walky
       const feedbackMessage = unicomSendCodeFeedbackMessage(runtime);
       const rateLimited = unicomSendCodeRateLimited(runtime);
       const firstPrompt = promptList[0] || null;
-      const sessionEndpointLabel = browserFlowSessionEndpointLabel(session, preferredAuthCaptureBrowserEndpoint());
+      const sessionEndpointLabel = browserFlowSessionEndpointLabel(session, authAssistantSelectedBrowserEndpoint(unicomAuthAssistantState.selected_browser_endpoint_id));
       if (unicomAuthAssistantState.loading) {
         return {
           tone: 'pending',
@@ -12502,7 +12561,8 @@ Copyright (c) 2026 walky
       if (!container) {
         return;
       }
-      const endpoint = preferredAuthCaptureBrowserEndpoint();
+      const endpoint = authAssistantSelectedBrowserEndpoint(unicomAuthAssistantState.selected_browser_endpoint_id) || preferredAuthCaptureBrowserEndpoint();
+      const endpointSelectorMarkup = authAssistantBrowserEndpointSelectMarkup('unicom', unicomAuthAssistantState.selected_browser_endpoint_id);
       const session = unicomAuthAssistantState.session;
       const runtime = session?.runtime || {};
       const promptList = (session?.prompts || []).filter(prompt => prompt.provider === 'unicom');
@@ -12644,6 +12704,7 @@ Copyright (c) 2026 walky
             <div>
               <div class="provider-note">${escapeHtml(tr('assistant.unicom.status', {}, 'Status:'))} <span class="pill ${unicomAssistantStatusTone(sessionState)}">${escapeHtml(browserFlowStatusLabel(sessionState))}</span></div>
               <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
+              ${endpointSelectorMarkup}
               <div class="provider-note">${escapeHtml(tr('Pending inputs:', {}, 'Pending inputs:'))} ${promptsMarkup}</div>
             </div>
           </div>
@@ -12803,6 +12864,7 @@ Copyright (c) 2026 walky
           ${launcherActionMarkup}
           <div class="unicom-assistant-launcher-meta">
             <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
+            ${endpointSelectorMarkup}
             <div class="provider-note">${escapeHtml(tr('Pending inputs:', {}, 'Pending inputs:'))} ${promptsMarkup}</div>
             <div class="provider-note">${escapeHtml(tr('assistant.unicom.launcher_expires', {}, 'Session expires:'))} <span class="mono">${escapeHtml(sessionExpiresAt > 0 ? formatTimestamp(sessionExpiresAt) : tr('assistant.value.unknown', {}, 'unknown'))}</span></div>
           </div>
@@ -13109,8 +13171,8 @@ Copyright (c) 2026 walky
         kicker: 'Step 1',
         title: tr('auth.telecom.guidance.request_sms.title', {}, 'Request the SMS code from the live page'),
         body: tr('auth.telecom.guidance.request_sms.body', {
-          hint: telecomFlowTargetingHint(requestCodeFlowId),
-        }, `${telecomFlowTargetingHint(requestCodeFlowId)} Use Start SMS Login + Validate, then stay in this window for the rest of the Telecom login.`),
+          hint: telecomFlowTargetingHint(requestCodeFlowId, null, telecomAuthAssistantState.selected_browser_endpoint_id),
+        }, `${telecomFlowTargetingHint(requestCodeFlowId, null, telecomAuthAssistantState.selected_browser_endpoint_id)} Use Start SMS Login + Validate, then stay in this window for the rest of the Telecom login.`),
         focusField: 'phone_number',
       };
     }
@@ -13119,7 +13181,8 @@ Copyright (c) 2026 walky
       if (!container) {
         return;
       }
-      const endpoint = preferredAuthCaptureBrowserEndpoint();
+      const endpoint = authAssistantSelectedBrowserEndpoint(telecomAuthAssistantState.selected_browser_endpoint_id) || preferredAuthCaptureBrowserEndpoint();
+      const endpointSelectorMarkup = authAssistantBrowserEndpointSelectMarkup('telecom', telecomAuthAssistantState.selected_browser_endpoint_id);
       const session = telecomAuthAssistantState.session;
       const runtime = session?.runtime || {};
       const promptList = (session?.prompts || []).filter(prompt => prompt.provider === 'telecom');
@@ -13151,7 +13214,7 @@ Copyright (c) 2026 walky
               ? resumeSubmitFlowId
               : requestCodeFlowId)))
       ).trim();
-      const targetHint = telecomFlowTargetingHint(activeFlowId, session);
+      const targetHint = telecomFlowTargetingHint(activeFlowId, session, telecomAuthAssistantState.selected_browser_endpoint_id);
       const lastError = String(session?.last_error || '').trim();
       const lastErrorSummary = lastError
         ? decorateTelecomBrowserFlowError(activeFlowId, { message: lastError }, session)
@@ -13220,7 +13283,7 @@ Copyright (c) 2026 walky
         ['Updated', session?.updated_at_unix_ms ? formatTimestamp(session.updated_at_unix_ms) : 'n/a'],
         ['Phone Number', phoneNumber || 'not entered'],
         ['Current URL', currentUrl || 'n/a'],
-        ['Effective Target Selector', telecomFlowTargetingContext(activeFlowId, session).selector || 'not resolved'],
+        ['Effective Target Selector', telecomFlowTargetingContext(activeFlowId, session, telecomAuthAssistantState.selected_browser_endpoint_id).selector || 'not resolved'],
       ];
       const sessionFactsMarkup = sessionFacts.map(([label, value]) => `
         <div class="unicom-assistant-kv-card">
@@ -13267,6 +13330,7 @@ Copyright (c) 2026 walky
             <div>
               <div class="provider-note">${escapeHtml(tr('Status:', {}, 'Status:'))} <span class="pill ${unicomAssistantStatusTone(sessionState)}">${escapeHtml(browserFlowStatusLabel(sessionState))}</span></div>
               <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
+              ${endpointSelectorMarkup}
               <div class="provider-note">${escapeHtml(tr('Pending inputs:', {}, 'Pending inputs:'))} ${promptsMarkup}</div>
             </div>
           </div>
@@ -13338,7 +13402,7 @@ Copyright (c) 2026 walky
                   </div>
                   <div class="inline-warning">${escapeHtml(tr('Complete this blocker manually in the live Telecom page first. After the page advances, wait for the SMS and continue here with Resume With SMS Code.', {}, 'Complete this blocker manually in the live Telecom page first. After the page advances, wait for the SMS and continue here with Resume With SMS Code.'))}</div>
                   <div class="provider-note">${escapeHtml(tr('CDP endpoint:', {}, 'CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
-                  <div class="provider-note">${escapeHtml(tr('Effective Target:', {}, 'Effective Target:'))} <span class="mono">${escapeHtml(telecomFlowTargetingContext(requestCodeFlowId, session).selector || 'not resolved')}</span></div>
+                  <div class="provider-note">${escapeHtml(tr('Effective Target:', {}, 'Effective Target:'))} <span class="mono">${escapeHtml(telecomFlowTargetingContext(requestCodeFlowId, session, telecomAuthAssistantState.selected_browser_endpoint_id).selector || 'not resolved')}</span></div>
                   <div class="provider-note">${escapeHtml(tr('After manual verification, click Capture Current Session for personal space or Capture Family Session for family space. That auto-grabs the live session so you can leave the browser.', {}, 'After manual verification, click Capture Current Session for personal space or Capture Family Session for family space. That auto-grabs the live session so you can leave the browser.'))}</div>
                   ${secondValidationScreenshotUrl
                     ? `<div class="auth-assistant-screenshot"><img src="${escapeHtmlAttr(secondValidationScreenshotUrl)}" alt="Captured Telecom secondary verification screenshot" /></div>`
@@ -13475,7 +13539,8 @@ Copyright (c) 2026 walky
           </div>
           <div class="unicom-assistant-launcher-meta">
             <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
-            <div class="provider-note">${escapeHtml(tr('Effective Target:', {}, 'Effective Target:'))} <span class="mono">${escapeHtml(telecomFlowTargetingContext(requestCodeFlowId).selector || 'not resolved')}</span></div>
+            ${endpointSelectorMarkup}
+            <div class="provider-note">${escapeHtml(tr('Effective Target:', {}, 'Effective Target:'))} <span class="mono">${escapeHtml(telecomFlowTargetingContext(requestCodeFlowId, null, telecomAuthAssistantState.selected_browser_endpoint_id).selector || 'not resolved')}</span></div>
             <div class="provider-note">${escapeHtml(tr('Pending inputs:', {}, 'Pending inputs:'))} ${promptsMarkup}</div>
             <div class="provider-note">${escapeHtml(tr('Current URL:', {}, 'Current URL:'))} <span class="mono">${escapeHtml(currentUrl || 'n/a')}</span></div>
           </div>
@@ -14115,8 +14180,8 @@ Copyright (c) 2026 walky
         }),
       });
     }
-    async function probePreferredBrowserEndpointForSelector(selector, targetTimeoutMs = null) {
-      const endpoint = preferredAuthCaptureBrowserEndpoint();
+    async function probePreferredBrowserEndpointForSelector(selector, targetTimeoutMs = null, endpointId = '') {
+      const endpoint = authAssistantSelectedBrowserEndpoint(endpointId) || preferredAuthCaptureBrowserEndpoint();
       const normalizedSelector = String(selector || '').trim();
       if (!endpoint?.endpoint_url || !normalizedSelector) {
         return null;
@@ -14134,7 +14199,7 @@ Copyright (c) 2026 walky
         }),
       });
     }
-    async function detectLoggedInBrowserFlowTargets(catalogPayload, flowIds) {
+    async function detectLoggedInBrowserFlowTargets(catalogPayload, flowIds, endpointId = '') {
       const detections = [];
       for (const flowId of flowIds || []) {
         const selector = browserFlowCatalogDefaultTargetSelector(catalogPayload, flowId);
@@ -14142,7 +14207,7 @@ Copyright (c) 2026 walky
           continue;
         }
         try {
-          const probe = await probePreferredBrowserEndpointForSelector(selector);
+          const probe = await probePreferredBrowserEndpointForSelector(selector, null, endpointId);
           if (probe?.ok) {
             detections.push({
               flow_id: flowId,
@@ -14155,8 +14220,8 @@ Copyright (c) 2026 walky
       }
       return detections;
     }
-    async function detectLoggedInBrowserFlowTarget(catalogPayload, flowIds) {
-      const detections = await detectLoggedInBrowserFlowTargets(catalogPayload, flowIds);
+    async function detectLoggedInBrowserFlowTarget(catalogPayload, flowIds, endpointId = '') {
+      const detections = await detectLoggedInBrowserFlowTargets(catalogPayload, flowIds, endpointId);
       return detections[0] || null;
     }
     async function maybeAutoCaptureAndSaveUnicomLoggedInSession() {
@@ -14165,6 +14230,7 @@ Copyright (c) 2026 walky
       const detection = await detectLoggedInBrowserFlowTarget(
         catalog,
         probes.map(probe => probe.flow_id),
+        unicomAuthAssistantState.selected_browser_endpoint_id,
       );
       if (!detection) {
         return false;
@@ -14255,6 +14321,7 @@ Copyright (c) 2026 walky
       const detections = await detectLoggedInBrowserFlowTargets(
         catalog,
         providerBridgeResolvedLoggedInProbes('telecom', catalog).map(probe => probe.flow_id),
+        telecomAuthAssistantState.selected_browser_endpoint_id,
       );
       if (!detections.length) {
         return false;
@@ -14420,13 +14487,13 @@ Copyright (c) 2026 walky
       const mainProbe = probeMap.get('main');
       const anyProbe = probeMap.get('logged_in_any');
       const mainDetection = mainProbe
-        ? await detectLoggedInBrowserFlowTarget(catalog, [mainProbe.flow_id])
+        ? await detectLoggedInBrowserFlowTarget(catalog, [mainProbe.flow_id], mobileAuthAssistantState.selected_browser_endpoint_id)
         : null;
       const fallbackSelector = String(anyProbe?.target_selector || '').trim() || 'url:https://yun.139.com/w/*';
       let anyLoggedInDetection = null;
       if (!mainDetection) {
         try {
-          const probe = await probePreferredBrowserEndpointForSelector(fallbackSelector);
+          const probe = await probePreferredBrowserEndpointForSelector(fallbackSelector, null, mobileAuthAssistantState.selected_browser_endpoint_id);
           if (probe?.ok) {
             anyLoggedInDetection = {
               flow_id: captureSessionFromLoggedInFlowId,
@@ -14484,7 +14551,7 @@ Copyright (c) 2026 walky
       }
     }
     async function recoverUnicomAuthAssistantSession(reason = 'manual') {
-      const browserEndpoints = preferredAuthCaptureBrowserEndpointPayload();
+      const browserEndpoints = preferredAuthCaptureBrowserEndpointPayload({ endpointId: unicomAuthAssistantState.selected_browser_endpoint_id });
       if (!browserEndpoints.length) {
         return null;
       }
@@ -14548,7 +14615,9 @@ Copyright (c) 2026 walky
       }
     }
     function preferredAuthCaptureBrowserEndpointPayload(options = {}) {
-      const endpoint = preferredAuthCaptureBrowserEndpoint();
+      const endpoint = options.endpoint
+        || authAssistantSelectedBrowserEndpoint(options.endpointId)
+        || preferredAuthCaptureBrowserEndpoint();
       if (!endpoint?.endpoint_url) {
         return [];
       }
@@ -14567,6 +14636,7 @@ Copyright (c) 2026 walky
       const targetSelector = String(options.targetSelector || '').trim()
         || browserFlowCatalogDefaultTargetSelector(catalogPayload, flowId);
       return preferredAuthCaptureBrowserEndpointPayload({
+        endpointId: options.endpointId,
         targetSelector,
         preserveConfiguredSelector: options.preserveConfiguredSelector === true,
       });
@@ -14580,6 +14650,7 @@ Copyright (c) 2026 walky
       const browserEndpoints = Array.isArray(options.browserEndpoints) && options.browserEndpoints.length
         ? options.browserEndpoints
         : browserFlowPreferredBrowserEndpoints(catalogPayload, flowId, {
+          endpointId: options.endpointId || unicomAuthAssistantState.selected_browser_endpoint_id,
           targetSelector: options.targetSelector,
         });
       if (!browserEndpoints.length) {
@@ -14643,7 +14714,9 @@ Copyright (c) 2026 walky
         setUnicomAssistantWindowOpen(true, { focusField: normalizedPhone ? 'sms_code' : 'phone_number' });
         const catalog = await loadUnicomBrowserFlowCatalog().catch(() => null);
         const requestCodeFlowId = unicomFlowId('sms_request_code', 'unicom_sms_login_request_code_validate');
-        const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId);
+        const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId, {
+          endpointId: unicomAuthAssistantState.selected_browser_endpoint_id,
+        });
         if (!browserEndpoints.length) {
           setUnicomAuthAssistantFeedback(tr('auth.unicom.feedback.no_cdp', {}, 'Configure at least one enabled CDP endpoint in Browser / CDP before using the Unicom login assistant.'), 'warn');
           activateAdminTab('browser-cdp');
@@ -14688,7 +14761,7 @@ Copyright (c) 2026 walky
         }
         if (result.status === 'awaiting_input') {
           const sessionSnapshot = unicomAuthAssistantState.session || optimisticUnicomAssistantSessionFromRunResult(requestCodeFlowId, result) || null;
-          const endpointLabel = browserFlowSessionEndpointLabel(sessionSnapshot, preferredAuthCaptureBrowserEndpoint()) || 'the configured CDP endpoint';
+          const endpointLabel = browserFlowSessionEndpointLabel(sessionSnapshot, authAssistantSelectedBrowserEndpoint(unicomAuthAssistantState.selected_browser_endpoint_id)) || 'the configured CDP endpoint';
           setUnicomAuthAssistantFeedback(tr('auth.unicom.feedback.prompt_followup', {
             endpoint: endpointLabel,
           }, `The Unicom login assistant needs another verification field before it can finish requesting the SMS code. Complete that step on ${endpointLabel}, or use the pending field below, then resume the same session. Once the page reaches the logged-in file list, click Capture Current Session to pull the token and detach.`), 'warn');
@@ -14919,6 +14992,7 @@ Copyright (c) 2026 walky
       const browserEndpoints = Array.isArray(options.browserEndpoints) && options.browserEndpoints.length
         ? options.browserEndpoints
         : browserFlowPreferredBrowserEndpoints(catalogPayload, flowId, {
+          endpointId: options.endpointId || telecomAuthAssistantState.selected_browser_endpoint_id,
           targetSelector: options.targetSelector,
         });
       if (!browserEndpoints.length) {
@@ -15202,6 +15276,7 @@ Copyright (c) 2026 walky
       const browserEndpoints = Array.isArray(options.browserEndpoints) && options.browserEndpoints.length
         ? options.browserEndpoints
         : browserFlowPreferredBrowserEndpoints(catalogPayload, flowId, {
+          endpointId: options.endpointId || mobileAuthAssistantState.selected_browser_endpoint_id,
           targetSelector: options.targetSelector,
         });
       if (!browserEndpoints.length) {
@@ -15267,7 +15342,7 @@ Copyright (c) 2026 walky
           return;
         }
         const anySiteSelector = browserFlowCatalogDefaultTargetSelector(catalog, requestCodeFlowId) || 'url:https://yun.139.com*';
-        const anySiteProbe = await probePreferredBrowserEndpointForSelector(anySiteSelector).catch(() => null);
+        const anySiteProbe = await probePreferredBrowserEndpointForSelector(anySiteSelector, null, mobileAuthAssistantState.selected_browser_endpoint_id).catch(() => null);
         if (anySiteProbe?.ok) {
           const message = tr('mobile.error.capture_hint', { hint: mobileFlowTargetingHint(requestCodeFlowId, catalog) }, `The current CDP target is not a reusable logged-in China Mobile file list. Use Start SMS Login + Guide instead, or finish the login in the live browser page first. ${mobileFlowTargetingHint(requestCodeFlowId, catalog)}`);
           setMobileAssistantWindowOpen(true, {
@@ -15422,7 +15497,7 @@ Copyright (c) 2026 walky
         || sessionState === 'awaiting_input'
         || sessionState === 'answered'
         || sessionState === 'resumed';
-      const endpoint = preferredAuthCaptureBrowserEndpoint();
+      const endpoint = authAssistantSelectedBrowserEndpoint(mobileAuthAssistantState.selected_browser_endpoint_id) || preferredAuthCaptureBrowserEndpoint();
       const endpointLabel = browserFlowSessionEndpointLabel(session, endpoint);
       if (mobileAuthAssistantState.loading) {
         if (mobileAuthAssistantState.action === 'request-code') {
@@ -15504,8 +15579,9 @@ Copyright (c) 2026 walky
       if (!container) {
         return;
       }
-      const endpoint = preferredAuthCaptureBrowserEndpoint();
+      const endpoint = authAssistantSelectedBrowserEndpoint(mobileAuthAssistantState.selected_browser_endpoint_id) || preferredAuthCaptureBrowserEndpoint();
       const session = mobileAuthAssistantState.session;
+      const endpointSelectorMarkup = authAssistantBrowserEndpointSelectMarkup('mobile', mobileAuthAssistantState.selected_browser_endpoint_id);
       const runtime = session?.runtime || {};
       const token = runtime.token || '';
       const cookieHeader = runtime.cookie_header || '';
@@ -15622,6 +15698,7 @@ Copyright (c) 2026 walky
             <div>
               <div class="provider-note">${escapeHtml(tr('Status:', {}, 'Status:'))} <span class="pill ${mobileAssistantStatusTone(sessionState)}">${escapeHtml(browserFlowStatusLabel(sessionState))}</span></div>
               <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
+              ${endpointSelectorMarkup}
             </div>
           </div>
           <div class="unicom-assistant-window-body">
@@ -15801,6 +15878,7 @@ Copyright (c) 2026 walky
           </div>
           <div class="unicom-assistant-launcher-meta">
             <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
+            ${endpointSelectorMarkup}
             <div class="provider-note">${escapeHtml(tr('Phone Number:', {}, 'Phone Number:'))} <span class="mono">${escapeHtml(phoneNumber || 'not entered')}</span></div>
             <div class="provider-note">${escapeHtml(tr('Current URL:', {}, 'Current URL:'))} <span class="mono">${escapeHtml(currentUrl || 'n/a')}</span></div>
           </div>
@@ -15856,6 +15934,7 @@ Copyright (c) 2026 walky
       const catalog = await loadMobileBrowserFlowCatalog().catch(() => null);
       const requestCodeFlowId = mobileFlowId('sms_request_code', 'mobile_sms_login_request_code_validate');
       const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId, {
+        endpointId: mobileAuthAssistantState.selected_browser_endpoint_id,
         preserveConfiguredSelector: true,
       });
       if (!browserEndpoints.length) {
@@ -16015,7 +16094,9 @@ Copyright (c) 2026 walky
     async function startTelecomSmsLoginRequestCode() {
       const catalog = await loadTelecomBrowserFlowCatalog().catch(() => null);
       const requestCodeFlowId = telecomFlowId('sms_request_code', 'telecom_sms_login_request_code');
-      const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId);
+      const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId, {
+        endpointId: telecomAuthAssistantState.selected_browser_endpoint_id,
+      });
       if (!browserEndpoints.length) {
         setTelecomAuthAssistantFeedback(tr('auth.telecom.feedback.no_cdp', {}, 'Configure at least one enabled CDP endpoint in Browser / CDP before using the Telecom login assistant.'), 'warn');
         setProviderCredentialsFeedback('telecom', tr('Configure at least one enabled CDP endpoint in Browser / CDP before capturing the Telecom browser session.', {}, 'Configure at least one enabled CDP endpoint in Browser / CDP before capturing the Telecom browser session.'), 'warn');
@@ -16038,8 +16119,8 @@ Copyright (c) 2026 walky
       try {
         setTelecomAssistantBusy('request-code', true, { openWindow: true, focusField: 'sms_code' });
         setTelecomAuthAssistantFeedback(tr('auth.telecom.feedback.request_start', {
-          hint: telecomFlowTargetingHint(requestCodeFlowId),
-        }, `Starting Telecom SMS login, requesting the verification code, and capturing validation facts from the live page… ${telecomFlowTargetingHint(requestCodeFlowId)}`), 'warn');
+          hint: telecomFlowTargetingHint(requestCodeFlowId, null, telecomAuthAssistantState.selected_browser_endpoint_id),
+        }, `Starting Telecom SMS login, requesting the verification code, and capturing validation facts from the live page… ${telecomFlowTargetingHint(requestCodeFlowId, null, telecomAuthAssistantState.selected_browser_endpoint_id)}`), 'warn');
         const result = await runTelecomBrowserFlow(requestCodeFlowId, {
           phone_number: normalizedPhone,
         }, {
@@ -19879,6 +19960,12 @@ Copyright (c) 2026 walky
         }
       }
     });
+    document.getElementById('mobile-auth-assistant-panel').addEventListener('change', event => {
+      const assistantField = event.target.closest('[data-mobile-assistant-field]');
+      if (assistantField?.dataset.mobileAssistantField === 'selected_browser_endpoint_id') {
+        setMobileAssistantSelectedBrowserEndpointId(assistantField.value);
+      }
+    });
     document.getElementById('mobile-auth-assistant-panel').addEventListener('keydown', event => {
       if (event.key !== 'Enter') {
         return;
@@ -19977,6 +20064,12 @@ Copyright (c) 2026 walky
         unicomAuthPromptDraftState.set(String(promptInput.dataset.unicomAuthPromptInput || '').trim(), promptInput.value || '');
       }
     });
+    document.getElementById('unicom-auth-assistant-panel').addEventListener('change', event => {
+      const assistantField = event.target.closest('[data-unicom-assistant-field]');
+      if (assistantField?.dataset.unicomAssistantField === 'selected_browser_endpoint_id') {
+        setUnicomAssistantSelectedBrowserEndpointId(assistantField.value);
+      }
+    });
     document.getElementById('unicom-auth-assistant-panel').addEventListener('keydown', event => {
       if (event.key !== 'Enter') {
         return;
@@ -20066,6 +20159,12 @@ Copyright (c) 2026 walky
       }
       if (assistantField.dataset.telecomAssistantField === 'sms_code') {
         setTelecomAssistantSmsCode(assistantField.value);
+      }
+    });
+    document.getElementById('telecom-auth-assistant-panel').addEventListener('change', event => {
+      const assistantField = event.target.closest('[data-telecom-assistant-field]');
+      if (assistantField?.dataset.telecomAssistantField === 'selected_browser_endpoint_id') {
+        setTelecomAssistantSelectedBrowserEndpointId(assistantField.value);
       }
     });
     document.getElementById('telecom-auth-assistant-panel').addEventListener('keydown', event => {

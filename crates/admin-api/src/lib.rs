@@ -499,6 +499,8 @@ pub struct ProviderCredentialPayload {
     pub family_quota_min_free: Option<String>,
     pub family_quota_max_used: Option<String>,
     pub browser_profile: Option<BrowserRequestProfile>,
+    pub capture_cdp_endpoint_url: Option<String>,
+    pub capture_cdp_target_selector: Option<String>,
     pub session_file: Option<String>,
     pub lease: Option<ProviderCredentialLeasePayload>,
 }
@@ -1036,6 +1038,8 @@ mod tests {
             family_quota_min_free: None,
             family_quota_max_used: None,
             browser_profile: None,
+            capture_cdp_endpoint_url: None,
+            capture_cdp_target_selector: None,
             session_file: None,
             lease: None,
         };

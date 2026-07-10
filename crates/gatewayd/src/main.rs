@@ -4715,6 +4715,10 @@ struct ProviderCredentialRecord {
     family_quota_max_used: Option<String>,
     #[serde(default)]
     browser_profile: Option<BrowserRequestProfile>,
+    #[serde(default)]
+    capture_cdp_endpoint_url: Option<String>,
+    #[serde(default)]
+    capture_cdp_target_selector: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -5574,6 +5578,8 @@ impl ProviderCredentialRecord {
         self.personal_quota_max_used = normalize_secret_field(self.personal_quota_max_used);
         self.family_quota_min_free = normalize_secret_field(self.family_quota_min_free);
         self.family_quota_max_used = normalize_secret_field(self.family_quota_max_used);
+        self.capture_cdp_endpoint_url = normalize_secret_field(self.capture_cdp_endpoint_url);
+        self.capture_cdp_target_selector = normalize_secret_field(self.capture_cdp_target_selector);
         self.browser_profile = self
             .browser_profile
             .map(BrowserRequestProfile::normalize)
@@ -5598,6 +5604,8 @@ impl ProviderCredentialRecord {
             && self.personal_quota_max_used.is_none()
             && self.family_quota_min_free.is_none()
             && self.family_quota_max_used.is_none()
+            && self.capture_cdp_endpoint_url.is_none()
+            && self.capture_cdp_target_selector.is_none()
             && self.browser_profile.is_none()
     }
 }
@@ -5622,6 +5630,8 @@ impl From<ProviderCredentialInput> for ProviderCredentialRecord {
             family_quota_min_free: value.family_quota_min_free,
             family_quota_max_used: value.family_quota_max_used,
             browser_profile: value.browser_profile,
+            capture_cdp_endpoint_url: None,
+            capture_cdp_target_selector: None,
         }
         .normalize()
     }
@@ -12572,6 +12582,14 @@ fn provider_cdp_keepalive_url_matches(provider: ProviderId, url: &str) -> bool {
     }
 }
 
+fn provider_cdp_keepalive_target_selector(provider: ProviderId) -> Option<String> {
+    match provider {
+        ProviderId::Unicom => Some("url:https://pan.wo.cn/*".to_string()),
+        ProviderId::Telecom => Some("url:https://cloud.189.cn/web/*".to_string()),
+        _ => None,
+    }
+}
+
 async fn maybe_run_provider_cdp_keepalive(
     state: &AppState,
     provider: ProviderId,
@@ -12581,10 +12599,22 @@ async fn maybe_run_provider_cdp_keepalive(
     }
 
     let endpoints = auth_capture_browser_endpoints_for_policy(&current_auth_capture_policy(state));
-    let enabled_endpoints = endpoints
+    let stored_credentials = load_provider_credential_record_or_default(&state.config, provider);
+    let preferred_endpoint_url = stored_credentials.capture_cdp_endpoint_url.clone();
+    let preferred_target_selector = stored_credentials.capture_cdp_target_selector.clone();
+    let mut enabled_endpoints = endpoints
         .into_iter()
         .filter(|entry| entry.enabled)
         .collect::<Vec<_>>();
+    if let Some(preferred_endpoint_url) = preferred_endpoint_url.as_deref() {
+        enabled_endpoints.sort_by_key(|entry| {
+            if entry.endpoint_url == preferred_endpoint_url {
+                0
+            } else {
+                1
+            }
+        });
+    }
     if enabled_endpoints.is_empty() {
         let mut guard = state
             .provider_cdp_keepalive
@@ -12601,7 +12631,13 @@ async fn maybe_run_provider_cdp_keepalive(
     let mut failure_reasons = Vec::new();
     for endpoint in enabled_endpoints {
         let endpoint_url = endpoint.endpoint_url.clone();
-        let session = match CdpBrowserFlowSession::connect(&cdp_connection_config_from_browser_endpoint(&endpoint)).await {
+        let mut keepalive_endpoint = endpoint.clone();
+        if endpoint_url == preferred_endpoint_url.clone().unwrap_or_default() && preferred_target_selector.is_some() {
+            keepalive_endpoint.target_selector = preferred_target_selector.clone();
+        } else if keepalive_endpoint.target_selector.is_none() {
+            keepalive_endpoint.target_selector = provider_cdp_keepalive_target_selector(provider);
+        }
+        let session = match CdpBrowserFlowSession::connect(&cdp_connection_config_from_browser_endpoint(&keepalive_endpoint)).await {
             Ok(session) => session,
             Err(error) => {
                 failure_reasons.push(format!("{} connect failed: {error}", endpoint_url));
@@ -17055,6 +17091,8 @@ async fn handoff_browser_flow_session(
     let existing_record = load_provider_credential_record_or_default(&state.config, provider);
     let (mut next_record, credential_keys, runtime_keys) =
         apply_session_runtime_to_provider_credentials(&session.runtime, &existing_record, bridge);
+    next_record.capture_cdp_endpoint_url = session.cdp_endpoint_url.clone();
+    next_record.capture_cdp_target_selector = session.cdp_target_selector.clone();
     if credential_keys.is_empty() {
         return Err(BlobError::Configuration(format!(
             "session {} does not include any runtime credential mappings",
@@ -27593,6 +27631,8 @@ fn default_provider_credential_payload(
             family_quota_min_free: quota_defaults.family_min_free.clone(),
             family_quota_max_used: quota_defaults.family_max_used.clone(),
             browser_profile: None,
+            capture_cdp_endpoint_url: None,
+            capture_cdp_target_selector: None,
             session_file: None,
             lease: provider_credential_lease_payload(config, provider)
                 .ok()
@@ -27630,6 +27670,8 @@ fn default_provider_credential_payload(
             family_quota_min_free: quota_defaults.family_min_free.clone(),
             family_quota_max_used: quota_defaults.family_max_used.clone(),
             browser_profile: None,
+            capture_cdp_endpoint_url: None,
+            capture_cdp_target_selector: None,
             session_file: None,
             lease: provider_credential_lease_payload(config, provider)
                 .ok()
@@ -27663,6 +27705,8 @@ fn default_provider_credential_payload(
             family_quota_min_free: quota_defaults.family_min_free.clone(),
             family_quota_max_used: quota_defaults.family_max_used.clone(),
             browser_profile: None,
+            capture_cdp_endpoint_url: None,
+            capture_cdp_target_selector: None,
             session_file: None,
             lease: provider_credential_lease_payload(config, provider)
                 .ok()
@@ -27692,6 +27736,8 @@ fn default_provider_credential_payload(
             family_quota_min_free: quota_defaults.family_min_free.clone(),
             family_quota_max_used: quota_defaults.family_max_used.clone(),
             browser_profile: None,
+            capture_cdp_endpoint_url: None,
+            capture_cdp_target_selector: None,
             session_file: config.onedrive.session_file.clone(),
             lease: provider_credential_lease_payload(config, provider)
                 .ok()
@@ -27721,6 +27767,8 @@ fn default_provider_credential_payload(
             family_quota_min_free: quota_defaults.family_min_free,
             family_quota_max_used: quota_defaults.family_max_used,
             browser_profile: None,
+            capture_cdp_endpoint_url: None,
+            capture_cdp_target_selector: None,
             session_file: None,
             lease: None,
         },
@@ -27783,6 +27831,12 @@ fn current_provider_credential_payload(
     }
     if stored.family_quota_max_used.is_some() {
         payload.family_quota_max_used = stored.family_quota_max_used;
+    }
+    if stored.capture_cdp_endpoint_url.is_some() {
+        payload.capture_cdp_endpoint_url = stored.capture_cdp_endpoint_url;
+    }
+    if stored.capture_cdp_target_selector.is_some() {
+        payload.capture_cdp_target_selector = stored.capture_cdp_target_selector;
     }
     if let Some(browser_profile) = stored.browser_profile {
         payload.browser_profile =
@@ -28003,6 +28057,8 @@ fn merge_provider_credential_input_with_existing(
         family_quota_min_free: input.family_quota_min_free,
         family_quota_max_used: input.family_quota_max_used,
         browser_profile: input.browser_profile,
+        capture_cdp_endpoint_url: existing.capture_cdp_endpoint_url,
+        capture_cdp_target_selector: existing.capture_cdp_target_selector,
     }
     .normalize()
 }
@@ -39203,6 +39259,19 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn provider_cdp_keepalive_selector_defaults_are_provider_scoped() {
+        assert_eq!(
+            provider_cdp_keepalive_target_selector(ProviderId::Unicom).as_deref(),
+            Some("url:https://pan.wo.cn/*")
+        );
+        assert_eq!(
+            provider_cdp_keepalive_target_selector(ProviderId::Telecom).as_deref(),
+            Some("url:https://cloud.189.cn/web/*")
+        );
+        assert_eq!(provider_cdp_keepalive_target_selector(ProviderId::Mobile), None);
+    }
+
     #[tokio::test]
     async fn admin_status_surfaces_provider_cdp_keepalive_failures() {
         let mut state = test_state();
@@ -41014,6 +41083,8 @@ mod tests {
                 "pan.wo.cn-web",
                 "unicom_capture_current_session",
             ));
+            session.cdp_endpoint_url = Some("http://192.168.1.36:9222".to_string());
+            session.cdp_target_selector = Some("url:https://pan.wo.cn/*".to_string());
         });
 
         let Json(payload) = handoff_browser_flow_session(
@@ -41049,6 +41120,10 @@ mod tests {
         assert!(credentials_payload.token_present);
         assert!(credentials_payload.cookie_header.is_none());
         assert!(credentials_payload.cookie_header_present);
+        assert_eq!(
+            credentials_payload.capture_cdp_endpoint_url.as_deref(),
+            Some("http://192.168.1.36:9222")
+        );
 
         let handoff_audit =
             fs::read_to_string(auth_session_handoff_path(&state.config, &session_id))
@@ -41060,6 +41135,10 @@ mod tests {
         let loaded = load_provider_credential_record(&state.config, ProviderId::Unicom)
             .expect("load persisted credentials");
         assert_eq!(loaded.token.as_deref(), Some("handoff-token-v1"));
+        assert_eq!(
+            loaded.capture_cdp_endpoint_url.as_deref(),
+            Some("http://192.168.1.36:9222")
+        );
     }
 
     #[tokio::test]
@@ -45442,7 +45521,9 @@ mod tests {
         );
         assert!(html.contains("function renderTelecomAuthAssistant()"));
         assert!(
-            html.contains("function detectLoggedInBrowserFlowTargets(catalogPayload, flowIds)")
+            html.contains(
+                "function detectLoggedInBrowserFlowTargets(catalogPayload, flowIds, endpointId = '')"
+            )
         );
         assert!(html.contains("telecom_sms_login_request_code"));
         assert!(html.contains("telecom_sms_login_resume_submit_code"));
