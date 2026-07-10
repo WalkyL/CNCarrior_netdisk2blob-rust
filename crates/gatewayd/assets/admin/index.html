@@ -5797,6 +5797,24 @@ Copyright (c) 2026 walky
         : desktopMountMacCommand(selectedBucket);
       await navigator.clipboard.writeText(text);
     }
+    function browserFlowSessionSnapshotForCopy(session) {
+      return {
+        cdp_endpoint_url: String(session?.cdp_endpoint_url || '').trim() || null,
+        cdp_target_selector: String(session?.cdp_target_selector || '').trim() || null,
+        cdp_target_timeout_ms: Number.isFinite(Number(session?.cdp_target_timeout_ms))
+          ? Number(session.cdp_target_timeout_ms)
+          : null,
+        runtime: session?.runtime && typeof session.runtime === 'object' ? session.runtime : {},
+      };
+    }
+    async function copyBrowserFlowSessionSnapshot(session, setFeedback) {
+      if (!navigator.clipboard || !navigator.clipboard.writeText) {
+        throw new Error('当前浏览器不支持自动复制快照。');
+      }
+      const text = JSON.stringify(browserFlowSessionSnapshotForCopy(session), null, 2);
+      await navigator.clipboard.writeText(text);
+      setFeedback('运行时快照已复制。', 'ok');
+    }
     function renderDesktopMountPanel(status) {
       const container = document.getElementById('desktop-mount-panel');
       const notes = document.getElementById('desktop-mount-notes');
@@ -12806,8 +12824,8 @@ Copyright (c) 2026 walky
                 <div class="provider-note">${escapeHtml(tr('assistant.unicom.validation.countdown', {}, 'Countdown Detected:'))} <span class="mono">${escapeHtml(countdownDetected ? tr('assistant.value.yes', {}, 'yes') : tr('assistant.value.no', {}, 'no'))}</span></div>
                 <div class="provider-note">${escapeHtml(tr('assistant.unicom.validation.rate_limited', {}, 'Rate Limited:'))} <span class="mono">${escapeHtml(sendCodeRateLimited ? tr('assistant.value.yes', {}, 'yes') : tr('assistant.value.no', {}, 'no'))}</span></div>
                 <details>
-                  <summary>${escapeHtml(tr('assistant.unicom.validation.runtime_snapshot', {}, 'Runtime Snapshot'))}</summary>
-                  <pre>${escapeHtml(JSON.stringify(runtime, null, 2) || '{}')}</pre>
+                  <summary>${escapeHtml(tr('assistant.unicom.validation.runtime_snapshot', {}, 'Runtime Snapshot'))} <button class="secondary" type="button" data-unicom-auth-action="copy-snapshot">${escapeHtml(tr('Copy', {}, 'Copy'))}</button></summary>
+                  <pre>${escapeHtml(JSON.stringify(browserFlowSessionSnapshotForCopy(session), null, 2) || '{}')}</pre>
                 </details>
               </section>
             </div>
@@ -13481,8 +13499,8 @@ Copyright (c) 2026 walky
                 <div class="provider-note">${escapeHtml(tr('Rate Limited:', {}, 'Rate Limited:'))} <span class="mono">${escapeHtml(sendCodeRateLimited ? 'yes' : 'no')}</span></div>
                 <div class="provider-note">${escapeHtml(tr('Second Validation Visible:', {}, 'Second Validation Visible:'))} <span class="mono">${escapeHtml(secondValidationVisible ? 'yes' : 'no')}</span></div>
                 <details data-telecom-assistant-toggle="runtime_snapshot_open" ${runtimeSnapshotOpen ? 'open' : ''}>
-                  <summary>${escapeHtml(tr('Runtime Snapshot', {}, 'Runtime Snapshot'))}</summary>
-                  <pre>${escapeHtml(JSON.stringify(runtimeSnapshot, null, 2) || '{}')}</pre>
+                  <summary>${escapeHtml(tr('Runtime Snapshot', {}, 'Runtime Snapshot'))} <button class="secondary" type="button" data-telecom-auth-action="copy-snapshot">${escapeHtml(tr('Copy', {}, 'Copy'))}</button></summary>
+                  <pre>${escapeHtml(JSON.stringify(browserFlowSessionSnapshotForCopy(session), null, 2) || '{}')}</pre>
                 </details>
               </section>
             </div>
@@ -15823,8 +15841,8 @@ Copyright (c) 2026 walky
                 <div class="provider-note">${escapeHtml(tr('Countdown Detected:', {}, 'Countdown Detected:'))} <span class="mono">${escapeHtml(countdownDetected ? 'yes' : 'no')}</span></div>
                 <div class="provider-note">${escapeHtml(tr('Rate Limited:', {}, 'Rate Limited:'))} <span class="mono">${escapeHtml(rateLimited ? 'yes' : 'no')}</span></div>
                 <details data-mobile-assistant-toggle="runtime_snapshot_open" ${runtimeSnapshotOpen ? 'open' : ''}>
-                  <summary>${escapeHtml(tr('Runtime Snapshot', {}, 'Runtime Snapshot'))}</summary>
-                  <pre>${escapeHtml(JSON.stringify(runtime, null, 2) || '{}')}</pre>
+                  <summary>${escapeHtml(tr('Runtime Snapshot', {}, 'Runtime Snapshot'))} <button class="secondary" type="button" data-mobile-auth-action="copy-snapshot">${escapeHtml(tr('Copy', {}, 'Copy'))}</button></summary>
+                  <pre>${escapeHtml(JSON.stringify(browserFlowSessionSnapshotForCopy(session), null, 2) || '{}')}</pre>
                 </details>
               </section>
             </div>
@@ -20027,6 +20045,11 @@ Copyright (c) 2026 walky
           });
         return;
       }
+      if (action === 'copy-snapshot') {
+        copyBrowserFlowSessionSnapshot(mobileAuthAssistantState.session, setMobileAuthAssistantFeedback)
+          .catch(error => setMobileAuthAssistantFeedback(error.message || String(error), 'warn'));
+        return;
+      }
       if (action === 'probe-upload-surface') {
         startMobileUploadSurfaceProbe();
         return;
@@ -20125,6 +20148,11 @@ Copyright (c) 2026 walky
           refreshUnicomAuthAssistantSession({ allowRecoverMissing: true });
           return;
         }
+        if (action === 'copy-snapshot') {
+          copyBrowserFlowSessionSnapshot(unicomAuthAssistantState.session, setUnicomAuthAssistantFeedback)
+            .catch(error => setUnicomAuthAssistantFeedback(error.message || String(error), 'warn'));
+          return;
+        }
         if (action === 'repair-flow') {
           startBrowserFlowLlmRepair('unicom', actionButton.dataset.browserFlowRepairFlow, unicomAuthAssistantState.session?.last_error || '');
           return;
@@ -20210,6 +20238,11 @@ Copyright (c) 2026 walky
       }
       if (action === 'capture-family-session') {
         captureTelecomFamilySession();
+        return;
+      }
+      if (action === 'copy-snapshot') {
+        copyBrowserFlowSessionSnapshot(telecomAuthAssistantState.session, setTelecomAuthAssistantFeedback)
+          .catch(error => setTelecomAuthAssistantFeedback(error.message || String(error), 'warn'));
         return;
       }
       if (action === 'request-code') {
