@@ -14973,6 +14973,16 @@ Copyright (c) 2026 walky
           : rawValue;
       });
       payload.browser_profile = normalizeBrowserProfilePayload(providerCredentialBrowserProfiles[provider] || null);
+      const sessionState = provider === 'unicom' ? unicomAuthAssistantState
+        : provider === 'telecom' ? telecomAuthAssistantState
+        : provider === 'mobile' ? mobileAuthAssistantState : null;
+      const session = sessionState?.session || null;
+      if (session?.cdp_endpoint_url) {
+        payload.capture_cdp_endpoint_url = String(session.cdp_endpoint_url || '').trim() || null;
+      }
+      if (session?.cdp_target_selector) {
+        payload.capture_cdp_target_selector = String(session.cdp_target_selector || '').trim() || null;
+      }
       return payload;
     }
     async function refreshTelecomAuthAssistantSession(options = {}) {

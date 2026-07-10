@@ -472,6 +472,10 @@ pub struct ProviderCredentialInput {
     pub family_quota_max_used: Option<String>,
     #[serde(default)]
     pub browser_profile: Option<BrowserRequestProfile>,
+    #[serde(default)]
+    pub capture_cdp_endpoint_url: Option<String>,
+    #[serde(default)]
+    pub capture_cdp_target_selector: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

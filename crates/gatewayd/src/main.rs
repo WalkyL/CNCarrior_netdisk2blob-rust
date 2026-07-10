@@ -28057,8 +28057,8 @@ fn merge_provider_credential_input_with_existing(
         family_quota_min_free: input.family_quota_min_free,
         family_quota_max_used: input.family_quota_max_used,
         browser_profile: input.browser_profile,
-        capture_cdp_endpoint_url: existing.capture_cdp_endpoint_url,
-        capture_cdp_target_selector: existing.capture_cdp_target_selector,
+        capture_cdp_endpoint_url: input.capture_cdp_endpoint_url.or(existing.capture_cdp_endpoint_url),
+        capture_cdp_target_selector: input.capture_cdp_target_selector.or(existing.capture_cdp_target_selector),
     }
     .normalize()
 }
@@ -38583,7 +38583,7 @@ mod tests {
                             family_quota_min_free: None,
                             family_quota_max_used: None,
                             browser_profile: None,
-                        })
+                        ..Default::default() })
                         .expect("credential input should encode"),
                     ))
                     .expect("credential request should build"),
@@ -42806,7 +42806,7 @@ mod tests {
                 family_quota_min_free: None,
                 family_quota_max_used: None,
                 browser_profile: None,
-            }),
+            ..Default::default() }),
         )
         .await
         .expect("provider credentials update should succeed");
@@ -42864,7 +42864,7 @@ mod tests {
                 family_quota_min_free: Some("3 GiB".to_string()),
                 family_quota_max_used: Some("6 GiB".to_string()),
                 browser_profile: None,
-            }),
+            ..Default::default() }),
         )
         .await
         .expect("unicom provider credentials update should succeed");
@@ -42927,7 +42927,7 @@ mod tests {
                 family_quota_min_free: None,
                 family_quota_max_used: None,
                 browser_profile: None,
-            }),
+            ..Default::default() }),
         )
         .await
         .expect("mobile provider credentials update should succeed");
@@ -43017,7 +43017,7 @@ mod tests {
                 family_quota_min_free: None,
                 family_quota_max_used: None,
                 browser_profile: Some(profile.clone()),
-            }),
+            ..Default::default() }),
         )
         .await
         .expect("telecom provider credentials update should succeed");
@@ -43163,7 +43163,7 @@ mod tests {
                 family_quota_min_free: None,
                 family_quota_max_used: None,
                 browser_profile: None,
-            }),
+            ..Default::default() }),
         )
         .await
         .expect("unicom provider credentials update should succeed");
@@ -43202,7 +43202,7 @@ mod tests {
                 family_quota_min_free: None,
                 family_quota_max_used: None,
                 browser_profile: None,
-            }),
+            ..Default::default() }),
         )
         .await
         .expect("telecom provider credentials update should succeed");
@@ -43242,7 +43242,7 @@ mod tests {
                 family_quota_min_free: None,
                 family_quota_max_used: None,
                 browser_profile: None,
-            }),
+            ..Default::default() }),
         )
         .await
         .expect("mobile provider credentials update should succeed");
@@ -43296,7 +43296,7 @@ mod tests {
                 family_quota_min_free: None,
                 family_quota_max_used: None,
                 browser_profile: None,
-            }),
+            ..Default::default() }),
         )
         .await
         .expect("credential update should succeed");
