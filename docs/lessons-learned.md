@@ -150,7 +150,50 @@
 - Prefer checking the smallest necessary local state before launching anything; do not turn entry
   scripts into permanent background daemons.
 - Keep browser/CDP handling capture-only and outside the core runtime so low-memory deployments can
-  omit it entirely.
+   omit it entirely.
+
+## Stale Primary Fencing
+
+- Alert-only fencing is not enough for production. The routing layer must also deprioritise the
+  stale primary so new PUT objects land on a healthy write target instead of queueing behind auth
+  failures.
+- The right place to apply stale-primary filtering is `eligible_write_candidates_for_object`, not
+  `select_home_write_provider` — the former owns the candidate ordering used by all write paths.
+- Auto-unfence is implicit: when the lease record transitions from `reauth_required` back to
+  `active`, `is_primary_stale` returns `false` and the primary re-enters the candidate pool
+  automatically. No separate reset logic is needed.
+- A stale primary with no healthy write targets should still accept writes. The fencing code must
+  guard against removing the last candidate: if the ordered list becomes empty after removing the
+  primary, re-add the primary.
+
+## WAL Commit Failure Alerting
+
+- WAL commit failures must be tracked in runtime state, not only logged as `warn!`. The runtime
+  state is consumed by `build_admin_alerts` to produce a visible error alert in the Admin panel.
+- Clearing the failure state on the next successful commit is important: stale failure alerts
+  erode operator trust. Use `mark_gateway_write_ahead_log_committed_or_warn` to set _and_ clear
+  the runtime state in one place.
+- The alert detail should include the bucket, key, and error message so operators can diagnose
+  without digging through logs.
+
+## CDP Keepalive Monitoring
+
+- With `RUST_LOG=warn`, the keepalive loop produces no visible log output on success. To monitor
+  keepalive activity, either lower the log level, write a separate polling script, or expose
+  keepalive status through a non-admin endpoint.
+- The CDP keepalive runtime state (`provider_cdp_keepalive`) is only visible through the Admin
+  status API, which requires a session cookie. For automated monitoring, either use the control
+  API key or a separate monitor script that scrapes `journalctl` for keepalive-related entries.
+
+## Remote Ops Scripting
+
+- When deploying shell scripts to remote hosts via SSH from PowerShell, heredocs with embedded
+  quotes (`"`, `'`) are fragile. Write the script to a local temp file first, then `scp` it to
+  the target host. This avoids PowerShell heredoc parsing issues with Python f-strings, shell
+  variable interpolation, and nested quotes.
+- `nohup` + `&` over SSH on systemd hosts can cause the SSH session to hang waiting for the
+  background process to detach. Use `setsid` or `systemd-run --user` to fully detach long-running
+  monitor scripts.
 
 ## Related Docs
 
