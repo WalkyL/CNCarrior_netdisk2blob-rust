@@ -1023,6 +1023,10 @@ struct GatewayWriteAheadLogRuntimeState {
     loaded: bool,
     last_refreshed_at_unix_ms: Option<u64>,
     status: GatewayWriteAheadLogStatusPayload,
+    last_commit_failed_at_unix_ms: Option<u64>,
+    last_commit_error: Option<String>,
+    last_commit_bucket: Option<String>,
+    last_commit_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -11984,6 +11988,29 @@ fn build_admin_alerts(
                 },
             );
         }
+        let wal_runtime = state
+            .gateway_write_ahead_log_runtime
+            .lock()
+            .expect("gateway write-ahead log runtime poisoned");
+        if let Some(failed_at) = wal_runtime.last_commit_failed_at_unix_ms {
+            let ago_ms = current_unix_ms().saturating_sub(failed_at);
+            push_alert(
+                &mut alerts,
+                AdminAlertPayload {
+                    id: "wal_commit_failure".to_string(),
+                    severity: "error",
+                    title: "Write-ahead log commit failed".to_string(),
+                    detail: format!(
+                        "bucket={} key={} error={} ago_ms={}",
+                        wal_runtime.last_commit_bucket.as_deref().unwrap_or("?"),
+                        wal_runtime.last_commit_key.as_deref().unwrap_or("?"),
+                        wal_runtime.last_commit_error.as_deref().unwrap_or("?"),
+                        ago_ms,
+                    ),
+                },
+            );
+        }
+        drop(wal_runtime);
     }
 
     let matured_failed_objects = replication_state
@@ -18340,6 +18367,15 @@ async fn eligible_write_candidates_for_object(
         }
     }
 
+    if is_primary_stale(state) {
+        if let Some(pos) = ordered.iter().position(|p| *p == topology.primary_provider) {
+            ordered.remove(pos);
+        }
+        if ordered.is_empty() {
+            ordered.push(topology.primary_provider);
+        }
+    }
+
     let balanced_targets = write_targets
         .iter()
         .copied()
@@ -19884,14 +19920,32 @@ async fn mark_gateway_write_ahead_log_committed_or_warn(
 ) {
     if let Some(context) = context {
         if let Err(error) = mark_gateway_write_ahead_log_committed(state, context).await {
+            let error_str = error.to_string();
             warn!(
                 bucket = %bucket,
                 key = %key,
                 action = %action,
                 remote_provider = context.remote_provider.as_str(),
-                error = %error,
+                error = %error_str,
                 "failed to mark gateway write-ahead log as committed"
             );
+            let mut runtime = state
+                .gateway_write_ahead_log_runtime
+                .lock()
+                .expect("gateway write-ahead log runtime poisoned");
+            runtime.last_commit_failed_at_unix_ms = Some(current_unix_ms());
+            runtime.last_commit_error = Some(error_str);
+            runtime.last_commit_bucket = Some(bucket.to_string());
+            runtime.last_commit_key = Some(key.to_string());
+        } else {
+            let mut runtime = state
+                .gateway_write_ahead_log_runtime
+                .lock()
+                .expect("gateway write-ahead log runtime poisoned");
+            runtime.last_commit_failed_at_unix_ms = None;
+            runtime.last_commit_error = None;
+            runtime.last_commit_bucket = None;
+            runtime.last_commit_key = None;
         }
     }
 }
@@ -39357,6 +39411,183 @@ mod tests {
             .find(|lease| lease.provider == "unicom")
             .expect("unicom lease should be present");
         assert_eq!(unicom.first_failure_at_unix_ms, Some(12345));
+    }
+
+    #[tokio::test]
+    async fn put_object_falls_back_to_write_target_when_primary_is_stale() {
+        let mut state = test_state();
+        let unicom_backend: DynBackend = Arc::new(StubBackend::new());
+        let telecom_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Unicom, unicom_backend);
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend);
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology.primary_provider = ProviderId::Unicom;
+            control_plane.topology.sync_targets = vec![ProviderId::Telecom];
+            control_plane.topology.fallback_read_order = vec![ProviderId::Telecom];
+            control_plane.write_targets = vec![ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferPrimary;
+        }
+        persist_provider_credential_lease_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialLeaseRecord {
+                provider: Some("unicom".to_string()),
+                status: Some("reauth_required".to_string()),
+                summary: Some("needs reauth".to_string()),
+                requires_reauth: Some(true),
+                captured_at_unix_ms: Some(1_700_000_000_000),
+                last_verified_at_unix_ms: Some(1_700_000_000_321),
+                last_success_at_unix_ms: Some(1_699_999_999_999),
+                last_error: Some("HTTP 401".to_string()),
+                first_failure_at_unix_ms: None,
+            },
+        )
+        .expect("unicom lease should persist");
+
+        let bucket = "root".to_string();
+        let key = "videos/stale-primary-test.mp4".to_string();
+        let body = Bytes::from_static(b"stale-primary-test");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers_for_application(
+            &state.config,
+            "ccbg-test",
+            "ccbg-secret",
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "video/mp4")],
+        );
+
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect("put should succeed despite stale primary");
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should exist");
+        assert_eq!(
+            placement.provider, "telecom",
+            "new puts should use write target when primary is stale"
+        );
+    }
+
+    #[tokio::test]
+    async fn put_object_uses_primary_after_lease_recovers() {
+        let mut state = test_state();
+        let unicom_backend: DynBackend = Arc::new(StubBackend::new());
+        let telecom_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Unicom, unicom_backend);
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend);
+        {
+            let mut control_plane = state
+                .control_plane
+                .lock()
+                .expect("control plane should lock");
+            control_plane.topology.primary_provider = ProviderId::Unicom;
+            control_plane.topology.sync_targets = vec![ProviderId::Telecom];
+            control_plane.topology.fallback_read_order = vec![ProviderId::Telecom];
+            control_plane.write_targets = vec![ProviderId::Telecom];
+            control_plane.object_placement_mode = ObjectPlacementMode::PreferPrimary;
+        }
+        // Lease has recovered - no reauth required
+        persist_provider_credential_lease_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialLeaseRecord {
+                provider: Some("unicom".to_string()),
+                status: Some("active".to_string()),
+                summary: Some("active".to_string()),
+                requires_reauth: Some(false),
+                captured_at_unix_ms: Some(1_700_000_000_000),
+                last_verified_at_unix_ms: Some(1_700_000_000_321),
+                last_success_at_unix_ms: Some(1_700_000_000_321),
+                last_error: None,
+                first_failure_at_unix_ms: None,
+            },
+        )
+        .expect("unicom lease should persist");
+
+        let bucket = "root".to_string();
+        let key = "videos/lease-recovered-test.mp4".to_string();
+        let body = Bytes::from_static(b"lease-recovered-test");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers_for_application(
+            &state.config,
+            "ccbg-test",
+            "ccbg-secret",
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "video/mp4")],
+        );
+
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect("put should succeed with recovered primary");
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should exist");
+        assert_eq!(
+            placement.provider, "unicom",
+            "new puts should use primary when lease has recovered"
+        );
+    }
+
+    #[tokio::test]
+    async fn wal_commit_failure_alert_appears_when_commit_fails() {
+        let state = test_state();
+        {
+            let mut runtime = state
+                .gateway_write_ahead_log_runtime
+                .lock()
+                .expect("gateway write-ahead log runtime poisoned");
+            runtime.last_commit_failed_at_unix_ms = Some(1_700_000_000_000);
+            runtime.last_commit_error = Some("remote write failed".to_string());
+            runtime.last_commit_bucket = Some("test-bucket".to_string());
+            runtime.last_commit_key = Some("test-key".to_string());
+        }
+
+        let Json(status) = admin_status(State(state), HeaderMap::new())
+            .await
+            .expect("admin status should succeed");
+
+        let alert = status
+            .alerts
+            .iter()
+            .find(|alert| alert.id == "wal_commit_failure")
+            .expect("wal_commit_failure alert should exist");
+        assert_eq!(alert.severity, "error");
+        assert!(alert.title.contains("Write-ahead log commit failed"));
+        assert!(alert.detail.contains("bucket=test-bucket"));
+        assert!(alert.detail.contains("key=test-key"));
+        assert!(alert.detail.contains("error=remote write failed"));
     }
 
     #[test]
