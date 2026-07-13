@@ -14,7 +14,7 @@ use std::{
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -126,7 +126,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tar::{Builder as TarBuilder, Header as TarHeader};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::time::{Duration, Instant, sleep, timeout, timeout_at};
 use tokio::{
     fs::File as TokioFile,
