@@ -4659,6 +4659,7 @@ struct AppConfig {
     admin_password_hash: Option<String>,
     admin_password_plain: Option<String>,
     admin_session_ttl_seconds: u64,
+    admin_cookie_secure: bool,
     control_api_key: Option<String>,
     topology: TopologyPolicy,
     s3_access_key_id: String,
@@ -5766,11 +5767,12 @@ impl AppConfig {
                 "CCBG_ADMIN_PASSWORD",
                 "CCBG_ADMIN_PASSWORD_FILE",
             ),
-            admin_session_ttl_seconds: env_u64(
+admin_session_ttl_seconds: env_u64(
                 "CCBG_ADMIN_SESSION_TTL_SECONDS",
                 DEFAULT_ADMIN_SESSION_TTL_SECONDS,
             )
             .max(300),
+            admin_cookie_secure: env_bool("CCBG_ADMIN_COOKIE_SECURE", true),
             control_api_key: env_opt_or_file("CCBG_CONTROL_API_KEY", "CCBG_CONTROL_API_KEY_FILE"),
             topology,
             s3_access_key_id: env_or("CCBG_S3_ACCESS_KEY_ID", "ccbg"),
@@ -7692,14 +7694,139 @@ fn admin_password_changed_at_unix_ms(state: &AppState) -> Option<u64> {
     control_plane_admin_auth_snapshot(state).password_changed_at_unix_ms
 }
 
-fn admin_session_cookie_header(session_id: &str, ttl_seconds: u64) -> String {
+fn admin_session_cookie_header(config: &AppConfig, session_id: &str, ttl_seconds: u64) -> String {
+    let secure_flag = if config.admin_cookie_secure { "; Secure" } else { "" };
     format!(
-        "{ADMIN_SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={ttl_seconds}"
+        "{ADMIN_SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={ttl_seconds}{secure_flag}"
     )
 }
 
-fn expire_cookie_header(cookie_name: &str) -> String {
-    format!("{cookie_name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0")
+fn expire_cookie_header(config: &AppConfig, cookie_name: &str) -> String {
+    let secure_flag = if config.admin_cookie_secure { "; Secure" } else { "" };
+    format!("{cookie_name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0{secure_flag}")
+}
+
+fn test_app_config() -> AppConfig {
+    AppConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        admin_mode: AdminMode::Web,
+        admin_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        auth_callback_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        metrics_bind_addr: "127.0.0.1:0".parse().unwrap(),
+        notify_webhook_url: None,
+        notify_webhook_signing_secret: None,
+        notify_poll_interval_seconds: 15,
+        provider_lease_poll_interval_seconds: 30,
+        provider_cdp_keepalive_enabled: false,
+        provider_cdp_keepalive_interval_seconds: 300,
+        replication_failed_alert_threshold: 1,
+        replication_failed_alert_min_age_ms: 0,
+        control_plane_file: "./data/control-plane.json".to_string(),
+        credentials_dir: "./data/provider-credentials".to_string(),
+        instance_id_file: "./data/instance-id".to_string(),
+        managed_root_base: "ccbg-managed".to_string(),
+        managed_root_suffix: "test".to_string(),
+        browser_flow_catalog_dir: "./config/browser-flows".to_string(),
+        browser_flow_override_dir: "./config/browser-flow-overrides".to_string(),
+        provider_bridge_catalog_dir: "./config/provider-bridges".to_string(),
+        provider_capability_catalog_dir: "./config/provider-capabilities".to_string(),
+        admin_username: Some("admin".to_string()),
+        admin_password_hash: None,
+        admin_password_plain: Some("password".to_string()),
+        admin_session_ttl_seconds: DEFAULT_ADMIN_SESSION_TTL_SECONDS,
+        admin_cookie_secure: true,
+        control_api_key: None,
+        topology: TopologyPolicy::from_input(TopologyInput {
+            primary_provider: ProviderId::Unicom,
+            sync_targets: vec![],
+            fallback_read_order: vec![],
+            onedrive_enabled: false,
+            replication_mode: ReplicationMode::AsyncBackup,
+        }).expect("valid test topology"),
+        s3_access_key_id: "ccbg".to_string(),
+        s3_secret_access_key: "change-me".to_string(),
+        s3_region: "us-east-1".to_string(),
+        metadata_db_path: "./data/ccbg.db".to_string(),
+        metadata_snapshot_recent_limit: 32,
+        metadata_retention: MetadataRetentionPolicy::default(),
+        replication_workers: 2,
+        data_plane_max_in_flight: 8,
+        data_plane_max_requests_per_second: 0,
+        replication_recent_limit: 64,
+        replication_max_attempts: 3,
+        replication_base_retry_delay_ms: 1_000,
+        replication_max_retry_delay_ms: 30_000,
+        object_action_history_limit: DEFAULT_OBJECT_ACTION_HISTORY_LIMIT,
+        max_in_memory_object_bytes: 8 * 1024 * 1024,
+        max_spooled_object_bytes: 0,
+        spooled_body_chunk_bytes: 1024 * 1024,
+        body_spool_dir: None,
+        external_kms_provider: "local_mock".to_string(),
+        external_kms_cache_ttl_ms: 300_000,
+        onedrive: OneDriveConfig {
+            enabled: false,
+            tenant: "common".to_string(),
+            client_id: None,
+            use_device_code: false,
+            redirect_url: None,
+            drive_id: None,
+            graph_base_url: "https://graph.microsoft.com/v1.0".to_string(),
+            auth_base_url: DEFAULT_ONEDRIVE_AUTH_BASE_URL.to_string(),
+            scopes: DEFAULT_ONEDRIVE_SCOPES.to_string(),
+            session_file: Some("./data/onedrive-session.json".to_string()),
+            token_source: resolve_token_source("CCBG_ONEDRIVE"),
+            root_prefix: None,
+            user_agent: "carrier-cloud-blob-gateway/0.1".to_string(),
+            request_timeout_secs: 30,
+            max_single_upload_bytes: Some(0),
+            max_single_download_bytes: Some(0),
+        },
+    }
+}
+
+#[cfg(test)]
+mod admin_cookie_tests {
+    use super::*;
+
+    #[test]
+    fn admin_session_cookie_header_includes_secure_when_enabled() {
+        let config = AppConfig {
+            admin_cookie_secure: true,
+            ..test_app_config()
+        };
+        let header = admin_session_cookie_header(&config, "test-session", 3600);
+        assert!(header.contains("Secure"));
+    }
+
+    #[test]
+    fn admin_session_cookie_header_excludes_secure_when_disabled() {
+        let config = AppConfig {
+            admin_cookie_secure: false,
+            ..test_app_config()
+        };
+        let header = admin_session_cookie_header(&config, "test-session", 3600);
+        assert!(!header.contains("Secure"));
+    }
+
+    #[test]
+    fn expire_cookie_header_includes_secure_when_enabled() {
+        let config = AppConfig {
+            admin_cookie_secure: true,
+            ..test_app_config()
+        };
+        let header = expire_cookie_header(&config, ADMIN_SESSION_COOKIE);
+        assert!(header.contains("Secure"));
+    }
+
+    #[test]
+    fn expire_cookie_header_excludes_secure_when_disabled() {
+        let config = AppConfig {
+            admin_cookie_secure: false,
+            ..test_app_config()
+        };
+        let header = expire_cookie_header(&config, ADMIN_SESSION_COOKIE);
+        assert!(!header.contains("Secure"));
+    }
 }
 
 fn verify_admin_browser_credentials(
@@ -7716,7 +7843,7 @@ fn verify_admin_browser_credentials(
     if let Some(hash) = admin_password_hash_for_state(state) {
         let parsed_hash = PasswordHash::new(hash.trim()).map_err(|_| {
             ControlApiError::service_unavailable("admin authentication is temporarily unavailable")
-                .with_set_cookie(expire_cookie_header(ADMIN_SESSION_COOKIE))
+                .with_set_cookie(expire_cookie_header(&state.config, ADMIN_SESSION_COOKIE))
         })?;
         return Ok(Argon2::default()
             .verify_password(password.as_bytes(), &parsed_hash)
@@ -7844,7 +7971,7 @@ async fn require_admin_access(
         if had_session_cookie {
             response.headers_mut().insert(
                 SET_COOKIE,
-                HeaderValue::from_str(&expire_cookie_header(ADMIN_SESSION_COOKIE))
+                HeaderValue::from_str(&expire_cookie_header(&state.config, ADMIN_SESSION_COOKIE))
                     .expect("expired session cookie should be valid"),
             );
         }
@@ -7853,7 +7980,7 @@ async fn require_admin_access(
 
     let mut error = ControlApiError::unauthorized("admin login required");
     if had_session_cookie {
-        error.set_cookie = Some(expire_cookie_header(ADMIN_SESSION_COOKIE));
+        error.set_cookie = Some(expire_cookie_header(&state.config, ADMIN_SESSION_COOKIE));
     }
     Err(error)
 }
@@ -7874,7 +8001,7 @@ async fn require_admin_password_rotation_completed(
     let Some((_, session)) = lookup_admin_browser_session(&state, req.headers()) else {
         let mut error = ControlApiError::unauthorized("admin login required");
         if had_session_cookie {
-            error.set_cookie = Some(expire_cookie_header(ADMIN_SESSION_COOKIE));
+            error.set_cookie = Some(expire_cookie_header(&state.config, ADMIN_SESSION_COOKIE));
         }
         return Err(error);
     };
@@ -13015,14 +13142,14 @@ async fn admin_login_page(State(state): State<AppState>, headers: HeaderMap) -> 
     if cookie_value_from_headers(&headers, ADMIN_SESSION_COOKIE).is_some() {
         response.headers_mut().append(
             SET_COOKIE,
-            HeaderValue::from_str(&expire_cookie_header(ADMIN_SESSION_COOKIE))
+            HeaderValue::from_str(&expire_cookie_header(&state.config, ADMIN_SESSION_COOKIE))
                 .expect("expired admin session cookie should be valid"),
         );
     }
     if cookie_value_from_headers(&headers, CONTROL_API_KEY_COOKIE).is_some() {
         response.headers_mut().append(
             SET_COOKIE,
-            HeaderValue::from_str(&expire_cookie_header(CONTROL_API_KEY_COOKIE))
+            HeaderValue::from_str(&expire_cookie_header(&state.config, CONTROL_API_KEY_COOKIE))
                 .expect("expired control api key cookie should be valid"),
         );
     }
@@ -13065,6 +13192,7 @@ async fn admin_login(
     response.headers_mut().append(
         SET_COOKIE,
         HeaderValue::from_str(&admin_session_cookie_header(
+            &state.config,
             &session_id,
             state.config.admin_session_ttl_seconds,
         ))
@@ -13072,7 +13200,7 @@ async fn admin_login(
     );
     response.headers_mut().append(
         SET_COOKIE,
-        HeaderValue::from_str(&expire_cookie_header(CONTROL_API_KEY_COOKIE))
+        HeaderValue::from_str(&expire_cookie_header(&state.config, CONTROL_API_KEY_COOKIE))
             .expect("expired control api key cookie should be valid"),
     );
     Ok(response)
@@ -13103,7 +13231,7 @@ async fn admin_change_password(
     }
     let (_, session) = lookup_admin_browser_session(&state, &headers).ok_or_else(|| {
         let mut error = ControlApiError::unauthorized("admin login required");
-        error.set_cookie = Some(expire_cookie_header(ADMIN_SESSION_COOKIE));
+        error.set_cookie = Some(expire_cookie_header(&state.config, ADMIN_SESSION_COOKIE));
         error
     })?;
     if !verify_admin_browser_credentials(&state, &session.username, &current_password)? {
@@ -13131,12 +13259,12 @@ async fn admin_logout(State(state): State<AppState>, headers: HeaderMap) -> Resp
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().append(
         SET_COOKIE,
-        HeaderValue::from_str(&expire_cookie_header(ADMIN_SESSION_COOKIE))
+        HeaderValue::from_str(&expire_cookie_header(&state.config, ADMIN_SESSION_COOKIE))
             .expect("expired admin session cookie should be valid"),
     );
     response.headers_mut().append(
         SET_COOKIE,
-        HeaderValue::from_str(&expire_cookie_header(CONTROL_API_KEY_COOKIE))
+        HeaderValue::from_str(&expire_cookie_header(&state.config, CONTROL_API_KEY_COOKIE))
             .expect("expired control api key cookie should be valid"),
     );
     response
@@ -36878,6 +37006,7 @@ mod tests {
             admin_password_hash: None,
             admin_password_plain: Some("test-password".to_string()),
             admin_session_ttl_seconds: DEFAULT_ADMIN_SESSION_TTL_SECONDS,
+            admin_cookie_secure: true,
             control_api_key: None,
             topology,
             s3_access_key_id: "ccbg-test".to_string(),
