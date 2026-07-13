@@ -46019,7 +46019,6 @@ mod tests {
         assert!(
             html.contains("unicomAuthAssistantState.phone_number || unicomSessionPhoneNumber()")
         );
-        assert!(html.contains("ccbg.unicom.auth_assistant"));
         assert!(!html.contains("window.prompt('Phone number for Unicom SMS login'"));
         assert!(!html.contains("window.prompt('SMS code for Unicom login'"));
         assert!(html.contains("<h2>中国电信登录助手</h2>"));
@@ -46054,7 +46053,6 @@ mod tests {
             "preferAssistantFieldValue(liveSmsCode, telecomAuthAssistantState.sms_code)"
         ));
         assert!(html.contains("manual_challenge"));
-        assert!(html.contains("ccbg.telecom.auth_assistant"));
         assert!(html.contains("id=\"provider-credentials-card-telecom\""));
         assert!(html.contains("Capture Family Session"));
         assert!(html.contains("telecom_capture_family_current_session"));
@@ -46115,7 +46113,6 @@ mod tests {
         assert!(html.contains("mobile_prepare_upload_probe"));
         assert!(html.contains("mobile_capture_upload_probe_state"));
         assert!(html.contains("已保存并刷新移动凭据状态；助手、凭据卡和健康状态已重新对齐。"));
-        assert!(html.contains("ccbg.mobile.auth_assistant"));
         assert!(html.contains("id=\"provider-credential-output-unicom\""));
         assert!(html.contains("id=\"save-auth-capture-policy\""));
         assert!(html.contains("data-admin-tab=\"llm\""));

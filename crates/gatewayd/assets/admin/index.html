@@ -5906,144 +5906,6 @@ Copyright (c) 2026 walky
         'Advanced users can keep using S3 and rclone directly. The beginner path is a future SMB plugin on larger hardware, with local SMB users and local share management instead of AD.',
       ].join('\\n');
     }
-    function persistUnicomAuthAssistantState() {
-      try {
-        if (!window.sessionStorage) {
-          return;
-        }
-        const payload = {
-          session_id: String(unicomAuthAssistantState.session_id || '').trim(),
-          phone_number: String(unicomAuthAssistantState.phone_number || '').trim(),
-          session_expires_at_unix_ms: Number.isFinite(Number(unicomAuthAssistantState.session_expires_at_unix_ms))
-            ? Number(unicomAuthAssistantState.session_expires_at_unix_ms)
-            : null,
-          session_timeout_ms: Number.isFinite(Number(unicomAuthAssistantState.session_timeout_ms))
-            ? Number(unicomAuthAssistantState.session_timeout_ms)
-            : null,
-          window_open: unicomAuthAssistantState.window_open === true,
-        };
-        if (!payload.session_id && !payload.phone_number && !payload.session_expires_at_unix_ms && !payload.session_timeout_ms && !payload.window_open) {
-          window.sessionStorage.removeItem('ccbg.unicom.auth_assistant');
-          return;
-        }
-        window.sessionStorage.setItem('ccbg.unicom.auth_assistant', JSON.stringify(payload));
-      } catch (_error) {
-      }
-    }
-    function persistTelecomAuthAssistantState() {
-      try {
-        if (!window.sessionStorage) {
-          return;
-        }
-        const payload = {
-          session_id: String(telecomAuthAssistantState.session_id || '').trim(),
-          phone_number: String(telecomAuthAssistantState.phone_number || '').trim(),
-          upload_probe_snapshot_open: telecomAuthAssistantState.upload_probe_snapshot_open === true,
-          runtime_snapshot_open: telecomAuthAssistantState.runtime_snapshot_open === true,
-          window_open: telecomAuthAssistantState.window_open === true,
-        };
-        if (!payload.session_id
-          && !payload.phone_number
-          && !payload.upload_probe_snapshot_open
-          && !payload.runtime_snapshot_open
-          && !payload.window_open) {
-          window.sessionStorage.removeItem('ccbg.telecom.auth_assistant');
-          return;
-        }
-        window.sessionStorage.setItem('ccbg.telecom.auth_assistant', JSON.stringify(payload));
-      } catch (_error) {
-      }
-    }
-    function persistMobileAuthAssistantState() {
-      try {
-        if (!window.sessionStorage) {
-          return;
-        }
-        const payload = {
-          session_id: String(mobileAuthAssistantState.session_id || '').trim(),
-          phone_number: String(mobileAuthAssistantState.phone_number || '').trim(),
-          upload_probe_snapshot_open: mobileAuthAssistantState.upload_probe_snapshot_open === true,
-          runtime_snapshot_open: mobileAuthAssistantState.runtime_snapshot_open === true,
-          window_open: mobileAuthAssistantState.window_open === true,
-        };
-        if (!payload.session_id && !payload.phone_number && !payload.upload_probe_snapshot_open && !payload.runtime_snapshot_open && !payload.window_open) {
-          window.sessionStorage.removeItem('ccbg.mobile.auth_assistant');
-          return;
-        }
-        window.sessionStorage.setItem('ccbg.mobile.auth_assistant', JSON.stringify(payload));
-      } catch (_error) {
-      }
-    }
-    function restoreUnicomAuthAssistantState() {
-      try {
-        if (!window.sessionStorage) {
-          return;
-        }
-        const raw = window.sessionStorage.getItem('ccbg.unicom.auth_assistant');
-        if (!raw) {
-          return;
-        }
-        const payload = JSON.parse(raw);
-        unicomAuthAssistantState.session_id = typeof payload?.session_id === 'string'
-          ? payload.session_id.trim()
-          : '';
-        unicomAuthAssistantState.phone_number = typeof payload?.phone_number === 'string'
-          ? payload.phone_number.trim()
-          : '';
-        unicomAuthAssistantState.session_expires_at_unix_ms = Number.isFinite(Number(payload?.session_expires_at_unix_ms))
-          ? Number(payload.session_expires_at_unix_ms)
-          : null;
-        unicomAuthAssistantState.session_timeout_ms = Number.isFinite(Number(payload?.session_timeout_ms))
-          ? Number(payload.session_timeout_ms)
-          : null;
-        unicomAuthAssistantState.window_open = payload?.window_open === true;
-      } catch (_error) {
-      }
-    }
-    function restoreTelecomAuthAssistantState() {
-      try {
-        if (!window.sessionStorage) {
-          return;
-        }
-        const raw = window.sessionStorage.getItem('ccbg.telecom.auth_assistant');
-        if (!raw) {
-          return;
-        }
-        const payload = JSON.parse(raw);
-        telecomAuthAssistantState.session_id = typeof payload?.session_id === 'string'
-          ? payload.session_id.trim()
-          : '';
-        telecomAuthAssistantState.phone_number = typeof payload?.phone_number === 'string'
-          ? payload.phone_number.trim()
-          : '';
-        telecomAuthAssistantState.upload_probe_snapshot_open = payload?.upload_probe_snapshot_open === true;
-        telecomAuthAssistantState.runtime_snapshot_open = payload?.runtime_snapshot_open === true;
-        telecomAuthAssistantState.window_open = payload?.window_open === true;
-      } catch (_error) {
-      }
-    }
-    function restoreMobileAuthAssistantState() {
-      try {
-        if (!window.sessionStorage) {
-          return;
-        }
-        const raw = window.sessionStorage.getItem('ccbg.mobile.auth_assistant');
-        if (!raw) {
-          return;
-        }
-        const payload = JSON.parse(raw);
-        mobileAuthAssistantState.session_id = typeof payload?.session_id === 'string'
-          ? payload.session_id.trim()
-          : '';
-        mobileAuthAssistantState.phone_number = typeof payload?.phone_number === 'string'
-          ? payload.phone_number.trim()
-          : '';
-        mobileAuthAssistantState.upload_probe_snapshot_open = payload?.upload_probe_snapshot_open === true;
-        mobileAuthAssistantState.runtime_snapshot_open = payload?.runtime_snapshot_open === true;
-        mobileAuthAssistantState.window_open = payload?.window_open === true;
-      } catch (_error) {
-      }
-    }
     function deriveUnicomAssistantExpiry(session) {
       const runtime = session?.runtime || {};
       const absolute = Number(runtime?.session_expires_at_unix_ms);
@@ -6064,20 +5926,17 @@ Copyright (c) 2026 walky
       unicomAuthAssistantState.session_timeout_ms = Number.isFinite(timeoutMs) && timeoutMs > 0
         ? timeoutMs
         : null;
-      persistUnicomAuthAssistantState();
     }
     function setUnicomAssistantSessionId(sessionId) {
       unicomAuthAssistantState.session_id = String(sessionId || '').trim();
       if (!unicomAuthAssistantState.session_id) {
         unicomAuthAssistantState.session = null;
       }
-      persistUnicomAuthAssistantState();
     }
     function setUnicomAssistantPhoneNumber(phoneNumber) {
       const normalized = String(phoneNumber || '').trim();
       unicomAuthAssistantState.phone_number = normalized;
       syncAssistantFieldValues('data-unicom-assistant-field', 'phone_number', normalized);
-      persistUnicomAuthAssistantState();
       return normalized;
     }
     function setUnicomAssistantSmsCode(smsCode) {
@@ -6162,7 +6021,6 @@ Copyright (c) 2026 walky
       } else if (!unicomAuthAssistantState.window_open) {
         setUnicomAssistantFocusField('');
       }
-      persistUnicomAuthAssistantState();
       if (options.render !== false) {
         renderUnicomAuthAssistant();
       }
@@ -6178,7 +6036,6 @@ Copyright (c) 2026 walky
       }
       if (options.openWindow === true) {
         unicomAuthAssistantState.window_open = true;
-        persistUnicomAuthAssistantState();
       }
       renderUnicomAuthAssistant();
       if (unicomAuthAssistantState.window_open) {
@@ -6229,18 +6086,16 @@ Copyright (c) 2026 walky
         last_error: null,
       };
     }
-    function setTelecomAssistantSessionId(sessionId) {
+function setTelecomAssistantSessionId(sessionId) {
       telecomAuthAssistantState.session_id = String(sessionId || '').trim();
       if (!telecomAuthAssistantState.session_id) {
         telecomAuthAssistantState.session = null;
       }
-      persistTelecomAuthAssistantState();
     }
     function setTelecomAssistantPhoneNumber(phoneNumber) {
       const normalized = String(phoneNumber || '').trim();
       telecomAuthAssistantState.phone_number = normalized;
       syncAssistantFieldValues('data-telecom-assistant-field', 'phone_number', normalized);
-      persistTelecomAuthAssistantState();
       return normalized;
     }
     function setTelecomAssistantSmsCode(smsCode) {
@@ -6259,12 +6114,10 @@ Copyright (c) 2026 walky
     function setTelecomAssistantPanelToggle(toggleName, isOpen) {
       if (toggleName === 'upload_probe_snapshot_open') {
         telecomAuthAssistantState.upload_probe_snapshot_open = isOpen === true;
-        persistTelecomAuthAssistantState();
         return;
       }
       if (toggleName === 'runtime_snapshot_open') {
         telecomAuthAssistantState.runtime_snapshot_open = isOpen === true;
-        persistTelecomAuthAssistantState();
       }
     }
     function currentTelecomAssistantFieldValue(fieldName) {
@@ -6317,7 +6170,6 @@ Copyright (c) 2026 walky
       } else if (!telecomAuthAssistantState.window_open) {
         setTelecomAssistantFocusField('');
       }
-      persistTelecomAuthAssistantState();
       if (options.render !== false) {
         renderTelecomAuthAssistant();
       }
@@ -6333,7 +6185,6 @@ Copyright (c) 2026 walky
       }
       if (options.openWindow === true) {
         telecomAuthAssistantState.window_open = true;
-        persistTelecomAuthAssistantState();
       }
       renderTelecomAuthAssistant();
       if (telecomAuthAssistantState.window_open) {
@@ -6383,18 +6234,16 @@ Copyright (c) 2026 walky
         last_error: null,
       };
     }
-    function setMobileAssistantSessionId(sessionId) {
+function setMobileAssistantSessionId(sessionId) {
       mobileAuthAssistantState.session_id = String(sessionId || '').trim();
       if (!mobileAuthAssistantState.session_id) {
         mobileAuthAssistantState.session = null;
       }
-      persistMobileAuthAssistantState();
     }
     function setMobileAssistantPhoneNumber(phoneNumber) {
       const normalized = String(phoneNumber || '').trim();
       mobileAuthAssistantState.phone_number = normalized;
       syncAssistantFieldValues('data-mobile-assistant-field', 'phone_number', normalized);
-      persistMobileAuthAssistantState();
       return normalized;
     }
     function setMobileAssistantSmsCode(smsCode) {
@@ -6419,12 +6268,10 @@ Copyright (c) 2026 walky
     function setMobileAssistantPanelToggle(toggleName, isOpen) {
       if (toggleName === 'upload_probe_snapshot_open') {
         mobileAuthAssistantState.upload_probe_snapshot_open = isOpen === true;
-        persistMobileAuthAssistantState();
         return;
       }
       if (toggleName === 'runtime_snapshot_open') {
         mobileAuthAssistantState.runtime_snapshot_open = isOpen === true;
-        persistMobileAuthAssistantState();
       }
     }
     function currentMobileAssistantFieldValue(fieldName) {
@@ -6481,7 +6328,6 @@ Copyright (c) 2026 walky
       } else if (!mobileAuthAssistantState.window_open) {
         setMobileAssistantFocusField('');
       }
-      persistMobileAuthAssistantState();
       if (options.render !== false) {
         renderMobileAuthAssistant();
       }
@@ -6497,7 +6343,6 @@ Copyright (c) 2026 walky
       }
       if (options.openWindow === true) {
         mobileAuthAssistantState.window_open = true;
-        persistMobileAuthAssistantState();
       }
       renderMobileAuthAssistant();
       if (mobileAuthAssistantState.window_open) {
@@ -6920,15 +6765,12 @@ Copyright (c) 2026 walky
             ${endpoints.map(entry => {
               const optionValue = String(entry.id || '').trim();
               const optionLabel = String(entry.label || entry.endpoint_url || optionValue).trim();
-              return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ? 'selected' : ''}>${escapeHtml(optionLabel)}</option>`;
+return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ? 'selected' : ''}>${escapeHtml(optionLabel)}</option>`;
             }).join('')}
           </select>
         </label>
       `;
     }
-    restoreUnicomAuthAssistantState();
-    restoreTelecomAuthAssistantState();
-    restoreMobileAuthAssistantState();
     function formatBytes(value) {
       if (value === null || value === undefined || Number.isNaN(Number(value))) {
         return tr('common.unknown', {}, 'unknown');
