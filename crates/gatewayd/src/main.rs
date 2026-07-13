@@ -13310,7 +13310,7 @@ fn admin_index_template_source() -> String {
     ADMIN_INDEX_TEMPLATE.to_string()
 }
 
-fn render_admin_index_html_from_template_source(template_source: &str) -> String {
+fn render_admin_index_html_from_template_source(template_source: &str, nonce: &str) -> String {
     let provider_credentials_template =
         ROUTE_PROVIDER_CREDENTIALS.replace("{provider}", "${encodeURIComponent(provider)}");
     let browser_flow_handoff_template = ROUTE_BROWSER_FLOW_SESSION_HANDOFF
@@ -13332,14 +13332,31 @@ fn render_admin_index_html_from_template_source(template_source: &str) -> String
             "{route_browser_flow_session_handoff_template}",
             &browser_flow_handoff_template,
         )
+        .replace("{csp_nonce}", nonce)
 }
 
-fn render_admin_index_html() -> String {
-    render_admin_index_html_from_template_source(&admin_index_template_source())
+fn render_admin_index_html(nonce: &str) -> String {
+    render_admin_index_html_from_template_source(&admin_index_template_source(), nonce)
 }
 
-async fn admin_index() -> Html<String> {
-    Html(render_admin_index_html())
+async fn admin_index(State(state): State<AppState>) -> Response {
+    let nonce = random_urlsafe_token(32);
+    let html = render_admin_index_html(&nonce);
+
+    let mut response = Html(html).into_response();
+    let headers = response.headers_mut();
+
+    // CSP with nonce
+    let csp = format!(
+        "default-src 'self'; script-src 'self' 'nonce-{}'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        nonce
+    );
+    headers.insert("content-security-policy", csp.parse().unwrap());
+    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
+    headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
+
+    response
 }
 
 async fn admin_showcase_feed(
@@ -38578,7 +38595,8 @@ mod tests {
 
     #[tokio::test]
     async fn admin_web_contract_routes_are_injected_and_key_calls_use_helpers() {
-        let response = admin_index().await.into_response();
+        let state = test_state();
+        let response = admin_index(axum::extract::State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -38627,17 +38645,37 @@ mod tests {
     #[test]
     fn admin_index_can_render_runtime_template_override() {
         let html = render_admin_index_html_from_template_source(
-            r#"<!doctype html><title>{admin_api_version}</title><script>const route="{route_status}";</script>"#,
+            r#"<!doctype html><title>{admin_api_version}</title><script nonce="{csp_nonce}">const route="{route_status}";</script>"#,
+            "test-nonce",
         );
 
         assert!(html.contains(&format!("<title>{ADMIN_API_VERSION}</title>")));
         assert!(html.contains(&format!("const route=\"{ROUTE_STATUS}\";")));
         assert!(!html.contains("{route_status}"));
+        assert!(html.contains("nonce=\"test-nonce\""));
+    }
+
+    #[tokio::test]
+    async fn admin_index_returns_csp_header_with_nonce() {
+        let state = test_state();
+        let response = admin_index(axum::extract::State(state)).await;
+        let headers = response.headers();
+
+        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(csp.contains("script-src 'self' 'nonce-"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+
+        let xfo = headers.get("x-frame-options").unwrap().to_str().unwrap();
+        assert_eq!(xfo, "DENY");
+
+        let nosniff = headers.get("x-content-type-options").unwrap().to_str().unwrap();
+        assert_eq!(nosniff, "nosniff");
     }
 
     #[test]
     fn admin_browser_help_template_keeps_idempotent_windows_startup_script() {
-        let html = render_admin_index_html();
+        let html = render_admin_index_html("test-nonce");
 
         assert!(html.contains("Get-CimInstance Win32_Process"));
         assert!(html.contains("$browserPattern = [regex]::Escape($browserProcessName)"));
@@ -45790,9 +45828,9 @@ mod tests {
 
     #[tokio::test]
     async fn admin_page_exposes_object_actions_panel() {
-        let _state = test_state();
+        let state = test_state();
 
-        let response = admin_index().await.into_response();
+        let response = admin_index(axum::extract::State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = to_bytes(response.into_body(), usize::MAX)
