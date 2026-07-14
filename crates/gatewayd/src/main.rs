@@ -183,7 +183,9 @@ const NOTIFY_TIMESTAMP_HEADER: &str = "x-ccbg-notify-timestamp";
 const NOTIFY_EVENT_ID_HEADER: &str = "x-ccbg-notify-event-id";
 const CONTROL_API_KEY_COOKIE: &str = "ccbg_admin_api_key";
 const ADMIN_SESSION_COOKIE: &str = "ccbg_admin_session";
+#[allow(dead_code)]
 const DEFAULT_ADMIN_USERNAME: Option<&str> = None;
+#[allow(dead_code)]
 const DEFAULT_ADMIN_PASSWORD: Option<&str> = None;
 const PROCESS_MEMORY_HISTORY_LIMIT: usize = 240;
 const PROCESS_MEMORY_MIN_SAMPLE_INTERVAL_MS: u64 = 5_000;
@@ -6424,8 +6426,10 @@ enum ObjectActionInput {
     Delete {
         bucket: String,
         key: String,
+        #[allow(dead_code)]
         #[serde(default = "default_object_action_mode")]
         mode: ObjectActionMode,
+        #[allow(dead_code)]
         #[serde(default)]
         provider: Option<String>,
         #[serde(default)]
@@ -6439,8 +6443,10 @@ enum ObjectActionInput {
         bucket: String,
         key: String,
         new_key: String,
+        #[allow(dead_code)]
         #[serde(default = "default_object_action_mode")]
         mode: ObjectActionMode,
+        #[allow(dead_code)]
         #[serde(default)]
         provider: Option<String>,
         #[serde(default)]
@@ -6455,10 +6461,13 @@ enum ObjectActionInput {
         source_key: String,
         destination_bucket: String,
         destination_key: String,
+        #[allow(dead_code)]
         #[serde(default = "default_object_action_mode")]
         mode: ObjectActionMode,
+        #[allow(dead_code)]
         #[serde(default)]
         source_provider: Option<String>,
+        #[allow(dead_code)]
         #[serde(default)]
         destination_provider: Option<String>,
         #[serde(default)]
@@ -6473,10 +6482,13 @@ enum ObjectActionInput {
         source_key: String,
         destination_bucket: String,
         destination_key: String,
+        #[allow(dead_code)]
         #[serde(default = "default_object_action_mode")]
         mode: ObjectActionMode,
+        #[allow(dead_code)]
         #[serde(default)]
         source_provider: Option<String>,
+        #[allow(dead_code)]
         #[serde(default)]
         destination_provider: Option<String>,
         #[serde(default)]
@@ -10480,6 +10492,7 @@ fn require_browser_flow_coordinates(
     ))
 }
 
+#[allow(dead_code)]
 fn browser_flow_plan_from_catalogs(
     catalogs: &BrowserFlowCatalogCollection,
     provider: &str,
@@ -10542,6 +10555,7 @@ fn resolve_browser_flow_cdp_candidates_from_catalogs(
     Ok(candidates)
 }
 
+#[allow(dead_code)]
 fn resolve_browser_flow_cdp_config_from_catalogs(
     catalogs: &BrowserFlowCatalogCollection,
     input: &BrowserFlowSessionRunInput,
@@ -10570,6 +10584,7 @@ fn resolve_browser_flow_cdp_config_from_catalogs(
     })
 }
 
+#[allow(dead_code)]
 fn browser_flow_default_cdp_target_selector(
     state: &AppState,
     provider: &str,
@@ -10658,6 +10673,7 @@ fn resolve_browser_flow_cdp_config(
         })
 }
 
+#[allow(dead_code)]
 async fn connect_browser_flow_cdp_session(
     state: &AppState,
     input: &BrowserFlowSessionRunInput,
@@ -11757,6 +11773,7 @@ impl BrowserFlowOutputReader for CdpBrowserFlowSession {
     }
 }
 
+#[allow(dead_code)]
 fn browser_flow_catalog_summary_payloads(
     state: &AppState,
 ) -> Vec<BrowserFlowCatalogSummaryPayload> {
@@ -13344,7 +13361,7 @@ fn render_admin_index_html(nonce: &str) -> String {
     render_admin_index_html_from_template_source(&admin_index_template_source(), nonce)
 }
 
-async fn admin_index(State(state): State<AppState>) -> Response {
+async fn admin_index(State(_state): State<AppState>) -> Response {
     let nonce = random_urlsafe_token(32);
     let html = render_admin_index_html(&nonce);
 
@@ -15657,7 +15674,7 @@ async fn run_object_action(
                     })
                     .await
 .map_err(|error| {
-                let rollback_error = match previous_target_placement {
+                let _rollback_error = match previous_target_placement {
                     Some((provider, updated_at_unix_ms)) => {
                         state.metadata_store
                             .upsert_object_placement(
@@ -15679,7 +15696,7 @@ async fn run_object_action(
                             })
                     }
                 };
-                match previous_target_protection_plan {
+                let _ = match previous_target_protection_plan {
                     Some(previous) => {
                         persist_object_protection_plan(
                             &state,
@@ -16306,7 +16323,7 @@ async fn run_object_action(
                                 );
                             }
                         }
-                        match previous_target_protection_plan {
+                        let _ = match previous_target_protection_plan {
                             Some(previous) => {
                                 let _ = persist_object_protection_plan(
                                     &state,
@@ -16324,7 +16341,7 @@ async fn run_object_action(
                                     &destination_key,
                                 );
                             }
-                        }
+                        };
                         restore_logical_object_record(
                             &state,
                             previous_target_logical.clone(),
@@ -26364,7 +26381,7 @@ fn sanitize_gateway_write_ahead_log_path_component(value: &str) -> String {
         .trim()
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
                 ch
             } else {
                 '-'
@@ -32250,6 +32267,7 @@ async fn execute_copy_object(
     Ok(xml_response(StatusCode::OK, body))
 }
 
+#[allow(dead_code)]
 async fn rollback_copy_destination_after_failure(
     state: &AppState,
     backend: &DynBackend,
@@ -32479,7 +32497,7 @@ fn restore_copy_destination_metadata(
     previous_logical: Option<LogicalObjectRecord>,
     previous_protection_plan: Option<PersistedObjectProtectionPlan>,
 ) {
-    restore_previous_object_write_state(state, bucket, key, previous_placement, previous_logical);
+    let _ = restore_previous_object_write_state(state, bucket, key, previous_placement, previous_logical);
     match previous_protection_plan {
         Some(previous) => {
             let _ = persist_object_protection_plan(
@@ -32837,7 +32855,7 @@ async fn execute_put_upload(
     }
     let logical_persist_result = persist_logical_object_record(state, &desired_logical_record);
     if let Err(error) = logical_persist_result {
-        restore_previous_object_write_state(
+        let _ = restore_previous_object_write_state(
             state,
             &bucket,
             &key,
@@ -32869,7 +32887,7 @@ async fn execute_put_upload(
             match encrypt_upload(source_body, plan.request.clone(), plan.key_encryption_key) {
                 Ok(encrypted) => encrypted.body,
                 Err(error) => {
-                    restore_previous_object_write_state(
+                    let _ = restore_previous_object_write_state(
                         state,
                         &bucket,
                         &key,
@@ -32908,7 +32926,7 @@ async fn execute_put_upload(
                 ProviderIoOperationKind::Write,
                 &error.to_string(),
             );
-            restore_previous_object_write_state(
+            let _ = restore_previous_object_write_state(
                 state,
                 &bucket,
                 &key,
@@ -32933,7 +32951,7 @@ async fn execute_put_upload(
                 ProviderIoOperationKind::Write,
                 &error.message,
             );
-            restore_previous_object_write_state(
+            let _ = restore_previous_object_write_state(
                 state,
                 &bucket,
                 &key,
@@ -32988,7 +33006,7 @@ async fn execute_put_upload(
                 error = %error,
                 "put post-write head verification failed after provider returned success"
             );
-            restore_previous_object_write_state(
+            let _ = restore_previous_object_write_state(
                 state,
                 &bucket,
                 &key,
@@ -59354,5 +59372,38 @@ mod tests {
         assert_eq!(value["error"], "admin login required");
         assert_eq!(value["code"], "unauthorized");
         assert_eq!(value["api_version"], admin_api::ADMIN_API_VERSION);
+    }
+
+    #[test]
+    fn sanitize_wal_path_component_rejects_dots_and_dangerous_chars() {
+        use super::sanitize_gateway_write_ahead_log_path_component;
+
+        assert_eq!(sanitize_gateway_write_ahead_log_path_component("app"), "app");
+        assert_eq!(sanitize_gateway_write_ahead_log_path_component("my-app"), "my-app");
+        assert_eq!(sanitize_gateway_write_ahead_log_path_component("my_app"), "my_app");
+        assert_eq!(
+            sanitize_gateway_write_ahead_log_path_component("a..b"),
+            "a--b"
+        );
+        assert_eq!(
+            sanitize_gateway_write_ahead_log_path_component(".."),
+            "unknown"
+        );
+        assert_eq!(
+            sanitize_gateway_write_ahead_log_path_component("../etc/passwd"),
+            "etc-passwd"
+        );
+        assert_eq!(
+            sanitize_gateway_write_ahead_log_path_component("has space"),
+            "has-space"
+        );
+        assert_eq!(
+            sanitize_gateway_write_ahead_log_path_component(""),
+            "unknown"
+        );
+        assert_eq!(
+            sanitize_gateway_write_ahead_log_path_component("a/b/c"),
+            "a-b-c"
+        );
     }
 }
