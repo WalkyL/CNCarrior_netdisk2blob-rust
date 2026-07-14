@@ -7430,7 +7430,9 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       return String(value ?? '')
         .replaceAll('&', '&amp;')
         .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
+        .replaceAll('>', '&gt;')
+        .replaceAll("'", '&#x27;')
+        .replaceAll('`', '&#x60;');
     }
     function escapeHtmlAttr(value) {
       return escapeHtml(value).replaceAll('"', '&quot;');

@@ -13360,6 +13360,10 @@ async fn admin_index(State(state): State<AppState>) -> Response {
     headers.insert("x-frame-options", "DENY".parse().unwrap());
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
+    headers.insert(
+        "strict-transport-security",
+        "max-age=31536000; includeSubDomains".parse().unwrap(),
+    );
 
     response
 }
@@ -38709,6 +38713,14 @@ mod tests {
 
         let nosniff = headers.get("x-content-type-options").unwrap().to_str().unwrap();
         assert_eq!(nosniff, "nosniff");
+
+        let hsts = headers
+            .get("strict-transport-security")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(hsts.contains("max-age=31536000"));
+        assert!(hsts.contains("includeSubDomains"));
     }
 
     #[test]
