@@ -8,3 +8,6 @@ version.workspace = true
 policy-engine = { path = "../policy-engine" }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = "1"

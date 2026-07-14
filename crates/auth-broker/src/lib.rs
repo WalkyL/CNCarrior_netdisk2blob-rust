@@ -633,4 +633,550 @@ mod tests {
             );
         }
     }
+
+    // === Pure utility function unit tests ===
+
+    #[test]
+    fn normalize_field_none_returns_none() {
+        assert_eq!(normalize_field(None), None);
+    }
+
+    #[test]
+    fn normalize_field_empty_string_returns_none() {
+        assert_eq!(normalize_field(Some("".to_string())), None);
+    }
+
+    #[test]
+    fn normalize_field_whitespace_only_returns_none() {
+        assert_eq!(normalize_field(Some("   ".to_string())), None);
+    }
+
+    #[test]
+    fn normalize_field_valid_string_trimmed() {
+        assert_eq!(
+            normalize_field(Some("  hello  ".to_string())),
+            Some("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_field_preserves_inner_whitespace() {
+        assert_eq!(
+            normalize_field(Some("a  b".to_string())),
+            Some("a  b".to_string())
+        );
+    }
+
+    #[test]
+    fn random_urlsafe_token_has_correct_length() {
+        let token = random_urlsafe_token(16);
+        assert_eq!(token.len(), 16);
+    }
+
+    #[test]
+    fn random_urlsafe_token_contains_only_valid_chars() {
+        let token = random_urlsafe_token(100);
+        for ch in token.chars() {
+            assert!(
+                ch.is_ascii_alphanumeric() || ch == '-' || ch == '_',
+                "invalid char: {ch}"
+            );
+        }
+    }
+
+    #[test]
+    fn random_urlsafe_token_produces_unique_values() {
+        let a = random_urlsafe_token(16);
+        let b = random_urlsafe_token(16);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn auth_provider_as_str_values() {
+        assert_eq!(AuthProvider::Unicom.as_str(), "unicom");
+        assert_eq!(AuthProvider::Telecom.as_str(), "telecom");
+        assert_eq!(AuthProvider::Mobile.as_str(), "mobile");
+    }
+
+    #[test]
+    fn manual_input_prompt_status_as_str_values() {
+        assert_eq!(ManualInputPromptStatus::Pending.as_str(), "pending");
+        assert_eq!(ManualInputPromptStatus::Answered.as_str(), "answered");
+        assert_eq!(ManualInputPromptStatus::Expired.as_str(), "expired");
+        assert_eq!(ManualInputPromptStatus::Canceled.as_str(), "canceled");
+    }
+
+    #[test]
+    fn prompt_from_input_sets_defaults() {
+        let prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "Title".to_string(),
+            message: "Message".to_string(),
+            field_label: "Label".to_string(),
+            field_kind: ManualInputFieldKind::Text,
+            placeholder: None,
+        });
+        assert_eq!(prompt.status, ManualInputPromptStatus::Pending);
+        assert_eq!(prompt.attempt_count, 0);
+        assert_eq!(prompt.max_attempts, 3);
+        assert_eq!(prompt.created_by.as_deref(), Some("system"));
+        assert_eq!(
+            prompt.last_transition_reason.as_deref(),
+            Some("prompt_created")
+        );
+        assert!(!prompt.answer_present);
+        assert!(prompt.answer_value.is_none());
+        assert!(prompt.expires_at_unix_ms > prompt.created_at_unix_ms);
+    }
+
+    #[test]
+    fn prompt_from_input_trims_provider() {
+        let prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "  unicom  ".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::Text,
+            placeholder: None,
+        });
+        assert_eq!(prompt.provider, "unicom");
+    }
+
+    #[test]
+    fn prompt_answer_empty_string_returns_error() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        assert_eq!(
+            prompt.answer("".to_string(), None, None),
+            Err(ManualInputPromptError::EmptyAnswer)
+        );
+    }
+
+    #[test]
+    fn prompt_answer_whitespace_only_returns_error() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        assert_eq!(
+            prompt.answer("   ".to_string(), None, None),
+            Err(ManualInputPromptError::EmptyAnswer)
+        );
+    }
+
+    #[test]
+    fn prompt_answer_trims_whitespace() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        prompt
+            .answer("  123456  ".to_string(), None, None)
+            .expect("should succeed");
+        assert_eq!(prompt.answer_value.as_deref(), Some("123456"));
+    }
+
+    #[test]
+    fn prompt_answer_max_attempts_reached() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        // max_attempts is 3 by default
+        prompt
+            .answer("a".to_string(), None, None)
+            .expect("attempt 1");
+        assert_eq!(prompt.attempt_count, 1);
+
+        // Reset to pending to allow more attempts (simulating retry flow)
+        prompt.status = ManualInputPromptStatus::Pending;
+        prompt
+            .answer("b".to_string(), None, None)
+            .expect("attempt 2");
+        assert_eq!(prompt.attempt_count, 2);
+        assert_eq!(prompt.retry_count, 1);
+
+        prompt.status = ManualInputPromptStatus::Pending;
+        prompt
+            .answer("c".to_string(), None, None)
+            .expect("attempt 3");
+        assert_eq!(prompt.attempt_count, 3);
+
+        prompt.status = ManualInputPromptStatus::Pending;
+        assert_eq!(
+            prompt.answer("d".to_string(), None, None),
+            Err(ManualInputPromptError::MaxAttemptsReached)
+        );
+    }
+
+    #[test]
+    fn prompt_cancel_when_already_canceled_returns_error() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        prompt.cancel(None, None).expect("first cancel");
+        assert_eq!(
+            prompt.cancel(None, None),
+            Err(ManualInputPromptError::Canceled)
+        );
+    }
+
+    #[test]
+    fn prompt_cancel_when_already_answered_returns_error() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        prompt
+            .answer("123".to_string(), None, None)
+            .expect("answer");
+        assert_eq!(
+            prompt.cancel(None, None),
+            Err(ManualInputPromptError::Answered)
+        );
+    }
+
+    #[test]
+    fn prompt_expire_if_needed_returns_false_when_not_pending() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        prompt
+            .answer("123".to_string(), None, None)
+            .expect("answer");
+        assert!(!prompt.expire_if_needed());
+    }
+
+    #[test]
+    fn prompt_expire_if_needed_returns_false_when_not_yet_expired() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        // expires_at is ~10 minutes in the future by default
+        assert!(!prompt.expire_if_needed());
+        assert_eq!(prompt.status, ManualInputPromptStatus::Pending);
+    }
+
+    #[test]
+    fn prompt_sanitized_removes_answer_value() {
+        let mut prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: None,
+            flow_id: None,
+            input_id: None,
+            title: "T".to_string(),
+            message: "M".to_string(),
+            field_label: "L".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: None,
+        });
+        prompt
+            .answer("secret".to_string(), None, None)
+            .expect("answer");
+        let sanitized = prompt.sanitized();
+        assert!(sanitized.answer_present);
+        assert!(sanitized.answer_value.is_none());
+        assert_eq!(prompt.answer_value.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn auth_session_set_failed_sets_status_and_error() {
+        let mut session: AuthSession<serde_json::Value, serde_json::Value> = AuthSession::new(
+            "s1".to_string(),
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        session.set_failed("something broke");
+        assert_eq!(session.status, "failed");
+        assert_eq!(session.last_error.as_deref(), Some("something broke"));
+    }
+
+    #[test]
+    fn auth_session_apply_request_resets_from_completed() {
+        let mut session: AuthSession<serde_json::Value, serde_json::Value> = AuthSession::new(
+            "s1".to_string(),
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        session.set_completed(json!({"done": true}));
+        assert_eq!(session.status, "completed");
+
+        session.apply_request(
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(session.status, "pending");
+        assert!(session.report.is_none());
+    }
+
+    #[test]
+    fn auth_session_apply_request_resets_from_failed() {
+        let mut session: AuthSession<serde_json::Value, serde_json::Value> = AuthSession::new(
+            "s1".to_string(),
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        session.set_failed("oops");
+        assert_eq!(session.status, "failed");
+
+        session.apply_request(
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(session.status, "pending");
+        assert!(session.last_error.is_none());
+    }
+
+    #[test]
+    fn auth_session_apply_request_merges_inputs_and_runtime() {
+        let mut session: AuthSession<serde_json::Value, serde_json::Value> = AuthSession::new(
+            "s1".to_string(),
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::from([("existing".to_string(), json!("old"))]),
+            BTreeMap::from([("rt1".to_string(), json!("v1"))]),
+        );
+        session.apply_request(
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::from([("new_key".to_string(), json!("new_val"))]),
+            BTreeMap::from([("rt2".to_string(), json!("v2"))]),
+        );
+        assert_eq!(session.inputs.get("existing"), Some(&json!("old")));
+        assert_eq!(session.inputs.get("new_key"), Some(&json!("new_val")));
+        assert_eq!(session.runtime.get("rt1"), Some(&json!("v1")));
+        assert_eq!(session.runtime.get("rt2"), Some(&json!("v2")));
+    }
+
+    #[test]
+    fn auth_session_clears_manual_challenge_on_apply_request() {
+        let mut session: AuthSession<serde_json::Value, serde_json::Value> = AuthSession::new(
+            "s1".to_string(),
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        session.manual_challenge = Some(json!("challenge"));
+        session.apply_request(
+            "unicom".to_string(),
+            "web".to_string(),
+            "f1".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        assert!(session.manual_challenge.is_none());
+    }
+
+    #[test]
+    fn auth_provider_serde_roundtrip() {
+        for provider in [
+            AuthProvider::Unicom,
+            AuthProvider::Telecom,
+            AuthProvider::Mobile,
+        ] {
+            let json = serde_json::to_string(&provider).unwrap();
+            let decoded: AuthProvider = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, provider);
+        }
+    }
+
+    #[test]
+    fn manual_input_prompt_status_serde_roundtrip() {
+        for status in [
+            ManualInputPromptStatus::Pending,
+            ManualInputPromptStatus::Answered,
+            ManualInputPromptStatus::Expired,
+            ManualInputPromptStatus::Canceled,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let decoded: ManualInputPromptStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, status);
+        }
+    }
+
+    #[test]
+    fn manual_input_field_kind_serde_roundtrip() {
+        for kind in [
+            ManualInputFieldKind::Text,
+            ManualInputFieldKind::PhoneNumber,
+            ManualInputFieldKind::SmsCode,
+            ManualInputFieldKind::Password,
+            ManualInputFieldKind::Captcha,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            let decoded: ManualInputFieldKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, kind);
+        }
+    }
+
+    #[test]
+    fn manual_input_event_serde_tagged_roundtrip() {
+        let events = vec![
+            ManualInputEvent::PromptCreated {
+                prompt_id: "p1".to_string(),
+                provider: "unicom".to_string(),
+                session_id: Some("s1".to_string()),
+                flow_id: Some("f1".to_string()),
+            },
+            ManualInputEvent::PromptAnswered {
+                prompt_id: "p2".to_string(),
+                provider: "telecom".to_string(),
+                session_id: None,
+                flow_id: None,
+            },
+            ManualInputEvent::PromptCanceled {
+                prompt_id: "p3".to_string(),
+                provider: "mobile".to_string(),
+                session_id: Some("s3".to_string()),
+                flow_id: None,
+            },
+            ManualInputEvent::PromptExpired {
+                prompt_id: "p4".to_string(),
+                provider: "unicom".to_string(),
+                session_id: None,
+                flow_id: Some("f4".to_string()),
+            },
+        ];
+        for event in events {
+            let json = serde_json::to_string(&event).unwrap();
+            let decoded: ManualInputEvent = serde_json::from_str(&json).unwrap();
+            let reserialized = serde_json::to_string(&decoded).unwrap();
+            assert_eq!(json, reserialized);
+        }
+    }
+
+    #[test]
+    fn manual_input_prompt_error_display_messages() {
+        assert!(ManualInputPromptError::Expired
+            .to_string()
+            .contains("expired"));
+        assert!(ManualInputPromptError::Canceled
+            .to_string()
+            .contains("canceled"));
+        assert!(ManualInputPromptError::Answered
+            .to_string()
+            .contains("answered"));
+        assert!(ManualInputPromptError::EmptyAnswer
+            .to_string()
+            .contains("empty"));
+        assert!(ManualInputPromptError::MaxAttemptsReached
+            .to_string()
+            .contains("max attempts"));
+        let not_pending = ManualInputPromptError::NotPending("test".to_string());
+        assert!(not_pending.to_string().contains("not pending"));
+    }
+
+    #[test]
+    fn token_refresh_outcome_unsupported_includes_provider_name() {
+        let outcome = TokenRefreshOutcome::unsupported(AuthProvider::Unicom);
+        assert!(outcome.message.unwrap().contains("unicom"));
+        assert!(outcome.access_token.is_none());
+        assert!(outcome.refresh_token.is_none());
+    }
+
+    #[test]
+    fn manual_input_prompt_serializes_to_json() {
+        let prompt = ManualInputPrompt::from_input(ManualInputPromptCreateInput {
+            provider: "unicom".to_string(),
+            session_id: Some("s1".to_string()),
+            flow_id: None,
+            input_id: None,
+            title: "Title".to_string(),
+            message: "Message".to_string(),
+            field_label: "Label".to_string(),
+            field_kind: ManualInputFieldKind::SmsCode,
+            placeholder: Some("123456".to_string()),
+        });
+        let json = serde_json::to_string(&prompt).expect("should serialize");
+        let decoded: ManualInputPrompt = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(decoded.prompt_id, prompt.prompt_id);
+        assert_eq!(decoded.provider, "unicom");
+        assert_eq!(decoded.status, ManualInputPromptStatus::Pending);
+    }
 }

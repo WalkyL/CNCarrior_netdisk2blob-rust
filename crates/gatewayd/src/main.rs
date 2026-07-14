@@ -21,6 +21,14 @@ use std::{
 };
 
 use tokio::sync::Notify;
+use tracing::error;
+
+/// Recovers the inner value from a potentially poisoned mutex.
+/// If the mutex was poisoned (another thread panicked while holding the lock),
+/// this recovers the inner value instead of panicking.
+fn mutex_recover<T>(result: std::sync::LockResult<std::sync::MutexGuard<'_, T>>) -> std::sync::MutexGuard<'_, T> {
+    result.unwrap_or_else(|e| e.into_inner())
+}
 
 use admin_api::{
     ADMIN_API_VERSION, AdminAlertSuppressionInput, AdminApiErrorCode, AdminApiErrorResponse,
@@ -72,6 +80,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
+use tower_http::cors::Any;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blob_core::{
@@ -134,7 +143,7 @@ use tokio::{
 };
 #[cfg(test)]
 use tower::util::ServiceExt;
-use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
+use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer, cors::CorsLayer};
 use tracing::{Span, info, info_span, warn};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -174,8 +183,8 @@ const NOTIFY_TIMESTAMP_HEADER: &str = "x-ccbg-notify-timestamp";
 const NOTIFY_EVENT_ID_HEADER: &str = "x-ccbg-notify-event-id";
 const CONTROL_API_KEY_COOKIE: &str = "ccbg_admin_api_key";
 const ADMIN_SESSION_COOKIE: &str = "ccbg_admin_session";
-const DEFAULT_ADMIN_USERNAME: &str = "admin";
-const DEFAULT_ADMIN_PASSWORD: &str = "password";
+const DEFAULT_ADMIN_USERNAME: Option<&str> = None;
+const DEFAULT_ADMIN_PASSWORD: Option<&str> = None;
 const PROCESS_MEMORY_HISTORY_LIMIT: usize = 240;
 const PROCESS_MEMORY_MIN_SAMPLE_INTERVAL_MS: u64 = 5_000;
 const ADMIN_ALERT_CLOSE_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1_000;
@@ -2479,7 +2488,7 @@ impl ProviderIoStatsState {
         let Some(response_latency_ms) = response_latency_ms else {
             return;
         };
-        let mut inner = self.inner.lock().expect("provider io stats poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let observations = inner.entry(provider.to_string()).or_default();
         let operation = provider_io_operation_mut(observations, operation);
         if operation.first_response_latency_ms.is_none() {
@@ -2495,7 +2504,7 @@ impl ProviderIoStatsState {
         latency_ms: u64,
         bytes: Option<u64>,
     ) {
-        let mut inner = self.inner.lock().expect("provider io stats poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let observations = inner.entry(provider.to_string()).or_default();
         let operation = provider_io_operation_mut(observations, operation);
         let recorded_at_unix_ms = current_unix_ms();
@@ -2529,7 +2538,7 @@ impl ProviderIoStatsState {
     }
 
     fn record_failure(&self, provider: &str, operation: ProviderIoOperationKind, error: &str) {
-        let mut inner = self.inner.lock().expect("provider io stats poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let observations = inner.entry(provider.to_string()).or_default();
         let operation = provider_io_operation_mut(observations, operation);
         operation.failure_count = operation.failure_count.saturating_add(1);
@@ -2539,7 +2548,7 @@ impl ProviderIoStatsState {
 
     fn snapshot_provider(&self, provider: &str) -> ProviderIoObservationsPayload {
         let now_unix_ms = current_unix_ms();
-        let mut inner = self.inner.lock().expect("provider io stats poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let Some(observations) = inner.get_mut(provider) else {
             return ProviderIoObservationsPayload::default();
         };
@@ -2560,7 +2569,7 @@ impl ProviderResourceStatsState {
         operation: ProviderResourceOperationKind,
     ) -> ActiveProviderOperationLease {
         let provider = provider.to_string();
-        let mut inner = self.inner.lock().expect("provider resource stats poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let observations = inner.entry(provider.clone()).or_default();
         let operation_state = provider_resource_operation_mut(observations, operation);
         operation_state.in_flight = operation_state.in_flight.saturating_add(1);
@@ -2576,7 +2585,7 @@ impl ProviderResourceStatsState {
 
     fn start_spool_tracking(self: &Arc<Self>, provider: &str) -> ActiveProviderSpoolLease {
         let provider = provider.to_string();
-        let mut inner = self.inner.lock().expect("provider resource stats poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let observations = inner.entry(provider.clone()).or_default();
         observations.spool.active_files = observations.spool.active_files.saturating_add(1);
         observations.spool.peak_files = observations
@@ -2591,7 +2600,7 @@ impl ProviderResourceStatsState {
     }
 
     fn record_write_path(&self, provider: &str, path: ProviderWritePathKind) {
-        let mut inner = self.inner.lock().expect("provider resource stats poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let observations = inner.entry(provider.to_string()).or_default();
         match path {
             ProviderWritePathKind::Streaming => {
@@ -2717,7 +2726,7 @@ impl ProcessMemoryHistoryState {
     }
 
     fn snapshot(&self, current: ProcessMemorySnapshot, now_unix_ms: u64) -> ProcessMemoryPayload {
-        let mut inner = self.inner.lock().expect("process memory history poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let should_record = inner
             .samples
             .back()
@@ -2768,7 +2777,7 @@ impl SpoolUsageState {
     }
 
     fn start_tracking(self: &Arc<Self>) -> ActiveSpoolLease {
-        let mut inner = self.inner.lock().expect("spool usage poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         inner.active_files = inner.active_files.saturating_add(1);
         inner.peak_files = inner.peak_files.max(inner.active_files);
         ActiveSpoolLease {
@@ -2778,7 +2787,7 @@ impl SpoolUsageState {
     }
 
     fn snapshot(&self) -> SpoolUsageSnapshot {
-        let inner = self.inner.lock().expect("spool usage poisoned");
+        let inner = mutex_recover(self.inner.lock());
         SpoolUsageSnapshot {
             active_files: inner.active_files,
             active_bytes: inner.active_bytes,
@@ -2822,19 +2831,14 @@ impl MultipartCompleteStatusState {
                 started_at_unix_ms: now_unix_ms,
             }],
         };
-        self.inner
-            .lock()
-            .expect("multipart complete status poisoned")
+        mutex_recover(self.inner.lock())
             .active
             .insert(upload_id.to_string(), job);
     }
 
     fn update_stage(&self, upload_id: &str, stage: MultipartCompleteStage) {
         let now_unix_ms = current_unix_ms();
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("multipart complete status poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let Some(job) = inner.active.get_mut(upload_id) else {
             return;
         };
@@ -2854,10 +2858,7 @@ impl MultipartCompleteStatusState {
     }
 
     fn snapshot(&self) -> MultipartCompleteRuntimeStatusPayload {
-        let inner = self
-            .inner
-            .lock()
-            .expect("multipart complete status poisoned");
+        let inner = mutex_recover(self.inner.lock());
         let mut active_jobs: Vec<_> = inner.active.values().cloned().collect();
         active_jobs.sort_by(|left, right| {
             right
@@ -2880,10 +2881,7 @@ impl MultipartCompleteStatusState {
         last_error: Option<String>,
     ) {
         let now_unix_ms = current_unix_ms();
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("multipart complete status poisoned");
+        let mut inner = mutex_recover(self.inner.lock());
         let Some(mut job) = inner.active.remove(upload_id) else {
             return;
         };
@@ -2924,7 +2922,7 @@ fn set_multipart_complete_job_stage(
 
 impl ActiveSpoolLease {
     fn update_tracked_bytes(&mut self, next_bytes: u64) {
-        let mut inner = self.state.inner.lock().expect("spool usage poisoned");
+        let mut inner = mutex_recover(self.state.inner.lock());
         if next_bytes >= self.tracked_bytes {
             inner.active_bytes = inner
                 .active_bytes
@@ -2941,7 +2939,7 @@ impl ActiveSpoolLease {
 
 impl Drop for ActiveSpoolLease {
     fn drop(&mut self) {
-        let mut inner = self.state.inner.lock().expect("spool usage poisoned");
+        let mut inner = mutex_recover(self.state.inner.lock());
         inner.active_files = inner.active_files.saturating_sub(1);
         inner.active_bytes = inner.active_bytes.saturating_sub(self.tracked_bytes);
     }
@@ -5806,7 +5804,7 @@ admin_session_ttl_seconds: env_u64(
             spooled_body_chunk_bytes: env_usize("CCBG_SPOOLED_BODY_CHUNK_BYTES", 1024 * 1024)
                 .max(1),
             body_spool_dir: env_opt("CCBG_BODY_SPOOL_DIR"),
-            external_kms_provider: env_or("CCBG_EXTERNAL_KMS_PROVIDER", "local_mock"),
+            external_kms_provider: env_or("CCBG_EXTERNAL_KMS_PROVIDER", ""),
             external_kms_cache_ttl_ms: env_u64(
                 "CCBG_EXTERNAL_KMS_CACHE_TTL_MS",
                 env_u64("CCBG_EXTERNAL_KMS_CACHE_TTL_SECONDS", 300).saturating_mul(1_000),
@@ -7433,6 +7431,12 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             state.clone(),
             capture_admin_client_ip,
         ))
+        .layer(CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([AUTHORIZATION, CONTENT_TYPE, HeaderName::from_static("x-admin-api-version")])
+            .allow_credentials(true)
+        )
         .layer(gateway_http_trace_layer!());
     tokio::spawn(async move {
         if let Err(error) = axum::serve(
@@ -7640,7 +7644,7 @@ fn admin_username_for_config(config: &AppConfig) -> String {
     config
         .admin_username
         .clone()
-        .unwrap_or_else(|| DEFAULT_ADMIN_USERNAME.to_string())
+        .unwrap_or_else(|| "admin".to_string())
 }
 
 fn control_plane_admin_auth_snapshot(state: &AppState) -> AdminAuthState {
@@ -7671,23 +7675,24 @@ fn admin_password_plain_for_state(state: &AppState) -> Option<String> {
 }
 
 fn admin_default_credentials_active(state: &AppState) -> bool {
+    // Check if we're using the implicit default "admin" username
     let expected_username = admin_username_for_config(&state.config);
-    if expected_username.trim() != DEFAULT_ADMIN_USERNAME {
-        return false;
+    let is_default_username = state.config.admin_username.is_none() && expected_username == "admin";
+    
+    // Check if we're using the implicit default "password" password
+    let is_default_password = state.config.admin_password_plain.as_deref() == Some("password")
+        || state.config.admin_password_hash.is_none();
+    
+    // Default is active only when BOTH username and password are using implicit defaults
+    // (no explicit configuration provided)
+    if is_default_username && is_default_password {
+        // Also check control plane state
+        if control_plane_admin_auth_snapshot(state).password_hash.is_some() {
+            return false;
+        }
+        return true;
     }
-    if control_plane_admin_auth_snapshot(state)
-        .password_hash
-        .is_some()
-    {
-        return false;
-    }
-    if let Some(hash) = state.config.admin_password_hash.as_deref() {
-        return hash.trim().is_empty();
-    }
-    if let Some(plain) = state.config.admin_password_plain.as_deref() {
-        return plain == DEFAULT_ADMIN_PASSWORD;
-    }
-    true
+    false
 }
 
 fn admin_password_changed_at_unix_ms(state: &AppState) -> Option<u64> {
@@ -7854,7 +7859,7 @@ fn verify_admin_browser_credentials(
         return Ok(password == expected_password);
     }
 
-    Ok(password == DEFAULT_ADMIN_PASSWORD)
+    Ok(false)
 }
 
 fn lookup_admin_browser_session(
@@ -7925,7 +7930,7 @@ fn persist_admin_password_hash(
     password_hash: String,
 ) -> Result<u64, ControlApiError> {
     let changed_at_unix_ms = current_unix_ms();
-    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    let mut control_plane = mutex_recover(state.control_plane.lock());
     control_plane.admin_auth.password_hash = Some(password_hash);
     control_plane.admin_auth.password_changed_at_unix_ms = Some(changed_at_unix_ms);
     persist_control_plane_state(&state.config.control_plane_file, &control_plane)
@@ -8883,7 +8888,7 @@ fn normalize_suppressed_admin_alerts_at(
 }
 
 fn current_suppressed_admin_alerts(state: &AppState) -> Vec<SuppressedAdminAlertRecord> {
-    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    let mut control_plane = mutex_recover(state.control_plane.lock());
     let normalized = normalize_suppressed_admin_alerts(&control_plane.suppressed_admin_alerts);
     if control_plane.suppressed_admin_alerts != normalized {
         control_plane.suppressed_admin_alerts = normalized.clone();
@@ -12930,7 +12935,7 @@ async fn notify_webhook_loop(state: AppState) {
         let _ = current_process_memory_payload(&state);
         if let Err(error) = process_notify_tick(&state).await {
             warn!(error = %error, "notify webhook tick failed");
-            let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
+            let mut notify_state = mutex_recover(state.notify_state.lock());
             notify_state.last_attempt_at_unix_ms = Some(current_unix_ms());
             notify_state.last_error = Some(error.to_string());
         }
@@ -12960,7 +12965,7 @@ async fn process_notify_tick(state: &AppState) -> Result<()> {
     let alert_hash = alerts_fingerprint(&alerts);
 
     {
-        let notify_state = state.notify_state.lock().expect("notify state poisoned");
+        let notify_state = mutex_recover(state.notify_state.lock());
         if notify_state.last_alert_hash.as_deref() == Some(alert_hash.as_str()) {
             return Ok(());
         }
@@ -12980,7 +12985,7 @@ async fn process_notify_tick(state: &AppState) -> Result<()> {
     let timestamp = current_unix_ms();
 
     {
-        let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
+        let mut notify_state = mutex_recover(state.notify_state.lock());
         notify_state.last_attempt_at_unix_ms = Some(current_unix_ms());
         notify_state.last_error = None;
     }
@@ -13006,7 +13011,7 @@ async fn process_notify_tick(state: &AppState) -> Result<()> {
         .error_for_status()
         .context("notify webhook returned error status")?;
 
-    let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
+    let mut notify_state = mutex_recover(state.notify_state.lock());
     notify_state.last_alert_hash = Some(alert_hash);
     notify_state.last_success_at_unix_ms = Some(current_unix_ms());
     notify_state.last_error = None;
@@ -13716,7 +13721,7 @@ async fn update_gateway_write_ahead_log_policy(
         &current_data_plane_applications(&state),
     )?;
     {
-        let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+        let mut control_plane = mutex_recover(state.control_plane.lock());
         control_plane.gateway_write_ahead_log_policy = policy;
         persist_control_plane_state(&state.config.control_plane_file, &control_plane)
             .map_err(|error| BlobError::Configuration(error.to_string()))?;
@@ -15647,45 +15652,60 @@ async fn run_object_action(
                         new_key: new_key.clone(),
                     })
                     .await
-                    .map_err(|error| {
-                        match previous_target_placement {
-                            Some((provider, updated_at_unix_ms)) => {
-                                let _ = state.metadata_store.upsert_object_placement(
-                                    provider.as_str(),
-                                    &bucket,
-                                    &new_key,
-                                    updated_at_unix_ms,
-                                );
-                            }
-                            None => {
-                                let _ = delete_persisted_object_home_provider(
-                                    &state, &bucket, &new_key,
-                                );
-                            }
-                        }
-                        match previous_target_protection_plan {
-                            Some(previous) => {
-                                let _ = persist_object_protection_plan(
-                                    &state,
-                                    &bucket,
-                                    &new_key,
-                                    &previous.sync_targets,
-                                    &previous.fallback_read_order,
-                                    previous.updated_at_unix_ms,
-                                );
-                            }
-                            None => {
-                                let _ = delete_object_protection_plan(&state, &bucket, &new_key);
-                            }
-                        }
-                        restore_logical_object_record(
+.map_err(|error| {
+                let rollback_error = match previous_target_placement {
+                    Some((provider, updated_at_unix_ms)) => {
+                        state.metadata_store
+                            .upsert_object_placement(
+                                provider.as_str(),
+                                &bucket,
+                                &new_key,
+                                updated_at_unix_ms,
+                            )
+                            .map_err(|rollback_error| {
+                                error!(?rollback_error, "rollback upsert_object_placement failed");
+                                BlobError::Upstream(format!("rollback upsert failed: {rollback_error}"))
+                            })
+                    }
+                    None => {
+                        delete_persisted_object_home_provider(&state, &bucket, &new_key)
+                            .map_err(|rollback_error| {
+                                error!(?rollback_error, "rollback delete_persisted_object_home_provider failed");
+                                rollback_error
+                            })
+                    }
+                };
+                match previous_target_protection_plan {
+                    Some(previous) => {
+                        persist_object_protection_plan(
                             &state,
-                            previous_target_logical.clone(),
                             &bucket,
                             &new_key,
-                        );
-                        error
-                    })?;
+                            &previous.sync_targets,
+                            &previous.fallback_read_order,
+                            previous.updated_at_unix_ms,
+                        )
+                        .map_err(|rollback_error| {
+                            error!(?rollback_error, "rollback persist_object_protection_plan failed");
+                            rollback_error
+                        })
+                    }
+                    None => {
+                        delete_object_protection_plan(&state, &bucket, &new_key)
+                            .map_err(|rollback_error| {
+                                error!(?rollback_error, "rollback delete_object_protection_plan failed");
+                                rollback_error
+                            })
+                    }
+                };
+                restore_logical_object_record(
+                    &state,
+                    previous_target_logical.clone(),
+                    &bucket,
+                    &new_key,
+                );
+                error
+            })?;
                 if let Err(error) = delete_persisted_object_home_provider(&state, &bucket, &key) {
                     let rollback_note = rollback_rename_after_failure_with_note(
                         &state,
@@ -17464,7 +17484,7 @@ async fn update_onedrive_policy(
     State(state): State<AppState>,
     Json(input): Json<OnedrivePolicyInput>,
 ) -> Result<Json<OnedrivePolicy>, ApiError> {
-    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    let mut control_plane = mutex_recover(state.control_plane.lock());
     control_plane.onedrive_policy = OnedrivePolicy::from_input(input);
     persist_control_plane_state(&state.config.control_plane_file, &control_plane)
         .map_err(|error| BlobError::Configuration(error.to_string()))?;
@@ -17475,7 +17495,7 @@ async fn update_auth_capture_policy(
     State(state): State<AppState>,
     Json(input): Json<AuthCapturePolicyInput>,
 ) -> Result<Json<AuthCapturePolicyPayload>, ApiError> {
-    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    let mut control_plane = mutex_recover(state.control_plane.lock());
     control_plane.auth_capture_policy.apply_input(input);
     persist_control_plane_state(&state.config.control_plane_file, &control_plane)
         .map_err(|error| BlobError::Configuration(error.to_string()))?;
@@ -17489,7 +17509,7 @@ async fn update_admin_alert_suppression(
     let alert_id = normalize_admin_alert_id(&input.alert_id).ok_or_else(|| {
         BlobError::Configuration("alert_id is required for alert close state".to_string())
     })?;
-    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    let mut control_plane = mutex_recover(state.control_plane.lock());
     control_plane.suppressed_admin_alerts =
         normalize_suppressed_admin_alerts(&control_plane.suppressed_admin_alerts);
     control_plane
@@ -17546,7 +17566,7 @@ async fn probe_browser_cdp_endpoint(
     let payload = probe_browser_cdp_endpoint_payload(&endpoint).await;
     let target_id = endpoint.id.clone();
     {
-        let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+        let mut control_plane = mutex_recover(state.control_plane.lock());
         if let Some(entry) = control_plane
             .auth_capture_policy
             .browser_endpoints
@@ -17767,7 +17787,7 @@ async fn update_topology(
         restart_required: false,
     };
 
-    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    let mut control_plane = mutex_recover(state.control_plane.lock());
     control_plane.topology = topology;
     control_plane.high_speed_providers = normalized_high_speed_providers;
     control_plane.write_targets = normalized_write_targets;
@@ -18735,21 +18755,31 @@ fn restore_previous_object_write_state(
     key: &str,
     previous_placement: Option<(ProviderId, u64)>,
     previous_logical: Option<LogicalObjectRecord>,
-) {
+) -> Result<(), BlobError> {
     match previous_placement {
         Some((provider, updated_at_unix_ms)) => {
-            let _ = state.metadata_store.upsert_object_placement(
-                provider.as_str(),
-                bucket,
-                key,
-                updated_at_unix_ms,
-            );
+            state.metadata_store
+                .upsert_object_placement(
+                    provider.as_str(),
+                    bucket,
+                    key,
+                    updated_at_unix_ms,
+                )
+                .map_err(|error| {
+                    error!(?error, "restore_previous_object_write_state upsert_object_placement failed");
+                    BlobError::Upstream(format!("failed to restore object placement: {error}"))
+                })?;
         }
         None => {
-            let _ = delete_persisted_object_home_provider(state, bucket, key);
+            delete_persisted_object_home_provider(state, bucket, key)
+                .map_err(|error| {
+                    error!(?error, "restore_previous_object_write_state delete_persisted_object_home_provider failed");
+                    BlobError::Upstream(format!("failed to delete persisted object home provider: {error}"))
+                })?;
         }
     }
     restore_logical_object_record(state, previous_logical, bucket, key);
+    Ok(())
 }
 
 fn restore_previous_object_metadata_state(
@@ -21347,7 +21377,7 @@ fn object_action_history_entry(
 }
 
 fn record_object_action_history(state: &AppState, entry: ObjectActionHistoryEntryPayload) {
-    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    let mut control_plane = mutex_recover(state.control_plane.lock());
     control_plane.object_action_history.insert(0, entry);
     control_plane
         .object_action_history
@@ -21363,7 +21393,7 @@ fn record_object_action_history(state: &AppState, entry: ObjectActionHistoryEntr
 }
 
 fn clear_object_action_history(state: &AppState) -> Result<(), BlobError> {
-    let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+    let mut control_plane = mutex_recover(state.control_plane.lock());
     control_plane.object_action_history.clear();
     persist_control_plane_state(&state.config.control_plane_file, &control_plane)
         .map_err(|error| BlobError::Upstream(error.to_string()))
@@ -27243,7 +27273,7 @@ fn apply_gateway_backup_bundle(
     persist_control_plane_state(&state.config.control_plane_file, &bundle.control_plane)
         .map_err(|error| BlobError::Configuration(error.to_string()))?;
     {
-        let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+        let mut control_plane = mutex_recover(state.control_plane.lock());
         *control_plane = bundle.control_plane.clone();
     }
 
@@ -27332,7 +27362,7 @@ fn save_gateway_backup_policy(
     }
 
     {
-        let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+        let mut control_plane = mutex_recover(state.control_plane.lock());
         control_plane.gateway_backup_policy = policy;
         persist_control_plane_state(&state.config.control_plane_file, &control_plane)
             .map_err(|error| BlobError::Configuration(error.to_string()))?;
@@ -27393,7 +27423,7 @@ async fn execute_gateway_backup_run(
         runtime.next_run_at_unix_ms = None;
     }
     {
-        let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+        let mut control_plane = mutex_recover(state.control_plane.lock());
         control_plane.gateway_backup_history.last_trigger = Some(trigger.clone());
         control_plane.gateway_backup_history.last_started_at_unix_ms = Some(current_unix_ms());
         control_plane
@@ -27408,7 +27438,7 @@ async fn execute_gateway_backup_run(
     let result = execute_gateway_backup_run_inner(&state).await;
     {
         let completed_at_unix_ms = current_unix_ms();
-        let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+        let mut control_plane = mutex_recover(state.control_plane.lock());
         let history = &mut control_plane.gateway_backup_history;
         history.last_completed_at_unix_ms = Some(completed_at_unix_ms);
         match &result {
@@ -30963,7 +30993,11 @@ where
 fn env_u64(key: &str, default: u64) -> u64 {
     env::var(key)
         .ok()
-        .and_then(|value| value.parse().ok())
+        .and_then(|value| {
+            value.parse().map_err(|_| {
+                warn!(%key, %value, "failed to parse env var as u64, using default");
+            }).ok()
+        })
         .unwrap_or(default)
 }
 
@@ -30979,7 +31013,11 @@ fn env_byte_size_limit(key: &str) -> Result<Option<u64>, BlobError> {
 fn env_usize(key: &str, default: usize) -> usize {
     env::var(key)
         .ok()
-        .and_then(|value| value.parse().ok())
+        .and_then(|value| {
+            value.parse().map_err(|_| {
+                warn!(%key, %value, "failed to parse env var as usize, using default");
+            }).ok()
+        })
         .unwrap_or(default)
 }
 
@@ -38390,7 +38428,7 @@ mod tests {
         let mut state = test_state();
         Arc::make_mut(&mut state.config).admin_username = None;
         Arc::make_mut(&mut state.config).admin_password_hash = None;
-        Arc::make_mut(&mut state.config).admin_password_plain = None;
+        Arc::make_mut(&mut state.config).admin_password_plain = Some("password".to_string());
         let app = Router::new()
             .route("/api/admin/login", post(admin_login))
             .with_state(state);
@@ -38425,7 +38463,7 @@ mod tests {
         let mut state = test_state();
         Arc::make_mut(&mut state.config).admin_username = None;
         Arc::make_mut(&mut state.config).admin_password_hash = None;
-        Arc::make_mut(&mut state.config).admin_password_plain = None;
+        Arc::make_mut(&mut state.config).admin_password_plain = Some("password".to_string());
 
         let protected_sensitive_app = Router::new()
             .route("/api/locked", get(|| async { StatusCode::OK }))
@@ -40138,7 +40176,7 @@ mod tests {
         );
 
         {
-            let mut notify_state = state.notify_state.lock().expect("notify state poisoned");
+            let mut notify_state = mutex_recover(state.notify_state.lock());
             notify_state.last_success_at_unix_ms = Some(now_unix_ms.saturating_sub(12_000));
         }
 
@@ -42989,7 +43027,7 @@ mod tests {
     fn browser_flow_session_run_uses_request_or_policy_cdp_config() {
         let state = test_state();
         {
-            let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+            let mut control_plane = mutex_recover(state.control_plane.lock());
             control_plane.auth_capture_policy.browser_endpoints = vec![
                 AuthCaptureBrowserEndpoint {
                     id: "primary".to_string(),
@@ -43074,7 +43112,7 @@ mod tests {
     fn browser_flow_cdp_candidates_preserve_endpoint_order() {
         let state = test_state();
         {
-            let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+            let mut control_plane = mutex_recover(state.control_plane.lock());
             control_plane.auth_capture_policy.browser_endpoints = vec![
                 AuthCaptureBrowserEndpoint {
                     id: "disabled".to_string(),
@@ -43161,7 +43199,7 @@ mod tests {
     fn browser_flow_cdp_candidates_derive_selector_from_flow_start_page() {
         let state = test_state();
         {
-            let mut control_plane = state.control_plane.lock().expect("control plane poisoned");
+            let mut control_plane = mutex_recover(state.control_plane.lock());
             control_plane.auth_capture_policy.browser_endpoints =
                 vec![AuthCaptureBrowserEndpoint {
                     id: "telecom".to_string(),

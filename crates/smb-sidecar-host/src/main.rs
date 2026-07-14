@@ -994,7 +994,7 @@ fn build_sidecar_model(
         bind_addr: {
             let raw = smb.bind_addr.trim();
             if raw.is_empty() {
-                "0.0.0.0".to_string()
+                "127.0.0.1".to_string()
             } else {
                 raw.to_string()
             }
@@ -2040,7 +2040,7 @@ mod tests {
         serde_json::from_value(json!({
             "smb_sidecar": {
                 "enabled": true,
-                "bind_addr": "0.0.0.0",
+                "bind_addr": "127.0.0.1",
                 "port": 445,
                 "mount_root": "/mnt/ccbg/smb/mounts",
                 "config_root": "/var/lib/ccbg/smb-sidecar/config",

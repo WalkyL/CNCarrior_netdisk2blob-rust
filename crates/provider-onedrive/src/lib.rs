@@ -2598,4 +2598,505 @@ mod tests {
 
         let _ = fs::remove_file(session_file);
     }
+
+    // === Pure utility function unit tests (no network) ===
+
+    #[test]
+    fn normalize_path_strips_empty_segments_and_joins() {
+        assert_eq!(normalize_path("a/b/c"), "a/b/c");
+        assert_eq!(normalize_path("/a/b/"), "a/b");
+        assert_eq!(normalize_path("a//b///c"), "a/b/c");
+        assert_eq!(normalize_path(""), "");
+        assert_eq!(normalize_path("/"), "");
+        assert_eq!(normalize_path("//"), "");
+        assert_eq!(normalize_path("single"), "single");
+    }
+
+    #[test]
+    fn parent_path_returns_parent_or_none() {
+        assert_eq!(parent_path("a/b/c"), Some("a/b".to_string()));
+        assert_eq!(parent_path("a/b"), Some("a".to_string()));
+        assert_eq!(parent_path("a"), None);
+        assert_eq!(parent_path(""), None);
+        assert_eq!(parent_path("/"), None);
+        assert_eq!(parent_path("a/"), None);
+        assert_eq!(parent_path("/a/b"), Some("a".to_string()));
+    }
+
+    #[test]
+    fn encode_segment_percent_encodes_special_chars() {
+        assert_eq!(encode_segment("hello"), "hello");
+        assert_eq!(encode_segment("a b"), "a%20b");
+        assert_eq!(encode_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_segment("a+b"), "a%2Bb");
+        assert_eq!(encode_segment("a%b"), "a%25b");
+        assert_eq!(encode_segment(""), "");
+    }
+
+    #[test]
+    fn encode_path_encodes_each_segment_independently() {
+        assert_eq!(encode_path("a/b/c"), "a/b/c");
+        assert_eq!(encode_path("a b/c d"), "a%20b/c%20d");
+        assert_eq!(encode_path("/a/b/"), "a/b");
+        assert_eq!(encode_path(""), "");
+    }
+
+    #[test]
+    fn join_relative_key_combines_prefix_and_name() {
+        assert_eq!(join_relative_key("", "file.txt"), "file.txt");
+        assert_eq!(join_relative_key("dir", "file.txt"), "dir/file.txt");
+        assert_eq!(join_relative_key("a/b", "c"), "a/b/c");
+    }
+
+    #[test]
+    fn normalize_scope_string_handles_various_delimiters() {
+        assert_eq!(
+            normalize_scope_string("Files.Read User.Read"),
+            "Files.Read User.Read"
+        );
+        assert_eq!(
+            normalize_scope_string("Files.Read, User.Read"),
+            "Files.Read User.Read"
+        );
+        assert_eq!(
+            normalize_scope_string("  Files.Read  ,  User.Read  "),
+            "Files.Read User.Read"
+        );
+        assert_eq!(
+            normalize_scope_string(""),
+            DEFAULT_ONEDRIVE_SCOPES
+        );
+        assert_eq!(
+            normalize_scope_string("   "),
+            DEFAULT_ONEDRIVE_SCOPES
+        );
+        assert_eq!(
+            normalize_scope_string("a,,b,,c"),
+            "a b c"
+        );
+    }
+
+    #[test]
+    fn ensure_non_empty_rejects_empty_and_whitespace() {
+        assert!(ensure_non_empty("value", "test").is_ok());
+        assert!(ensure_non_empty("  value  ", "test").is_ok());
+        assert!(ensure_non_empty("", "test").is_err());
+        assert!(ensure_non_empty("   ", "test").is_err());
+    }
+
+    #[test]
+    fn trim_response_body_handles_empty_and_long_strings() {
+        assert_eq!(trim_response_body(""), "empty response body");
+        assert_eq!(trim_response_body("   "), "empty response body");
+        assert_eq!(trim_response_body("short"), "short");
+
+        let exactly_240 = "x".repeat(240);
+        assert_eq!(trim_response_body(&exactly_240), exactly_240);
+
+        let long = "x".repeat(300);
+        let result = trim_response_body(&long);
+        assert!(result.ends_with("..."));
+        assert_eq!(result.len(), 243); // 240 chars + "..."
+    }
+
+    #[test]
+    fn decode_stored_oauth_session_valid_json() {
+        let json = r#"{"access_token":"tok","refresh_token":"ref","token_type":"Bearer","scope":"s","expires_at_unix":123}"#;
+        let session = decode_stored_oauth_session(json).expect("should decode");
+        assert_eq!(session.access_token, "tok");
+        assert_eq!(session.refresh_token.as_deref(), Some("ref"));
+        assert_eq!(session.expires_at_unix, Some(123));
+    }
+
+    #[test]
+    fn decode_stored_oauth_session_rejects_non_json() {
+        assert!(decode_stored_oauth_session("").is_none());
+        assert!(decode_stored_oauth_session("not json").is_none());
+        assert!(decode_stored_oauth_session("}").is_none());
+    }
+
+    #[test]
+    fn decode_stored_oauth_session_rejects_invalid_json() {
+        assert!(decode_stored_oauth_session(r#"{"access_token":}"#).is_none());
+    }
+
+    #[test]
+    fn decode_stored_oauth_session_handles_minimal_fields() {
+        let json = r#"{"access_token":"tok","token_type":"Bearer"}"#;
+        let session = decode_stored_oauth_session(json).expect("should decode minimal");
+        assert_eq!(session.access_token, "tok");
+        assert!(session.refresh_token.is_none());
+        assert!(session.expires_at_unix.is_none());
+    }
+
+    #[test]
+    fn needs_refresh_returns_true_when_expired() {
+        let session = OneDriveOAuthSession {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            token_type: "Bearer".to_string(),
+            scope: None,
+            expires_at_unix: Some(0), // already expired
+        };
+        assert!(session.needs_refresh(0));
+        assert!(session.needs_refresh(120));
+    }
+
+    #[test]
+    fn needs_refresh_returns_false_when_not_expired() {
+        let far_future = current_unix_time_secs() + 3600;
+        let session = OneDriveOAuthSession {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            token_type: "Bearer".to_string(),
+            scope: None,
+            expires_at_unix: Some(far_future),
+        };
+        assert!(!session.needs_refresh(0));
+        assert!(!session.needs_refresh(120));
+    }
+
+    #[test]
+    fn needs_refresh_returns_false_when_no_expiry() {
+        let session = OneDriveOAuthSession {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            token_type: "Bearer".to_string(),
+            scope: None,
+            expires_at_unix: None,
+        };
+        assert!(!session.needs_refresh(0));
+    }
+
+    #[test]
+    fn one_drive_oauth_session_serde_roundtrip() {
+        let session = OneDriveOAuthSession {
+            access_token: "tok".to_string(),
+            refresh_token: Some("ref".to_string()),
+            token_type: "Bearer".to_string(),
+            scope: Some("Files.Read".to_string()),
+            expires_at_unix: Some(1234567890),
+        };
+        let json = serde_json::to_string(&session).expect("serialize");
+        let decoded: OneDriveOAuthSession = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.access_token, session.access_token);
+        assert_eq!(decoded.refresh_token, session.refresh_token);
+        assert_eq!(decoded.expires_at_unix, session.expires_at_unix);
+    }
+
+    #[test]
+    fn oauth_token_response_into_session_full_response() {
+        let response = OAuthTokenResponse {
+            access_token: "tok".to_string(),
+            refresh_token: Some("ref".to_string()),
+            token_type: Some("Bearer".to_string()),
+            scope: Some("Files.Read".to_string()),
+            expires_in: Some(3600),
+        };
+        let session = response
+            .into_session(None)
+            .expect("should succeed");
+        assert_eq!(session.access_token, "tok");
+        assert_eq!(session.refresh_token.as_deref(), Some("ref"));
+        assert_eq!(session.token_type, "Bearer");
+        assert!(session.expires_at_unix.is_some());
+    }
+
+    #[test]
+    fn oauth_token_response_into_session_empty_token_fails() {
+        let response = OAuthTokenResponse {
+            access_token: "  ".to_string(),
+            refresh_token: None,
+            token_type: None,
+            scope: None,
+            expires_in: None,
+        };
+        assert!(response.into_session(None).is_err());
+    }
+
+    #[test]
+    fn oauth_token_response_into_session_falls_back_to_previous_refresh_token() {
+        let response = OAuthTokenResponse {
+            access_token: "tok".to_string(),
+            refresh_token: None,
+            token_type: None,
+            scope: None,
+            expires_in: None,
+        };
+        let session = response
+            .into_session(Some("previous-refresh"))
+            .expect("should succeed");
+        assert_eq!(session.refresh_token.as_deref(), Some("previous-refresh"));
+        assert_eq!(session.token_type, "Bearer"); // default
+    }
+
+    #[test]
+    fn oauth_token_response_into_session_uses_new_refresh_token_over_previous() {
+        let response = OAuthTokenResponse {
+            access_token: "tok".to_string(),
+            refresh_token: Some("new-refresh".to_string()),
+            token_type: None,
+            scope: None,
+            expires_in: None,
+        };
+        let session = response
+            .into_session(Some("previous-refresh"))
+            .expect("should succeed");
+        assert_eq!(session.refresh_token.as_deref(), Some("new-refresh"));
+    }
+
+    #[test]
+    fn drive_item_response_into_object_info_with_file() {
+        let item = DriveItemResponse {
+            id: "id1".to_string(),
+            name: Some("file.txt".to_string()),
+            size: Some(42),
+            etag: Some("etag1".to_string()),
+            last_modified: Some("2026-01-01T00:00:00Z".to_string()),
+            file: Some(FileFacet {
+                mime_type: Some("text/plain".to_string()),
+            }),
+            folder: None,
+            parent_reference: None,
+        };
+        let info = item.into_object_info("my-key".to_string());
+        assert_eq!(info.key, "my-key");
+        assert_eq!(info.size, 42);
+        assert_eq!(info.etag.as_deref(), Some("etag1"));
+        assert_eq!(info.content_type.as_deref(), Some("text/plain"));
+        assert_eq!(
+            info.last_modified.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn drive_item_response_into_object_info_without_file() {
+        let item = DriveItemResponse {
+            id: "id2".to_string(),
+            name: Some("folder".to_string()),
+            size: None,
+            etag: None,
+            last_modified: None,
+            file: None,
+            folder: Some(FolderFacet {
+                child_count: Some(0),
+            }),
+            parent_reference: None,
+        };
+        let info = item.into_object_info("dir".to_string());
+        assert_eq!(info.key, "dir");
+        assert_eq!(info.size, 0); // defaults to 0
+        assert!(info.etag.is_none());
+        assert!(info.content_type.is_none());
+    }
+
+    #[test]
+    fn adapter_token_endpoint_url_with_tenant() {
+        let config = test_config_with_drive("https://graph.microsoft.com", "my-tenant");
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(
+            adapter.token_endpoint_url(),
+            "https://login.microsoftonline.com/my%2Dtenant/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn adapter_token_endpoint_url_with_empty_tenant_uses_common() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "");
+        config.tenant = "".to_string();
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(
+            adapter.token_endpoint_url(),
+            "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn adapter_authorization_endpoint_url() {
+        let config = test_config_with_drive("https://graph.microsoft.com", "contoso");
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(
+            adapter.authorization_endpoint_url(),
+            "https://login.microsoftonline.com/contoso/oauth2/v2.0/authorize"
+        );
+    }
+
+    #[test]
+    fn adapter_drive_resource_with_drive_id() {
+        let config = test_config_with_drive("https://graph.microsoft.com", "t");
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(adapter.drive_resource(), "drives/my%2Ddrive%2Did");
+    }
+
+    #[test]
+    fn adapter_drive_resource_without_drive_id() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.drive_id = None;
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(adapter.drive_resource(), "me/drive");
+    }
+
+    #[test]
+    fn adapter_auth_tenant_empty_defaults_to_common() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "");
+        config.tenant = "".to_string();
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(adapter.auth_tenant(), "common");
+    }
+
+    #[test]
+    fn adapter_auth_tenant_custom() {
+        let config = test_config_with_drive("https://graph.microsoft.com", "contoso");
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(adapter.auth_tenant(), "contoso");
+    }
+
+    #[test]
+    fn adapter_normalized_root_prefix_none() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.root_prefix = None;
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert!(adapter.normalized_root_prefix().is_none());
+    }
+
+    #[test]
+    fn adapter_normalized_root_prefix_empty_string() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.root_prefix = Some("".to_string());
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert!(adapter.normalized_root_prefix().is_none());
+    }
+
+    #[test]
+    fn adapter_normalized_root_prefix_valid() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.root_prefix = Some("  a/b  ".to_string());
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(adapter.normalized_root_prefix(), Some("  a/b  ".to_string()));
+    }
+
+    #[test]
+    fn adapter_container_path_with_root_prefix() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.root_prefix = Some("prefix".to_string());
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(
+            adapter.container_path("my-container").unwrap(),
+            "prefix/my-container"
+        );
+    }
+
+    #[test]
+    fn adapter_container_path_without_root_prefix() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.root_prefix = None;
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(
+            adapter.container_path("my-container").unwrap(),
+            "my-container"
+        );
+    }
+
+    #[test]
+    fn adapter_container_path_rejects_empty_container() {
+        let config = test_config_with_drive("https://graph.microsoft.com", "t");
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert!(adapter_container_path_empty_returns_err(&adapter));
+    }
+
+    fn adapter_container_path_empty_returns_err(adapter: &OneDriveBlobAdapter) -> bool {
+        adapter.container_path("").is_err()
+    }
+
+    #[test]
+    fn adapter_object_path_combines_root_container_key() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.root_prefix = Some("root".to_string());
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(
+            adapter.object_path("cont", "key.txt").unwrap(),
+            "root/cont/key.txt"
+        );
+    }
+
+    #[test]
+    fn adapter_object_path_without_root_prefix() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.root_prefix = None;
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(
+            adapter.object_path("cont", "key.txt").unwrap(),
+            "cont/key.txt"
+        );
+    }
+
+    #[test]
+    fn adapter_object_path_rejects_empty_key() {
+        let config = test_config_with_drive("https://graph.microsoft.com", "t");
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert!(adapter.object_path("cont", "").is_err());
+    }
+
+    #[test]
+    fn adapter_ensure_enabled_true() {
+        let config = test_config_with_drive("https://graph.microsoft.com", "t");
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert!(adapter.ensure_enabled().is_ok());
+    }
+
+    #[test]
+    fn adapter_ensure_enabled_false() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.enabled = false;
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert!(adapter.ensure_enabled().is_err());
+    }
+
+    #[test]
+    fn adapter_timeout_clamps_to_minimum_one_second() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.request_timeout_secs = 0;
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(adapter.timeout(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn adapter_timeout_uses_configured_value() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.request_timeout_secs = 30;
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(adapter.timeout(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn adapter_scope_string_delegates_to_normalize() {
+        let mut config = test_config_with_drive("https://graph.microsoft.com", "t");
+        config.scopes = "a,b,c".to_string();
+        let adapter = OneDriveBlobAdapter::new(config);
+        assert_eq!(adapter.scope_string(), "a b c");
+    }
+
+    fn test_config_with_drive(graph_base_url: &str, tenant: &str) -> OneDriveConfig {
+        OneDriveConfig {
+            enabled: true,
+            tenant: tenant.to_string(),
+            client_id: Some("test-client".to_string()),
+            use_device_code: false,
+            redirect_url: None,
+            drive_id: Some("my-drive-id".to_string()),
+            graph_base_url: graph_base_url.to_string(),
+            auth_base_url: "https://login.microsoftonline.com".to_string(),
+            scopes: DEFAULT_ONEDRIVE_SCOPES.to_string(),
+            session_file: None,
+            token_source: TokenSource::EnvVar {
+                key: "TOKEN".to_string(),
+            },
+            root_prefix: None,
+            user_agent: "ccbg-test".to_string(),
+            request_timeout_secs: 30,
+            max_single_upload_bytes: None,
+            max_single_download_bytes: None,
+        }
+    }
 }

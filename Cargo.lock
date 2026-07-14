@@ -1599,6 +1599,7 @@ version = "0.1.12"
 dependencies = [
  "policy-engine",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
