@@ -5760,7 +5760,7 @@ Copyright (c) 2026 walky
         '  --dir-cache-time 5m \\\\',
         '  --poll-interval 0 \\\\',
         '  --allow-other=false',
-      ].join('\\n');
+      ].join('\n');
     }
     function desktopMountWindowsInstallSteps() {
       return [
@@ -5788,7 +5788,7 @@ Copyright (c) 2026 walky
         '  --poll-interval 0',
         '',
         '# 5. Open File Explorer and browse drive X:',
-      ].join('\\n');
+      ].join('\n');
     }
     async function copyDesktopMountCommand(kind, bucket) {
       const selectedBucket = String(bucket || 'root').trim() || 'root';
@@ -5904,7 +5904,7 @@ Copyright (c) 2026 walky
         `Reachability: ${reachability.summary}`,
         'Region shown here is the S3 signing region used by this gateway. Keep the desktop client config consistent with it.',
         'Advanced users can keep using S3 and rclone directly. The beginner path is a future SMB plugin on larger hardware, with local SMB users and local share management instead of AD.',
-      ].join('\\n');
+      ].join('\n');
     }
     function deriveUnicomAssistantExpiry(session) {
       const runtime = session?.runtime || {};
@@ -7877,7 +7877,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
             `${comments.commentPrefix} ${comments.portproxy(host, port)}`,
             `netsh interface portproxy delete v4tov4 listenaddress=${host} listenport=${port} | Out-Null`,
             `netsh interface portproxy add v4tov4 listenaddress=${host} listenport=${port} connectaddress=127.0.0.1 connectport=${port}`,
-          ].join('\\n');
+          ].join('\n');
         }
         const executable = state.browser === 'chrome' ? 'chrome' : 'msedge';
         return [
@@ -7895,7 +7895,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           `REM ${comments.portproxy(host, port)}`,
           `netsh interface portproxy delete v4tov4 listenaddress=${host} listenport=${port} >nul 2>&1`,
           `netsh interface portproxy add v4tov4 listenaddress=${host} listenport=${port} connectaddress=127.0.0.1 connectport=${port}`,
-        ].join('\\n');
+        ].join('\n');
       }
       if (state.os === 'macos') {
         const appName = state.browser === 'chrome' ? 'Google Chrome' : 'Microsoft Edge';
@@ -7915,7 +7915,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           `${comments.commentPrefix} ${comments.socatBridge(host, port)}`,
           `pkill -f "socat .*TCP-LISTEN:${port},bind=${host},reuseaddr,fork.*TCP:127.0.0.1:${port}" >/dev/null 2>&1 || true`,
           `nohup socat TCP-LISTEN:${port},bind=${host},reuseaddr,fork TCP:127.0.0.1:${port} >/tmp/ccbg-cdp-socat.log 2>&1 &`,
-        ].join('\\n');
+        ].join('\n');
       }
       const browserCommandCandidates = state.browser === 'chrome'
         ? `google-chrome google-chrome-stable chromium chromium-browser`
@@ -7960,7 +7960,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         `${comments.commentPrefix} ${comments.socatBridge(host, port)}`,
         `pkill -f "socat .*TCP-LISTEN:${port},bind=${host},reuseaddr,fork.*TCP:127.0.0.1:${port}" >/dev/null 2>&1 || true`,
         `nohup socat TCP-LISTEN:${port},bind=${host},reuseaddr,fork TCP:127.0.0.1:${port} >/tmp/ccbg-cdp-socat.log 2>&1 &`,
-      ].join('\\n');
+      ].join('\n');
     }
     function buildBrowserHelpVerifyScript(state) {
       const comments = browserHelpCommentPack();
@@ -7973,7 +7973,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         state.os === 'windows' && state.shell === 'powershell'
           ? `Invoke-WebRequest "http://${state.host}:${state.port}/json/version" -UseBasicParsing`
           : `curl http://${state.host}:${state.port}/json/version`,
-      ].join('\\n');
+      ].join('\n');
     }
     function renderBrowserHelpOsOptions(selected) {
       const options = [
@@ -8271,7 +8271,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         `Configured endpoints: ${authCaptureLlmEndpointsState.length}`,
         `Enabled endpoints: ${authCaptureLlmEndpointsState.filter(entry => entry.enabled !== false).length}`,
         'Screenshot checks: require a multimodal model with image input',
-      ].join('\\n');
+      ].join('\n');
     }
     function formatBrowserEndpointProbe(entry) {
       const probe = entry?.probe_result;
@@ -8289,7 +8289,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       return `
         <div class="browser-endpoint-probe">
           <div class="browser-endpoint-probe-summary">${escapeHtml(summary)}</div>
-          ${details.length ? `<pre class="browser-endpoint-probe-details">${escapeHtml(details.join('\\n'))}</pre>` : ''}
+          ${details.length ? `<pre class="browser-endpoint-probe-details">${escapeHtml(details.join('\n'))}</pre>` : ''}
         </div>
       `;
     }
@@ -9763,7 +9763,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         tr('topology.summary.fallback_read', { value: fallbackReadOrder.length ? fallbackReadOrder.map(providerLabel).join(' -> ') : tr('common.disabled', {}, 'disabled') }, `Fallback read order: ${fallbackReadOrder.length ? fallbackReadOrder.map(providerLabel).join(' -> ') : 'disabled'}`),
         tr('topology.summary.high_speed', { value: highSpeedProviders.length ? highSpeedProviders.map(providerLabel).join(', ') : tr('common.none', {}, 'none') }, `High-speed providers: ${highSpeedProviders.length ? highSpeedProviders.map(providerLabel).join(', ') : 'none'}`),
         tr('topology.summary.placement', { value: payload.object_placement_mode || 'prefer_primary' }, `New object placement: ${payload.object_placement_mode || 'prefer_primary'}`),
-      ].join('\\n');
+      ].join('\n');
       document.getElementById('runtime-topology-summary').textContent = summary;
     }
     function renderDesiredTopologySummary(payload) {
@@ -9779,7 +9779,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         tr('topology.summary.planned_high_speed', { value: highSpeedProviders.length ? highSpeedProviders.map(providerLabel).join(', ') : tr('common.none', {}, 'none') }, `Planned high-speed providers: ${highSpeedProviders.length ? highSpeedProviders.map(providerLabel).join(', ') : 'none'}`),
         tr('topology.summary.planned_placement', { value: payload.object_placement_mode || 'prefer_primary' }, `Planned new object placement: ${payload.object_placement_mode || 'prefer_primary'}`),
         tr('topology.summary.restart_required', { value: payload.restart_required ? tr('common.yes', {}, 'yes') : tr('common.no', {}, 'no') }, `Restart required: ${payload.restart_required ? 'yes' : 'no'}`),
-      ].join('\\n');
+      ].join('\n');
       document.getElementById('desired-topology-summary').textContent = summary;
     }
     function renderOnedrivePolicySummary(payload) {
@@ -9792,7 +9792,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         `Selected prefixes: ${(payload.selected_prefixes || []).length ? payload.selected_prefixes.join(', ') : 'none'}`,
         `Memory buckets: ${(payload.memory_buckets || []).length ? payload.memory_buckets.join(', ') : 'none'}`,
         `Memory prefixes: ${(payload.memory_prefixes || []).length ? payload.memory_prefixes.join(', ') : 'none'}`,
-      ].join('\\n');
+      ].join('\n');
       document.getElementById('onedrive-policy-summary').textContent = summary;
     }
     function renderAuthCapturePolicy(payload) {
@@ -9834,7 +9834,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         `Primary LLM: ${primaryLlmEndpoint?.endpoint_url || payload.llm_endpoint || 'not set'}`,
         `Primary model: ${primaryLlmEndpoint?.model_id || payload.llm_model_id || 'not set'}`,
         `LLM API key: ${payload.llm_api_key_present ? 'configured' : 'not set'}`,
-      ].join('\\n');
+      ].join('\n');
       document.getElementById('auth-capture-summary').textContent = summary;
       syncAuthCapturePanelHints();
     }
@@ -11831,7 +11831,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           (entry.references || []).map(ref => `${ref.label}:${ref.bucket}/${ref.key}`).join(' | '),
         ]),
       ];
-      const csv = rows.map(row => row.map(csvEscape).join(',')).join('\\n');
+      const csv = rows.map(row => row.map(csvEscape).join(',')).join('\n');
       const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
@@ -11992,7 +11992,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         warnings.push(tr('object.preview.warning.overwrite', {}, 'If a file already exists at the destination path, this action may overwrite it.'));
       }
       return {
-        summary: lines.join('\\n'),
+        summary: lines.join('\n'),
         warnings,
       };
     }
@@ -15493,6 +15493,11 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       const probeDisabled = canStart && !isBusy ? '' : 'disabled';
       const repairDisabled = canStart && !isBusy ? '' : 'disabled';
       const guidance = deriveMobileAssistantGuidance(session, runtime);
+      const promptList = (session?.prompts || []).filter(prompt => prompt.provider === 'mobile');
+      const pendingPromptSummary = assistantPendingPromptSummary(promptList.length);
+      const promptsMarkup = promptList.length
+        ? `<span class="pill pending">${escapeHtml(pendingPromptSummary)}</span>`
+        : `<span class="pill ready">${escapeHtml(pendingPromptSummary)}</span>`;
       const startLabel = isBusy && mobileAuthAssistantState.action === 'request-code'
         ? tr('assistant.state.requesting', {}, 'Requesting…')
         : 'Start SMS Login + Guide';
@@ -15571,6 +15576,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
               <div class="provider-note">${escapeHtml(tr('Status:', {}, 'Status:'))} <span class="pill ${mobileAssistantStatusTone(sessionState)}">${escapeHtml(browserFlowStatusLabel(sessionState))}</span></div>
               <div class="provider-note">${escapeHtml(tr('Preferred CDP endpoint:', {}, 'Preferred CDP endpoint:'))} <span class="mono">${escapeHtml(endpointLabel)}</span></div>
               ${endpointSelectorMarkup}
+              <div class="provider-note">${escapeHtml(tr('Pending inputs:', {}, 'Pending inputs:'))} ${promptsMarkup}</div>
             </div>
           </div>
           <div class="unicom-assistant-window-body">
@@ -15803,6 +15809,11 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       }
     }
     async function startMobileSmsLoginRequestCode() {
+      const livePhone = currentMobileAssistantFieldValue('phone_number');
+      const normalizedPhone = setMobileAssistantPhoneNumber(
+        preferAssistantFieldValue(livePhone, mobileAuthAssistantState.phone_number),
+      );
+      setMobileAssistantWindowOpen(true, { focusField: normalizedPhone ? 'sms_code' : 'phone_number' });
       const catalog = await loadMobileBrowserFlowCatalog().catch(() => null);
       const requestCodeFlowId = mobileFlowId('sms_request_code', 'mobile_sms_login_request_code_validate');
       const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId, {
@@ -15818,11 +15829,6 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       if (await maybeAutoCaptureAndSaveMobileLoggedInSession()) {
         return;
       }
-      const livePhone = currentMobileAssistantFieldValue('phone_number');
-      const normalizedPhone = setMobileAssistantPhoneNumber(
-        preferAssistantFieldValue(livePhone, mobileAuthAssistantState.phone_number),
-      );
-      setMobileAssistantWindowOpen(true, { focusField: normalizedPhone ? 'sms_code' : 'phone_number' });
       if (!normalizedPhone) {
         setMobileAuthAssistantFeedback(tr('Phone number is required in the assistant panel before starting the Mobile SMS login flow.', {}, 'Phone number is required in the assistant panel before starting the Mobile SMS login flow.'), 'warn');
         focusMobileAssistantField('phone_number');
@@ -15964,6 +15970,11 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       }
     }
     async function startTelecomSmsLoginRequestCode() {
+      const livePhone = currentTelecomAssistantFieldValue('phone_number');
+      const normalizedPhone = setTelecomAssistantPhoneNumber(
+        preferAssistantFieldValue(livePhone, telecomAuthAssistantState.phone_number),
+      );
+      setTelecomAssistantWindowOpen(true, { focusField: normalizedPhone ? 'sms_code' : 'phone_number' });
       const catalog = await loadTelecomBrowserFlowCatalog().catch(() => null);
       const requestCodeFlowId = telecomFlowId('sms_request_code', 'telecom_sms_login_request_code');
       const browserEndpoints = browserFlowPreferredBrowserEndpoints(catalog, requestCodeFlowId, {
@@ -15978,11 +15989,6 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       if (await maybeAutoCaptureAndSaveTelecomLoggedInSession()) {
         return;
       }
-      const livePhone = currentTelecomAssistantFieldValue('phone_number');
-      const normalizedPhone = setTelecomAssistantPhoneNumber(
-        preferAssistantFieldValue(livePhone, telecomAuthAssistantState.phone_number),
-      );
-      setTelecomAssistantWindowOpen(true, { focusField: normalizedPhone ? 'sms_code' : 'phone_number' });
       if (!normalizedPhone) {
         setTelecomAuthAssistantFeedback(tr('Phone number is required in the assistant panel before starting the Telecom SMS login flow.', {}, 'Phone number is required in the assistant panel before starting the Telecom SMS login flow.'), 'warn');
         focusTelecomAssistantField('phone_number');
