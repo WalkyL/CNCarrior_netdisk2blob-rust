@@ -77,6 +77,36 @@
   modules actually present on the host instead of producing a false-healthy SMB listener that
   rejects all sessions.
 
+## Container Memory / OOM
+
+- cgroup v2 counts file page cache against the LXC memory limit. On `.49` (CCBG gateway LXC),
+  gatewayd's own anonymous memory is only ~60 MB, but spool I/O (`/var/lib/ccbg/body-spool`)
+  balloons page cache to ~115 MB, so the container runs near its ceiling even though the process
+  looks small. Raising the LXC `memory` from 128 MiB to 192 MiB left `memory.peak` at ~190 MiB —
+  only ~1 MiB of headroom, so OOM still fired.
+- OOM history on `.49` is unambiguous in journald: gatewayd was killed by the OOM killer on
+  `2026-07-30 11:34:09Z` and `2026-07-31 11:06:32Z` (both `result 'oom-kill'`, restart counter 1).
+  The `Main process exited, code=killed, status=9/KILL` line is the OOM signature; a SIGSEGV
+  (`status=11/SEGV`) is a different failure class and should not be conflated.
+- An LXC guest cannot create its own swap or tune its own memory controller from inside. `swapon`
+  fails with `Operation not permitted` (needs host-side device cgroup / CAP_SYS_ADMIN), and writing
+  `/sys/fs/cgroup/memory.high` fails with `Permission denied` because the container's root cgroup is
+  host-owned. Both must be configured on the PVE host (`pct set <ctid> --swap` / `lxc.cgroup2.memory.high`).
+- LXC virtual swap (`/proc/swaps` shows `none virtual`) only helps if the host actually has swap
+  backing it; verify with `free -h` on the PVE host before relying on `--swap`.
+- The right mitigation for page-cache-driven OOM is a `memory.high` soft limit well below the hard
+  `memory.max`, so the kernel reclaims cache proactively instead of waiting until the hard OOM
+  cliff. A containerized blob gateway with spool streaming needs explicit headroom between
+  `memory.high`, `memory.max`, and the observed `memory.peak`.
+- `pct set <ctid> --memory-high` is NOT a valid option; PVE rejects it with `Unknown option:
+  memory-high`. `lxc.cgroup2.*` knobs must be written directly into `/etc/pve/lxc/<ctid>.conf`
+  (e.g. `lxc.cgroup2.memory.high: 209715200`) and take effect only after the container restarts.
+  Verify on the host with `cat /sys/fs/cgroup/lxc/<ctid>/memory.high`, not from inside the guest
+  (the guest sees `max` for its own root cgroup even when the host-side value is set).
+- Applied 2026-08-04 on `.49` (CT 104): `memory` 256 MiB, `swap` 1 GiB,
+  `memory.high` 209715200 (200 MiB), verified host-side. gatewayd healthy
+  (`/healthz` 200) after the reboot that applied the settings.
+
 ## S3 Compatibility Gaps
 
 - Directory traversal for mounted clients must be driven by local placement metadata, and the
