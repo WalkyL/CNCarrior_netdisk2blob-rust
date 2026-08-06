@@ -16,6 +16,7 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
+        OnceLock,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -6085,7 +6086,7 @@ impl Drop for AbortProviderLimitProbeOnDrop {
 }
 
 struct ProviderLimitProbeStreamState {
-    receiver: mpsc::UnboundedReceiver<ProviderLimitProbeEventPayload>,
+    receiver: mpsc::Receiver<ProviderLimitProbeEventPayload>,
     _abort_on_drop: AbortProviderLimitProbeOnDrop,
 }
 
@@ -13178,6 +13179,48 @@ async fn admin_login_page(State(state): State<AppState>, headers: HeaderMap) -> 
     response
 }
 
+/// Per-username login attempt rate limiter: at most 5 attempts within any
+/// 60-second window.  Built on a module-level OnceLock so it does not require
+/// adding a field to `AppState` and all its constructors.
+#[rustfmt::skip]
+static ADMIN_LOGIN_LIMITER: OnceLock<Mutex<HashMap<String, Vec<i64>>>> = OnceLock::new();
+const ADMIN_LOGIN_MAX_ATTEMPTS: u32 = 5;
+const ADMIN_LOGIN_WINDOW_SECONDS: i64 = 60;
+
+fn check_admin_login_rate(username: &str) -> Result<(), ControlApiError> {
+    // NOTE: called from async context (admin_login); the std Mutex lock is
+    // held for only a handful of O(1) HashMap operations and is never held
+    // across an .await point.  Do not add .await inside this function.
+    let now_ms = current_unix_ms() as i64;
+    let key = username.trim().to_lowercase();
+    if key.is_empty() {
+        return Err(ControlApiError::unauthorized("username must not be empty"));
+    }
+    let map = ADMIN_LOGIN_LIMITER.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().map_err(|_| {
+        ControlApiError::service_unavailable("login rate limiter is temporarily unavailable")
+    })?;
+    let entries = guard.entry(key).or_default();
+    let window_start = now_ms - ADMIN_LOGIN_WINDOW_SECONDS * 1000;
+    entries.retain(|t| *t > window_start);
+    if entries.len() as u32 >= ADMIN_LOGIN_MAX_ATTEMPTS {
+        return Err(ControlApiError::unauthorized(
+            "too many login attempts; try again later",
+        ));
+    }
+    entries.push(now_ms);
+    Ok(())
+}
+
+fn clear_admin_login_attempts(username: &str) {
+    let key = username.trim().to_lowercase();
+    if let Some(map) = ADMIN_LOGIN_LIMITER.get() {
+        if let Ok(mut guard) = map.lock() {
+            guard.remove(&key);
+        }
+    }
+}
+
 async fn admin_login(
     State(state): State<AppState>,
     Json(input): Json<AdminLoginInput>,
@@ -13189,11 +13232,13 @@ async fn admin_login(
             "username and password are both required",
         ));
     }
+    check_admin_login_rate(username)?;
     if !verify_admin_browser_credentials(&state, username, &password)? {
         return Err(ControlApiError::unauthorized(
             "invalid username or password",
         ));
     }
+    clear_admin_login_attempts(username);
 
     let must_change_password = admin_default_credentials_active(&state);
     let (session_id, expires_at_unix_ms) =
@@ -13977,13 +14022,12 @@ async fn run_provider_limit_probe_stream(
     Path(provider): Path<String>,
     Json(input): Json<ProviderLimitProbeInput>,
 ) -> Result<Response, ApiError> {
-    let (sender, receiver) = mpsc::unbounded_channel();
+    let (sender, receiver) = mpsc::channel(32);
 
     let handle = tokio::spawn(async move {
         match execute_provider_limit_probe(state, provider, input, Some(sender.clone())).await {
-            Ok(payload) => send_provider_limit_probe_event(
-                &Some(sender),
-                ProviderLimitProbeEventPayload {
+            Ok(payload) => {
+                let _ = sender.blocking_send(ProviderLimitProbeEventPayload {
                     event: "completed",
                     checked_at_unix_ms: current_unix_ms(),
                     message: format!("size probe completed for {}", payload.label),
@@ -13996,11 +14040,10 @@ async fn run_provider_limit_probe_stream(
                     step: None,
                     payload: Some(payload),
                     error: None,
-                },
-            ),
-            Err(error) => send_provider_limit_probe_event(
-                &Some(sender),
-                ProviderLimitProbeEventPayload {
+                });
+            }
+            Err(error) => {
+                let _ = sender.blocking_send(ProviderLimitProbeEventPayload {
                     event: "error",
                     checked_at_unix_ms: current_unix_ms(),
                     message: error.to_string(),
@@ -14013,8 +14056,8 @@ async fn run_provider_limit_probe_stream(
                     step: None,
                     payload: None,
                     error: Some(error.to_string()),
-                },
-            ),
+                });
+            }
         }
     });
 
@@ -14119,7 +14162,7 @@ async fn execute_provider_limit_probe(
     state: AppState,
     provider: String,
     input: ProviderLimitProbeInput,
-    event_sender: Option<mpsc::UnboundedSender<ProviderLimitProbeEventPayload>>,
+    event_sender: Option<mpsc::Sender<ProviderLimitProbeEventPayload>>,
 ) -> Result<ProviderLimitProbePayload, BlobError> {
     let provider = ProviderId::parse(&provider)
         .map_err(|error| BlobError::Configuration(error.to_string()))?;
@@ -14959,11 +15002,11 @@ fn provider_limit_probe_min_download_first_response_latency_ms(
 }
 
 fn send_provider_limit_probe_event(
-    sender: &Option<mpsc::UnboundedSender<ProviderLimitProbeEventPayload>>,
+    sender: &Option<mpsc::Sender<ProviderLimitProbeEventPayload>>,
     event: ProviderLimitProbeEventPayload,
 ) {
     if let Some(sender) = sender {
-        let _ = sender.send(event);
+        let _ = sender.try_send(event);
     }
 }
 
@@ -31493,12 +31536,19 @@ async fn metrics_prometheus(State(state): State<AppState>) -> Result<Response, A
 
 async fn list_containers(
     State(state): State<AppState>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
 ) -> Result<Json<Vec<blob_core::ContainerInfo>>, DataPlaneApiError> {
     record_data_plane_request(&state);
     try_acquire_data_plane_request_slot(&state, current_unix_ms())
         .map_err(DataPlaneApiError::from_s3_error)?;
     let _permit =
         try_acquire_data_plane_permit(&state).map_err(DataPlaneApiError::from_s3_error)?;
+    let application = authorize_s3(&state, &method, &uri, &headers, None)
+        .map_err(DataPlaneApiError::from_s3_error)?;
+    ensure_s3_application_permission(&application, S3ActionKind::ListBuckets, None, None)
+        .map_err(DataPlaneApiError::from_s3_error)?;
     let read = list_containers_with_fallback(&state).await?;
     record_data_plane_fallback_read(&state, read.source);
     let payload = read.value;
@@ -31508,6 +31558,9 @@ async fn list_containers(
 
 async fn list_objects(
     State(state): State<AppState>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
     Query(query): Query<ObjectsQuery>,
 ) -> Result<Json<Vec<blob_core::ObjectInfo>>, DataPlaneApiError> {
     record_data_plane_request(&state);
@@ -31515,6 +31568,15 @@ async fn list_objects(
         .map_err(DataPlaneApiError::from_s3_error)?;
     let _permit =
         try_acquire_data_plane_permit(&state).map_err(DataPlaneApiError::from_s3_error)?;
+    let application = authorize_s3(&state, &method, &uri, &headers, None)
+        .map_err(DataPlaneApiError::from_s3_error)?;
+    ensure_s3_application_permission(
+        &application,
+        S3ActionKind::ListObjects,
+        query.container.as_deref(),
+        None,
+    )
+    .map_err(DataPlaneApiError::from_s3_error)?;
     let (_, backend) = current_primary_backend(&state)?;
     let request = ListObjectsRequest {
         container: query.container,
@@ -52835,7 +52897,9 @@ mod tests {
             .await
             .expect("family object should be created");
 
-        let Json(containers) = list_containers(State(state))
+        let uri: Uri = "/v1/containers".parse().expect("uri");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let Json(containers) = list_containers(State(state), Method::GET, OriginalUri(uri), headers)
             .await
             .expect("containers api should succeed");
         assert!(containers.len() >= 2);
@@ -52865,8 +52929,13 @@ mod tests {
             .await
             .expect("family object should be created");
 
+        let uri: Uri = "/v1/objects?container=family".parse().expect("uri");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
         let Json(objects) = list_objects(
             State(state),
+            Method::GET,
+            OriginalUri(uri),
+            headers,
             Query(ObjectsQuery {
                 container: Some("family".to_string()),
                 prefix: None,
@@ -53658,7 +53727,9 @@ mod tests {
             rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
         });
 
-        let error = list_containers(State(state))
+        let uri: Uri = "/v1/containers".parse().expect("uri");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
+        let error = list_containers(State(state), Method::GET, OriginalUri(uri), headers)
             .await
             .expect_err("containers api should reject exhausted concurrency");
         let response = error.into_response();
@@ -53688,8 +53759,13 @@ mod tests {
             rate_limiter: Mutex::new(DataPlaneRateLimiterState::default()),
         });
 
+        let uri: Uri = "/v1/objects?container=family".parse().expect("uri");
+        let headers = signed_headers(&state.config, &Method::GET, &uri, &[], &[]);
         let error = list_objects(
             State(state),
+            Method::GET,
+            OriginalUri(uri),
+            headers,
             Query(ObjectsQuery {
                 container: Some("family".to_string()),
                 prefix: None,
@@ -54994,7 +55070,7 @@ mod tests {
         );
         replace_backend(&mut state, ProviderId::Stub, backend);
 
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(32);
         let payload = execute_provider_limit_probe(
             state,
             "stub".to_string(),
