@@ -81,7 +81,7 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
 };
-use tower_http::cors::Any;
+use tower_http::cors::AllowOrigin;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use blob_core::{
@@ -7445,7 +7445,7 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             capture_admin_client_ip,
         ))
         .layer(CorsLayer::new()
-            .allow_origin(Any)
+            .allow_origin(AllowOrigin::mirror_request())
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_headers([AUTHORIZATION, CONTENT_TYPE, HeaderName::from_static("x-admin-api-version")])
             .allow_credentials(true)
@@ -14026,8 +14026,8 @@ async fn run_provider_limit_probe_stream(
 
     let handle = tokio::spawn(async move {
         match execute_provider_limit_probe(state, provider, input, Some(sender.clone())).await {
-            Ok(payload) => {
-                let _ = sender.blocking_send(ProviderLimitProbeEventPayload {
+             Ok(payload) => {
+                let _ = sender.send(ProviderLimitProbeEventPayload {
                     event: "completed",
                     checked_at_unix_ms: current_unix_ms(),
                     message: format!("size probe completed for {}", payload.label),
@@ -14040,10 +14040,10 @@ async fn run_provider_limit_probe_stream(
                     step: None,
                     payload: Some(payload),
                     error: None,
-                });
+                }).await;
             }
             Err(error) => {
-                let _ = sender.blocking_send(ProviderLimitProbeEventPayload {
+                let _ = sender.send(ProviderLimitProbeEventPayload {
                     event: "error",
                     checked_at_unix_ms: current_unix_ms(),
                     message: error.to_string(),
@@ -14056,7 +14056,7 @@ async fn run_provider_limit_probe_stream(
                     step: None,
                     payload: None,
                     error: Some(error.to_string()),
-                });
+                }).await;
             }
         }
     });
@@ -59481,5 +59481,132 @@ mod tests {
             sanitize_gateway_write_ahead_log_path_component("a/b/c"),
             "a-b-c"
         );
+    }
+
+    #[tokio::test]
+    async fn v1_containers_rejects_unsigned_request() {
+        let state = test_state();
+        let uri: Uri = "/v1/containers".parse().expect("uri");
+        let error = list_containers(State(state), Method::GET, OriginalUri(uri), HeaderMap::new())
+            .await
+            .expect_err("unsigned containers request should be rejected");
+        assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn v1_objects_rejects_unsigned_request() {
+        let state = test_state();
+        let uri: Uri = "/v1/objects?container=family".parse().expect("uri");
+        let error = list_objects(
+            State(state),
+            Method::GET,
+            OriginalUri(uri),
+            HeaderMap::new(),
+            Query(ObjectsQuery {
+                container: Some("family".to_string()),
+                prefix: None,
+                limit: None,
+            }),
+        )
+        .await
+        .expect_err("unsigned objects request should be rejected");
+        assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_login_rate_limiter_blocks_after_six_attempts() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/admin/login", post(admin_login))
+            .with_state(state.clone());
+        let username = format!("ratelimit-test-{}", current_unix_ms());
+
+        for _ in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/admin/login")
+                        .header(CONTENT_TYPE, "application/json")
+                        .body(Body::from(format!(
+                            r#"{{"username":"{}","password":"wrong"}}"#,
+                            username
+                        )))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("login request should complete");
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let blocked = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/login")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"username":"{}","password":"wrong"}}"#,
+                        username
+                    )))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("login request should complete");
+        assert_eq!(blocked.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(blocked.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let body = String::from_utf8(body.to_vec()).expect("body should be utf-8");
+        assert!(
+            body.contains("too many login attempts"),
+            "rate-limit response body: {}",
+            body
+        );
+    }
+
+#[tokio::test]
+    async fn provider_limit_probe_works_with_bounded_channel() {
+        let mut state = test_state();
+        let backend = Arc::new(
+            LimitProbeRecordingBackend::new(3, 100, 100, 3)
+                .with_read_plan(3, Duration::from_millis(50)),
+        );
+        replace_backend(&mut state, ProviderId::Stub, backend);
+
+        let input = ProviderLimitProbeInput {
+            bucket: Some("root".to_string()),
+            key_prefix: Some("bounded-channel-test".to_string()),
+            sizes: vec!["9B".to_string()],
+            sizes_bytes: Vec::new(),
+            read_back: true,
+            delete_after: false,
+            stop_after_first_success: false,
+            chunk_size: Some("3B".to_string()),
+            chunk_size_bytes: None,
+            read_progress_interval_ms: Some(250),
+            read_total_timeout_ms: Some(5_000),
+        };
+
+        let (sender, mut receiver) = mpsc::channel(32);
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            execute_provider_limit_probe(
+                state_clone,
+                "stub".to_string(),
+                input,
+                Some(sender.clone()),
+            )
+            .await
+        });
+
+let mut saw_event = false;
+        while let Some(payload) = receiver.recv().await {
+            saw_event = true;
+        }
+        let result = handle.await.expect("probe task should complete");
+        assert!(result.is_ok(), "probe should succeed: {:?}", result.err());
+        assert!(saw_event, "should have received at least one probe event");
     }
 }
