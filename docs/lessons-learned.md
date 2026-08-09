@@ -225,6 +225,54 @@
   background process to detach. Use `setsid` or `systemd-run --user` to fully detach long-running
   monitor scripts.
 
+## Security Audit Gaps Closed (2026-08)
+
+- `/v1/containers` and `/v1/objects` JSON listing endpoints previously performed no
+  `authorize_s3` check — only data-plane rate limiting. Any "JSON listing endpoint that exposes
+  S3 metadata" must authenticate with the same `authorize_s3` + `ensure_s3_application_permission`
+  path as the S3 routes; treat no JSON route as implicitly public just because it is a helper API.
+- Admin login had no brute-force throttle. A per-username rate limiter (5 attempts / 60 s,
+  module-level `OnceLock<Mutex<HashMap>>`, recording before credential verification and cleared on
+  success) is enough to stop online guessing without breaking legitimate use. The limiter returns
+  the same 401 status as bad credentials, differing only in the message body.
+- The provider-limit-probe SSE stream used `mpsc::unbounded_channel()`. A slow HTTP consumer can
+  grow the channel without bound (OOM/backlog vector). Use a bounded channel (`channel(32)`) with
+  `try_send` for best-effort progress events and guaranteed delivery for terminal events.
+
+## Tokio Async Channel Pitfalls
+
+- `tokio::sync::mpsc::Sender::blocking_send` panics with "Cannot block the current thread from
+  within a runtime" when called inside a `tokio::spawn` task. Use `sender.send(event).await`
+  instead: it yields to the runtime while waiting for buffer space and still guarantees delivery.
+  `blocking_send` is only valid from a non-async context (e.g. a dedicated blocking thread).
+
+## CORS / tower-http 0.6.8
+
+- `CorsLayer::allow_origin(Any)` combined with `allow_credentials(true)` panics at startup in
+  `tower-http >= 0.6` ("Cannot combine Access-Control-Allow-Credentials: true with
+  Access-Control-Allow-Origin: *"). For an admin API that needs credentialed cross-origin access,
+  use `AllowOrigin::mirror_request()` to echo the request origin — valid with credentials and
+  verified to emit the correct `access-control-allow-origin` header.
+
+## Secure Cookie Over Plain HTTP
+
+- `CCBG_ADMIN_COOKIE_SECURE` defaults to `true`. On an HTTP-only deployment (no TLS), the browser
+  refuses to store the `Secure` session cookie: login reports success but the redirect back to `/`
+  carries no session and bounces to `/login` again. HTTP-only deployments MUST set
+  `CCBG_ADMIN_COOKIE_SECURE=false`; set it back to `true` only behind a TLS reverse proxy.
+
+## Cross-Compiling the Linux Binary Without the Build Runner
+
+- When the `.52` Podman build runner is unreachable, a Windows host can still produce the Linux
+  ELF with `cargo-zigbuild --release --target x86_64-unknown-linux-gnu`. Zig acts as the Linux
+  linker; `zig.exe` needs its full bundled directory (not just the binary) or it fails with
+  "unable to find zig installation directory". If the build host has no internet, download the
+  zig archive on a host that does (e.g. `.49`) and `scp` it back.
+- The resulting ELF must be packaged with `build-lxc-package.sh --binary <linux-gatewayd>
+  --helper-binary <linux-smb-sidecar-host>` on a Linux host (the script uses `file`/`install`/
+  `sha256sum`/`tar`). A stub `cargo` shim satisfies its unconditional `resolve-cargo.sh` when
+  `--skip-build` is in effect.
+
 ## Related Docs
 
 - [Object Delete Convergence spec](SPEC.md#object-delete-convergence)
