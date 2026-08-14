@@ -12607,6 +12607,14 @@ fn provider_has_credential_lease_inputs(
 const PROVIDER_CREDENTIAL_LEASE_PROBE_TARGETS: [ProviderId; 3] =
     [ProviderId::Unicom, ProviderId::Telecom, ProviderId::Mobile];
 
+fn credential_lease_probe_advance_ms(interval_seconds: u64, requires_reauth: bool) -> u64 {
+    if requires_reauth {
+        60_000
+    } else {
+        interval_seconds.saturating_mul(1000)
+    }
+}
+
 async fn maybe_probe_provider_credential_lease(
     state: &AppState,
     provider: ProviderId,
@@ -12676,10 +12684,11 @@ async fn maybe_probe_provider_credential_lease(
         .credential_lease_probe
         .lock()
         .expect("credential lease probe state poisoned");
-    guard.next_probe_at_unix_ms_by_provider.insert(
-        provider,
-        now.saturating_add(if requires_reauth { 60_000 } else { 5 * 60_000 }),
+    let advance_ms = credential_lease_probe_advance_ms(
+        state.config.provider_credential_lease_probe_interval_seconds,
+        requires_reauth,
     );
+    guard.next_probe_at_unix_ms_by_provider.insert(provider, now.saturating_add(advance_ms));
     Ok(())
 }
 
@@ -35388,6 +35397,14 @@ mod tests {
             ))
             .display()
             .to_string()
+    }
+
+    #[test]
+    fn credential_lease_probe_advance_ms_uses_interval_and_short_reauth_floor() {
+        assert_eq!(credential_lease_probe_advance_ms(300, false), 300_000);
+        assert_eq!(credential_lease_probe_advance_ms(45, false), 45_000);
+        assert_eq!(credential_lease_probe_advance_ms(300, true), 60_000);
+        assert_eq!(credential_lease_probe_advance_ms(45, true), 60_000);
     }
 
     #[test]
