@@ -7049,8 +7049,8 @@ async fn main() -> Result<()> {
         credential_lease_probe: Arc::new(Mutex::new(CredentialLeaseProbeState {
             next_probe_at_unix_ms_by_provider: BTreeMap::new(),
         })),
-        credential_lease_probe_wake: Arc::new(Notify::new()),
-        admin_client_ip: Arc::new(Mutex::new(None)),
+            credential_lease_probe_wake: Arc::new(Notify::new()),
+            admin_client_ip: Arc::new(Mutex::new(None)),
         admin_sessions: Arc::new(Mutex::new(HashMap::new())),
         browser_flow_catalogs,
         provider_bridge_catalogs,
@@ -37156,8 +37156,8 @@ mod tests {
             credential_lease_probe: Arc::new(Mutex::new(CredentialLeaseProbeState {
                 next_probe_at_unix_ms_by_provider: BTreeMap::new(),
             })),
-        credential_lease_probe_wake: Arc::new(Notify::new()),
-        admin_client_ip: Arc::new(Mutex::new(None)),
+            credential_lease_probe_wake: Arc::new(Notify::new()),
+            admin_client_ip: Arc::new(Mutex::new(None)),
             admin_sessions: Arc::new(Mutex::new(HashMap::new())),
             browser_flow_catalogs,
             provider_bridge_catalogs,
@@ -52358,8 +52358,8 @@ mod tests {
             credential_lease_probe: Arc::new(Mutex::new(CredentialLeaseProbeState {
                 next_probe_at_unix_ms_by_provider: BTreeMap::new(),
             })),
-        credential_lease_probe_wake: Arc::new(Notify::new()),
-        admin_client_ip: Arc::new(Mutex::new(None)),
+            credential_lease_probe_wake: Arc::new(Notify::new()),
+            admin_client_ip: Arc::new(Mutex::new(None)),
             admin_sessions: Arc::new(Mutex::new(HashMap::new())),
             browser_flow_catalogs,
             provider_bridge_catalogs,
