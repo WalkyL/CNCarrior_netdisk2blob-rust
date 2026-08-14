@@ -273,6 +273,12 @@
   `sha256sum`/`tar`). A stub `cargo` shim satisfies its unconditional `resolve-cargo.sh` when
   `--skip-build` is in effect.
 
+## Session Keepalive
+
+- Keepalive must go through the backend API (Unicom `probe_auth` / Telecom
+  `getUserInfoForPortal` / Mobile `list_page`), not a CDP browser reload. A browser is only
+  needed for login and re-authentication. The credential lease probe loop is the keepalive loop.
+
 ## Related Docs
 
 - [Object Delete Convergence spec](SPEC.md#object-delete-convergence)
