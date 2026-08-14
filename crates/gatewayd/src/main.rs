@@ -4643,6 +4643,7 @@ struct AppConfig {
     notify_webhook_signing_secret: Option<String>,
     notify_poll_interval_seconds: u64,
     provider_lease_poll_interval_seconds: u64,
+    provider_credential_lease_probe_interval_seconds: u64,
     provider_cdp_keepalive_enabled: bool,
     provider_cdp_keepalive_interval_seconds: u64,
     replication_failed_alert_threshold: usize,
@@ -5726,6 +5727,11 @@ impl AppConfig {
                 30,
             )
             .max(5),
+            provider_credential_lease_probe_interval_seconds: env_u64(
+                "CCBG_PROVIDER_CREDENTIAL_LEASE_PROBE_INTERVAL_SECONDS",
+                300,
+            )
+            .max(30),
             provider_cdp_keepalive_enabled: env_bool("CCBG_PROVIDER_CDP_KEEPALIVE_ENABLED", false),
             provider_cdp_keepalive_interval_seconds: env_u64(
                 "CCBG_PROVIDER_CDP_KEEPALIVE_INTERVAL_SECONDS",
@@ -7735,6 +7741,7 @@ fn test_app_config() -> AppConfig {
         notify_webhook_signing_secret: None,
         notify_poll_interval_seconds: 15,
         provider_lease_poll_interval_seconds: 30,
+        provider_credential_lease_probe_interval_seconds: 300,
         provider_cdp_keepalive_enabled: false,
         provider_cdp_keepalive_interval_seconds: 300,
         replication_failed_alert_threshold: 1,
@@ -37128,6 +37135,7 @@ mod tests {
             notify_webhook_signing_secret: None,
             notify_poll_interval_seconds: 15,
             provider_lease_poll_interval_seconds: 30,
+            provider_credential_lease_probe_interval_seconds: 300,
             provider_cdp_keepalive_enabled: false,
             provider_cdp_keepalive_interval_seconds: 300,
             replication_failed_alert_threshold: 1,
@@ -37192,6 +37200,27 @@ mod tests {
                 max_single_download_bytes: None,
             },
         })
+    }
+
+    #[test]
+    fn credential_lease_probe_interval_env_parses_with_floor() {
+        unsafe {
+            std::env::set_var("CCBG_PROVIDER_CREDENTIAL_LEASE_PROBE_INTERVAL_SECONDS", "45");
+        }
+        let parsed = env_u64("CCBG_PROVIDER_CREDENTIAL_LEASE_PROBE_INTERVAL_SECONDS", 300).max(30);
+        unsafe {
+            std::env::remove_var("CCBG_PROVIDER_CREDENTIAL_LEASE_PROBE_INTERVAL_SECONDS");
+        }
+        assert_eq!(parsed, 45);
+
+        unsafe {
+            std::env::set_var("CCBG_PROVIDER_CREDENTIAL_LEASE_PROBE_INTERVAL_SECONDS", "5");
+        }
+        let floored = env_u64("CCBG_PROVIDER_CREDENTIAL_LEASE_PROBE_INTERVAL_SECONDS", 300).max(30);
+        unsafe {
+            std::env::remove_var("CCBG_PROVIDER_CREDENTIAL_LEASE_PROBE_INTERVAL_SECONDS");
+        }
+        assert_eq!(floored, 30);
     }
 
     fn copy_json_catalog_dir(from: &str, to: &FsPath) {
