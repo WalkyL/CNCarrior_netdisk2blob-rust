@@ -157,6 +157,14 @@
   slow upstream auth errors. If dogfood responsiveness matters more than preserving the stale
   primary choice, the gateway needs an explicit policy for stale-primary fencing or automatic
   fallback.
+- Current runtime path (2026-08-21): direct `health()` credential lease probes cover Unicom,
+  Telecom, and Mobile; CDP is reserved for login/capture and optional browser workflows. The probe
+  records status and signals `requires_reauth`; it does not refresh credentials or take another
+  action unless a separately documented policy says so. `CCBG_PROVIDER_CREDENTIAL_LEASE_PROBE_INTERVAL_SECONDS`
+  controls each provider's next eligible probe (default `300`, floor `30` seconds), while
+  `CCBG_PROVIDER_LEASE_POLL_INTERVAL_SECONDS` only controls how often the loop wakes to check
+  eligibility (default `30`, floor `5` seconds).
+- Historical CDP experiment notes (not the current runtime keepalive path):
 - Periodic direct health probes do not extend browser session TTL. Providers like Unicom and Telecom
   expire session cookies based on browser-side activity, not API access. CDP page `Page.reload` is a
   more promising keepalive strategy than direct health checks.

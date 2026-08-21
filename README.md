@@ -4,7 +4,7 @@
 
 项目目标是把中国联通、中国电信、中国移动云盘接入为“多账号、多后端”的统一对象层，其中任意时刻只允许指定一个运营商或 `stub` provider 作为唯一写入主云盘，其他被选中的运营商后端可作为异步同步目标，并以 `daemon + MCP server + Skill` 三种交付形态提供给 Agent 使用。OneDrive 相关实现当前保留为延后集成能力，默认禁用并从近期主线隐藏，等出现真实用户需求后再恢复评估。仓库采用“商业核心 + 公开材料 + 个人非商业源码审查申请”模式，不是 MIT，也不是 OSI 开源。
 
-当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及三大运营商 provider 的基础适配。当前状态是: `gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载、上传、对象删除，并把 personal/family scope 映射成 `root`/`family` 两个容器；电信 provider 已打通真实目录列举、流式下载、受控根目录下的 multipart 上传与有界 spool 写路径，但对象级 delete/rename/copy/move 仍待补；移动 provider 已打通真实对象列举、真实上传、真实下载，以及 native `delete/rename/move` 和受能力开关约束的 `copy`，上传链路也已按上游约束改成“`file/create` 首批最多 100 个 `partInfos`，剩余分片再通过 `file/getUploadUrl` 补齐”；但中国移动超大文件能力仍不能夸大，`.49` 在 2026-07-02 的隔离 `limit-probe` 仍显示 `8 GiB` 被上游 `04010319` 拒绝，而 `16 GiB` 在当前部署形态下会先撞到本地 `No space left on device`。OneDrive Graph 读写与 OAuth 会话代码仍在仓库中，但当前阶段不作为默认备份、默认 fallback 或近期完成度目标。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置、运行态监控摘要、聚合监控摘要面板、自动刷新控制，以及带 `operator/ticket/notes`、时间范围筛选的对象动作共享审计历史。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
+当前仓库已经完成多 provider 工作区、S3 兼容 HTTP 入口、`policy-engine`、`replication-engine`、SQLite 复制状态持久化，以及三大运营商 provider 的基础适配。当前状态是: `gatewayd` 已在 `ListBuckets`、`HeadBucket`、`ListObjectsV2`、`HeadObject`、`GetObject` 上按 `fallback_read_order` 执行读侧 fallback，并通过响应头提示实际数据来源；联通 provider 已打通真实目录列举、下载、上传、对象删除，并把 personal/family scope 映射成 `root`/`family` 两个容器；电信 provider 已实现并有本地测试覆盖真实目录列举、流式下载、personal/family 的受控根目录 multipart 上传与有界 spool、删除、rename、copy、move。电信 `rename` 仅支持同一 parent；`copy`/`move` 拒绝 personal/family 跨容器和目标 basename 变更，其他上游限制仍以实际 provider 为准；移动 provider 已打通真实对象列举、真实上传、真实下载，以及 native `delete/rename/move` 和受能力开关约束、默认不可用的 `copy`，上传链路也已按上游约束改成“`file/create` 首批最多 100 个 `partInfos`，剩余分片再通过 `file/getUploadUrl` 补齐”；但中国移动超大文件能力仍不能夸大，`.49` 在 2026-07-02 的隔离 `limit-probe` 仍显示 `8 GiB` 被上游 `04010319` 拒绝，而 `16 GiB` 在当前部署形态下会先撞到本地 `No space left on device`。这些 provider 结论是源码与本地测试证据；完整真实读写回归仍需操作者提供实时凭据并完成新的实际验收。OneDrive Graph 读写与 OAuth 会话代码仍在仓库中，但当前阶段不作为默认备份、默认 fallback 或近期完成度目标。控制面当前已支持更直观的 Admin Web、provider 独立凭证存储热注入、provider 级 IPv4/IPv6 策略、auth-capture sidecar / LLM 配置、运行态监控摘要、聚合监控摘要面板、自动刷新控制，以及带 `operator/ticket/notes`、时间范围筛选的对象动作共享审计历史。认证部分仍坚持由操作者显式提供材料或通过受控控制面完成授权，不在服务内实现浏览器会话窃取。
 
 针对网页端经常改版的运营商流程，仓库现在额外引入了三层可替换事实配置: `config/provider-bridges/*.json` 负责 `gatewayd` / Admin Web / auth session 与 provider-specific surface、flow alias、runtime→credential 映射之间的绑定；`config/browser-flows/*.json` 负责页面元素、JS 入口点和关键请求形状；`config/provider-capabilities/*.json` 负责已经证明稳定的 native 请求模板。对“每个云盘后续还要自动探测哪些账号、作用域、读写路径事实”，则额外放进 `config/provider-probes/*.json`。这几层的目的都是把页面和控制面漂移优先收敛成 JSON 改动，而不是重写 Rust 数据面。首个样例是联通桌面站 `pan.wo.cn`，当前已覆盖当前会话抓取、短信登录、个人空间上传准备、个人空间上传、目录创建/删除/重命名/复制/移动这九条真实验证过的网页流程，并为 native `CreateDirectory` / `DeleteFile` 和后续自动探测项维护独立 catalog。
 
@@ -181,11 +181,11 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 - `PutObject`
 - `DeleteObject`
 
-后续规划:
+已实现并有本地测试覆盖的扩展:
 
-- `Multipart Upload`
+- `Multipart Upload`（initiate、part upload、complete、abort）
 - `CopyObject`
-- `Presigned URL`
+- `Presigned SigV4`（GET、PUT 与 multipart）
 
 ## 当前已实现接口
 
@@ -254,10 +254,10 @@ sed -i "s#^CCBG_UNICOM_TOKEN=.*#CCBG_UNICOM_TOKEN=replace-with-your-own-token#" 
 
 当前 S3 兼容实现边界:
 
-- 仅验证 header-based SigV4
-- 仅保证 `path-style` bucket 访问
-- 暂未支持 `Presigned URL`
-- 暂未支持 `Multipart Upload`
+- 已验证 header-based SigV4，以及 GET、PUT 和 multipart 的 query-string Presigned SigV4；不支持 `X-Amz-Security-Token`
+- 已实现并本地测试 `path-style` 与 virtual-hosted-style bucket 访问
+- 已实现并本地测试 `Multipart Upload` 的 initiate、part upload、complete、abort；会使用本地磁盘 spool 与持久化 session/part 元数据
+- 已实现 `CopyObject`；provider-specific 对象动作限制仍然适用
 - OneDrive 映射逻辑保留在延后集成代码中，但默认不进入当前 S3 主线
 - 读请求当前会先尝试 primary provider，失败后按 `fallback_read_order` 尝试 sync targets
 - 当响应来自备份侧时，会附带 `x-ccbg-source-provider` 和 `x-ccbg-fallback-from`

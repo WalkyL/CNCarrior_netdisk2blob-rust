@@ -640,16 +640,16 @@ curl -s http://127.0.0.1:61080/__ccbg/providers
 
 ### 当前代码支持到什么程度
 
-当前 `provider-telecom` 已经打通到天翼云盘网页版真实文件列表、下载直链、personal 空间原生上传流程，以及回收站软删除:
+当前 `provider-telecom` 已实现并有本地测试覆盖天翼云盘网页版文件列表、下载直链、personal/family 原生上传流程，以及回收站软删除；这些本地证据不等同于可用的实时运营商会话，真实接受度仍须由操作者注入凭据后重新验证:
 
 - 已支持 `Browser ID`、`Cookie Header`、可选 `Access Token`
 - 已支持 health 真实请求 `listFiles.action`
 - 已支持把天翼云盘个人空间映射成 S3 bucket: `root`
 - 配置 `Family ID` + `Access Token` 后，已支持把天翼家庭云映射成 S3 bucket: `family`
 - 已支持 `ListBuckets` / `ListObjectsV2` / `head_object` / `get_object` / `put_object`
-- 已支持在受控根目录下按 multipart 链路真实上传对象；若上游要求预分片和显式哈希，网关会先把请求体落到有界 spool，再回放上传
+- 已支持在 personal/family 受控根目录下按 multipart 链路上传对象；若上游要求预分片和显式哈希，网关会先把请求体落到有界 spool，再回放上传
 - 已支持 personal/family 文件删除，删除走天翼云盘网页批任务接口的回收站软删除
-- 当前 family 上传未启用；原生 `rename` / `copy` / `move` 仍未完成
+- 已支持原生 `rename` / `copy` / `move`；`rename` 仅支持同一 parent，`copy`/`move` 拒绝 personal/family 跨容器和目标 basename 变更，其他上游限制仍以实际 provider 为准
 
 ### 电信云盘 Step by Step
 
@@ -722,7 +722,7 @@ CCBG_TELECOM_TOKEN_FILE=$HOME/.config/ccbg/credentials/telecom.token
 
 如果你只是接个人云，`Root Folder ID` 通常保持默认 `-11` 即可，不需要改。
 
-如果你要接家庭云，需要额外填 `Family ID`。保存后 Admin Web 会把家庭云作为 `family` bucket 暴露；当前支持列举、读取和删除，上传仍请使用 `root`。
+如果你要接家庭云，需要额外填 `Family ID`。保存后 Admin Web 会把家庭云作为 `family` bucket 暴露；当前实现支持列举、读取、上传和删除。请保留上面的对象动作范围：`rename` 仅同一 parent，`copy`/`move` 不支持 personal/family 跨容器或目标 basename 变更。
 
 16. 如果你不想用 `*_FILE`，也可以直接手工写环境变量:
 
@@ -751,9 +751,9 @@ curl -s http://127.0.0.1:61080/__ccbg/providers
 
 同样注意:
 
-- 当前版本已经完成 personal 真实读取、上传和回收站软删除链路验证
-- 如果配置了 `Family ID` + `Access Token`，还应能看到 `family` scope / bucket，并可列举、读取和删除家庭云对象
-- 当前还不代表 family 上传或 `rename` / `copy` / `move` 已经完成
+- 当前版本的 personal/family 读取、multipart 上传、回收站软删除及受限对象动作已有源码和本地测试证据，不是对实时运营商会话的保证
+- 如果配置了 `Family ID` + `Access Token`，还应能看到 `family` scope / bucket；本地实现覆盖列举、读取、上传和删除家庭云对象
+- `rename` 仅同一 parent；`copy`/`move` 不支持 personal/family 跨容器或目标 basename 变更。请使用操作者注入的实际凭据完成新的 provider 验收
 
 如果页面提示:
 
@@ -785,7 +785,7 @@ CCBG_TELECOM_IP_FAMILY=ipv4
 
 - 已支持 `file/list`、`file/create`、`file/complete`、`file/getDownloadUrl`
 - 已支持托管根目录下的真实列举、真实下载、真实上传
-- 已支持 native `delete/rename/move`，以及受能力开关约束的 `copy`
+- 已支持 native `delete/rename/move`；`copy` 受能力开关约束，默认不可用
 - 中国移动上传链路已经按上游约束改成“`file/create` 首批最多 100 个分片，剩余分片再通过 `file/getUploadUrl` 取上传地址”
 - 但大文件能力仍不能夸大: `.49` 在 2026-07-02 的隔离 `limit-probe` 中，`8 GiB` 仍被上游返回 `code=04010319`；而 `16 GiB` 在当前 `.49` 部署形态下会先撞到本地 `No space left on device`，因此仍没有“超大文件已验证通过”的证据
 
