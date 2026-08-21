@@ -75,7 +75,7 @@
 ## PKG-004: 包管理器模板
 
 **优先级:** P1
-**状态:** template path locally complete; formal release rendering and package-manager publication pending
+**状态:** template source path present; Homebrew/winget rendering and dry-run lint pending; package-manager publication pending
 **目标:** 为 Homebrew 和 winget 提供 repo-managed 模板，release 阶段用真实 tag 和 SHA256 渲染。
 **Coding 指导:** 模板只放占位符，不提交真实 token；Homebrew 指向 macOS x86_64/arm64 tarball，winget 指向 Windows x86_64 zip。
 **验收方法:** release checklist 中用本次 artifact SHA256 替换占位符并 dry-run lint。
@@ -87,7 +87,7 @@
 ## CI-001: 发布和验收门
 
 **优先级:** P1
-**状态:** local automation checks complete; aggregate release gate and real-host gates pending
+**状态:** catalog/public-boundary/license/package-script checks locally recorded; aggregate release gate and real-host gates pending
 **目标:** CI 至少覆盖 catalog、Cloudflare public fingerprint、原生打包脚本 smoke。
 **Coding 指导:** 先做不依赖交叉编译工具链的 smoke；Windows/macOS 真机运行作为 release checklist gate。
 **验收方法:** `.52` 本地 release gate 能跑通；macOS `x86_64` 与 `arm64` 社区/实验包由 GitHub Actions self-hosted build-runner workflow 生成，下载后通过 `CCBG_RELEASE_MACOS_ASSET_DIR` 合并回 `.52` release 目录。
@@ -122,17 +122,20 @@ scripts/check-native-package-smoke.sh
 本节只记录本工作树的 fresh local evidence，不能替代真实主机、浏览器、签名或正式发布验收。`cargo fmt --all -- --check` 在 committed formatter baseline 处失败，包含 97 个 `Diff in` sections；因此 format 和 aggregate release-ready 不标为通过。`cargo check --workspace --locked` 通过，`cargo test --workspace --locked` 通过且为 775/775。
 
 - [x] catalog、license、local public-boundary、package-structure、release-asset-merge、offline backup drill、provenance/checksum 和 local S3 loopback smoke 通过。
-- [x] WS-002、PKG-001、PKG-004 以及 CI-001 的本地脚本/结构路径有 fresh evidence；这些结果不代表 real Windows/macOS runtime 或 formal release。
+- [x] WS-002、PKG-001 以及已执行的 catalog/public-boundary/license/native package-script/native package-structure checks 有 fresh evidence；这些结果不代表 real Windows/macOS runtime 或 formal release。
+- [ ] PKG-004 Homebrew/winget template rendering 和 dry-run lint：本轮没有 fresh evidence，仍 pending。
+- [ ] CI-001 aggregate release gate：在 formatter baseline 处 exit 1；SMB aggregate 仍受 host-tooling/interoperability 限制，real-host verification 仍 pending。
 - [ ] browser installation-page acceptance、`.43` smoke/manual acceptance、Windows/macOS real-host background execution、signing/notarization、operator credentials、formal release、public upload 和 provenance publication。
 - [ ] native Linux packaging 与 SMB aggregate：当前受 host-tooling/interoperability 限制，未宣称通过。
 
-Task 4 使用用户批准的 C: backing store 和逻辑 worktree target 路径，因为 D: 遇到 OS error 112。所有 task-owned paths 已删除；`.codegraph`、`C:\ccbg-target` 和 `C:\ccbg-tmp` 等预先存在路径已保留。
+Task 4 使用用户批准的 C: backing store 和逻辑 worktree target 路径，因为 D: 遇到 OS error 112。2026-08-21 的 C: fresh exact-path inventory 显示 final-run paths `C:\ccbg-todo-closeout-task4-target`、`C:\ccbg-todo-closeout-task4-tmp`、`C:\ccbg-todo-closeout-task4-logs`、final-fix backing `C:\ccbg-todo-closeout-task4-fix-backing`，以及 earlier-rerun paths `C:\ccbg-todo-closeout-rerun-target`、`C:\ccbg-todo-closeout-rerun-scratch`、`C:\ccbg-todo-closeout-rerun-logs`、`C:\ccbg-todo-closeout-rerun-tmp` 均为 absent；`.codegraph`、`C:\ccbg-target`、`C:\ccbg-tmp` 为 present。此处只对列出的 exact paths 作出清理结论。
 
 ## Release Gate
 
 - [ ] 首页和 `/install/` 安装入口通过人工浏览器验收
 - [x] Windows/macOS 包结构 smoke 已进入 `scripts/check-release-ready.sh`
-- [x] 本地 LXC/OpenWrt/container/native package-structure smoke 通过；real-host/interoperability verification pending
+- [x] 本地 LXC release artifact 与 native package-structure/scripts smoke 通过；real-host verification pending
+- [ ] OpenWrt/container package-structure smoke 通过：本轮没有 fresh Task 3/4 evidence，仍 pending
 - [ ] `.43` release candidate smoke 通过
 - [ ] Windows 真机后台常驻路径通过（script/package path complete; real-host verification pending）
 - [ ] macOS 真机 `launchd` 路径通过（script/package path complete; real-host verification pending）

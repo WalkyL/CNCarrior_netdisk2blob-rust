@@ -236,7 +236,7 @@ LXC 包验收必须确认:
 - [ ] aggregate release-ready：在 committed formatter baseline 处 exit 1；native Linux packaging 和 SMB aggregate 仍受 host-tooling/interoperability 限制。
 - [x] release-local disposable metadata 与 asset-pair checks：通过；未进行 formal release 或 upload。
 
-Task 4 因 D: 遇到 OS error 112，使用用户批准的 C: backing store，并通过逻辑 worktree `target` 路径执行验证。所有 task-owned paths 已删除；`.codegraph` 以及预先存在的 `C:\ccbg-target`、`C:\ccbg-tmp` 已保留。
+Task 4 因 D: 遇到 OS error 112，使用用户批准的 C: backing store，并通过逻辑 worktree `target` 路径执行验证。2026-08-21 在 C: 做了 fresh exact-path inventory：final-run paths `C:\ccbg-todo-closeout-task4-target`、`C:\ccbg-todo-closeout-task4-tmp`、`C:\ccbg-todo-closeout-task4-logs` 和 final-fix backing `C:\ccbg-todo-closeout-task4-fix-backing` 均为 absent；earlier-rerun paths `C:\ccbg-todo-closeout-rerun-target`、`C:\ccbg-todo-closeout-rerun-scratch`、`C:\ccbg-todo-closeout-rerun-logs`、`C:\ccbg-todo-closeout-rerun-tmp` 也均为 absent。`.codegraph`、`C:\ccbg-target`、`C:\ccbg-tmp` 均为 present。此处只对这些 exact paths 作出清理结论，不作 broad all-task-owned claim。
 
 ### External gates still open
 
