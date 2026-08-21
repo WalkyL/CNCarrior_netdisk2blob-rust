@@ -222,3 +222,22 @@ LXC 包验收必须确认:
 - 受控 self-hosted build-runner workflow 可在 `.52` 本地 Linux 构建不可用时产出 LXC fallback 包，也可继续产出 macOS 社区/实验包
 - Linux/Windows/OpenWrt release gate 与 Cloudflare 部署改为 `.52` 本地脚本；build-runner 产物下载回 `.52` 后进入同一校验和 `/downloads/latest/*` 发布链路
 - macOS 暂时降级为社区/实验包
+
+## 9. 2026-08-21 CCBG-local closeout evidence
+
+本节记录本工作树在 2026-08-21 取得的 fresh local evidence；它不改写上面的历史 release 记录，也不等于 formal release。当前源码 identity 为：版本 `0.1.12`、release date `2026-06-30`、fingerprint `ccbg-0.1.12-walky-20260630`、SHA-256 `b80d0b733277d9fa83b8ae8dcd468f6ad0a460301db449ef9e85e87aeebfbe93`。
+
+### Local checks
+
+- [ ] `cargo fmt --all -- --check`：失败，命中 committed tree 中 97 个 `Diff in` sections；不能记录为 format passed。
+- [x] `cargo check --workspace --locked`：通过。
+- [x] `cargo test --workspace --locked`：通过，775/775，0 failed。
+- [x] catalog、license、local public-boundary、package-structure、release-asset-merge、offline backup drill、provenance/checksum 和 local S3 loopback smoke：通过。
+- [ ] aggregate release-ready：在 committed formatter baseline 处 exit 1；native Linux packaging 和 SMB aggregate 仍受 host-tooling/interoperability 限制。
+- [x] release-local disposable metadata 与 asset-pair checks：通过；未进行 formal release 或 upload。
+
+Task 4 因 D: 遇到 OS error 112，使用用户批准的 C: backing store，并通过逻辑 worktree `target` 路径执行验证。所有 task-owned paths 已删除；`.codegraph` 以及预先存在的 `C:\ccbg-target`、`C:\ccbg-tmp` 已保留。
+
+### External gates still open
+
+以下项目仍保持未勾选：`.43` 或 `.49` real-host/remote acceptance、Windows/macOS real runtime、operator credentials、signing、notarization、formal release、public upload/publication、provenance publication、browser acceptance 和 release rollback evidence。历史 `.43`、`.49`、正式 release 与公网发布文字仍按其原日期保留，不作为本次 closeout 的新证据。

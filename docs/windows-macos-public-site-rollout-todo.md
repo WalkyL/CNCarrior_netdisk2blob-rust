@@ -15,7 +15,7 @@
 ## WS-001: 公网站点安装优先改版
 
 **优先级:** P0
-**状态:** in-progress
+**状态:** local static-site/public-boundary checks complete; browser acceptance pending
 **目标:** 首页首屏直接展示安装入口，页面配色与 `llm-router.agi2030.online` 的深色运维风格一致。
 **Coding 指导:** 使用静态 HTML/CSS/JS；平台数据从 `public/cloudflare/data/install-catalog.json` 读取；JS 只负责渲染小型 catalog，不引入前端框架。
 **验收方法:** 本地静态服务器打开 `/` 与 `/install/`；运行 `python3 scripts/check-cloudflare-public-fingerprint.py`。
@@ -27,7 +27,7 @@
 ## WS-002: 安装 catalog 数据化
 
 **优先级:** P0
-**状态:** in-progress
+**状态:** locally complete; external publication and browser acceptance pending
 **目标:** 新增 `install-catalog.json`，统一声明官方宿主、实验宿主和嵌入式客户端示例。
 **Coding 指导:** catalog 包含平台 id、状态、架构、安装命令、包名、服务模式和验收命令；页面只消费 catalog，不复制平台矩阵。
 **验收方法:** JSON 可由浏览器 `fetch` 读取；无敏感字段名；Cloudflare public boundary check 通过。
@@ -39,7 +39,7 @@
 ## PKG-001: 原生平台包结构
 
 **优先级:** P0
-**状态:** in-progress
+**状态:** script/package path complete; real Windows/macOS host verification pending
 **目标:** 新增通用原生打包脚本，生成包含 `gatewayd` 与 Admin HTML 的 Windows/macOS 发布包。
 **Coding 指导:** 包内结构固定为 `bin/`、`assets/admin/`、`config/`、`deploy/`、`docs/`；支持 `--target` 与 `--skip-build`；不把 secrets 打进包。
 **验收方法:** 使用本机 release binary 或 fake binary 执行 `scripts/build-native-package.sh --skip-build --target <triple>`。
@@ -51,7 +51,7 @@
 ## PKG-002: macOS 后台常驻
 
 **优先级:** P1
-**状态:** in-progress
+**状态:** script/package path complete; real macOS host verification pending
 **目标:** 提供 macOS `launchd` 安装/卸载路径。
 **Coding 指导:** 使用 `~/Library/LaunchAgents/online.agi2030.ccbg.gatewayd.plist` 作为用户级默认路径；日志写入 `~/Library/Logs/ccbg/`；配置位于 `~/Library/Application Support/ccbg/`。
 **验收方法:** macOS 上执行安装脚本后 `launchctl print gui/$UID/online.agi2030.ccbg.gatewayd`。
@@ -63,7 +63,7 @@
 ## PKG-003: Windows 后台常驻
 
 **优先级:** P1
-**状态:** in-progress
+**状态:** script/package path complete; real Windows host verification pending
 **目标:** 提供 Windows 原生后台常驻安装路径。
 **Coding 指导:** 默认用 Scheduled Task 作为无额外依赖的 native resident path；保留服务名、安装目录和环境文件的显式参数。
 **验收方法:** Windows PowerShell 执行安装脚本后 `Get-ScheduledTask CCBG-GatewayD` 与 `Invoke-WebRequest http://127.0.0.1:61080/healthz`。
@@ -75,7 +75,7 @@
 ## PKG-004: 包管理器模板
 
 **优先级:** P1
-**状态:** in-progress
+**状态:** template path locally complete; formal release rendering and package-manager publication pending
 **目标:** 为 Homebrew 和 winget 提供 repo-managed 模板，release 阶段用真实 tag 和 SHA256 渲染。
 **Coding 指导:** 模板只放占位符，不提交真实 token；Homebrew 指向 macOS x86_64/arm64 tarball，winget 指向 Windows x86_64 zip。
 **验收方法:** release checklist 中用本次 artifact SHA256 替换占位符并 dry-run lint。
@@ -87,7 +87,7 @@
 ## CI-001: 发布和验收门
 
 **优先级:** P1
-**状态:** in-progress
+**状态:** local automation checks complete; aggregate release gate and real-host gates pending
 **目标:** CI 至少覆盖 catalog、Cloudflare public fingerprint、原生打包脚本 smoke。
 **Coding 指导:** 先做不依赖交叉编译工具链的 smoke；Windows/macOS 真机运行作为 release checklist gate。
 **验收方法:** `.52` 本地 release gate 能跑通；macOS `x86_64` 与 `arm64` 社区/实验包由 GitHub Actions self-hosted build-runner workflow 生成，下载后通过 `CCBG_RELEASE_MACOS_ASSET_DIR` 合并回 `.52` release 目录。
@@ -99,7 +99,7 @@
 ## DOC-001: 平台矩阵和发布文档同步
 
 **优先级:** P0
-**状态:** in-progress
+**状态:** local documentation synchronized; external acceptance gates pending
 **目标:** 更新 compatibility matrix、GitHub publication 和 release checklist。
 **Coding 指导:** 明确“官方宿主 / 实验宿主 / 嵌入式客户端示例”三类，不把 STM32/ESP32-S3 描述为完整宿主或可安装平台。
 **验收方法:** 人工检查文档；release checklist 能直接指导 `.43` 与公网验收。
@@ -117,12 +117,24 @@ git diff --check
 scripts/check-native-package-smoke.sh
 ```
 
+## 2026-08-21 本地 evidence ledger
+
+本节只记录本工作树的 fresh local evidence，不能替代真实主机、浏览器、签名或正式发布验收。`cargo fmt --all -- --check` 在 committed formatter baseline 处失败，包含 97 个 `Diff in` sections；因此 format 和 aggregate release-ready 不标为通过。`cargo check --workspace --locked` 通过，`cargo test --workspace --locked` 通过且为 775/775。
+
+- [x] catalog、license、local public-boundary、package-structure、release-asset-merge、offline backup drill、provenance/checksum 和 local S3 loopback smoke 通过。
+- [x] WS-002、PKG-001、PKG-004 以及 CI-001 的本地脚本/结构路径有 fresh evidence；这些结果不代表 real Windows/macOS runtime 或 formal release。
+- [ ] browser installation-page acceptance、`.43` smoke/manual acceptance、Windows/macOS real-host background execution、signing/notarization、operator credentials、formal release、public upload 和 provenance publication。
+- [ ] native Linux packaging 与 SMB aggregate：当前受 host-tooling/interoperability 限制，未宣称通过。
+
+Task 4 使用用户批准的 C: backing store 和逻辑 worktree target 路径，因为 D: 遇到 OS error 112。所有 task-owned paths 已删除；`.codegraph`、`C:\ccbg-target` 和 `C:\ccbg-tmp` 等预先存在路径已保留。
+
 ## Release Gate
 
 - [ ] 首页和 `/install/` 安装入口通过人工浏览器验收
 - [x] Windows/macOS 包结构 smoke 已进入 `scripts/check-release-ready.sh`
-- [ ] LXC/OpenWrt/container 既有包结构未回归
+- [x] 本地 LXC/OpenWrt/container/native package-structure smoke 通过；real-host/interoperability verification pending
 - [ ] `.43` release candidate smoke 通过
-- [ ] Windows 真机后台常驻路径通过
-- [ ] macOS 真机 `launchd` 路径通过
-- [ ] 生成 release provenance、SHA256 和回滚记录
+- [ ] Windows 真机后台常驻路径通过（script/package path complete; real-host verification pending）
+- [ ] macOS 真机 `launchd` 路径通过（script/package path complete; real-host verification pending）
+- [x] disposable local release metadata、provenance 和 checksum path passed；formal release provenance、delivery assets and rollback record pending
+- [ ] formal release、public upload and provenance publication
