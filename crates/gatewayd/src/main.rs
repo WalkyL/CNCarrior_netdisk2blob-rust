@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicBool;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     env, fs,
+    future::Future,
     io::{BufReader, BufWriter, Cursor, Read, Write},
     net::SocketAddr,
     path::{Path as FsPath, PathBuf},
@@ -21,7 +22,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tokio::sync::Notify;
+use tokio::sync::{Mutex as TokioMutex, Notify};
 use tracing::error;
 
 /// Recovers the inner value from a potentially poisoned mutex.
@@ -161,6 +162,12 @@ const DEFAULT_TIMESTAMP: &str = "1970-01-01T00:00:00.000Z";
 const SOURCE_PROVIDER_HEADER: &str = "x-ccbg-source-provider";
 const FALLBACK_FROM_HEADER: &str = "x-ccbg-fallback-from";
 const DEFAULT_OBJECT_ACTION_HISTORY_LIMIT: usize = 12;
+#[allow(dead_code)]
+const OBJECT_BATCH_SELECTION_LIMIT: usize = 32;
+#[allow(dead_code)]
+const OBJECT_BATCH_RUNTIME_TTL_MS: u64 = 5 * 60 * 1_000;
+const OBJECT_BATCH_LEDGER_LIMIT: usize = 64;
+const OBJECT_BATCH_LEDGER_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
 const DEFAULT_OBJECT_BROWSER_LIMIT: usize = 100;
 const MAX_OBJECT_BROWSER_LIMIT: usize = 500;
 const DEFAULT_OBJECT_PLACEMENT_SAMPLE_LIMIT: usize = 3;
@@ -248,6 +255,9 @@ struct AppState {
     metadata_store: Arc<MetadataStore>,
     auth: Arc<AuthBrokerState>,
     control_plane: Arc<Mutex<ControlPlaneState>>,
+    object_mutation_lock: Arc<TokioMutex<()>>,
+    #[allow(dead_code)]
+    object_batch_runtime: Arc<Mutex<ObjectBatchRuntimeState>>,
     gateway_backup_runtime: Arc<Mutex<GatewayBackupRuntimeState>>,
     gateway_write_ahead_log_runtime: Arc<Mutex<GatewayWriteAheadLogRuntimeState>>,
     notify_state: Arc<Mutex<NotifyState>>,
@@ -267,6 +277,32 @@ struct AppState {
     external_kms_runtime: Arc<Mutex<ExternalKmsRuntimeState>>,
     admin_log_source: Arc<dyn AdminLogSource>,
     started_at_unix_ms: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct AdminAuthenticatedPrincipal(String);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObjectBatchSelectionSnapshot {
+    expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObjectBatchPlanRecord {
+    expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObjectBatchLedgerRecord {
+    updated_at_unix_ms: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Default)]
+struct ObjectBatchRuntimeState {
+    selections: BTreeMap<String, ObjectBatchSelectionSnapshot>,
+    plans: BTreeMap<String, ObjectBatchPlanRecord>,
 }
 
 trait AdminLogSource: Send + Sync {
@@ -816,6 +852,18 @@ struct OnedrivePolicy {
     updated_at_unix_ms: u64,
 }
 
+fn default_onedrive_policy() -> OnedrivePolicy {
+    OnedrivePolicy {
+        replication_enabled: false,
+        scope_mode: OnedriveScopeMode::All,
+        selected_buckets: Vec::new(),
+        selected_prefixes: Vec::new(),
+        memory_buckets: Vec::new(),
+        memory_prefixes: Vec::new(),
+        updated_at_unix_ms: current_unix_ms(),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct OnedrivePolicyInput {
     replication_enabled: bool,
@@ -1129,6 +1177,7 @@ struct ControlPlaneState {
     object_placement_mode: ObjectPlacementMode,
     #[serde(default = "SmbSidecarConfig::from_env_defaults")]
     smb_sidecar: SmbSidecarConfig,
+    #[serde(default = "default_onedrive_policy")]
     onedrive_policy: OnedrivePolicy,
     #[serde(default = "AuthCapturePolicy::from_env_defaults")]
     auth_capture_policy: AuthCapturePolicy,
@@ -1137,6 +1186,10 @@ struct ControlPlaneState {
     #[serde(default)]
     object_action_history: Vec<ObjectActionHistoryEntryPayload>,
     #[serde(default)]
+    object_batch_ledger: BTreeMap<String, ObjectBatchLedgerRecord>,
+    #[serde(default)]
+    object_topology_generation: u64,
+    #[serde(default)]
     gateway_backup_policy: GatewayBackupPolicy,
     #[serde(default)]
     gateway_backup_history: GatewayBackupHistory,
@@ -1144,6 +1197,75 @@ struct ControlPlaneState {
     gateway_write_ahead_log_policy: GatewayWriteAheadLogPolicy,
     #[serde(default)]
     admin_auth: AdminAuthState,
+}
+
+#[allow(dead_code)]
+fn prune_object_batch_runtime_state(runtime: &mut ObjectBatchRuntimeState, now_unix_ms: u64) {
+    runtime
+        .selections
+        .retain(|_, selection| selection.expires_at_unix_ms > now_unix_ms);
+    runtime
+        .plans
+        .retain(|_, plan| plan.expires_at_unix_ms > now_unix_ms);
+
+    let excess = runtime
+        .selections
+        .len()
+        .saturating_sub(OBJECT_BATCH_SELECTION_LIMIT);
+    if excess == 0 {
+        return;
+    }
+
+    let mut oldest_selection_ids = runtime
+        .selections
+        .iter()
+        .map(|(selection_id, selection)| (selection.expires_at_unix_ms, selection_id.clone()))
+        .collect::<Vec<_>>();
+    oldest_selection_ids.sort_unstable();
+    for (_, selection_id) in oldest_selection_ids.into_iter().take(excess) {
+        runtime.selections.remove(&selection_id);
+    }
+}
+
+fn prune_object_batch_ledger(
+    ledger: &mut BTreeMap<String, ObjectBatchLedgerRecord>,
+    now_unix_ms: u64,
+) {
+    ledger.retain(|_, record| {
+        now_unix_ms.saturating_sub(record.updated_at_unix_ms) <= OBJECT_BATCH_LEDGER_RETENTION_MS
+    });
+
+    let excess = ledger.len().saturating_sub(OBJECT_BATCH_LEDGER_LIMIT);
+    if excess == 0 {
+        return;
+    }
+
+    let mut oldest_batch_ids = ledger
+        .iter()
+        .map(|(batch_id, record)| (record.updated_at_unix_ms, batch_id.clone()))
+        .collect::<Vec<_>>();
+    oldest_batch_ids.sort_unstable();
+    for (_, batch_id) in oldest_batch_ids.into_iter().take(excess) {
+        ledger.remove(&batch_id);
+    }
+}
+
+#[allow(dead_code)]
+fn topology_fingerprint(state: &AppState) -> String {
+    format!(
+        "rev:{}",
+        mutex_recover(state.control_plane.lock()).object_topology_generation
+    )
+}
+
+async fn with_object_mutation_lock<T>(
+    state: &AppState,
+    action: impl Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+    let _guard = timeout(Duration::from_secs(5), state.object_mutation_lock.lock())
+        .await
+        .map_err(|_| BlobError::Configuration("object mutation lock timed out".to_string()))?;
+    action.await
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -7036,6 +7158,8 @@ async fn main() -> Result<()> {
         metadata_store,
         auth: Arc::new(AuthBrokerState::new()),
         control_plane: Arc::new(Mutex::new(control_plane)),
+        object_mutation_lock: Arc::new(TokioMutex::new(())),
+        object_batch_runtime: Arc::new(Mutex::new(ObjectBatchRuntimeState::default())),
         gateway_backup_runtime: Arc::new(Mutex::new(GatewayBackupRuntimeState::default())),
         gateway_write_ahead_log_runtime: Arc::new(Mutex::new(
             GatewayWriteAheadLogRuntimeState::default(),
@@ -7926,11 +8050,13 @@ fn remove_admin_browser_session_by_headers(state: &AppState, headers: &HeaderMap
 
 async fn require_admin_access(
     State(state): State<AppState>,
-    req: AxumRequest<Body>,
+    mut req: AxumRequest<Body>,
     next: Next,
 ) -> Result<Response, ControlApiError> {
     if let Some(expected_api_key) = state.config.control_api_key.as_deref() {
         if control_api_key_matches_headers(req.headers(), expected_api_key) {
+            req.extensions_mut()
+                .insert(AdminAuthenticatedPrincipal("admin-api-key".to_string()));
             return Ok(next.run(req).await);
         }
     }
@@ -7938,7 +8064,12 @@ async fn require_admin_access(
     let had_session_cookie =
         cookie_value_from_headers(req.headers(), ADMIN_SESSION_COOKIE).is_some();
     if let Some((_, session)) = lookup_admin_browser_session(&state, req.headers()) {
-        let _ = (&session.username, session.created_at_unix_ms);
+        let _ = session.created_at_unix_ms;
+        req.extensions_mut()
+            .insert(AdminAuthenticatedPrincipal(format!(
+                "admin:{}",
+                session.username
+            )));
         return Ok(next.run(req).await);
     }
 
@@ -15162,6 +15293,13 @@ async fn execute_object_reconcile(
     State(state): State<AppState>,
     Json(input): Json<ObjectReconcileExecuteInput>,
 ) -> Result<Json<ObjectReconcileExecutePayload>, ApiError> {
+    with_object_mutation_lock(&state, execute_object_reconcile_unlocked(&state, input)).await
+}
+
+async fn execute_object_reconcile_unlocked(
+    state: &AppState,
+    input: ObjectReconcileExecuteInput,
+) -> Result<Json<ObjectReconcileExecutePayload>, ApiError> {
     if input.rows.is_empty() {
         return Err(BlobError::Configuration("至少要选择一条历史对象记录".to_string()).into());
     }
@@ -15184,6 +15322,17 @@ async fn delete_stale_object_placement(
     State(state): State<AppState>,
     Json(input): Json<DeleteStaleObjectPlacementInput>,
 ) -> Result<Json<DeleteStaleObjectPlacementPayload>, ApiError> {
+    with_object_mutation_lock(
+        &state,
+        delete_stale_object_placement_unlocked(&state, input),
+    )
+    .await
+}
+
+async fn delete_stale_object_placement_unlocked(
+    state: &AppState,
+    input: DeleteStaleObjectPlacementInput,
+) -> Result<Json<DeleteStaleObjectPlacementPayload>, ApiError> {
     let provider = input.provider.trim().to_string();
     let bucket = input.bucket.trim().to_string();
     let key = input.key.trim().to_string();
@@ -15200,6 +15349,17 @@ async fn delete_stale_object_placement(
 async fn delete_stale_object_placement_bulk(
     State(state): State<AppState>,
     Json(input): Json<DeleteStaleObjectPlacementBulkInput>,
+) -> Result<Json<DeleteStaleObjectPlacementBulkPayload>, ApiError> {
+    with_object_mutation_lock(
+        &state,
+        delete_stale_object_placement_bulk_unlocked(&state, input),
+    )
+    .await
+}
+
+async fn delete_stale_object_placement_bulk_unlocked(
+    state: &AppState,
+    input: DeleteStaleObjectPlacementBulkInput,
 ) -> Result<Json<DeleteStaleObjectPlacementBulkPayload>, ApiError> {
     if input.records.is_empty() {
         return Err(BlobError::Configuration("至少要选择一条 placement 记录".to_string()).into());
@@ -15299,6 +15459,13 @@ async fn clear_object_action_history_api(
 async fn run_object_action(
     State(state): State<AppState>,
     Json(input): Json<ObjectActionInput>,
+) -> Result<StatusCode, ApiError> {
+    with_object_mutation_lock(&state, run_object_action_unlocked(&state, input)).await
+}
+
+async fn run_object_action_unlocked(
+    state: &AppState,
+    input: ObjectActionInput,
 ) -> Result<StatusCode, ApiError> {
     let default_provider = runtime_topology(&state).primary_provider;
     let input_for_history = input.clone();
@@ -17593,6 +17760,13 @@ async fn update_topology(
     State(state): State<AppState>,
     Json(input): Json<TopologyUpdateInput>,
 ) -> Result<Json<DesiredTopologyPayload>, ApiError> {
+    with_object_mutation_lock(&state, update_topology_unlocked(&state, input)).await
+}
+
+async fn update_topology_unlocked(
+    state: &AppState,
+    input: TopologyUpdateInput,
+) -> Result<Json<DesiredTopologyPayload>, ApiError> {
     let current = runtime_topology(&state);
     let topology = TopologyPolicy::from_input(TopologyInput {
         primary_provider: input.primary_provider,
@@ -17630,12 +17804,17 @@ async fn update_topology(
     };
 
     let mut control_plane = mutex_recover(state.control_plane.lock());
-    control_plane.topology = topology;
-    control_plane.high_speed_providers = normalized_high_speed_providers;
-    control_plane.write_targets = normalized_write_targets;
-    control_plane.object_placement_mode = input.object_placement_mode;
-    persist_control_plane_state(&state.config.control_plane_file, &control_plane)
+    let mut next_control_plane = control_plane.clone();
+    next_control_plane.topology = topology;
+    next_control_plane.high_speed_providers = normalized_high_speed_providers;
+    next_control_plane.write_targets = normalized_write_targets;
+    next_control_plane.object_placement_mode = input.object_placement_mode;
+    next_control_plane.object_topology_generation = next_control_plane
+        .object_topology_generation
+        .saturating_add(1);
+    persist_control_plane_state(&state.config.control_plane_file, &next_control_plane)
         .map_err(|error| BlobError::Configuration(error.to_string()))?;
+    *control_plane = next_control_plane;
     Ok(Json(payload))
 }
 
@@ -24979,6 +25158,7 @@ fn load_control_plane_state(
             .context("invalid saved gateway backup policy in control plane file")?;
             state.gateway_backup_history =
                 normalize_gateway_backup_history(state.gateway_backup_history);
+            prune_object_batch_ledger(&mut state.object_batch_ledger, current_unix_ms());
             Ok(state)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(default_state),
@@ -25958,6 +26138,8 @@ fn default_control_plane_state(config: &AppConfig) -> ControlPlaneState {
         auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
         suppressed_admin_alerts: Vec::new(),
         object_action_history: Vec::new(),
+        object_batch_ledger: BTreeMap::new(),
+        object_topology_generation: 0,
         gateway_backup_policy: GatewayBackupPolicy {
             enabled: false,
             local_enabled: true,
@@ -37135,6 +37317,8 @@ mod tests {
                 auth_capture_policy: AuthCapturePolicy::from_env_defaults(),
                 suppressed_admin_alerts: Vec::new(),
                 object_action_history: Vec::new(),
+                object_batch_ledger: BTreeMap::new(),
+                object_topology_generation: 0,
                 gateway_backup_policy: GatewayBackupPolicy {
                     local_directory: default_gateway_backup_local_directory(&config),
                     ..GatewayBackupPolicy::default()
@@ -37143,6 +37327,8 @@ mod tests {
                 gateway_write_ahead_log_policy: GatewayWriteAheadLogPolicy::default(),
                 admin_auth: AdminAuthState::default(),
             })),
+            object_mutation_lock: Arc::new(TokioMutex::new(())),
+            object_batch_runtime: Arc::new(Mutex::new(ObjectBatchRuntimeState::default())),
             gateway_backup_runtime: Arc::new(Mutex::new(GatewayBackupRuntimeState::default())),
             gateway_write_ahead_log_runtime: Arc::new(Mutex::new(
                 GatewayWriteAheadLogRuntimeState::default(),
@@ -52345,6 +52531,8 @@ mod tests {
             metadata_store,
             auth: Arc::new(AuthBrokerState::new()),
             control_plane: Arc::new(Mutex::new(control_plane)),
+            object_mutation_lock: Arc::new(TokioMutex::new(())),
+            object_batch_runtime: Arc::new(Mutex::new(ObjectBatchRuntimeState::default())),
             gateway_backup_runtime: Arc::new(Mutex::new(GatewayBackupRuntimeState::default())),
             gateway_write_ahead_log_runtime: Arc::new(Mutex::new(
                 GatewayWriteAheadLogRuntimeState::default(),
@@ -53758,6 +53946,39 @@ mod tests {
             "root",
             "bulk/archive.bin"
         ));
+    }
+
+    #[tokio::test]
+    async fn object_batch_topology_update_waits_for_mutation_lock() {
+        let state = test_state();
+        let guard = state.object_mutation_lock.lock().await;
+        let state_for_update = state.clone();
+        let task = tokio::spawn(async move {
+            update_topology(
+                State(state_for_update),
+                Json(TopologyUpdateInput {
+                    primary_provider: ProviderId::Stub,
+                    sync_targets: Vec::new(),
+                    fallback_read_order: Vec::new(),
+                    high_speed_providers: Vec::new(),
+                    write_targets: vec![ProviderId::Stub],
+                    object_placement_mode: ObjectPlacementMode::PreferPrimary,
+                }),
+            )
+            .await
+        });
+        assert!(timeout(Duration::from_millis(50), task).await.is_err());
+        drop(guard);
+    }
+
+    #[test]
+    fn legacy_control_plane_defaults_batch_state() {
+        let decoded: ControlPlaneState = serde_json::from_str(
+            r#"{"topology":{"primary_provider":"stub","sync_targets":[],"fallback_read_order":[],"onedrive_enabled":true,"replication_mode":"async_backup"}}"#,
+        )
+        .expect("legacy control plane should decode");
+        assert!(decoded.object_batch_ledger.is_empty());
+        assert_eq!(decoded.object_topology_generation, 0);
     }
 
     #[tokio::test]
