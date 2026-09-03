@@ -89,6 +89,8 @@ Admin Web 的“对象与文件操作”页已经能从当前读来源浏览对�
 
 锁最多等待 5 秒；超时返回 409、reason code batch_busy 和 Retry-After: 5，不开始任何对象动作。
 
+锁忙、ledger 容量不足或 ledger 持久化失败都属于批次级错误，不产生对象动作历史。它们分别使用 batch_busy、batch_ledger_full 和 batch_ledger_unavailable。
+
 ## UI 设计
 
 ### 对象列表与选择状态
@@ -162,7 +164,11 @@ selection_id 是服务端短期快照标识，不是授权机制。当前结果�
 - ready/no-op/conflict 状态；
 - 警告和 reason code。
 
-如果 canonical source 与 destination 完全相同，先验证 source identity 和 home-provider 解析，再分类为 no_op，不参加目标存在冲突判断，也不调用远端 move。一个批次可以混合 no_op 与真正移动项；全部为 no_op 时仍可生成计划，但界面提示“没有需要移动的对象”。
+如果 canonical source 与 destination 完全相同，先验证 source identity、home-provider 解析和目标桶存在，再分类为 no_op；该项不参加目标对象存在冲突判断，也不调用远端 move。一个批次可以混合 no_op 与真正移动项；全部为 no_op 时仍可生成计划，但界面提示“没有需要移动的对象”。
+
+移动最终预检还必须对每个 action home provider 验证 destination bucket：调用 `head_container(destination_bucket)` 成功且 backend 的写入/删除能力可用。provider 不得在批量动作中隐式创建目标桶。
+
+目标桶不存在返回 reason code `destination_bucket_missing`；无法读取、权限不足或无法确认目标桶返回 `destination_bucket_unverifiable`；能力不足返回 `provider_unsupported`。这些状态都会在第一项写入前阻止整个移动批次。
 
 移动目标冲突包括：
 
@@ -184,6 +190,7 @@ selection_id 是服务端短期快照标识，不是授权机制。当前结果�
 - 取消和确认删除按钮。
 
 不要求输入确认短语。请求期间禁用所有批量操作按钮。
+确认面板只确认当前预检计划；如果计划在提交时过期或发生状态变化，服务端返回冲突并要求重新预览，不自动继续。
 
 删除预检逐项分类：
 
@@ -217,6 +224,12 @@ selection 快照有效期固定为 5 分钟，服务端最多保留 32 个未过
 4. 如果列表来源能读到对象，但权威 home provider 不能读到，返回 home_resolution_conflict；
 5. 如果 preview 与 execute 之间 primary 发生变化，最终预检将计划视为过期并拒绝执行。
 
+### 认证主体与操作者标签
+
+Admin 鉴权中间件在请求 extension 中放入服务端解析的 authenticated principal：浏览器会话记录为 admin:<username>；机器凭据路径只记录 admin-api-key，不记录或回显 key 内容。该 principal 来自服务端会话或鉴权路径，不能由请求 body 覆盖。
+
+批量请求中的 operator 字段保留为向后兼容的可选操作者备注标签，不是可信身份；服务端 trim 并限制长度后原样作为 operator_label 保存。UI 将其标为“操作者备注（可选）”。批次响应和历史同时保存 authenticated_principal 与 operator_label。现有单对象历史中的 operator 字段继续表示客户端提供的标签，单对象合同不因本功能改变。
+
 ### 批量预检
 
 新增 POST /api/object-actions/batch/preview。
@@ -236,7 +249,7 @@ selection 快照有效期固定为 5 分钟，服务端最多保留 32 个未过
 
 action 只允许 delete 或 move。对象必须是 selection 对应当前结果的子集；服务端按 canonical bucket/key 去重并拒绝重复项。客户端不提交或覆盖身份字段，服务端从快照和实际 backend 重新读取身份。
 
-预检成功返回 plan_id、plan_expires_at、规范化后的对象映射和逐项状态。计划有效期固定为 5 分钟。
+预检成功返回 plan_id、plan_expires_at、规范化后的对象映射和逐项状态。计划有效期固定为 5 分钟。move 预检对每个 action home provider 调用 head_container(destination_bucket)；目标桶不存在、不可验证或 backend 不具备写入/删除能力时不生成计划。
 
 预检失败使用 409 Conflict，表示没有任何对象动作开始；字段、重复项或数量错误使用 400 Bad Request。所有可预期错误返回：
 
@@ -289,6 +302,7 @@ action 只允许 delete 或 move。对象必须是 selection 对应当前结果�
     ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
 
 对象集合、目标映射和 action 全部来自 plan_id，客户端不能在执行请求中改写。
+服务端收到请求后先执行幂等 key 的 compare-and-reserve；reserve 或首次 ledger 持久化失败时，若尚未开始对象动作则返回 500、reason code batch_ledger_unavailable。任何对象动作开始后若中间结果无法持久化，立即停止剩余项，保留已完成项并尝试持久化 interrupted ledger；持久化成功时返回 409 和 batch_recovery_required 恢复合同，持久化失败时返回 500 和 batch_ledger_unavailable，绝不自动重放。
 
 执行流程：
 
@@ -299,7 +313,6 @@ action 只允许 delete 或 move。对象必须是 selection 对应当前结果�
 5. 每完成一个对象，就更新幂等 ledger 的逐项结果；
 6. 完成后保存最终响应、批次历史摘要并释放锁。
 
-如果幂等 key 的 reserve 或中间结果持久化失败，则在任何对象动作开始前返回 500 和 batch_ledger_unavailable；如果某个对象的远端动作已经完成但其 ledger 更新失败，立即停止剩余项，保留已完成项，并返回 failed 或 interrupted 语义，绝不自动重放该对象。
 
 最终预检失败返回 409 Conflict，不开始任何对象动作。执行过程中在下一个对象开始前发现目标出现、源身份变化或其他冲突时，停止剩余项并标记为 not_started；已完成项保留。
 
@@ -328,6 +341,8 @@ status 只允许：
     {
       "batch_id": "550e8400-e29b-41d4-a716-446655440000",
       "action": "move",
+      "authenticated_principal": "admin:alice",
+      "operator_label": "alice",
       "requested": 2,
       "completed": 1,
       "already_missing": 0,
@@ -337,7 +352,26 @@ status 只允许：
       "not_started": 0,
       "non_atomic_warning": true,
       "consistency_note": "External writers are outside the gateway mutation lock.",
-      "results": []
+      "results": [
+        {
+          "ordinal": 0,
+          "source": { "bucket": "root", "key": "photos/a.jpg" },
+          "read_source": "telecom",
+          "home_provider": "unicom",
+          "destination": { "bucket": "family", "key": "archive/a.jpg" },
+          "status": "completed"
+        },
+        {
+          "ordinal": 1,
+          "source": { "bucket": "root", "key": "photos/b.jpg" },
+          "read_source": "telecom",
+          "home_provider": "unicom",
+          "destination": { "bucket": "family", "key": "archive/b.jpg" },
+          "status": "failed",
+          "reason_code": "provider_unsupported",
+          "message": "Provider does not support move."
+        }
+      ]
     }
 
 计数不变量为：
@@ -351,8 +385,8 @@ status 只允许：
 幂等 ledger 持久化到 control-plane state，使用向后兼容的默认字段，不保存凭据。初始限制：
 
 - 最多 64 个未过期批次记录；
-- 已完成记录保留 24 小时；
-- 状态为 in_progress、completed、interrupted；
+- 所有状态记录按最后更新时间保留 24 小时；
+- 状态为 in_progress、completed、interrupted；interrupted 是批次级状态，不是普通逐项 status；
 - compare-and-reserve 在 control-plane mutex 内完成，并通过现有原子 control-plane 文件写入持久化。
 
 同一 key 的行为：
@@ -360,20 +394,52 @@ status 只允许：
 - completed 且计划/审计指纹相同：返回原最终响应；
 - in_progress：返回 409、reason code batch_in_progress 和 Retry-After: 5，不并发执行；
 - 指纹不同：返回 409、reason code idempotency_key_reused；
-- 服务重启后发现 in_progress：转为 interrupted，返回已保存部分结果和 409 batch_recovery_required，不自动重放剩余删除/移动。
+- 服务重启后发现 in_progress：转为 interrupted。恢复响应使用独立的批次级合同，不使用普通执行计数不变量：
 
-只有已完成且超过 24 小时的 ledger 记录可自动清理；未完成记录必须人工确认后清理。
+    {
+      "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+      "action": "move",
+      "state": "interrupted",
+      "code": "batch_recovery_required",
+      "requested": 2,
+      "saved_count": 1,
+      "unresolved_count": 1,
+      "saved_results": [
+        {
+          "ordinal": 0,
+          "source": { "bucket": "root", "key": "photos/a.jpg" },
+          "status": "completed"
+        }
+      ],
+      "unresolved_items": [
+        {
+          "ordinal": 1,
+          "source": { "bucket": "root", "key": "photos/b.jpg" },
+          "destination": { "bucket": "family", "key": "archive/b.jpg" },
+          "reason_code": "recovery_required",
+          "message": "Provider result was not durably recorded before restart."
+        }
+      ],
+      "non_atomic_warning": true,
+      "consistency_note": "The gateway cannot determine whether the in-flight provider call committed before restart."
+    }
+
+其中 saved_results 只包含已经持久化的终态项；当前动作及其后的项进入 unresolved_items，不能被标为 completed 或 failed。interrupted 是批次级 ledger 状态，不是普通逐项 status。恢复合同的不变量为 requested = saved_count + unresolved_count = saved_results.length + unresolved_items.length；unresolved_items 只包含 ordinal、source、可选 destination、reason_code=recovery_required 和 message，不伪造远端结果。原 Idempotency-Key 在该记录保留期间始终返回同一恢复合同，不允许重放或改写；操作者必须重新检查对象并创建新的 selection、plan 和 UUID 才能继续未完成工作。
+
+所有 ledger 记录按最后更新时间保留 24 小时后自动清理，包括 interrupted 记录；在保留期内原 key 不可复用。清理只删除 ledger 记录，不对云盘对象执行动作。此功能不提供人工清除接口；如果操作者已完成外部核查，只需重新浏览并创建新的 selection、plan 和 UUID。
 
 ### 批次历史
 
-每个批量请求写入一条摘要历史，不写入 100 条互相争抢全局上限的单项记录。摘要包含：
+每个批量执行请求写入一条摘要历史；批量预检失败不写历史，不写入 100 条互相争抢全局上限的单项记录。摘要包含：
 
 - batch_id；
 - action 和批次标记；
 - requested、各状态计数；
-- operator、ticket、notes；
+- authenticated_principal；
+- operator_label（客户端 operator 字段的非可信备注值）；
+- ticket、notes；
 - non_atomic_warning 和 consistency_note；
-- 最多 100 项的完整结果引用，包括 source、destination、read_source、home_provider、status、reason_code 和 message。
+- 最多 100 项的完整结果，包括 source、destination、read_source、home_provider、status、reason_code 和 message；这些结果直接嵌入摘要，不是指向另一个未定义的存储。
 
 摘要的结构等价于：
 
@@ -381,6 +447,8 @@ status 只允许：
       "batch_id": "550e8400-e29b-41d4-a716-446655440000",
       "action": "move",
       "batch": true,
+      "authenticated_principal": "admin:alice",
+      "operator_label": "alice",
       "requested": 2,
       "completed": 1,
       "already_missing": 0,
@@ -390,10 +458,25 @@ status 只允许：
       "not_started": 0,
       "non_atomic_warning": true,
       "consistency_note": "External writers are outside the gateway mutation lock.",
-      "items": []
+      "items": [
+        {
+          "ordinal": 0,
+          "source": { "bucket": "root", "key": "photos/a.jpg" },
+          "destination": { "bucket": "family", "key": "archive/a.jpg" },
+          "status": "completed"
+        },
+        {
+          "ordinal": 1,
+          "source": { "bucket": "root", "key": "photos/b.jpg" },
+          "destination": { "bucket": "family", "key": "archive/b.jpg" },
+          "status": "failed",
+          "reason_code": "provider_unsupported",
+          "message": "Provider does not support move."
+        }
+      ]
     }
 
-现有 object_action_history_limit 只限制批次摘要数量。单对象 API 的历史语义保持不变。批次 outcome 只有在 failed、stale_conflict、not_started 都为零时才为 success，否则为 failed，以兼容现有监控汇总。
+现有 object_action_history_limit 只限制批次摘要数量。单对象 API 的历史语义保持不变。批次 outcome 只有在 failed、stale_conflict、not_started 都为零时才为 success，否则为 failed，以兼容现有监控汇总。预检失败不写入批次历史；ledger 中断状态只通过恢复合同保留，待人工重新检查后再建立新的批次历史。
 
 ## 路径与身份规范
 
@@ -428,7 +511,7 @@ status 只允许：
 
 稳定 reason code 至少包括：
 
-selection_expired、selection_mismatch、plan_expired、invalid_path、duplicate_object、duplicate_destination、source_missing、source_changed、source_unverifiable、home_resolution_conflict、destination_exists、destination_metadata_exists、provider_unsupported、batch_busy、batch_ledger_unavailable、batch_in_progress、idempotency_key_reused、batch_recovery_required。
+selection_expired、selection_mismatch、plan_expired、invalid_path、duplicate_object、duplicate_destination、source_missing、source_changed、source_unverifiable、home_resolution_conflict、destination_exists、destination_metadata_exists、destination_bucket_missing、destination_bucket_unverifiable、provider_unsupported、batch_busy、batch_ledger_full、batch_ledger_unavailable、batch_in_progress、idempotency_key_reused、batch_recovery_required、recovery_required。
 
 ## 实现边界
 
