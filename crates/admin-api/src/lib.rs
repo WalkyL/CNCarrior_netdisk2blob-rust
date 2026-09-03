@@ -497,7 +497,7 @@ pub struct ObjectBatchItemPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObjectBatchPreviewPayload {
     pub plan_id: String,
-    pub plan_expires_at_unix_ms: u64,
+    pub plan_expires_at: u64,
     pub topology_fingerprint: String,
     pub items: Vec<ObjectBatchItemPayload>,
 }
@@ -533,6 +533,16 @@ pub struct ObjectBatchErrorPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchRecoveryItemPayload {
+    pub ordinal: usize,
+    pub source: ObjectBatchObjectInput,
+    #[serde(default)]
+    pub destination: Option<ObjectBatchObjectInput>,
+    pub reason_code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObjectBatchRecoveryPayload {
     pub batch_id: String,
     pub action: ObjectBatchAction,
@@ -542,7 +552,7 @@ pub struct ObjectBatchRecoveryPayload {
     pub saved_count: usize,
     pub unresolved_count: usize,
     pub saved_results: Vec<ObjectBatchItemPayload>,
-    pub unresolved_items: Vec<ObjectBatchItemPayload>,
+    pub unresolved_items: Vec<ObjectBatchRecoveryItemPayload>,
     pub non_atomic_warning: bool,
     pub consistency_note: String,
 }
@@ -977,6 +987,7 @@ mod tests {
             route.id == "object_batch_preview"
                 && route.method == AdminApiMethod::Post
                 && route.path == ROUTE_OBJECT_BATCH_PREVIEW
+                && route.surface == AdminApiSurface::Operator
                 && route.request == Some(AdminDtoKind::ObjectBatchPreviewInput)
                 && route.response == AdminDtoKind::ObjectBatchPreviewPayload
         }));
@@ -984,9 +995,135 @@ mod tests {
             route.id == "object_batch_execute"
                 && route.method == AdminApiMethod::Post
                 && route.path == ROUTE_OBJECT_BATCH_EXECUTE
+                && route.surface == AdminApiSurface::Operator
                 && route.request == Some(AdminDtoKind::ObjectBatchExecuteInput)
                 && route.response == AdminDtoKind::ObjectBatchExecutePayload
         }));
+
+        let preview_input = ObjectBatchPreviewInput {
+            action: ObjectBatchAction::Move,
+            selection_id: "selection-1".to_string(),
+            objects: vec![ObjectBatchObjectInput {
+                bucket: "root".to_string(),
+                key: "photos/a.jpg".to_string(),
+            }],
+            destination_bucket: Some("family".to_string()),
+            destination_prefix: Some("archive/".to_string()),
+        };
+        let preview_input_json =
+            serde_json::to_value(&preview_input).expect("serialize preview input");
+        assert_eq!(preview_input_json["action"], json!("move"));
+        assert_eq!(
+            serde_json::from_value::<ObjectBatchPreviewInput>(preview_input_json)
+                .expect("deserialize preview input"),
+            preview_input
+        );
+
+        let execute_input = ObjectBatchExecuteInput {
+            plan_id: "plan-1".to_string(),
+            batch_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            operator: Some("alice".to_string()),
+            ticket: Some("CHG-2026-0903".to_string()),
+            notes: Some("archive photos".to_string()),
+        };
+        let execute_input_json =
+            serde_json::to_value(&execute_input).expect("serialize execute input");
+        assert_eq!(
+            serde_json::from_value::<ObjectBatchExecuteInput>(execute_input_json)
+                .expect("deserialize execute input"),
+            execute_input
+        );
+
+        let item = json!({
+            "ordinal": 0,
+            "source": { "bucket": "root", "key": "photos/a.jpg" },
+            "read_source": "telecom",
+            "home_provider": "unicom",
+            "destination": { "bucket": "family", "key": "archive/a.jpg" },
+            "status": "completed",
+            "warnings": ["WAL finalization warning"]
+        });
+        let preview: ObjectBatchPreviewPayload = serde_json::from_value(json!({
+            "plan_id": "plan-1",
+            "plan_expires_at": 1_778_947_975_011_u64,
+            "topology_fingerprint": "rev:7",
+            "items": [item.clone()]
+        }))
+        .expect("deserialize preview payload");
+        let preview_json = serde_json::to_value(&preview).expect("serialize preview payload");
+        assert_eq!(
+            preview_json["plan_expires_at"],
+            json!(1_778_947_975_011_u64)
+        );
+        assert!(preview_json.get("plan_expires_at_unix_ms").is_none());
+
+        let execution: ObjectBatchExecutePayload = serde_json::from_value(json!({
+            "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+            "action": "move",
+            "authenticated_principal": "admin:alice",
+            "operator_label": "alice",
+            "requested": 1,
+            "completed": 1,
+            "already_missing": 0,
+            "no_op": 0,
+            "failed": 0,
+            "stale_conflict": 0,
+            "not_started": 0,
+            "non_atomic_warning": true,
+            "consistency_note": "External writers are outside the gateway mutation lock.",
+            "results": [item.clone()]
+        }))
+        .expect("deserialize execution payload");
+        assert_eq!(
+            serde_json::to_value(&execution).expect("serialize execution payload")["results"][0]["status"],
+            json!("completed")
+        );
+
+        let error: ObjectBatchErrorPayload = serde_json::from_value(json!({
+            "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+            "state": "rejected",
+            "code": "destination_exists",
+            "message": "Destination already exists.",
+            "action": "move",
+            "items": [item.clone()]
+        }))
+        .expect("deserialize error payload");
+        assert_eq!(
+            serde_json::to_value(&error).expect("serialize error payload")["code"],
+            json!("destination_exists")
+        );
+
+        let recovery: ObjectBatchRecoveryPayload = serde_json::from_value(json!({
+            "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+            "action": "move",
+            "state": "interrupted",
+            "code": "batch_recovery_required",
+            "requested": 2,
+            "saved_count": 1,
+            "unresolved_count": 1,
+            "saved_results": [item],
+            "unresolved_items": [{
+                "ordinal": 1,
+                "source": { "bucket": "root", "key": "photos/b.jpg" },
+                "destination": { "bucket": "family", "key": "archive/b.jpg" },
+                "reason_code": "recovery_required",
+                "message": "Provider result was not durably recorded before restart."
+            }],
+            "non_atomic_warning": true,
+            "consistency_note": "The gateway cannot determine whether the in-flight provider call committed before restart."
+        }))
+        .expect("deserialize recovery payload");
+        assert_eq!(
+            serde_json::to_value(&recovery).expect("serialize recovery payload")["unresolved_items"]
+                [0],
+            json!({
+                "ordinal": 1,
+                "source": { "bucket": "root", "key": "photos/b.jpg" },
+                "destination": { "bucket": "family", "key": "archive/b.jpg" },
+                "reason_code": "recovery_required",
+                "message": "Provider result was not durably recorded before restart."
+            })
+        );
     }
 
     #[test]
