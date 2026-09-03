@@ -223,13 +223,15 @@ objects、destination 映射和 action 全部来自 plan_id，客户端不能在
 
 如果 reservation 后、首个 provider 变更调用前发生错误，持久化 state=rejected、终态 HTTP status 和错误 payload；rejected 响应使用统一的批次错误 envelope，包含 batch_id、state=rejected、code、message 和 items=[]，同 key 相同 fingerprint 后续请求重放完全相同的 HTTP status/body。如果 provider_call_started_at 已持久化后中间结果无法持久化，停止剩余项并尽力保存 interrupted ledger；不自动重放。
 
-批量每一项必须调用与现有单对象 POST /api/object-actions 共用的结构化动作核心。move 成功后的网关状态必须与现有单对象 move 完全一致：远端 destination 成功后，destination placement、logical object 和 protection plan 成为当前记录，source 对应记录被删除；同时为 destination 入队 replication put、为 source 入队 replication delete，并提交两条对应 WAL 记录。任一 metadata、复制入队或 WAL 收尾失败都沿用现有 rollback_move_after_failure 语义，结果标为 failed 并保留 side-effect/rollback 说明；不得只移动远端对象而留下 source metadata。
+批量每一项必须调用与现有单对象 POST /api/object-actions 共用的结构化动作核心。move 成功后的网关状态必须与现有单对象 move 完全一致：远端 destination 成功后，destination placement、logical object 和 protection plan 成为当前记录，source 对应记录被删除；同时为 destination 入队 replication put、为 source 入队 replication delete，并准备两条对应 WAL 记录。远端动作后的 metadata 或复制入队失败沿用现有 rollback_move_after_failure 语义，结果标为 failed 并保留 side-effect/rollback 说明；不得只移动远端对象而留下 source metadata。
+
+WAL 提交完成标记沿用现有 mark_gateway_write_ahead_log_committed_or_warn 语义：提交标记失败只记录 WAL commit warning 和运行时告警，不回滚已经成功的远端 move/delete，也不把该对象改判为 failed。结构化动作核心要把 warning 回传给批量 item 的 warnings 字段和批次历史；单对象 API 的成功/告警语义保持不变。
 
 批量 delete 同样复用单对象 delete 核心，包括 NotFound 的 already_missing 收敛、metadata 清理、复制 delete、WAL 和现有回滚报告。
 
 最终预检失败返回 409，不开始对象动作。执行过程中在下一个对象开始前发现目标出现、源身份改变或其他冲突时，停止剩余项并标记 not_started；已完成项保留。
 
-执行结果每项固定包含 ordinal、source、read_source、home_provider、可选 destination、status、可选 reason_code 和可选 message。status 只允许 completed、already_missing、no_op、failed、stale_conflict、not_started。
+执行结果每项固定包含 ordinal、source、read_source、home_provider、可选 destination、status、可选 reason_code、可选 message 和 warnings。status 只允许 completed、already_missing、no_op、failed、stale_conflict、not_started。
 
 响应至少包含：
 
@@ -254,7 +256,8 @@ objects、destination 映射和 action 全部来自 plan_id，客户端不能在
           "read_source": "telecom",
           "home_provider": "unicom",
           "destination": { "bucket": "family", "key": "archive/a.jpg" },
-          "status": "completed"
+          "status": "completed",
+          "warnings": []
         },
         {
           "ordinal": 1,
@@ -327,7 +330,7 @@ interrupted 恢复响应使用独立的批次级合同，不使用普通执行�
 
 ### 批次历史
 
-每个批量执行请求写入一条摘要历史；批量预检失败不写历史。摘要包含 batch_id、action、batch=true、authenticated_principal、operator_label、requested 和各状态计数、ticket、notes、non_atomic_warning、consistency_note，以及最多 100 项直接嵌入的完整结果。
+每个批量执行请求写入一条摘要历史；批量预检失败不写历史。摘要包含 batch_id、action、batch=true、authenticated_principal、operator_label、requested 和各状态计数、ticket、notes、non_atomic_warning、consistency_note，以及最多 100 项直接嵌入的完整结果和 warnings。
 
 批次 outcome 只有在 failed、stale_conflict、not_started 都为零时才为 success，否则为 failed。预检失败不产生批次历史；ledger 中断状态只通过恢复合同保留。旧 control-plane 历史记录读取时，新增 authenticated_principal、operator_label、batch 和 items 字段使用默认值：authenticated_principal 为空、operator_label 取旧 operator、batch=false；旧 references 继续按原单对象语义展示。
 
@@ -385,9 +388,10 @@ v1 reason code 是封闭枚举：selection_expired、selection_mismatch、plan_e
 8. 删除已不存在对象返回 already_missing 并清理可清理 metadata；
 9. ledger compare-and-reserve、重复完成、rejected、处理中、复用冲突和重启恢复行为；
 10. provider_call_started_at 不被只读预检设置，且 marker 写入失败时不调用 provider；
-11. move 成功后的 destination/source metadata、WAL 和 replication 状态与单对象核心一致，失败时保留现有 rollback 语义；
-12. 路径规则拒绝尾随 slash、//、.、..、反斜杠和空 basename；
-13. 100 项上限、空字段、非法 UUID、未认证请求和响应计数不变量被验证。
+11. move 成功后的 destination/source metadata、WAL 准备和 replication 状态与单对象核心一致，预提交失败时保留现有 rollback 语义；
+12. WAL commit finalization warning 不回滚已成功对象，并在批量结果和历史中可见；
+13. 路径规则拒绝尾随 slash、//、.、..、反斜杠和空 basename；
+14. 100 项上限、空字段、非法 UUID、未认证请求和响应计数不变量被验证。
 
 ### Admin 行为测试
 
