@@ -15470,11 +15470,55 @@ async fn run_object_action_unlocked(
     let default_provider = runtime_topology(&state).primary_provider;
     let input_for_history = input.clone();
     let description = object_action_description(&input_for_history);
-    let warnings = object_action_warnings(&input_for_history, default_provider);
+    let mut warnings = object_action_warnings(&input_for_history, default_provider);
     let refs = object_action_targets(&input_for_history);
     let before_snapshots = capture_object_action_snapshots(&state, &refs).await;
     let audit = object_action_audit_fields(&input_for_history);
-    let action_result: Result<(), BlobError> = match input {
+    let action_result = execute_object_action_core(state, &input).await;
+    if let Ok(outcome) = &action_result {
+        warnings.extend(outcome.warnings.iter().cloned());
+    }
+
+    let after_snapshots = capture_object_action_snapshots(&state, &refs).await;
+    let outcome = if action_result.is_ok() {
+        "success"
+    } else {
+        "failed"
+    };
+    let message = action_result
+        .as_ref()
+        .err()
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| format!("Completed {description}"));
+    record_object_action_history(
+        &state,
+        object_action_history_entry(
+            default_provider,
+            &input_for_history,
+            outcome,
+            message,
+            audit,
+            warnings,
+            &before_snapshots,
+            &after_snapshots,
+        ),
+    );
+
+    action_result?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Default)]
+struct ObjectActionCoreOutcome {
+    warnings: Vec<String>,
+}
+
+async fn execute_object_action_core(
+    state: &AppState,
+    input: &ObjectActionInput,
+) -> Result<ObjectActionCoreOutcome, BlobError> {
+    let mut warnings = Vec::new();
+    match input.clone() {
         ObjectActionInput::Delete { bucket, key, .. } => {
             let bucket = bucket.trim().to_string();
             let key = key.trim().to_string();
@@ -15523,10 +15567,10 @@ async fn run_object_action_unlocked(
                     previous_logical_record.clone(),
                     previous_protection_plan_record.clone(),
                 );
-                return Err(ApiError(BlobError::Upstream(format!(
+                return Err(BlobError::Upstream(format!(
                     "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
                     bucket, key
-                ))));
+                )));
             }
             match enqueue_replication_delete_for_object(
                 &state,
@@ -15538,7 +15582,7 @@ async fn run_object_action_unlocked(
                 Ok(jobs) => {
                     enqueue_admin_object_action_replication_jobs(&state, &bucket, &key, &jobs)
                         .map_err(|error| {
-                            ApiError(BlobError::Upstream(format!(
+                            BlobError::Upstream(format!(
                                 "delete remote side effect may have occurred for {}/{}: {error}; {}",
                                 bucket,
                                 key,
@@ -15550,7 +15594,7 @@ async fn run_object_action_unlocked(
                                     previous_logical_record.clone(),
                                     previous_protection_plan_record.clone(),
                                 )
-                            )))
+                            ))
                         })?;
                 }
                 Err(error) => {
@@ -15562,20 +15606,22 @@ async fn run_object_action_unlocked(
                         previous_logical_record,
                         previous_protection_plan_record,
                     );
-                    return Err(ApiError(BlobError::Upstream(format!(
+                    return Err(BlobError::Upstream(format!(
                         "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
                         bucket, key
-                    ))));
+                    )));
                 }
             }
-            mark_gateway_write_ahead_log_committed_or_warn(
+            if let Some(warning) = mark_gateway_write_ahead_log_committed_or_warn(
                 &state,
                 gateway_write_ahead_log.as_ref(),
                 &bucket,
                 &key,
                 "object action delete",
             )
-            .await;
+            .await {
+                warnings.push(warning);
+            }
             Ok(())
         }
         ObjectActionInput::Rename {
@@ -15935,22 +15981,26 @@ async fn run_object_action_unlocked(
                         bucket, key, new_key
                     )))?;
                 }
-                mark_gateway_write_ahead_log_committed_or_warn(
+                if let Some(warning) = mark_gateway_write_ahead_log_committed_or_warn(
                     &state,
                     destination_gateway_write_ahead_log.as_ref(),
                     &bucket,
                     &new_key,
                     "object action rename destination",
                 )
-                .await;
-                mark_gateway_write_ahead_log_committed_or_warn(
+                .await {
+                    warnings.push(warning);
+                }
+                if let Some(warning) = mark_gateway_write_ahead_log_committed_or_warn(
                     &state,
                     source_delete_gateway_write_ahead_log.as_ref(),
                     &bucket,
                     &key,
                     "object action rename source delete",
                 )
-                .await;
+                .await {
+                    warnings.push(warning);
+                }
                 Ok(())
             }
         }
@@ -16178,14 +16228,16 @@ async fn run_object_action_unlocked(
                     destination_bucket, destination_key
                 )))?;
             }
-            mark_gateway_write_ahead_log_committed_or_warn(
+            if let Some(warning) = mark_gateway_write_ahead_log_committed_or_warn(
                 &state,
                 gateway_write_ahead_log.as_ref(),
                 &destination_bucket,
                 &destination_key,
                 "object action copy destination",
             )
-            .await;
+            .await {
+                warnings.push(warning);
+            }
             Ok(())
         }
         ObjectActionInput::Move {
@@ -16576,54 +16628,32 @@ async fn run_object_action_unlocked(
                         source_bucket, source_key, destination_bucket, destination_key
                     )))?;
                 }
-                mark_gateway_write_ahead_log_committed_or_warn(
+                if let Some(warning) = mark_gateway_write_ahead_log_committed_or_warn(
                     &state,
                     destination_gateway_write_ahead_log.as_ref(),
                     &destination_bucket,
                     &destination_key,
                     "object action move destination",
                 )
-                .await;
-                mark_gateway_write_ahead_log_committed_or_warn(
+                .await {
+                    warnings.push(warning);
+                }
+                if let Some(warning) = mark_gateway_write_ahead_log_committed_or_warn(
                     &state,
                     source_delete_gateway_write_ahead_log.as_ref(),
                     &source_bucket,
                     &source_key,
                     "object action move source delete",
                 )
-                .await;
+                .await {
+                    warnings.push(warning);
+                }
                 Ok(())
             }
         }
-    };
+    }?;
 
-    let after_snapshots = capture_object_action_snapshots(&state, &refs).await;
-    let outcome = if action_result.is_ok() {
-        "success"
-    } else {
-        "failed"
-    };
-    let message = action_result
-        .as_ref()
-        .err()
-        .map(|error| error.to_string())
-        .unwrap_or_else(|| format!("Completed {description}"));
-    record_object_action_history(
-        &state,
-        object_action_history_entry(
-            default_provider,
-            &input_for_history,
-            outcome,
-            message,
-            audit,
-            warnings,
-            &before_snapshots,
-            &after_snapshots,
-        ),
-    );
-
-    action_result?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(ObjectActionCoreOutcome { warnings })
 }
 
 async fn list_browser_flow_catalogs(
@@ -20113,7 +20143,7 @@ async fn mark_gateway_write_ahead_log_committed_or_warn(
     bucket: &str,
     key: &str,
     action: &str,
-) {
+) -> Option<String> {
     if let Some(context) = context {
         if let Err(error) = mark_gateway_write_ahead_log_committed(state, context).await {
             let error_str = error.to_string();
@@ -20133,6 +20163,9 @@ async fn mark_gateway_write_ahead_log_committed_or_warn(
             runtime.last_commit_error = Some(error_str);
             runtime.last_commit_bucket = Some(bucket.to_string());
             runtime.last_commit_key = Some(key.to_string());
+            return Some(format!(
+                "WAL finalization warning for {action}: remote commit could not be confirmed"
+            ));
         } else {
             let mut runtime = state
                 .gateway_write_ahead_log_runtime
@@ -20144,6 +20177,7 @@ async fn mark_gateway_write_ahead_log_committed_or_warn(
             runtime.last_commit_key = None;
         }
     }
+    None
 }
 
 fn latest_replication_job_is_terminal_or_pending(
@@ -20179,6 +20213,19 @@ async fn mark_gateway_write_ahead_log_committed(
     state: &AppState,
     context: &GatewayWriteAheadLogContext,
 ) -> Result<(), BlobError> {
+    #[cfg(test)]
+    {
+        let gate = WAL_COMMIT_FAILURES_REMAINING.get_or_init(|| Mutex::new(0));
+        let mut remaining = gate
+            .lock()
+            .expect("wal commit failure gate lock should not be poisoned");
+        if *remaining > 0 {
+            *remaining -= 1;
+            return Err(BlobError::Upstream(
+                "injected WAL commit finalization failure".to_string(),
+            ));
+        }
+    }
     let mut record = context.record.clone();
     record.phase = GatewayWriteAheadLogPhase::Committed;
     record.committed_at_unix_ms = Some(current_unix_ms());
@@ -22758,7 +22805,7 @@ async fn apply_reconcile_replica_plan_only(
         ));
     }
     persist_replication_jobs(state, &jobs, "historical object reconcile");
-    mark_gateway_write_ahead_log_committed_or_warn(
+    let _ = mark_gateway_write_ahead_log_committed_or_warn(
         state,
         gateway_write_ahead_log.as_ref(),
         &record.bucket,
@@ -23000,7 +23047,7 @@ async fn execute_historical_object_rewrite(
         )));
     }
     persist_replication_jobs(state, &jobs, "historical object reconcile");
-    mark_gateway_write_ahead_log_committed_or_warn(
+    let _ = mark_gateway_write_ahead_log_committed_or_warn(
         state,
         gateway_write_ahead_log.as_ref(),
         &record.bucket,
@@ -33997,6 +34044,8 @@ static POST_PUT_LOGICAL_OBJECT_PERSIST_FAILURES_REMAINING: std::sync::OnceLock<M
 static OBJECT_PROTECTION_PLAN_PERSIST_FAILURES_REMAINING: std::sync::OnceLock<
     Mutex<HashMap<String, u32>>,
 > = std::sync::OnceLock::new();
+#[cfg(test)]
+static WAL_COMMIT_FAILURES_REMAINING: std::sync::OnceLock<Mutex<u32>> = std::sync::OnceLock::new();
 
 #[cfg(test)]
 fn set_test_multipart_part_upsert_failures(upload_id: &str, remaining: u32) {
@@ -34059,6 +34108,14 @@ fn set_test_admin_object_action_replication_plan_failures(bucket: &str, key: &st
     } else {
         gate.insert(scope, remaining);
     }
+}
+
+#[cfg(test)]
+fn set_test_wal_commit_failures(remaining: u32) {
+    *WAL_COMMIT_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(0))
+        .lock()
+        .expect("wal commit failure gate lock should not be poisoned") = remaining;
 }
 
 #[cfg(test)]
@@ -44625,6 +44682,101 @@ mod tests {
         assert!(backend.get_object(&bucket, &source_key).await.is_ok());
         let destination_lookup = backend.get_object(&bucket, &destination_key).await;
         assert!(matches!(destination_lookup, Err(BlobError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn object_action_core_surfaces_wal_commit_warning_without_rollback() {
+        let state = test_state();
+        let input = seeded_move_input();
+        seed_object_for_move(&state, &input).await;
+        install_gateway_write_ahead_log_policy(&state, ProviderId::Stub, &["admin-console"]);
+        set_test_wal_commit_failures(1);
+
+        let outcome = execute_object_action_core(&state, &input)
+            .await
+            .expect("move remains successful");
+        assert!(outcome.warnings.iter().any(|warning| warning.contains("WAL")));
+        assert_object_exists_on_home(&state, "family", "archive/source.txt").await;
+    }
+
+    #[tokio::test]
+    async fn object_action_core_rolls_back_after_metadata_failure() {
+        let state = test_state();
+        let input = seeded_move_input();
+        seed_object_for_move(&state, &input).await;
+        set_test_admin_object_action_replication_plan_failures("family", "archive/source.txt", 1);
+
+        let error = execute_object_action_core(&state, &input)
+            .await
+            .expect_err("move should fail when replication plan enqueue fails");
+        set_test_admin_object_action_replication_plan_failures("family", "archive/source.txt", 0);
+
+        assert!(error.to_string().contains("remote move rollback succeeded"));
+        let source_placement = state
+            .metadata_store
+            .object_placement("root", "archive/source.txt")
+            .expect("source placement should load")
+            .expect("source placement should be restored");
+        assert_eq!(source_placement.provider, "stub");
+        assert!(state
+            .metadata_store
+            .object_placement("family", "archive/source.txt")
+            .expect("destination placement should load")
+            .is_none());
+    }
+
+    fn seeded_move_input() -> ObjectActionInput {
+        ObjectActionInput::Move {
+            source_bucket: "root".to_string(),
+            source_key: "archive/source.txt".to_string(),
+            destination_bucket: "family".to_string(),
+            destination_key: "archive/source.txt".to_string(),
+            mode: ObjectActionMode::GatewayManaged,
+            source_provider: None,
+            destination_provider: None,
+            operator: None,
+            ticket: None,
+            notes: None,
+        }
+    }
+
+    async fn seed_object_for_move(state: &AppState, input: &ObjectActionInput) {
+        let ObjectActionInput::Move {
+            source_bucket,
+            source_key,
+            ..
+        } = input
+        else {
+            panic!("seed_object_for_move requires a move input");
+        };
+        let uri: Uri = format!("/{source_bucket}/{source_key}")
+            .parse()
+            .expect("source uri should parse");
+        let body = Bytes::from_static(b"shared core move source");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((source_bucket.clone(), source_key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect("source put should succeed");
+    }
+
+    async fn assert_object_exists_on_home(state: &AppState, bucket: &str, key: &str) {
+        let home_provider = persisted_or_primary_home_provider(state, bucket, key)
+            .expect("object home provider should resolve");
+        let backend = backend_for_provider(state, home_provider).expect("object backend should resolve");
+        assert!(backend.get_object(bucket, key).await.is_ok());
     }
 
     #[tokio::test]
