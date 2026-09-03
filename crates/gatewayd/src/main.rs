@@ -38,14 +38,17 @@ use admin_api::{
     AuthCaptureBrowserEndpoint, AuthCaptureBrowserEndpointInput, AuthCaptureLlmEndpoint,
     AuthCaptureLlmEndpointInput, AuthCaptureLlmEndpointPayload, AuthCapturePolicyInput,
     AuthCapturePolicyPayload, BrowserFlowSessionHandoffInput, BrowserFlowSessionHandoffPayload,
-    DesiredTopologyPayload, ObjectPlacementMode, ProviderCredentialInput,
+    DesiredTopologyPayload, ObjectBatchAction, ObjectBatchErrorPayload, ObjectBatchItemPayload,
+    ObjectBatchItemStatus, ObjectBatchObjectInput, ObjectBatchPreviewInput,
+    ObjectBatchPreviewPayload, ObjectPlacementMode, ProviderCredentialInput,
     ProviderCredentialLeasePayload, ProviderCredentialPayload, ROUTE_ADMIN_CHANGE_PASSWORD,
     ROUTE_ADMIN_LOGIN, ROUTE_ADMIN_LOGOUT, ROUTE_ADMIN_LOGS, ROUTE_ALERT_SUPPRESSIONS,
     ROUTE_AUTH_CAPTURE_POLICY, ROUTE_BROWSER_FLOW_SESSION_HANDOFF, ROUTE_PROVIDER_CREDENTIALS,
-    ROUTE_REPLICATION_DLQ, ROUTE_REPLICATION_DLQ_REPLAY_JOB, ROUTE_REPLICATION_DLQ_REPLAY_TARGET,
-    ROUTE_REPLICATION_RETRY_JOB, ROUTE_STATUS, ROUTE_TOPOLOGY_UPDATE, ReplicationDlqEntryPayload,
-    ReplicationDlqListPayload, ReplicationDlqReplayPayload, ReplicationDlqTargetReplayPayload,
-    ReplicationRetryPayload, SuppressedAdminAlertRecord, TopologyUpdateInput,
+    ROUTE_OBJECT_BATCH_PREVIEW, ROUTE_REPLICATION_DLQ, ROUTE_REPLICATION_DLQ_REPLAY_JOB,
+    ROUTE_REPLICATION_DLQ_REPLAY_TARGET, ROUTE_REPLICATION_RETRY_JOB, ROUTE_STATUS,
+    ROUTE_TOPOLOGY_UPDATE, ReplicationDlqEntryPayload, ReplicationDlqListPayload,
+    ReplicationDlqReplayPayload, ReplicationDlqTargetReplayPayload, ReplicationRetryPayload,
+    SuppressedAdminAlertRecord, TopologyUpdateInput,
 };
 use anyhow::{Context, Result};
 use argon2::{
@@ -162,9 +165,8 @@ const DEFAULT_TIMESTAMP: &str = "1970-01-01T00:00:00.000Z";
 const SOURCE_PROVIDER_HEADER: &str = "x-ccbg-source-provider";
 const FALLBACK_FROM_HEADER: &str = "x-ccbg-fallback-from";
 const DEFAULT_OBJECT_ACTION_HISTORY_LIMIT: usize = 12;
-#[allow(dead_code)]
 const OBJECT_BATCH_SELECTION_LIMIT: usize = 32;
-#[allow(dead_code)]
+const OBJECT_BATCH_REQUEST_LIMIT: usize = 100;
 const OBJECT_BATCH_RUNTIME_TTL_MS: u64 = 5 * 60 * 1_000;
 const OBJECT_BATCH_LEDGER_LIMIT: usize = 64;
 const OBJECT_BATCH_LEDGER_RETENTION_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -283,14 +285,49 @@ struct AppState {
 #[derive(Clone)]
 struct AdminAuthenticatedPrincipal(String);
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ObjectBatchIdentitySnapshot {
+    etag: Option<String>,
+    size: u64,
+    last_modified: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ObjectBatchSelectionSnapshot {
+    bucket: String,
+    prefix: Option<String>,
+    read_source: ProviderId,
+    fallback_from: Option<ProviderId>,
+    objects: BTreeMap<(String, String), ObjectBatchIdentitySnapshot>,
+    topology_fingerprint: String,
     expires_at_unix_ms: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ObjectBatchPlannedObject {
+    ordinal: usize,
+    source: ObjectBatchObjectInput,
+    destination: Option<ObjectBatchObjectInput>,
+    identity: ObjectBatchIdentitySnapshot,
+    read_source: ProviderId,
+    home_provider: ProviderId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ObjectBatchPlanRecord {
+    action: ObjectBatchAction,
+    selection_id: String,
+    objects: Vec<ObjectBatchPlannedObject>,
+    topology_fingerprint: String,
+    preview_items: Vec<ObjectBatchItemPayload>,
     expires_at_unix_ms: u64,
+}
+
+#[derive(Debug)]
+struct ObjectBatchPreflightResult {
+    objects: Vec<ObjectBatchPlannedObject>,
+    items: Vec<ObjectBatchItemPayload>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6395,6 +6432,8 @@ struct ObjectBrowserObjectsPayload {
     source_provider: &'static str,
     fallback_from: Option<&'static str>,
     objects: Vec<blob_core::ObjectInfo>,
+    selection_id: String,
+    selection_expires_at_unix_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6659,6 +6698,64 @@ impl IntoResponse for ApiError {
         (
             status,
             Json(AdminApiErrorResponse::with_code(message, code)),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug)]
+struct ObjectBatchPreviewError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+    action: ObjectBatchAction,
+    items: Vec<ObjectBatchItemPayload>,
+}
+
+impl ObjectBatchPreviewError {
+    fn bad_request(
+        code: &'static str,
+        message: impl Into<String>,
+        action: ObjectBatchAction,
+    ) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code,
+            message: message.into(),
+            action,
+            items: Vec::new(),
+        }
+    }
+
+    fn conflict(
+        code: &'static str,
+        message: impl Into<String>,
+        action: ObjectBatchAction,
+        items: Vec<ObjectBatchItemPayload>,
+    ) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code,
+            message: message.into(),
+            action,
+            items,
+        }
+    }
+}
+
+impl IntoResponse for ObjectBatchPreviewError {
+    fn into_response(self) -> Response {
+        log_gateway_error_response(self.status, "object_batch_preview", Some(self.code), &self.message);
+        (
+            self.status,
+            Json(ObjectBatchErrorPayload {
+                batch_id: None,
+                state: None,
+                code: self.code.to_string(),
+                message: self.message,
+                action: self.action,
+                items: self.items,
+            }),
         )
             .into_response()
     }
@@ -7415,6 +7512,7 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
             "/api/object-browser/objects",
             get(list_object_browser_objects),
         )
+        .route(ROUTE_OBJECT_BATCH_PREVIEW, post(preview_object_batch))
         .route("/api/object-actions", post(run_object_action))
         .route(
             "/api/object-actions/history/clear",
@@ -15401,6 +15499,169 @@ fn normalize_optional_admin_filter(raw: Option<String>) -> Option<String> {
     })
 }
 
+fn validate_object_batch_bucket(raw: &str) -> Result<String, String> {
+    if raw.trim().is_empty() {
+        return Err("bucket must not be empty".to_string());
+    }
+    if raw
+        .chars()
+        .any(|character| character == '/' || character == '\\' || character.is_control())
+    {
+        return Err(format!("invalid bucket path: {raw}"));
+    }
+    Ok(raw.to_string())
+}
+
+fn validate_object_batch_key(raw: &str) -> Result<String, String> {
+    if raw.trim().is_empty()
+        || raw.starts_with('/')
+        || raw.ends_with('/')
+        || raw.contains("//")
+        || raw.contains('\\')
+        || raw.chars().any(char::is_control)
+    {
+        return Err(format!("invalid object key: {raw}"));
+    }
+    if raw
+        .split('/')
+        .any(|segment| segment == "." || segment == ".." || segment.trim().is_empty())
+    {
+        return Err(format!("invalid object key: {raw}"));
+    }
+    if raw
+        .rsplit('/')
+        .next()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return Err(format!("object key basename must not be empty: {raw}"));
+    }
+    Ok(raw.to_string())
+}
+
+fn canonical_object_batch_prefix(raw: &str) -> Result<String, String> {
+    if raw.is_empty() {
+        return Ok(String::new());
+    }
+    if raw.trim().is_empty()
+        || raw.starts_with('/')
+        || raw.contains("//")
+        || raw.contains('\\')
+        || raw.chars().any(char::is_control)
+    {
+        return Err(format!("invalid destination prefix: {raw}"));
+    }
+    let without_trailing_slash = raw.strip_suffix('/').unwrap_or(raw);
+    if without_trailing_slash.is_empty()
+        || without_trailing_slash
+            .split('/')
+            .any(|segment| segment == "." || segment == ".." || segment.trim().is_empty())
+    {
+        return Err(format!("invalid destination prefix: {raw}"));
+    }
+    Ok(format!("{without_trailing_slash}/"))
+}
+
+fn object_batch_identity_snapshot(object: &blob_core::ObjectInfo) -> ObjectBatchIdentitySnapshot {
+    ObjectBatchIdentitySnapshot {
+        etag: object
+            .etag
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToString::to_string),
+        size: object.size,
+        last_modified: object
+            .last_modified
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(ToString::to_string),
+    }
+}
+
+fn object_batch_identity_is_verifiable(identity: &ObjectBatchIdentitySnapshot) -> bool {
+    identity.etag.is_some() || identity.last_modified.is_some()
+}
+
+fn object_batch_identity_matches(
+    expected: &ObjectBatchIdentitySnapshot,
+    actual: &ObjectBatchIdentitySnapshot,
+) -> bool {
+    if expected.etag.is_some() {
+        expected.etag == actual.etag && expected.size == actual.size
+    } else {
+        expected.etag.is_none()
+            && actual.etag.is_none()
+            && expected.size == actual.size
+            && expected.last_modified == actual.last_modified
+    }
+}
+
+fn object_batch_item(
+    ordinal: usize,
+    source: ObjectBatchObjectInput,
+    read_source: ProviderId,
+    home_provider: Option<ProviderId>,
+    destination: Option<ObjectBatchObjectInput>,
+    status: ObjectBatchItemStatus,
+    reason_code: Option<&str>,
+    message: impl Into<String>,
+) -> ObjectBatchItemPayload {
+    ObjectBatchItemPayload {
+        ordinal,
+        source,
+        read_source: read_source.as_str().to_string(),
+        home_provider: home_provider
+            .map(|provider| provider.as_str().to_string())
+            .unwrap_or_default(),
+        destination,
+        status,
+        reason_code: reason_code.map(ToString::to_string),
+        message: Some(message.into()),
+        warnings: Vec::new(),
+    }
+}
+
+fn record_object_batch_failure(
+    first_failure: &mut Option<(&'static str, String)>,
+    items: &mut Vec<ObjectBatchItemPayload>,
+    code: &'static str,
+    message: String,
+    item: ObjectBatchItemPayload,
+) {
+    if first_failure.is_none() {
+        *first_failure = Some((code, message));
+    }
+    items.push(item);
+}
+
+fn destination_has_gateway_metadata(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+) -> Result<bool, BlobError> {
+    if state
+        .metadata_store
+        .object_placement(bucket, key)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    if state
+        .metadata_store
+        .logical_object(bucket, key)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    Ok(state
+        .metadata_store
+        .object_protection_plan(bucket, key)
+        .map_err(|error| BlobError::Upstream(error.to_string()))?
+        .is_some())
+}
+
 async fn list_object_browser_buckets(
     State(state): State<AppState>,
 ) -> Result<Json<ObjectBrowserBucketsPayload>, DataPlaneApiError> {
@@ -15421,9 +15682,8 @@ async fn list_object_browser_objects(
     Query(query): Query<ObjectBrowserObjectsQuery>,
 ) -> Result<Json<ObjectBrowserObjectsPayload>, DataPlaneApiError> {
     let bucket = query.bucket.trim().to_string();
-    if bucket.is_empty() {
-        return Err(BlobError::Configuration("bucket is required".to_string()).into());
-    }
+    validate_object_batch_bucket(&bucket)
+        .map_err(|message| DataPlaneApiError::from(BlobError::Configuration(message)))?;
     let prefix = query
         .prefix
         .as_deref()
@@ -15439,6 +15699,33 @@ async fn list_object_browser_objects(
     let read = list_bucket_objects_with_fallback(&state, &bucket, prefix.as_deref(), limit)
         .await
         .map_err(DataPlaneApiError::from)?;
+    let now_unix_ms = current_unix_ms();
+    let selection_expires_at_unix_ms = now_unix_ms.saturating_add(OBJECT_BATCH_RUNTIME_TTL_MS);
+    let selection_id = format!("selection-{}", random_urlsafe_token(18));
+    let mut selected_objects = BTreeMap::new();
+    for object in &read.value {
+        let key = validate_object_batch_key(&object.key)
+            .map_err(|message| DataPlaneApiError::from(BlobError::Configuration(message)))?;
+        selected_objects.insert(
+            (bucket.clone(), key),
+            object_batch_identity_snapshot(object),
+        );
+    }
+    let selection = ObjectBatchSelectionSnapshot {
+        bucket: bucket.clone(),
+        prefix: prefix.clone(),
+        read_source: read.source.provider,
+        fallback_from: read.source.fallback_from,
+        objects: selected_objects,
+        topology_fingerprint: topology_fingerprint(&state),
+        expires_at_unix_ms: selection_expires_at_unix_ms,
+    };
+    {
+        let mut runtime = mutex_recover(state.object_batch_runtime.lock());
+        prune_object_batch_runtime_state(&mut runtime, now_unix_ms);
+        runtime.selections.insert(selection_id.clone(), selection);
+        prune_object_batch_runtime_state(&mut runtime, now_unix_ms);
+    }
     Ok(Json(ObjectBrowserObjectsPayload {
         bucket,
         prefix,
@@ -15446,7 +15733,662 @@ async fn list_object_browser_objects(
         source_provider: read.source.provider.as_str(),
         fallback_from: read.source.fallback_from.map(ProviderId::as_str),
         objects: read.value,
+        selection_id,
+        selection_expires_at_unix_ms,
     }))
+}
+
+async fn preview_object_batch(
+    State(state): State<AppState>,
+    Json(input): Json<ObjectBatchPreviewInput>,
+) -> Result<Json<ObjectBatchPreviewPayload>, ObjectBatchPreviewError> {
+    let action = input.action;
+    let _guard = timeout(Duration::from_secs(5), state.object_mutation_lock.lock())
+        .await
+        .map_err(|_| {
+            ObjectBatchPreviewError::conflict(
+                "batch_busy",
+                "object mutation lock timed out",
+                action,
+                Vec::new(),
+            )
+        })?;
+    preview_object_batch_unlocked(&state, input).await
+}
+
+async fn preview_object_batch_unlocked(
+    state: &AppState,
+    input: ObjectBatchPreviewInput,
+) -> Result<Json<ObjectBatchPreviewPayload>, ObjectBatchPreviewError> {
+    let action = input.action;
+    if input.objects.is_empty() || input.objects.len() > OBJECT_BATCH_REQUEST_LIMIT {
+        return Err(ObjectBatchPreviewError::bad_request(
+            "invalid_path",
+            format!(
+                "batch object count must be between 1 and {OBJECT_BATCH_REQUEST_LIMIT}"
+            ),
+            action,
+        ));
+    }
+
+    let (destination_bucket, destination_prefix) = match action {
+        ObjectBatchAction::Delete => {
+            if input.destination_bucket.is_some() || input.destination_prefix.is_some() {
+                return Err(ObjectBatchPreviewError::bad_request(
+                    "invalid_path",
+                    "delete preview must not include a destination",
+                    action,
+                ));
+            }
+            (None, None)
+        }
+        ObjectBatchAction::Move => {
+            let bucket = input.destination_bucket.as_deref().ok_or_else(|| {
+                ObjectBatchPreviewError::bad_request(
+                    "invalid_path",
+                    "move preview requires destination_bucket",
+                    action,
+                )
+            })?;
+            let prefix = input.destination_prefix.as_deref().ok_or_else(|| {
+                ObjectBatchPreviewError::bad_request(
+                    "invalid_path",
+                    "move preview requires destination_prefix",
+                    action,
+                )
+            })?;
+            let bucket = validate_object_batch_bucket(bucket).map_err(|message| {
+                ObjectBatchPreviewError::bad_request("invalid_path", message, action)
+            })?;
+            let prefix = canonical_object_batch_prefix(prefix).map_err(|message| {
+                ObjectBatchPreviewError::bad_request("invalid_path", message, action)
+            })?;
+            (Some(bucket), Some(prefix))
+        }
+    };
+
+    let now_unix_ms = current_unix_ms();
+    let selection = {
+        let mut runtime = mutex_recover(state.object_batch_runtime.lock());
+        prune_object_batch_runtime_state(&mut runtime, now_unix_ms);
+        runtime.selections.get(&input.selection_id).cloned()
+    }
+    .ok_or_else(|| {
+        ObjectBatchPreviewError::conflict(
+            "selection_expired",
+            "selection snapshot is missing or expired",
+            action,
+            Vec::new(),
+        )
+    })?;
+
+    let current_topology_fingerprint = topology_fingerprint(state);
+    if selection.topology_fingerprint != current_topology_fingerprint {
+        return Err(ObjectBatchPreviewError::conflict(
+            "topology_changed",
+            "selection topology is no longer current",
+            action,
+            Vec::new(),
+        ));
+    }
+
+    let mut normalized = Vec::with_capacity(input.objects.len());
+    let mut seen_sources = BTreeSet::new();
+    for (ordinal, object) in input.objects.into_iter().enumerate() {
+        let bucket = validate_object_batch_bucket(&object.bucket).map_err(|message| {
+            ObjectBatchPreviewError::bad_request("invalid_path", message, action)
+        })?;
+        let key = validate_object_batch_key(&object.key).map_err(|message| {
+            ObjectBatchPreviewError::bad_request("invalid_path", message, action)
+        })?;
+        let source_key = (bucket.clone(), key.clone());
+        if !seen_sources.insert(source_key.clone()) {
+            return Err(ObjectBatchPreviewError::bad_request(
+                "duplicate_object",
+                format!("duplicate object: {bucket}/{key}"),
+                action,
+            ));
+        }
+        let Some(identity) = selection.objects.get(&source_key).cloned() else {
+            let item = object_batch_item(
+                ordinal,
+                ObjectBatchObjectInput { bucket, key },
+                selection.read_source,
+                None,
+                None,
+                ObjectBatchItemStatus::Conflict,
+                Some("selection_mismatch"),
+                "object is not part of the selection snapshot",
+            );
+            return Err(ObjectBatchPreviewError::conflict(
+                "selection_mismatch",
+                "requested object is outside the selection snapshot",
+                action,
+                vec![item],
+            ));
+        };
+        let source = ObjectBatchObjectInput { bucket, key };
+        let destination = match (&destination_bucket, &destination_prefix) {
+            (Some(bucket), Some(prefix)) => {
+                let basename = source
+                    .key
+                    .rsplit('/')
+                    .next()
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        ObjectBatchPreviewError::bad_request(
+                            "invalid_path",
+                            "object key basename must not be empty",
+                            action,
+                        )
+                    })?;
+                let key = validate_object_batch_key(&format!("{prefix}{basename}"))
+                    .map_err(|message| {
+                        ObjectBatchPreviewError::bad_request("invalid_path", message, action)
+                    })?;
+                Some(ObjectBatchObjectInput {
+                    bucket: bucket.clone(),
+                    key,
+                })
+            }
+            _ => None,
+        };
+        normalized.push((ordinal, source, destination, identity));
+    }
+
+    if let ObjectBatchAction::Move = action {
+        let mut seen_destinations = BTreeSet::new();
+        for (ordinal, source, destination, _) in &normalized {
+            let destination = destination.as_ref().expect("move destination should exist");
+            let key = (destination.bucket.clone(), destination.key.clone());
+            if !seen_destinations.insert(key) {
+                let item = object_batch_item(
+                    *ordinal,
+                    source.clone(),
+                    selection.read_source,
+                    None,
+                    Some(destination.clone()),
+                    ObjectBatchItemStatus::Conflict,
+                    Some("duplicate_destination"),
+                    "multiple selected objects generate the same destination",
+                );
+                return Err(ObjectBatchPreviewError::conflict(
+                    "duplicate_destination",
+                    "multiple selected objects generate the same destination",
+                    action,
+                    vec![item],
+                ));
+            }
+        }
+    }
+
+    let mut planned_objects = Vec::with_capacity(normalized.len());
+    let mut preview_items = Vec::with_capacity(normalized.len());
+    let mut first_failure: Option<(&'static str, String)> = None;
+
+    for (ordinal, source, destination, expected_identity) in normalized {
+        let home_provider = match persisted_or_primary_home_provider(state, &source.bucket, &source.key) {
+            Ok(provider) => provider,
+            Err(error) => {
+                let message = error.to_string();
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "source_unverifiable",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        None,
+                        destination,
+                        ObjectBatchItemStatus::Unverifiable,
+                        Some("source_unverifiable"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+        };
+        let home_backend = match backend_for_provider(state, home_provider) {
+            Ok(backend) => backend,
+            Err(error) => {
+                let message = error.to_string();
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "source_unverifiable",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        destination,
+                        ObjectBatchItemStatus::Unverifiable,
+                        Some("source_unverifiable"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+        };
+        if !object_batch_identity_is_verifiable(&expected_identity) {
+            let message = format!("source identity is not verifiable: {}/{}", source.bucket, source.key);
+            record_object_batch_failure(
+                &mut first_failure,
+                &mut preview_items,
+                "source_unverifiable",
+                message.clone(),
+                object_batch_item(
+                    ordinal,
+                    source,
+                    selection.read_source,
+                    Some(home_provider),
+                    destination,
+                    ObjectBatchItemStatus::Unverifiable,
+                    Some("source_unverifiable"),
+                    message,
+                ),
+            );
+            continue;
+        }
+
+        let source_missing = match home_backend.head_object(&source.bucket, &source.key).await {
+            Ok(actual) => {
+                let actual_identity = object_batch_identity_snapshot(&actual);
+                if !object_batch_identity_is_verifiable(&actual_identity) {
+                    let message = format!("source identity is not verifiable: {}/{}", source.bucket, source.key);
+                    record_object_batch_failure(
+                        &mut first_failure,
+                        &mut preview_items,
+                        "source_unverifiable",
+                        message.clone(),
+                        object_batch_item(
+                            ordinal,
+                            source,
+                            selection.read_source,
+                            Some(home_provider),
+                            destination,
+                            ObjectBatchItemStatus::Unverifiable,
+                            Some("source_unverifiable"),
+                            message,
+                        ),
+                    );
+                    continue;
+                }
+                if !object_batch_identity_matches(&expected_identity, &actual_identity) {
+                    let message = format!("source identity changed: {}/{}", source.bucket, source.key);
+                    record_object_batch_failure(
+                        &mut first_failure,
+                        &mut preview_items,
+                        "source_changed",
+                        message.clone(),
+                        object_batch_item(
+                            ordinal,
+                            source,
+                            selection.read_source,
+                            Some(home_provider),
+                            destination,
+                            ObjectBatchItemStatus::StaleConflict,
+                            Some("source_changed"),
+                            message,
+                        ),
+                    );
+                    continue;
+                }
+                false
+            }
+            Err(BlobError::NotFound(_)) => {
+                if home_provider != selection.read_source {
+                    let message = format!(
+                        "read source {} can read the object but authoritative home {} cannot",
+                        selection.read_source.as_str(),
+                        home_provider.as_str()
+                    );
+                    record_object_batch_failure(
+                        &mut first_failure,
+                        &mut preview_items,
+                        "home_resolution_conflict",
+                        message.clone(),
+                        object_batch_item(
+                            ordinal,
+                            source,
+                            selection.read_source,
+                            Some(home_provider),
+                            destination,
+                            ObjectBatchItemStatus::Conflict,
+                            Some("home_resolution_conflict"),
+                            message,
+                        ),
+                    );
+                    continue;
+                }
+                true
+            }
+            Err(error) => {
+                let message = error.to_string();
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "source_unverifiable",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        destination,
+                        ObjectBatchItemStatus::Unverifiable,
+                        Some("source_unverifiable"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+        };
+
+        let capabilities = home_backend.capabilities();
+        let unsupported = match action {
+            ObjectBatchAction::Delete => !capabilities.delete,
+            ObjectBatchAction::Move => !capabilities.write || !capabilities.delete,
+        };
+        if unsupported {
+            let message = format!("provider {} lacks required object capabilities", home_provider.as_str());
+            record_object_batch_failure(
+                &mut first_failure,
+                &mut preview_items,
+                "provider_unsupported",
+                message.clone(),
+                object_batch_item(
+                    ordinal,
+                    source,
+                    selection.read_source,
+                    Some(home_provider),
+                    destination,
+                    ObjectBatchItemStatus::Conflict,
+                    Some("provider_unsupported"),
+                    message,
+                ),
+            );
+            continue;
+        }
+
+        if source_missing {
+            if action == ObjectBatchAction::Move {
+                let message = format!("source object is missing: {}/{}", source.bucket, source.key);
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "source_missing",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        destination,
+                        ObjectBatchItemStatus::Conflict,
+                        Some("source_missing"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+            let item = object_batch_item(
+                ordinal,
+                source.clone(),
+                selection.read_source,
+                Some(home_provider),
+                destination.clone(),
+                ObjectBatchItemStatus::AlreadyMissing,
+                Some("source_missing"),
+                "source object is already missing; only gateway cleanup can be planned",
+            );
+            planned_objects.push(ObjectBatchPlannedObject {
+                ordinal,
+                source,
+                destination,
+                identity: expected_identity,
+                read_source: selection.read_source,
+                home_provider,
+            });
+            preview_items.push(item);
+            continue;
+        }
+
+        if action == ObjectBatchAction::Delete {
+            preview_items.push(object_batch_item(
+                ordinal,
+                source.clone(),
+                selection.read_source,
+                Some(home_provider),
+                None,
+                ObjectBatchItemStatus::Ready,
+                None,
+                "object is ready for batch deletion",
+            ));
+            planned_objects.push(ObjectBatchPlannedObject {
+                ordinal,
+                source,
+                destination: None,
+                identity: expected_identity,
+                read_source: selection.read_source,
+                home_provider,
+            });
+            continue;
+        }
+
+        let destination = destination.expect("move destination should exist");
+        match home_backend.head_container(&destination.bucket).await {
+            Ok(_) => {}
+            Err(BlobError::NotFound(_)) => {
+                let message = format!("destination bucket does not exist: {}", destination.bucket);
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "destination_bucket_missing",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        Some(destination),
+                        ObjectBatchItemStatus::Conflict,
+                        Some("destination_bucket_missing"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+            Err(error) => {
+                let message = format!("destination bucket could not be verified: {error}");
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "destination_bucket_unverifiable",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        Some(destination),
+                        ObjectBatchItemStatus::Unverifiable,
+                        Some("destination_bucket_unverifiable"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+        }
+
+        if source.bucket == destination.bucket && source.key == destination.key {
+            preview_items.push(object_batch_item(
+                ordinal,
+                source.clone(),
+                selection.read_source,
+                Some(home_provider),
+                Some(destination.clone()),
+                ObjectBatchItemStatus::NoOp,
+                None,
+                "source and destination are identical",
+            ));
+            planned_objects.push(ObjectBatchPlannedObject {
+                ordinal,
+                source,
+                destination: Some(destination),
+                identity: expected_identity,
+                read_source: selection.read_source,
+                home_provider,
+            });
+            continue;
+        }
+
+        match destination_has_gateway_metadata(state, &destination.bucket, &destination.key) {
+            Ok(true) => {
+                let message = format!("destination gateway metadata already exists: {}/{}", destination.bucket, destination.key);
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "destination_metadata_exists",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        Some(destination),
+                        ObjectBatchItemStatus::Conflict,
+                        Some("destination_metadata_exists"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let message = format!("destination metadata could not be verified: {error}");
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "destination_bucket_unverifiable",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        Some(destination),
+                        ObjectBatchItemStatus::Unverifiable,
+                        Some("destination_bucket_unverifiable"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+        }
+
+        match home_backend.head_object(&destination.bucket, &destination.key).await {
+            Ok(_) => {
+                let message = format!("destination object already exists: {}/{}", destination.bucket, destination.key);
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "destination_exists",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        Some(destination),
+                        ObjectBatchItemStatus::Conflict,
+                        Some("destination_exists"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+            Err(BlobError::NotFound(_)) => {}
+            Err(error) => {
+                let message = format!("destination object could not be verified: {error}");
+                record_object_batch_failure(
+                    &mut first_failure,
+                    &mut preview_items,
+                    "destination_bucket_unverifiable",
+                    message.clone(),
+                    object_batch_item(
+                        ordinal,
+                        source,
+                        selection.read_source,
+                        Some(home_provider),
+                        Some(destination),
+                        ObjectBatchItemStatus::Unverifiable,
+                        Some("destination_bucket_unverifiable"),
+                        message,
+                    ),
+                );
+                continue;
+            }
+        }
+
+        preview_items.push(object_batch_item(
+            ordinal,
+            source.clone(),
+            selection.read_source,
+            Some(home_provider),
+            Some(destination.clone()),
+            ObjectBatchItemStatus::Ready,
+            None,
+            "object is ready for batch execution",
+        ));
+        planned_objects.push(ObjectBatchPlannedObject {
+            ordinal,
+            source,
+            destination: Some(destination),
+            identity: expected_identity,
+            read_source: selection.read_source,
+            home_provider,
+        });
+    }
+
+    if let Some((code, message)) = first_failure {
+        return Err(ObjectBatchPreviewError::conflict(
+            code,
+            message,
+            action,
+            preview_items,
+        ));
+    }
+
+    preview_items.sort_by_key(|item| item.ordinal);
+    planned_objects.sort_by_key(|object| object.ordinal);
+    let plan_expires_at_unix_ms = now_unix_ms.saturating_add(OBJECT_BATCH_RUNTIME_TTL_MS);
+    let plan_id = format!("plan-{}", random_urlsafe_token(18));
+    let result = ObjectBatchPreflightResult {
+        objects: planned_objects,
+        items: preview_items,
+    };
+    let payload = ObjectBatchPreviewPayload {
+        plan_id: plan_id.clone(),
+        plan_expires_at: plan_expires_at_unix_ms,
+        topology_fingerprint: current_topology_fingerprint.clone(),
+        items: result.items.clone(),
+    };
+    let plan = ObjectBatchPlanRecord {
+        action,
+        selection_id: input.selection_id,
+        objects: result.objects,
+        topology_fingerprint: current_topology_fingerprint,
+        preview_items: result.items,
+        expires_at_unix_ms: plan_expires_at_unix_ms,
+    };
+    let mut runtime = mutex_recover(state.object_batch_runtime.lock());
+    prune_object_batch_runtime_state(&mut runtime, now_unix_ms);
+    runtime.plans.insert(plan_id, plan);
+    Ok(Json(payload))
 }
 
 async fn clear_object_action_history_api(
@@ -53153,6 +54095,742 @@ mod tests {
                 .iter()
                 .any(|object| object.key == "shared/note.txt")
         );
+    }
+
+    async fn seed_object_browser_selection(
+        state: &AppState,
+        bucket: &str,
+        objects: Vec<(&str, &'static [u8])>,
+    ) -> ObjectBrowserObjectsPayload {
+        for (key, body) in objects {
+            seed_object_at(state, bucket, key, body).await;
+        }
+        let Json(payload) = list_object_browser_objects(
+            State(state.clone()),
+            Query(ObjectBrowserObjectsQuery {
+                bucket: bucket.to_string(),
+                prefix: None,
+                limit: Some(MAX_OBJECT_BROWSER_LIMIT),
+            }),
+        )
+        .await
+        .expect("object browser selection should succeed");
+        payload
+    }
+
+    fn batch_object(bucket: &str, key: &str) -> admin_api::ObjectBatchObjectInput {
+        admin_api::ObjectBatchObjectInput {
+            bucket: bucket.to_string(),
+            key: key.to_string(),
+        }
+    }
+
+    fn move_preview_input(
+        selection_id: &str,
+        objects: Vec<admin_api::ObjectBatchObjectInput>,
+        destination_bucket: &str,
+        destination_prefix: &str,
+    ) -> admin_api::ObjectBatchPreviewInput {
+        admin_api::ObjectBatchPreviewInput {
+            action: admin_api::ObjectBatchAction::Move,
+            selection_id: selection_id.to_string(),
+            objects,
+            destination_bucket: Some(destination_bucket.to_string()),
+            destination_prefix: Some(destination_prefix.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn object_browser_lists_current_read_source() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"selection source")],
+        )
+        .await;
+
+        assert_eq!(selection.source_provider, "stub");
+        assert!(selection.fallback_from.is_none());
+        assert!(selection.selection_id.starts_with("selection-"));
+        assert!(selection.selection_expires_at_unix_ms > current_unix_ms());
+
+        let runtime = state
+            .object_batch_runtime
+            .lock()
+            .expect("batch runtime should lock");
+        let snapshot = runtime
+            .selections
+            .get(&selection.selection_id)
+            .expect("selection snapshot should be stored");
+        assert_eq!(snapshot.bucket, "root");
+        assert_eq!(snapshot.prefix, None);
+        assert_eq!(snapshot.read_source, ProviderId::Stub);
+        assert_eq!(snapshot.fallback_from, None);
+        assert_eq!(snapshot.topology_fingerprint, "rev:0");
+        assert!(snapshot.objects.contains_key(&("root".to_string(), "docs/a.txt".to_string())));
+    }
+
+    #[tokio::test]
+    async fn object_browser_does_not_store_selection_when_read_fails() {
+        let mut state = test_state();
+        replace_backend(
+            &mut state,
+            ProviderId::Stub,
+            Arc::new(FailingBackend::new("failing-browser", "list failed")),
+        );
+
+        let result = list_object_browser_objects(
+            State(state.clone()),
+            Query(ObjectBrowserObjectsQuery {
+                bucket: "root".to_string(),
+                prefix: None,
+                limit: Some(100),
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            state
+                .object_batch_runtime
+                .lock()
+                .expect("batch runtime should lock")
+                .selections
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_destination_conflict_without_mutation() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+        seed_object_at(&state, "family", "archive/a.txt", b"existing").await;
+        delete_object_metadata_records(&state, "family", "archive/a.txt")
+            .expect("destination test metadata should be removable");
+
+        let error = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "family",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("existing destination must block preview");
+
+        assert_eq!(error.code, "destination_exists");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_object_exists_on_home(&state, "root", "docs/a.txt").await;
+        assert_object_exists_on_home(&state, "family", "archive/a.txt").await;
+        assert!(
+            state
+                .object_batch_runtime
+                .lock()
+                .expect("batch runtime should lock")
+                .plans
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_destination_metadata_conflict_without_mutation() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+        seed_object_at(&state, "family", "keep-bucket.txt", b"bucket marker").await;
+        persist_object_home_provider(&state, ProviderId::Stub, "family", "archive/a.txt")
+            .expect("destination placement should seed");
+
+        let error = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "family",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("destination metadata must block preview");
+
+        assert_eq!(error.code, "destination_metadata_exists");
+        assert_eq!(error.items[0].reason_code.as_deref(), Some("destination_metadata_exists"));
+        assert_object_exists_on_home(&state, "root", "docs/a.txt").await;
+        assert!(
+            state
+                .metadata_store
+                .object_placement("family", "archive/a.txt")
+                .expect("destination placement should load")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_duplicate_generated_destination_keys() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("one/a.txt", b"one"), ("two/a.txt", b"two")],
+        )
+        .await;
+        seed_object_at(&state, "family", "keep-bucket.txt", b"bucket marker").await;
+
+        let error = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![
+                    batch_object("root", "one/a.txt"),
+                    batch_object("root", "two/a.txt"),
+                ],
+                "family",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("duplicate generated destinations must block preview");
+
+        assert_eq!(error.code, "duplicate_destination");
+        assert_object_exists_on_home(&state, "root", "one/a.txt").await;
+        assert_object_exists_on_home(&state, "root", "two/a.txt").await;
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_noop_is_not_a_destination_conflict() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+
+        let Json(payload) = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "root",
+                "docs/",
+            )),
+        )
+        .await
+        .expect("same canonical source and destination should be a no-op");
+
+        assert_eq!(payload.items.len(), 1);
+        assert_eq!(payload.items[0].status, admin_api::ObjectBatchItemStatus::NoOp);
+        assert_eq!(
+            payload.items[0].destination,
+            Some(batch_object("root", "docs/a.txt"))
+        );
+        assert_object_exists_on_home(&state, "root", "docs/a.txt").await;
+
+        let runtime = state
+            .object_batch_runtime
+            .lock()
+            .expect("batch runtime should lock");
+        let plan = runtime
+            .plans
+            .get(&payload.plan_id)
+            .expect("successful preview should store one plan");
+        assert_eq!(plan.action, admin_api::ObjectBatchAction::Move);
+        assert_eq!(plan.selection_id, selection.selection_id);
+        assert_eq!(plan.topology_fingerprint, "rev:0");
+        assert_eq!(plan.objects.len(), 1);
+        assert_eq!(plan.preview_items, payload.items);
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_preserves_basename_and_stores_ready_plan() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("photos/2026/a.jpg", b"source")],
+        )
+        .await;
+        seed_object_at(&state, "family", "bucket-marker.txt", b"target bucket").await;
+
+        let Json(payload) = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "photos/2026/a.jpg")],
+                "family",
+                "archive/",
+            )),
+        )
+        .await
+        .expect("non-conflicting move should produce a plan");
+
+        assert_eq!(payload.items[0].status, admin_api::ObjectBatchItemStatus::Ready);
+        assert_eq!(
+            payload.items[0].destination,
+            Some(batch_object("family", "archive/a.jpg"))
+        );
+        let runtime = state
+            .object_batch_runtime
+            .lock()
+            .expect("batch runtime should lock");
+        let plan = runtime.plans.get(&payload.plan_id).expect("plan should exist");
+        assert_eq!(plan.objects[0].source, batch_object("root", "photos/2026/a.jpg"));
+        assert_eq!(
+            plan.objects[0].destination,
+            Some(batch_object("family", "archive/a.jpg"))
+        );
+        assert_eq!(plan.objects[0].read_source, ProviderId::Stub);
+        assert_eq!(plan.objects[0].home_provider, ProviderId::Stub);
+        drop(runtime);
+        assert_object_exists_on_home(&state, "root", "photos/2026/a.jpg").await;
+        let backend = backend_for_provider(&state, ProviderId::Stub).expect("stub should resolve");
+        assert!(matches!(
+            backend.head_object("family", "archive/a.jpg").await,
+            Err(BlobError::NotFound(_))
+        ));
+        assert!(
+            state
+                .metadata_store
+                .object_placement("family", "archive/a.jpg")
+                .expect("destination placement should load")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .logical_object("family", "archive/a.jpg")
+                .expect("destination logical metadata should load")
+                .is_none()
+        );
+        assert!(
+            state
+                .metadata_store
+                .object_protection_plan("family", "archive/a.jpg")
+                .expect("destination protection plan should load")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_stale_selection() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+        state
+            .object_batch_runtime
+            .lock()
+            .expect("batch runtime should lock")
+            .selections
+            .get_mut(&selection.selection_id)
+            .expect("selection should exist")
+            .expires_at_unix_ms = current_unix_ms();
+
+        let error = preview_object_batch(
+            State(state),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "root",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("expired selection must be rejected");
+
+        assert_eq!(error.code, "selection_expired");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_selection_after_topology_changes() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+        let _ = update_topology(
+            State(state.clone()),
+            Json(TopologyUpdateInput {
+                primary_provider: ProviderId::Stub,
+                sync_targets: Vec::new(),
+                fallback_read_order: Vec::new(),
+                high_speed_providers: Vec::new(),
+                write_targets: vec![ProviderId::Stub],
+                object_placement_mode: ObjectPlacementMode::PreferPrimary,
+            }),
+        )
+        .await
+        .expect("topology update should persist");
+
+        let error = preview_object_batch(
+            State(state),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "root",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("selection from an earlier topology must be rejected");
+
+        assert_eq!(error.code, "topology_changed");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_changed_source_identity() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"old")],
+        )
+        .await;
+        seed_object_at(&state, "root", "docs/a.txt", b"new identity").await;
+
+        let error = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "root",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("changed identity must block preview");
+
+        assert_eq!(error.code, "source_changed");
+        assert_eq!(error.items[0].status, admin_api::ObjectBatchItemStatus::StaleConflict);
+        assert_object_exists_on_home(&state, "root", "docs/a.txt").await;
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_missing_target_bucket() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+
+        let error = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "missing",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("missing target bucket must block preview");
+
+        assert_eq!(error.code, "destination_bucket_missing");
+        assert_object_exists_on_home(&state, "root", "docs/a.txt").await;
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_source_home_mismatch() {
+        let mut state = test_state();
+        let telecom_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend);
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+        persist_object_home_provider(&state, ProviderId::Telecom, "root", "docs/a.txt")
+            .expect("mismatched home placement should seed");
+
+        let error = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "root",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("source visible only outside authoritative home must block preview");
+
+        assert_eq!(error.code, "home_resolution_conflict");
+        assert_eq!(error.items[0].home_provider, "telecom");
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_provider_without_required_capabilities() {
+        let mut state = test_state();
+        let backend = Arc::new(NoDeleteStubBackend::new("no-delete-preview"));
+        backend
+            .put_object(PutObjectRequest {
+                container: "root".to_string(),
+                key: "docs/a.txt".to_string(),
+                body: Bytes::from_static(b"source").into(),
+                size: Some(6),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("source should seed");
+        let dyn_backend: DynBackend = backend;
+        replace_backend(&mut state, ProviderId::Stub, dyn_backend);
+        let Json(selection) = list_object_browser_objects(
+            State(state.clone()),
+            Query(ObjectBrowserObjectsQuery {
+                bucket: "root".to_string(),
+                prefix: None,
+                limit: Some(100),
+            }),
+        )
+        .await
+        .expect("selection should list");
+
+        let error = preview_object_batch(
+            State(state),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object("root", "docs/a.txt")],
+                "root",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("move requires generic write and delete capabilities");
+
+        assert_eq!(error.code, "provider_unsupported");
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_duplicate_requested_objects() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+
+        let error = preview_object_batch(
+            State(state),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![
+                    batch_object("root", "docs/a.txt"),
+                    batch_object("root", "docs/a.txt"),
+                ],
+                "root",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("duplicate source objects must be rejected");
+
+        assert_eq!(error.code, "duplicate_object");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_objects_outside_selection() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"selected"), ("other.txt", b"outside")],
+        )
+        .await;
+        let Json(filtered_selection) = list_object_browser_objects(
+            State(state.clone()),
+            Query(ObjectBrowserObjectsQuery {
+                bucket: "root".to_string(),
+                prefix: Some("docs/".to_string()),
+                limit: Some(100),
+            }),
+        )
+        .await
+        .expect("filtered selection should list");
+        assert_ne!(selection.selection_id, filtered_selection.selection_id);
+
+        let error = preview_object_batch(
+            State(state),
+            Json(move_preview_input(
+                &filtered_selection.selection_id,
+                vec![batch_object("root", "other.txt")],
+                "root",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("object outside exact selection must be rejected");
+
+        assert_eq!(error.code, "selection_mismatch");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_invalid_paths() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+        let invalid_sources = [
+            batch_object("", "docs/a.txt"),
+            batch_object("ro/ot", "docs/a.txt"),
+            batch_object("ro\\ot", "docs/a.txt"),
+            batch_object("root", ""),
+            batch_object("root", "/docs/a.txt"),
+            batch_object("root", "docs/a.txt/"),
+            batch_object("root", "docs//a.txt"),
+            batch_object("root", "docs\\a.txt"),
+            batch_object("root", "docs/./a.txt"),
+            batch_object("root", "docs/../a.txt"),
+            batch_object("root", "docs/\u{0001}.txt"),
+        ];
+        for source in invalid_sources {
+            let error = preview_object_batch(
+                State(state.clone()),
+                Json(move_preview_input(
+                    &selection.selection_id,
+                    vec![source],
+                    "root",
+                    "archive/",
+                )),
+            )
+            .await
+            .expect_err("invalid source path must be rejected");
+            assert_eq!(error.code, "invalid_path");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        }
+
+        for (bucket, prefix) in [
+            ("", "archive/"),
+            ("fam/ily", "archive/"),
+            ("family", "/archive/"),
+            ("family", "archive//"),
+            ("family", "archive\\"),
+            ("family", "archive/./"),
+            ("family", "archive/../"),
+            ("family", "archive/\u{0001}/"),
+        ] {
+            let error = preview_object_batch(
+                State(state.clone()),
+                Json(move_preview_input(
+                    &selection.selection_id,
+                    vec![batch_object("root", "docs/a.txt")],
+                    bucket,
+                    prefix,
+                )),
+            )
+            .await
+            .expect_err("invalid destination path must be rejected");
+            assert_eq!(error.code, "invalid_path");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_rejects_more_than_one_hundred_objects() {
+        let mut state = test_state();
+        let backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Stub, backend.clone());
+        for index in 0..101 {
+            backend
+                .put_object(PutObjectRequest {
+                    container: "root".to_string(),
+                    key: format!("bulk/{index:03}.txt"),
+                    body: Bytes::from_static(b"x").into(),
+                    size: Some(1),
+                    content_type: Some("text/plain".to_string()),
+                    preferred_upload_part_size_bytes: None,
+                })
+                .await
+                .expect("bulk source should seed");
+        }
+        let Json(selection) = list_object_browser_objects(
+            State(state.clone()),
+            Query(ObjectBrowserObjectsQuery {
+                bucket: "root".to_string(),
+                prefix: Some("bulk/".to_string()),
+                limit: Some(101),
+            }),
+        )
+        .await
+        .expect("bulk selection should list");
+        let objects = (0..101)
+            .map(|index| batch_object("root", &format!("bulk/{index:03}.txt")))
+            .collect();
+
+        let error = preview_object_batch(
+            State(state),
+            Json(move_preview_input(
+                &selection.selection_id,
+                objects,
+                "root",
+                "archive/",
+            )),
+        )
+        .await
+        .expect_err("batch size above one hundred must be rejected");
+
+        assert_eq!(error.code, "invalid_path");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_allows_delete_of_already_missing_selection_item() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/a.txt", b"source")],
+        )
+        .await;
+        let backend = backend_for_provider(&state, ProviderId::Stub).expect("stub should resolve");
+        backend
+            .delete_object("root", "docs/a.txt")
+            .await
+            .expect("source should be removed outside gateway metadata");
+
+        let Json(payload) = preview_object_batch(
+            State(state),
+            Json(admin_api::ObjectBatchPreviewInput {
+                action: admin_api::ObjectBatchAction::Delete,
+                selection_id: selection.selection_id,
+                objects: vec![batch_object("root", "docs/a.txt")],
+                destination_bucket: None,
+                destination_prefix: None,
+            }),
+        )
+        .await
+        .expect("already missing delete should still produce a cleanup plan");
+
+        assert_eq!(payload.items[0].status, admin_api::ObjectBatchItemStatus::AlreadyMissing);
+        assert!(payload.items[0].destination.is_none());
     }
 
     #[tokio::test]
