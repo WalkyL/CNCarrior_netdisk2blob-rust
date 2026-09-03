@@ -2,7 +2,7 @@
 
 日期：2026-09-04
 
-状态：已按 Sol 审阅意见修订，待最终复审
+状态：已按 Sol 最终复审意见修订，待用户审阅
 
 ## 背景
 
@@ -64,7 +64,8 @@ Admin Web 的“对象与文件操作”页已经能从当前读来源浏览对�
 - POST /api/object-actions/batch；
 - POST /api/object-reconcile/execute 的实际执行分支；
 - POST /api/object-placement/delete-stale；
-- POST /api/object-placement/delete-stale-bulk。
+- POST /api/object-placement/delete-stale-bulk；
+- POST /api/control-plane/topology。
 
 批量执行从最终预检开始一直持有锁，直到本批次结束。预览、状态查询和历史导出不持有该锁。数据面 S3 PUT/DELETE、后台 replication worker 和绕过网关的 provider 客户端不在锁内。
 
@@ -157,7 +158,7 @@ GET /api/object-browser/objects 成功响应新增 selection_id 和 selection_ex
 2. 没有 placement 时，使用最终预检时的当前 primary provider；
 3. 列表 read source/fallback source 只用于展示和 selection 绑定，不决定 action backend；
 4. 如果列表来源能读到对象，但权威 home provider 不能读到，返回 home_resolution_conflict；
-5. 如果 preview 与 execute 之间 primary 发生变化，最终预检将计划视为过期并拒绝执行。
+5. 如果 preview 与 execute 之间 primary 发生变化，最终预检将计划视为过期并拒绝执行。preview 将 topology_fingerprint 写入 plan；拓扑更新也取得同一把对象变更锁并更新 fingerprint，最终预检在锁内比较两者。
 
 ### 认证主体与操作者标签
 
@@ -182,7 +183,7 @@ Admin 鉴权中间件为请求提供服务端解析的 authenticated_principal�
 
 objects 必须是 selection 对应当前结果的子集。服务端按 canonical bucket/key 去重并拒绝重复项；客户端不提交或覆盖身份字段，服务端从快照和实际 action backend 重新读取身份。
 
-预检成功返回 plan_id、plan_expires_at、规范化后的对象映射和逐项状态。计划有效期固定为 5 分钟。move 预检对每个 action home provider 调用 head_container(destination_bucket)；目标桶不存在、不可验证或 backend 不具备写入/删除能力时不生成计划。
+预检成功返回 plan_id、plan_expires_at、topology_fingerprint、规范化后的对象映射和逐项状态。计划有效期固定为 5 分钟；plan 同时保存 action、selection_id、规范化对象集合、目标映射和 topology_fingerprint。move 预检对每个 action home provider 调用 head_container(destination_bucket)；目标桶不存在、不可验证或 backend 不具备写入/删除能力时不生成计划。
 
 预检失败使用 409 Conflict，表示没有对象动作开始；字段、重复项或数量错误使用 400 Bad Request。可预期错误至少包含 code、message、action 和 items。item 至少包含 ordinal、source、destination（如适用）、status、reason_code 和 message。
 
@@ -190,7 +191,7 @@ objects 必须是 selection 对应当前结果的子集。服务端按 canonical
 
 预检成功的逐项结构至少包含 ordinal、source、read_source、home_provider、destination（如适用）、status 和 warnings。只有没有冲突的计划才返回 plan_id。
 
-reason code destination_bucket_missing、destination_bucket_unverifiable 和 provider_unsupported 用于目标桶检查。selection 过期或提交对象不属于 selection 时分别使用 selection_expired 和 selection_mismatch。
+reason code destination_bucket_missing 和 destination_bucket_unverifiable 用于目标桶检查。通用 write/delete 能力缺失时预检使用 provider_unsupported；当前 BlobBackend 没有独立的 move capability 位，因此 provider 的 move_object 在执行阶段返回 NotImplemented 时，按逐项 provider_unsupported 失败处理，不把它误报为目标冲突。selection 过期或提交对象不属于 selection 时分别使用 selection_expired 和 selection_mismatch。
 
 ### 批量执行
 
@@ -212,14 +213,19 @@ objects、destination 映射和 action 全部来自 plan_id，客户端不能在
 
 1. 解析认证、Idempotency-Key 和请求字段；
 2. 查找已有 ledger；matching completed/rejected/interrupted 直接返回对应保存结果，matching in_progress 返回 batch_in_progress；不同 fingerprint 返回 idempotency_key_reused；
+   获取锁后必须再次查 ledger；如果等待期间已有请求完成 reservation，按该次读取到的状态处理，不继续使用旧的空查找结果；
 3. 以最多 5 秒的有界等待取得对象变更锁；锁忙返回 batch_busy，不创建 ledger；
-4. 在锁内验证 plan 未过期并执行最终预检；plan_expired、冲突、目标桶错误或路径错误直接返回对应零写入响应；
+4. 在锁内验证 plan 未过期、topology_fingerprint 未变化并执行最终预检；plan_expired、topology_changed、冲突、目标桶错误或路径错误直接返回对应零写入响应；
 5. 所有零写入检查通过后，compare-and-reserve 并持久化 in_progress ledger；
-6. 在第一个 provider 调用即将发生前，先持久化 provider_call_started_at；成功后才允许调用 provider；
+6. 在第一个 provider 变更调用（move、delete 或其他会改变远端对象的调用）即将发生前，先持久化 provider_call_started_at；head/list/health 等只读预检调用不设置该字段；成功后才允许调用 provider；
 7. 按 canonical source bucket/key 稳定顺序逐项执行，完成每项后持久化 ledger 结果；
 8. 保存最终响应和批次历史摘要，释放锁。
 
-如果 reservation 后、首个 provider 调用前发生错误，持久化 state=rejected、终态 HTTP status 和错误 payload；同 key 相同 fingerprint 后续请求重放相同的零写入响应。如果 provider_call_started_at 已持久化后中间结果无法持久化，停止剩余项并尽力保存 interrupted ledger；不自动重放。
+如果 reservation 后、首个 provider 变更调用前发生错误，持久化 state=rejected、终态 HTTP status 和错误 payload；rejected 响应使用统一的批次错误 envelope，包含 batch_id、state=rejected、code、message 和 items=[]，同 key 相同 fingerprint 后续请求重放完全相同的 HTTP status/body。如果 provider_call_started_at 已持久化后中间结果无法持久化，停止剩余项并尽力保存 interrupted ledger；不自动重放。
+
+批量每一项必须调用与现有单对象 POST /api/object-actions 共用的结构化动作核心。move 成功后的网关状态必须与现有单对象 move 完全一致：远端 destination 成功后，destination placement、logical object 和 protection plan 成为当前记录，source 对应记录被删除；同时为 destination 入队 replication put、为 source 入队 replication delete，并提交两条对应 WAL 记录。任一 metadata、复制入队或 WAL 收尾失败都沿用现有 rollback_move_after_failure 语义，结果标为 failed 并保留 side-effect/rollback 说明；不得只移动远端对象而留下 source metadata。
+
+批量 delete 同样复用单对象 delete 核心，包括 NotFound 的 already_missing 收敛、metadata 清理、复制 delete、WAL 和现有回滚报告。
 
 最终预检失败返回 409，不开始对象动作。执行过程中在下一个对象开始前发现目标出现、源身份改变或其他冲突时，停止剩余项并标记 not_started；已完成项保留。
 
@@ -271,9 +277,9 @@ objects、destination 映射和 action 全部来自 plan_id，客户端不能在
 
 幂等 ledger 持久化到 control-plane state，使用 serde 默认值兼容旧文件，不保存凭据。每条记录包含 batch_id、plan/request fingerprint、state、provider_call_started_at、逐项结果、终态 HTTP status 和终态 payload。
 
-初始限制：最多 64 个记录；所有状态按最后更新时间保留 24 小时；状态为 in_progress、completed、rejected、interrupted。rejected 和 interrupted 是批次级状态，不是普通逐项 status。compare-and-reserve 在 control-plane mutex 内完成，并通过现有原子 control-plane 文件写入持久化。
+初始限制：最多 64 个记录；所有状态按最后更新时间保留 24 小时；状态为 in_progress、completed、rejected、interrupted。rejected 和 interrupted 是批次级状态，不是普通逐项 status。ledger 容量不足返回 503、reason code batch_ledger_full；持久化失败返回 500、reason code batch_ledger_unavailable；两者都不开始对象动作。compare-and-reserve 在 control-plane mutex 内完成，并通过现有原子 control-plane 文件写入持久化。
 
-provider_call_started_at 初始为空。只有在第一个 provider 调用即将发生前成功持久化该字段后，才允许开始远端对象动作。
+provider_call_started_at 初始为空。只有在第一个 provider 变更调用即将发生前成功持久化该字段后，才允许开始远端对象动作；head/list/health 等只读预检调用不会设置该字段。
 
 同一 key 的行为：
 
@@ -323,7 +329,7 @@ interrupted 恢复响应使用独立的批次级合同，不使用普通执行�
 
 每个批量执行请求写入一条摘要历史；批量预检失败不写历史。摘要包含 batch_id、action、batch=true、authenticated_principal、operator_label、requested 和各状态计数、ticket、notes、non_atomic_warning、consistency_note，以及最多 100 项直接嵌入的完整结果。
 
-批次 outcome 只有在 failed、stale_conflict、not_started 都为零时才为 success，否则为 failed。预检失败不产生批次历史；ledger 中断状态只通过恢复合同保留。
+批次 outcome 只有在 failed、stale_conflict、not_started 都为零时才为 success，否则为 failed。预检失败不产生批次历史；ledger 中断状态只通过恢复合同保留。旧 control-plane 历史记录读取时，新增 authenticated_principal、operator_label、batch 和 items 字段使用默认值：authenticated_principal 为空、operator_label 取旧 operator、batch=false；旧 references 继续按原单对象语义展示。
 
 ## 路径与身份规范
 
@@ -350,7 +356,7 @@ interrupted 恢复响应使用独立的批次级合同，不使用普通执行�
 
 客户端和服务端都验证空选择、重复对象、路径、目标桶、selection/plan 有效期和 100 项上限。预检失败、锁忙、ledger 错误和恢复错误都返回稳定的 machine-readable code、message 和适用的 item/批次信息。
 
-稳定 reason code 至少包括：selection_expired、selection_mismatch、plan_expired、invalid_path、duplicate_object、duplicate_destination、source_missing、source_changed、source_unverifiable、home_resolution_conflict、destination_exists、destination_metadata_exists、destination_bucket_missing、destination_bucket_unverifiable、provider_unsupported、batch_busy、batch_ledger_full、batch_ledger_unavailable、batch_in_progress、idempotency_key_reused、batch_not_started、batch_recovery_required、recovery_required。
+v1 reason code 是封闭枚举：selection_expired、selection_mismatch、plan_expired、topology_changed、invalid_path、duplicate_object、duplicate_destination、source_missing、source_changed、source_unverifiable、home_resolution_conflict、destination_exists、destination_metadata_exists、destination_bucket_missing、destination_bucket_unverifiable、provider_unsupported、batch_busy、batch_ledger_full、batch_ledger_unavailable、batch_in_progress、idempotency_key_reused、batch_not_started、batch_recovery_required、recovery_required。未来新增 code 必须通过 Admin API 版本变更；旧 UI 将未知 code 显示为通用错误并阻止继续。
 
 ## 实现边界
 
@@ -361,7 +367,7 @@ interrupted 恢复响应使用独立的批次级合同，不使用普通执行�
 - docs/object-actions-api-reference.md：批量预检/执行、状态和 reason code；
 - docs/object-actions-and-history.md：批量删除/移动、冲突、best-effort、部分失败和恢复说明。
 
-不修改 provider crate 或 BlobBackend 协议，不改变现有单对象 API 请求和响应合同。新增 control-plane 字段使用 serde 默认值兼容旧文件。
+不修改 provider crate 或 BlobBackend 协议，不改变现有单对象 API 请求和响应合同。新增 control-plane 字段使用 serde 默认值兼容旧文件。新增批量路由必须同步登记到 crates/admin-api/src/lib.rs 的 Admin route contract 和 DTO kind。
 
 ## 测试策略
 
@@ -374,13 +380,14 @@ interrupted 恢复响应使用独立的批次级合同，不使用普通执行�
 3. 任一远端目标、目标 metadata、目标桶或重复目标 key 冲突时零写入；
 4. no-op 优先级正确，可与真实移动项混合；
 5. selection/plan 过期、primary 改变、home provider 不可读和 source identity 改变时拒绝执行；
-6. stale-placement 删除、reconcile 执行和单对象动作共享同一变更锁；
+6. stale-placement 删除、reconcile 执行、topology 更新和单对象动作共享同一变更锁，并验证 topology_fingerprint；
 7. 执行期间单项失败时计数、逐项错误和 not_started 正确；
 8. 删除已不存在对象返回 already_missing 并清理可清理 metadata；
 9. ledger compare-and-reserve、重复完成、rejected、处理中、复用冲突和重启恢复行为；
-10. provider_call_started_at 写入失败时不调用 provider；
-11. 路径规则拒绝尾随 slash、//、.、..、反斜杠和空 basename；
-12. 100 项上限、空字段、非法 UUID、未认证请求和响应计数不变量被验证。
+10. provider_call_started_at 不被只读预检设置，且 marker 写入失败时不调用 provider；
+11. move 成功后的 destination/source metadata、WAL 和 replication 状态与单对象核心一致，失败时保留现有 rollback 语义；
+12. 路径规则拒绝尾随 slash、//、.、..、反斜杠和空 basename；
+13. 100 项上限、空字段、非法 UUID、未认证请求和响应计数不变量被验证。
 
 ### Admin 行为测试
 
