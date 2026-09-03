@@ -44704,25 +44704,103 @@ mod tests {
         let state = test_state();
         let input = seeded_move_input();
         seed_object_for_move(&state, &input).await;
-        set_test_admin_object_action_replication_plan_failures("family", "archive/source.txt", 1);
+        seed_object_at(
+            &state,
+            "family",
+            "archive/source.txt",
+            b"existing destination metadata",
+        )
+        .await;
+        persist_object_protection_plan(
+            &state,
+            "root",
+            "archive/source.txt",
+            &[ProviderId::Telecom],
+            &[ProviderId::Telecom],
+            1,
+        )
+        .expect("source protection plan should persist");
+        persist_object_protection_plan(
+            &state,
+            "family",
+            "archive/source.txt",
+            &[ProviderId::Unicom],
+            &[],
+            2,
+        )
+        .expect("destination protection plan should persist");
+
+        let source_placement_before = state
+            .metadata_store
+            .object_placement("root", "archive/source.txt")
+            .expect("source placement should load");
+        let source_logical_before = load_logical_object_record(&state, "root", "archive/source.txt")
+            .expect("source logical metadata should load");
+        let source_protection_plan_before = state
+            .metadata_store
+            .object_protection_plan("root", "archive/source.txt")
+            .expect("source protection plan should load");
+        let destination_placement_before = state
+            .metadata_store
+            .object_placement("family", "archive/source.txt")
+            .expect("destination placement should load");
+        let destination_logical_before =
+            load_logical_object_record(&state, "family", "archive/source.txt")
+                .expect("destination logical metadata should load");
+        let destination_protection_plan_before = state
+            .metadata_store
+            .object_protection_plan("family", "archive/source.txt")
+            .expect("destination protection plan should load");
+
+        set_test_object_protection_plan_persist_failures("family", "archive/source.txt", 1);
 
         let error = execute_object_action_core(&state, &input)
             .await
-            .expect_err("move should fail when replication plan enqueue fails");
-        set_test_admin_object_action_replication_plan_failures("family", "archive/source.txt", 0);
+            .expect_err("move should fail when destination protection metadata persist fails");
+        set_test_object_protection_plan_persist_failures("family", "archive/source.txt", 0);
 
+        assert!(error
+            .to_string()
+            .contains("injected object protection plan persist failure"));
         assert!(error.to_string().contains("remote move rollback succeeded"));
-        let source_placement = state
-            .metadata_store
-            .object_placement("root", "archive/source.txt")
-            .expect("source placement should load")
-            .expect("source placement should be restored");
-        assert_eq!(source_placement.provider, "stub");
-        assert!(state
-            .metadata_store
-            .object_placement("family", "archive/source.txt")
-            .expect("destination placement should load")
-            .is_none());
+        assert_eq!(
+            state
+                .metadata_store
+                .object_placement("root", "archive/source.txt")
+                .expect("source placement should load"),
+            source_placement_before
+        );
+        assert_eq!(
+            load_logical_object_record(&state, "root", "archive/source.txt")
+                .expect("source logical metadata should load"),
+            source_logical_before
+        );
+        assert_eq!(
+            state
+                .metadata_store
+                .object_protection_plan("root", "archive/source.txt")
+                .expect("source protection plan should load"),
+            source_protection_plan_before
+        );
+        assert_eq!(
+            state
+                .metadata_store
+                .object_placement("family", "archive/source.txt")
+                .expect("destination placement should load"),
+            destination_placement_before
+        );
+        assert_eq!(
+            load_logical_object_record(&state, "family", "archive/source.txt")
+                .expect("destination logical metadata should load"),
+            destination_logical_before
+        );
+        assert_eq!(
+            state
+                .metadata_store
+                .object_protection_plan("family", "archive/source.txt")
+                .expect("destination protection plan should load"),
+            destination_protection_plan_before
+        );
     }
 
     fn seeded_move_input() -> ObjectActionInput {
@@ -44749,10 +44827,20 @@ mod tests {
         else {
             panic!("seed_object_for_move requires a move input");
         };
-        let uri: Uri = format!("/{source_bucket}/{source_key}")
+        seed_object_at(
+            state,
+            source_bucket,
+            source_key,
+            b"shared core move source",
+        )
+        .await;
+    }
+
+    async fn seed_object_at(state: &AppState, bucket: &str, key: &str, body: &'static [u8]) {
+        let uri: Uri = format!("/{bucket}/{key}")
             .parse()
             .expect("source uri should parse");
-        let body = Bytes::from_static(b"shared core move source");
+        let body = Bytes::from_static(body);
         let headers = signed_headers(
             &state.config,
             &Method::PUT,
@@ -44762,7 +44850,7 @@ mod tests {
         );
         put_object(
             State(state.clone()),
-            Path((source_bucket.clone(), source_key.clone())),
+            Path((bucket.to_string(), key.to_string())),
             Method::PUT,
             OriginalUri(uri),
             headers,
