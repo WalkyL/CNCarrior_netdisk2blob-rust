@@ -24876,8 +24876,11 @@ fn load_control_plane_state(
 ) -> Result<ControlPlaneState> {
     match fs::read_to_string(path) {
         Ok(raw) => {
-            let mut state: ControlPlaneState =
+            let raw_state: serde_json::Value =
                 serde_json::from_str(&raw).context("invalid control plane JSON")?;
+            let missing_onedrive_policy = raw_state.get("onedrive_policy").is_none();
+            let mut state: ControlPlaneState =
+                serde_json::from_value(raw_state).context("invalid control plane JSON")?;
             if state.topology.primary_provider == ProviderId::Stub
                 && default_state.topology.primary_provider != ProviderId::Stub
             {
@@ -24909,6 +24912,9 @@ fn load_control_plane_state(
                 replication_mode: state.topology.replication_mode,
             })
             .context("invalid saved topology in control plane file")?;
+            if missing_onedrive_policy {
+                state.onedrive_policy = OnedrivePolicy::from_env_defaults(&state.topology);
+            }
             state.high_speed_providers = normalize_high_speed_providers(
                 if state.high_speed_providers.is_empty() {
                     default_high_speed_providers()
@@ -53979,6 +53985,27 @@ mod tests {
         .expect("legacy control plane should decode");
         assert!(decoded.object_batch_ledger.is_empty());
         assert_eq!(decoded.object_topology_generation, 0);
+    }
+
+    #[test]
+    fn legacy_control_plane_load_keeps_onedrive_sync_policy_enabled() {
+        let config = test_config();
+        fs::write(
+            &config.control_plane_file,
+            r#"{"topology":{"primary_provider":"stub","sync_targets":["onedrive"],"fallback_read_order":[],"onedrive_enabled":true,"replication_mode":"async_backup"}}"#,
+        )
+        .expect("legacy control plane should write");
+
+        let loaded = load_control_plane_state(
+            &config.control_plane_file,
+            &config.credentials_dir,
+            default_control_plane_state(&config),
+            config.onedrive.enabled,
+        )
+        .expect("legacy control plane should load");
+
+        assert_eq!(loaded.topology.sync_targets, vec![ProviderId::Onedrive]);
+        assert!(loaded.onedrive_policy.replication_enabled);
     }
 
     #[tokio::test]
