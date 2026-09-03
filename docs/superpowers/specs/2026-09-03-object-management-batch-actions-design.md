@@ -223,7 +223,7 @@ objects、destination 映射和 action 全部来自 plan_id，客户端不能在
 
 如果 reservation 后、首个 provider 变更调用前发生错误，持久化 state=rejected、终态 HTTP status 和错误 payload；rejected 响应使用统一的批次错误 envelope，包含 batch_id、state=rejected、code、message 和 items=[]，同 key 相同 fingerprint 后续请求重放完全相同的 HTTP status/body。如果 provider_call_started_at 已持久化后中间结果无法持久化，停止剩余项并尽力保存 interrupted ledger；不自动重放。
 
-批量每一项必须调用与现有单对象 POST /api/object-actions 共用的结构化动作核心。move 成功后的网关状态必须与现有单对象 move 完全一致：远端 destination 成功后，destination placement、logical object 和 protection plan 成为当前记录，source 对应记录被删除；同时为 destination 入队 replication put、为 source 入队 replication delete，并准备两条对应 WAL 记录。远端动作后的 metadata 或复制入队失败沿用现有 rollback_move_after_failure 语义，结果标为 failed 并保留 side-effect/rollback 说明；不得只移动远端对象而留下 source metadata。
+批量每一项必须调用与现有单对象 POST /api/object-actions 共用的结构化动作核心。move 的状态迁移和失败顺序必须与现有单对象 core 一致：先捕获 source/target metadata 和 protection plan，准备 destination/source WAL，暂存 destination placement，再调用 provider move；成功后删除 source placement、迁移 logical/protection metadata，并为 destination 入队 replication put、为 source 入队 replication delete。远端动作后的 metadata 或复制入队失败沿用现有 rollback_move_after_failure 语义，结果标为 failed 并保留 side-effect/rollback 说明；不得只移动远端对象而留下 source metadata。
 
 WAL 提交完成标记沿用现有 mark_gateway_write_ahead_log_committed_or_warn 语义：提交标记失败只记录 WAL commit warning 和运行时告警，不回滚已经成功的远端 move/delete，也不把该对象改判为 failed。结构化动作核心要把 warning 回传给批量 item 的 warnings 字段和批次历史；单对象 API 的成功/告警语义保持不变。
 
