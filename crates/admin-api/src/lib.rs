@@ -27,6 +27,8 @@ pub const ROUTE_REPLICATION_DLQ_REPLAY_TARGET: &str =
     "/api/replication/dlq/targets/{target}/replay";
 pub const ROUTE_OBJECT_RECONCILE_PREVIEW: &str = "/api/object-reconcile/preview";
 pub const ROUTE_OBJECT_RECONCILE_EXECUTE: &str = "/api/object-reconcile/execute";
+pub const ROUTE_OBJECT_BATCH_PREVIEW: &str = "/api/object-actions/batch/preview";
+pub const ROUTE_OBJECT_BATCH_EXECUTE: &str = "/api/object-actions/batch";
 pub const ROUTE_ALERT_SUPPRESSIONS: &str = "/api/alerts/suppressions";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +66,13 @@ pub enum AdminDtoKind {
     ObjectReconcileExecuteInput,
     ObjectReconcileExecutePayload,
     ObjectReconcilePreviewPayload,
+    ObjectBatchPreviewInput,
+    ObjectBatchExecuteInput,
+    ObjectBatchItemPayload,
+    ObjectBatchPreviewPayload,
+    ObjectBatchExecutePayload,
+    ObjectBatchErrorPayload,
+    ObjectBatchRecoveryPayload,
     AdminAlertSuppressionInput,
     SuppressedAdminAlertRecord,
     SuppressedAdminAlertRecordList,
@@ -418,6 +427,126 @@ pub struct ObjectReconcileExecuteEntryPayload {
     pub local_spool_required_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectBatchAction {
+    Delete,
+    Move,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchObjectInput {
+    pub bucket: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchPreviewInput {
+    pub action: ObjectBatchAction,
+    pub selection_id: String,
+    pub objects: Vec<ObjectBatchObjectInput>,
+    #[serde(default)]
+    pub destination_bucket: Option<String>,
+    #[serde(default)]
+    pub destination_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchExecuteInput {
+    pub plan_id: String,
+    pub batch_id: String,
+    #[serde(default)]
+    pub operator: Option<String>,
+    #[serde(default)]
+    pub ticket: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectBatchItemStatus {
+    Ready,
+    AlreadyMissing,
+    NoOp,
+    Completed,
+    Failed,
+    StaleConflict,
+    NotStarted,
+    Conflict,
+    Unverifiable,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchItemPayload {
+    pub ordinal: usize,
+    pub source: ObjectBatchObjectInput,
+    pub read_source: String,
+    pub home_provider: String,
+    #[serde(default)]
+    pub destination: Option<ObjectBatchObjectInput>,
+    pub status: ObjectBatchItemStatus,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchPreviewPayload {
+    pub plan_id: String,
+    pub plan_expires_at_unix_ms: u64,
+    pub topology_fingerprint: String,
+    pub items: Vec<ObjectBatchItemPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchExecutePayload {
+    pub batch_id: String,
+    pub action: ObjectBatchAction,
+    pub authenticated_principal: String,
+    pub operator_label: Option<String>,
+    pub requested: usize,
+    pub completed: usize,
+    pub already_missing: usize,
+    pub no_op: usize,
+    pub failed: usize,
+    pub stale_conflict: usize,
+    pub not_started: usize,
+    pub non_atomic_warning: bool,
+    pub consistency_note: String,
+    pub results: Vec<ObjectBatchItemPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchErrorPayload {
+    #[serde(default)]
+    pub batch_id: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    pub code: String,
+    pub message: String,
+    pub action: ObjectBatchAction,
+    pub items: Vec<ObjectBatchItemPayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectBatchRecoveryPayload {
+    pub batch_id: String,
+    pub action: ObjectBatchAction,
+    pub state: String,
+    pub code: String,
+    pub requested: usize,
+    pub saved_count: usize,
+    pub unresolved_count: usize,
+    pub saved_results: Vec<ObjectBatchItemPayload>,
+    pub unresolved_items: Vec<ObjectBatchItemPayload>,
+    pub non_atomic_warning: bool,
+    pub consistency_note: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdminAlertSuppressionInput {
     pub alert_id: String,
@@ -684,6 +813,22 @@ pub fn route_contracts() -> Vec<AdminRouteContract> {
             response: AdminDtoKind::ObjectReconcileExecutePayload,
         },
         AdminRouteContract {
+            id: "object_batch_preview",
+            method: AdminApiMethod::Post,
+            path: ROUTE_OBJECT_BATCH_PREVIEW,
+            surface: AdminApiSurface::Operator,
+            request: Some(AdminDtoKind::ObjectBatchPreviewInput),
+            response: AdminDtoKind::ObjectBatchPreviewPayload,
+        },
+        AdminRouteContract {
+            id: "object_batch_execute",
+            method: AdminApiMethod::Post,
+            path: ROUTE_OBJECT_BATCH_EXECUTE,
+            surface: AdminApiSurface::Operator,
+            request: Some(AdminDtoKind::ObjectBatchExecuteInput),
+            response: AdminDtoKind::ObjectBatchExecutePayload,
+        },
+        AdminRouteContract {
             id: "admin_alert_suppressions_update",
             method: AdminApiMethod::Post,
             path: ROUTE_ALERT_SUPPRESSIONS,
@@ -826,6 +971,25 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn object_batch_contracts_are_registered_and_serde_stable() {
+        let routes = route_contracts();
+        assert!(routes.iter().any(|route| {
+            route.id == "object_batch_preview"
+                && route.method == AdminApiMethod::Post
+                && route.path == ROUTE_OBJECT_BATCH_PREVIEW
+                && route.request == Some(AdminDtoKind::ObjectBatchPreviewInput)
+                && route.response == AdminDtoKind::ObjectBatchPreviewPayload
+        }));
+        assert!(routes.iter().any(|route| {
+            route.id == "object_batch_execute"
+                && route.method == AdminApiMethod::Post
+                && route.path == ROUTE_OBJECT_BATCH_EXECUTE
+                && route.request == Some(AdminDtoKind::ObjectBatchExecuteInput)
+                && route.response == AdminDtoKind::ObjectBatchExecutePayload
+        }));
+    }
+
+    #[test]
     fn contract_routes_distinguish_operator_and_internal_surfaces() {
         let routes = route_contracts();
         let operator_routes = operator_route_contracts();
@@ -885,6 +1049,16 @@ mod tests {
         assert!(
             routes
                 .iter()
+                .any(|route| route.path == ROUTE_OBJECT_BATCH_PREVIEW)
+        );
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.path == ROUTE_OBJECT_BATCH_EXECUTE)
+        );
+        assert!(
+            routes
+                .iter()
                 .any(|route| route.path == ROUTE_ALERT_SUPPRESSIONS)
         );
     }
@@ -922,6 +1096,12 @@ mod tests {
         }));
         assert!(routes.iter().any(|route| {
             route.path == ROUTE_OBJECT_RECONCILE_EXECUTE && route.method == AdminApiMethod::Post
+        }));
+        assert!(routes.iter().any(|route| {
+            route.path == ROUTE_OBJECT_BATCH_PREVIEW && route.method == AdminApiMethod::Post
+        }));
+        assert!(routes.iter().any(|route| {
+            route.path == ROUTE_OBJECT_BATCH_EXECUTE && route.method == AdminApiMethod::Post
         }));
         assert!(routes.iter().any(|route| {
             route.path == ROUTE_ALERT_SUPPRESSIONS && route.method == AdminApiMethod::Post
@@ -979,6 +1159,32 @@ mod tests {
         assert_eq!(
             reconcile.response,
             AdminDtoKind::ObjectReconcileExecutePayload
+        );
+
+        let batch_preview = routes
+            .iter()
+            .find(|route| route.id == "object_batch_preview")
+            .expect("object batch preview route should be registered");
+        assert_eq!(
+            batch_preview.request,
+            Some(AdminDtoKind::ObjectBatchPreviewInput)
+        );
+        assert_eq!(
+            batch_preview.response,
+            AdminDtoKind::ObjectBatchPreviewPayload
+        );
+
+        let batch_execute = routes
+            .iter()
+            .find(|route| route.id == "object_batch_execute")
+            .expect("object batch execute route should be registered");
+        assert_eq!(
+            batch_execute.request,
+            Some(AdminDtoKind::ObjectBatchExecuteInput)
+        );
+        assert_eq!(
+            batch_execute.response,
+            AdminDtoKind::ObjectBatchExecutePayload
         );
 
         let suppress = routes
