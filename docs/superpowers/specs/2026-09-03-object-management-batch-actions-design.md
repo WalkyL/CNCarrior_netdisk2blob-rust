@@ -1,304 +1,511 @@
 # 对象管理与批量删除/移动设计
 
-**日期：** 2026-09-03
+**日期：** 2026-09-04
 
-**状态：** 已按 Sol 审阅意见修订，待复审
+**状态：** 已按 Sol 两轮审阅修订，待用户审阅
 
 ## 背景
 
-Admin Web 的“对象与文件操作”页已经能从当前读来源浏览对象，且网关已经有单对象的托管删除、重命名、复制和移动能力。当前浏览表格的行操作只有“检查”，用户需要把 bucket 和 key 再次填入下方文件操作表单才能执行动作。
+Admin Web 的“对象与文件操作”页已经能从当前读来源浏览对象，也已经有网关托管的单对象删除、重命名、复制和移动能力。但当前列表行操作主要是“检查”，用户需要把已经看到的 bucket/key 再次填入下方表单，才能执行动作。
 
-这把“找到对象”和“整理对象”拆成两个不连贯的步骤，增加了重复输入，也容易把“删除真实云盘对象”和“清理残留 Placement 元数据”混淆。
+用户真正要完成的是：
 
-本次只解决用户最常见的两个任务：
+1. 找到需要整理的文件；
+2. 选择一个或多个文件；
+3. 移动或删除；
+4. 看到明确的执行结果。
 
-1. 选择一个或多个对象并删除。
-2. 选择一个或多个对象并移动到指定桶和目录。
+本设计把当前对象列表变成管理入口，首版只优化两个高频任务：批量删除和批量移动。
 
 ## 设计原则
 
 ### 第一性原理
 
-用户的任务是“找到文件、选择文件、移动或删除、确认结果”。普通操作不要求先理解 provider、placement、复制拓扑或审计字段。
+普通操作者不需要先理解 provider、placement、复制拓扑或 WAL。界面应围绕“找文件、选文件、执行整理、确认结果”组织。
 
 ### 易用性
 
-- 在当前对象列表中直接选择，不重复输入已显示的 bucket 和 key。
-- 单对象与批量对象使用同一套管理交互。
-- 批量移动只填写目标桶和目录，自动保留每个源对象的文件名。
-- 删除前展示数量和对象摘要。
-- 完成后逐项展示结果，不把部分失败伪装成整体成功。
+- 从当前列表直接选择，不重复输入已显示的 bucket/key；
+- 单对象和批量对象使用同一套管理交互；
+- 批量移动只填写目标桶和目标目录，自动保留每个源对象的文件名；
+- 删除前显示数量、对象摘要和真实影响；
+- 执行后按对象显示结果，不把部分失败伪装成整体成功。
 
 ### 简约性
 
-- 未选中对象时不显示批量工具栏。
-- 真实对象删除与 Placement 元数据清理使用不同入口和文案。
-- 删除、移动是主路径；rename/copy 收进高级操作。
-- 不新增 provider 选择器、重复对象输入表单或无意义的确认层级。
+- 未选中对象时不显示批量工具栏；
+- 真实云盘对象删除与 Placement 元数据清理使用不同入口和文案；
+- 删除、移动是主路径；rename/copy 收进高级操作；
+- 不新增 provider 选择器、重复对象输入表单或多余确认层。
 
-## 并发与一致性选择
+## 方案与范围
 
-本次采用已确认的实用方案，不扩展 `BlobBackend` 或各 provider 的条件移动协议：
+采用“增强现有对象列表”的方案。它复用当前浏览、对象状态、网关动作和共享历史，减少导航和重复实现。
 
-- 在 `gatewayd` 增加一个网关内对象变更锁。现有 Admin 单对象动作和新的批量执行都使用这把锁；批量执行从最终预检开始一直持有到本批次结束。
-- 批量执行在锁内再次验证来源对象身份、目标是否存在和目标 metadata，然后按稳定顺序逐项调用现有网关托管动作。
-- 产品保证定义为：“最终网关预检观察到任何冲突时，在第一项写入前阻止整个批次；网关内受同一把锁保护的其他 Admin 对象动作不会插入预检与执行之间。”
-- 这不是跨进程、跨网关实例或绕过网关的 S3/provider 直写的分布式 CAS 保证。数据面 S3 写入和外部客户端仍可能在 provider 操作窗口内制造竞态；本版不伪装成绝对原子移动。
-- 如果在某个对象开始前的边界检查发现外部变化，停止剩余未开始项并逐项报告；已经成功的项不自动撤销。如果 provider 调用内部发生不可观察的外部竞态，沿用 provider 返回结果并明确记录“非原子批量”。
+本次包含：
 
-这样既满足常规 Admin 操作下“冲突先发现、整批不写入”的安全目标，也不引入当前 provider 抽象无法兑现的严格条件移动承诺。
+- 当前结果列表的多选、当前结果全选和清除选择；
+- 单对象“管理”入口；
+- 批量删除；
+- 批量移动到目标桶和目录，并保留 basename；
+- 服务端预检、短期 selection/plan；
+- 网关内对象变更锁；
+- 幂等提交、逐项结果和批次历史摘要；
+- Admin API、Rust 行为测试、DOM/state 测试和运维文档。
 
-## 范围
+本次不包含：
 
-### 包含
+- 递归文件夹操作、服务端全量搜索或未加载对象的隐式全选；
+- 回收站、撤销删除或用户指定底层 provider；
+- 批量 copy、批量 rename；
+- provider crate 或 BlobBackend 条件移动协议改造；
+- .43/.49 部署、真实凭据注入和正式发布。
 
-- 当前对象浏览表格的多选能力。
-- “全选当前结果”和“清除选择”。
-- 单对象“管理”入口。
-- 批量删除。
-- 批量移动至目标桶、目标目录，并保留源文件名。
-- 服务端冲突预检。
-- 批量执行的逐项结果、共享历史和对象列表刷新。
-- Admin API、Rust 测试、Admin HTML 合同测试与运维文档更新。
+## 并发与一致性边界
 
-### 不包含
+本版采用实用方案，不向 provider 要求当前抽象没有的条件移动或 CAS 能力。
 
-- 递归文件夹操作、服务端全量搜索或未加载对象的隐式全选。
-- 回收站、撤销删除或用户指定底层 provider。
-- 批量 copy、批量 rename。
-- 修改运营商 provider 的底层对象动作协议。
-- .43 部署、真实凭据注入和正式发布。
+### 网关内保护
 
-## 交互设计
+增加一把网关内对象变更锁。以下现有 Admin 路径和新批量执行必须使用它：
 
-### 对象列表成为管理入口
+- POST /api/object-actions；
+- POST /api/object-actions/batch；
+- POST /api/object-reconcile/execute 的实际执行分支；
+- POST /api/object-placement/delete-stale；
+- POST /api/object-placement/delete-stale-bulk。
 
-“浏览桶和对象 Key（当前读来源）”保留为对象管理主列表。每行增加选择框，并把当前的“检查”行操作改为“管理”。点击“管理”打开对象管理面板，自动载入该对象状态，并提供查看状态、移动和删除；用户不再复制 bucket/key。
+批量执行从最终预检开始一直持有锁，直到本批次结束。预览、状态查询和历史导出不持有该锁。数据面 S3 PUT/DELETE、后台 replication worker 和绕过网关的 provider 客户端不在锁内。
 
-选择状态同时保存当前列表的 `selection_id`、bucket、prefix、列表来源 provider、加载时间和已加载对象的身份快照（etag、size、last_modified）。`selection_id` 由对象列表接口生成，是防止 UI 误把不同查询结果混在一起的短期服务端快照标识，不是新的授权机制。selection 快照有效期固定为 5 分钟，服务端最多保留 32 个未过期快照。
+### 产品保证
 
-以下情况必须清空选择、丢弃 `selection_id` 并关闭批量面板：
+产品保证精确定义为：
+
+- 最终网关预检观察到任何冲突时，在第一项写入前阻止整个批次；
+- 受同一把锁保护的其他 Admin 对象元数据动作不会插入最终预检与执行之间；
+- 外部 S3/provider 写入或其他网关实例造成的竞态不宣称为分布式原子保证；
+- 如果下一个对象开始前发现外部变化，停止剩余未开始项并返回逐项状态；已经完成的项不自动撤销；
+- 预览、执行结果和批次历史都带有 non_atomic_warning 与可读的 consistency_note，明确外部竞态边界。
+
+锁最多等待 5 秒；超时返回 409、reason code batch_busy 和 Retry-After: 5，不开始任何对象动作。
+
+## UI 设计
+
+### 对象列表与选择状态
+
+“浏览桶和对象 Key（当前读来源）”继续作为主列表。每行显示：
+
+- 选择框；
+- object key；
+- 大小；
+- 修改时间；
+- “管理”按钮。
+
+前端保存：
+
+- selection_id；
+- bucket、prefix；
+- 列表 read source/provider 与 fallback source；
+- 加载时间；
+- 已加载对象的 canonical bucket/key 和身份快照（etag、size、last_modified）。
+
+selection_id 是服务端短期快照标识，不是授权机制。当前结果全选只选择已经渲染的行，不代表服务端未加载的对象。单次最多选择 100 项。
+
+下列任一事件发生时，必须清空选择、丢弃 selection_id、关闭批量面板并清除当前批次预览：
 
 - 切换 bucket；
 - 修改 prefix 并重新浏览；
-- 点击重载桶列表或重新加载对象；
-- 列表来源 provider/fallback 来源变化；
-- 请求失败或页面重新加载。
+- 重载桶列表或对象列表；
+- read source/fallback source 发生变化；
+- 列表请求失败；
+- 页面重新加载；
+- 操作完成或部分失败。
 
-当至少选中一项时，列表上方显示：
+### 单对象管理
+
+点击某行“管理”打开统一管理面板，自动填入该行的 bucket/key，并先显示对象状态。面板提供：
+
+- 移动；
+- 删除；
+- 查看详细状态；
+- 进入高级操作。
+
+同一面板既服务单对象，也服务批量对象；不要求复制 bucket/key。现有 rename/copy 表单收进“高级对象操作”，不再作为删除/移动的主入口。
+
+### 批量工具栏
+
+至少选中一项后，在列表上方显示：
 
     已选 3 项    [移动] [删除] [清除选择]
 
-“全选当前结果”只选择当前已经渲染的对象，不代表服务端未加载的全部对象。首版单次批量上限为 100 项；超过上限时立即提示缩小列表或分批执行。服务端也强制执行该上限。
+工具栏明确写“当前已加载结果”，避免用户误认为会作用于未加载对象。
 
 ### 批量移动
 
-移动面板只包含：
+移动面板只要求：
 
 - 目标桶；
 - 目标目录。
 
-目标目录为空表示目标桶根目录。系统取每个源 key 最后一个路径片段作为文件名并生成目标 key。例如：
+目标目录为空表示目标桶根目录。每个源 key 取最后一个路径片段作为 basename：
 
-    源：root/photos/2026/a.jpg
-    目标目录：family/archive/
-    结果：family/archive/a.jpg
+    source:      root/photos/2026/a.jpg
+    destination: family/archive/
+    result:      family/archive/a.jpg
 
-面板显示源 key、当前读来源、实际 home provider 到目标 key 的预览。预检确认输入合法、目标 key 不重复、目标对象在实际动作 backend 上不存在、网关没有目标 metadata、源对象身份仍匹配且 provider 支持现有网关托管移动语义。任何在最终网关预检中观察到的冲突都会阻止整个批次写入，并逐项列出冲突原因。
+预览逐项显示：
 
-源与目标相同的 no-op 对象必须在预览中明确标识，不能伪装成正常移动。
+- source bucket/key；
+- 当前列表 read source；
+- 实际动作 home provider；
+- destination bucket/key；
+- ready/no-op/conflict 状态；
+- 警告和 reason code。
 
-预检计划有效期固定为 5 分钟；如果计划过期或执行前状态发生变化，必须重新预览，不能直接继续执行旧计划。
+如果 canonical source 与 destination 完全相同，先验证 source identity 和 home-provider 解析，再分类为 no_op，不参加目标存在冲突判断，也不调用远端 move。一个批次可以混合 no_op 与真正移动项；全部为 no_op 时仍可生成计划，但界面提示“没有需要移动的对象”。
+
+移动目标冲突包括：
+
+- 实际动作 backend 上目标对象已存在；
+- 网关已有目标 placement、logical object 或 protection plan；
+- 本批次两个源对象生成同一目标 key。
+
+发现任何上述冲突时，批次在第一项写入前停止。目标 metadata 残留不能由批量移动隐式覆盖。
 
 ### 批量删除
 
-点击“删除”后，客户端先调用批量预检；预检通过后才打开唯一的删除确认面板。预检冲突直接显示冲突列表，不弹出可继续的确认框。
+点击“删除”后先调用服务端预检；预检通过后才打开唯一的删除确认面板。预检冲突直接展示冲突列表，不打开可继续的确认框。
 
-删除面板在一次确认中显示：
+确认面板显示：
 
 - “即将删除 N 个云盘对象”；
-- 前五个对象的 bucket/key，更多对象仅显示数量；
-- “这会删除云盘对象及网关元数据，并产生相应复制状态”。
+- 前 5 个对象的 bucket/key，剩余数量；
+- “这会删除云盘对象及网关元数据，并产生相应复制状态”；
+- 取消和确认删除按钮。
 
-用户点击“确认删除”即可执行，不要求输入确认短语。请求进行时禁用操作按钮，避免重复提交。
+不要求输入确认短语。请求期间禁用所有批量操作按钮。
 
-删除预览逐项区分：
+删除预检逐项分类：
 
-- `ready`：对象仍存在且身份与列表快照一致；
-- `already_missing`：远端对象已经不存在，执行时只尝试沿用现有语义清理网关 metadata；
-- `stale_conflict`：对象仍存在但身份已改变；
-- `unverifiable`：无法取得足够身份信息。
+- ready：对象仍存在且身份与 selection 快照一致；
+- already_missing：远端对象已经不存在，执行时只尝试清理可清理的网关 metadata；
+- stale_conflict：对象仍存在但身份已经改变；
+- unverifiable：无法取得足够身份信息。
 
-`stale_conflict` 或 `unverifiable` 会让整个删除批次在第一项写入前停止；`already_missing` 可以作为安全收敛项继续，但结果不会伪装成发生过远端删除。删除本版是 best-effort 收敛，不宣称能删除某个已被外部替换的历史版本。
+任何 stale_conflict 或 unverifiable 都阻止整个删除批次。already_missing 可以进入计划，但执行结果不能伪装成发生过远端删除。删除是 best-effort 收敛，不承诺删除某个已被外部替换的历史版本。
 
-Placement 卡片中的“删除残留 Placement”保持现有独立入口和独立文案；该动作只清理网关元数据，不删除云盘文件。
-
-### 高级操作
-
-现有 rename/copy 手工表单保留为“高级对象操作”。删除和移动从该表单主路径移除，避免同一动作有两套不一致入口。operator、ticket、notes 也收进可选高级审计区；批量执行时相同审计字段写入该批次摘要。
+Placement 卡片中的“删除残留 Placement”保持独立入口；它只清理网关元数据，不删除云盘文件。
 
 ## API 与数据流
 
 ### 对象列表快照
 
-`GET /api/object-browser/objects` 的成功响应新增：
+GET /api/object-browser/objects 成功响应新增：
 
-- `selection_id`：短期、不可猜测的服务端快照标识；
-- `selection_expires_at`：快照过期时间。
+- selection_id：不可猜测的短期服务端快照标识；
+- selection_expires_at：过期时间。
 
-服务端在有界缓存中保存 bucket、prefix、读来源和最多当前返回对象的 canonical key 与身份快照。缓存过期后，批量预检必须要求重新浏览。
+selection 快照有效期固定为 5 分钟，服务端最多保留 32 个未过期快照。快照保存 bucket、prefix、read source 和当前返回对象的 canonical key 与身份快照。它只约束 Admin UI 选中的范围，不能替代服务端重新读取对象。
+
+### Home provider 解析
+
+对每个对象，动作 backend 按以下顺序确定：
+
+1. 有持久化 placement 时，placement provider 是唯一权威 home provider；
+2. 没有 placement 时，使用最终预检时的当前 primary provider；
+3. 列表 read source/fallback source 只用于展示和 selection 绑定，不决定动作 backend；
+4. 如果列表来源能读到对象，但权威 home provider 不能读到，返回 home_resolution_conflict；
+5. 如果 preview 与 execute 之间 primary 发生变化，最终预检将计划视为过期并拒绝执行。
 
 ### 批量预检
 
 新增 POST /api/object-actions/batch/preview。
 
-它接受 delete 或 move、`selection_id`、所选对象列表，以及 move 所需的 destination_bucket 和 destination_prefix。预检不写入云盘、metadata、复制队列或共享历史。
+请求：
 
-请求中的对象只能是 `selection_id` 对应当前已加载结果的子集；服务端按 canonical bucket/key 去重并拒绝重复项。服务端仍会重新读取对象，不信任浏览器提交的身份字段。
+    {
+      "action": "move",
+      "selection_id": "selection-opaque-id",
+      "objects": [
+        { "bucket": "root", "key": "photos/a.jpg" },
+        { "bucket": "root", "key": "photos/b.jpg" }
+      ],
+      "destination_bucket": "family",
+      "destination_prefix": "archive/"
+    }
 
-移动预检成功返回每行源 key、列表来源、实际 home provider、生成的目标 key、no-op 状态和警告。目标冲突、源身份过期、selection 过期或无法验证返回 `409 Conflict`，并包含所有冲突项；无效字段、重复项或超过批量上限返回 `400 Bad Request`。
+action 只允许 delete 或 move。对象必须是 selection 对应当前结果的子集；服务端按 canonical bucket/key 去重并拒绝重复项。客户端不提交或覆盖身份字段，服务端从快照和实际 backend 重新读取身份。
 
-移动目标冲突包括：
+预检成功返回 plan_id、plan_expires_at、规范化后的对象映射和逐项状态。计划有效期固定为 5 分钟。
 
-- 实际执行 backend 上目标对象已存在；
-- 网关已有目标 placement、logical object 或 protection plan；
-- 本批次两个源对象生成同一目标 key。
+预检失败使用 409 Conflict，表示没有任何对象动作开始；字段、重复项或数量错误使用 400 Bad Request。所有可预期错误返回：
 
-目标 metadata 残留也按冲突处理，不由批量移动隐式覆盖。
+    {
+      "code": "batch_preflight_failed",
+      "message": "Batch did not start.",
+      "action": "move",
+      "items": [
+        {
+          "ordinal": 0,
+          "source": { "bucket": "root", "key": "photos/a.jpg" },
+          "destination": { "bucket": "family", "key": "archive/a.jpg" },
+          "status": "conflict",
+          "reason_code": "destination_exists",
+          "message": "Destination exists on the action provider."
+        }
+      ]
+    }
 
-删除预检在同一接口上执行上面的 `ready/already_missing/stale_conflict/unverifiable` 分类；只有无 stale/unverifiable 项时才生成可执行计划。
+移动预检中，源不存在使用 source_missing，源身份变化使用 source_changed，无法取得身份使用 source_unverifiable；这些状态都会阻止整个移动计划。删除预检允许 already_missing，但不允许 stale_conflict 或 unverifiable。
 
-预检通过时返回短期 `plan_id` 和 `plan_expires_at`。`plan_id` 绑定 action、selection、规范化后的对象集合、目标映射和预检身份快照。
+预检成功的逐项结构至少包含：
+
+    {
+      "ordinal": 0,
+      "source": { "bucket": "root", "key": "photos/a.jpg" },
+      "read_source": "telecom",
+      "home_provider": "unicom",
+      "destination": { "bucket": "family", "key": "archive/a.jpg" },
+      "status": "ready",
+      "warnings": []
+    }
+
+删除预检使用同一接口和同一错误合同；already_missing 是可执行计划状态，stale_conflict 和 unverifiable 会让整个计划失败。
 
 ### 批量执行
 
-新增 POST /api/object-actions/batch。
-
-执行请求只提交预检计划和审计字段：
+新增 POST /api/object-actions/batch。请求必须带 Idempotency-Key header，并且 body 中的 batch_id 必须与 header 完全相同：
 
     {
       "plan_id": "plan-opaque-id",
-      "batch_id": "batch-opaque-id",
+      "batch_id": "550e8400-e29b-41d4-a716-446655440000",
       "operator": "alice",
       "ticket": "CHG-2026-0903",
       "notes": "整理归档"
     }
 
-移动的对象和目标映射、删除的对象集合都来自 `plan_id`，客户端不能在执行请求中重新改写它们。`batch_id` 必须与 `Idempotency-Key` header 的值完全相同；服务端要求 header 存在且长度在 1 到 128 个 ASCII 字符之间。
+客户端只生成 canonical lowercase UUID v4。服务端拒绝不匹配以下规则的 key：
 
-接口沿用现有 Admin 鉴权。服务端不接受用户指定底层 provider，而是复用已有对象归属、网关托管动作、WAL、metadata 与复制语义。
+    ^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
 
-执行时先以最多 5 秒的有界等待取得网关内对象变更锁；锁忙时返回 `409 Conflict`，不开始任何对象动作。取得锁后验证 `plan_id` 未过期，再执行最终预检。服务端按 canonical source bucket/key 的稳定顺序逐项调用复用后的单对象动作核心，不从浏览器直接循环调用单对象 HTTP 接口。
+对象集合、目标映射和 action 全部来自 plan_id，客户端不能在执行请求中改写。
 
-最终预检失败时返回 `409 Conflict`，不开始任何对象动作。执行过程中在下一个对象开始前发现目标出现、源身份改变或其他冲突时，停止剩余对象并把它们标记为 `not_started`；已完成结果保留。
+执行流程：
 
-部分失败时仍返回 200 OK 和逐项结果。结果状态固定为 `completed`、`already_missing`、`no_op`、`failed`、`stale_conflict`、`not_started`：
+1. 以最多 5 秒的有界等待取得对象变更锁；
+2. 验证 plan 未过期；
+3. 在锁内执行最终预检；
+4. 最终预检通过后，按 canonical source bucket/key 稳定排序，逐项调用复用后的单对象动作核心；
+5. 每完成一个对象，就更新幂等 ledger 的逐项结果；
+6. 完成后保存最终响应、批次历史摘要并释放锁。
+
+如果幂等 key 的 reserve 或中间结果持久化失败，则在任何对象动作开始前返回 500 和 batch_ledger_unavailable；如果某个对象的远端动作已经完成但其 ledger 更新失败，立即停止剩余项，保留已完成项，并返回 failed 或 interrupted 语义，绝不自动重放该对象。
+
+最终预检失败返回 409 Conflict，不开始任何对象动作。执行过程中在下一个对象开始前发现目标出现、源身份变化或其他冲突时，停止剩余项并标记为 not_started；已完成项保留。
+
+执行结果每项固定包含：
+
+- ordinal；
+- source；
+- read_source；
+- home_provider；
+- 可选 destination；
+- status；
+- 可选 reason_code；
+- 可选 message。
+
+status 只允许：
+
+- completed；
+- already_missing；
+- no_op；
+- failed；
+- stale_conflict；
+- not_started。
+
+响应至少包含：
 
     {
+      "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+      "action": "move",
       "requested": 2,
       "completed": 1,
       "already_missing": 0,
       "no_op": 0,
       "failed": 1,
+      "stale_conflict": 0,
       "not_started": 0,
-      "batch_id": "batch-opaque-id",
-      "results": [
-        {
-          "bucket": "root",
-          "key": "photos/a.jpg",
-          "status": "completed",
-          "destination_key": "family/archive/a.jpg"
-        },
-        {
-          "bucket": "root",
-          "key": "photos/b.jpg",
-          "status": "failed",
-          "message": "..."
-        }
-      ]
+      "non_atomic_warning": true,
+      "consistency_note": "External writers are outside the gateway mutation lock.",
+      "results": []
     }
 
-跨对象批量不声明事务性，也不自动撤销已经成功的对象。UI 必须清楚显示各状态计数。预检失败不产生动作历史；`already_missing`、`no_op` 和 `not_started` 不伪造远端成功。
+计数不变量为：
 
-服务端为 `Idempotency-Key` 保存有界的请求指纹和最终响应（不保存凭据），例如最多保留 64 个未过期批次记录并按 24 小时过期。相同 key 和相同计划/审计指纹重复提交返回原响应；相同 key 绑定不同请求返回 `409 Conflict`。
+    requested == completed + already_missing + no_op + failed + stale_conflict + not_started
 
-共享历史为每个批次写入一条摘要记录，包含 `batch_id`、action、批次标记、各状态计数、审计字段和最多 100 项的结果引用；现有 `object_action_history_limit` 只限制批次摘要数量，不会把一个批次的 100 项结果拆成 100 条互相争抢全局上限的记录。单对象 API 的历史语义不变。
+跨对象批量不声明事务性，不自动撤销已经成功的对象。预检失败不产生动作历史；already_missing、no_op 和 not_started 不伪造远端成功。
+
+### 幂等 ledger
+
+幂等 ledger 持久化到 control-plane state，使用向后兼容的默认字段，不保存凭据。初始限制：
+
+- 最多 64 个未过期批次记录；
+- 已完成记录保留 24 小时；
+- 状态为 in_progress、completed、interrupted；
+- compare-and-reserve 在 control-plane mutex 内完成，并通过现有原子 control-plane 文件写入持久化。
+
+同一 key 的行为：
+
+- completed 且计划/审计指纹相同：返回原最终响应；
+- in_progress：返回 409、reason code batch_in_progress 和 Retry-After: 5，不并发执行；
+- 指纹不同：返回 409、reason code idempotency_key_reused；
+- 服务重启后发现 in_progress：转为 interrupted，返回已保存部分结果和 409 batch_recovery_required，不自动重放剩余删除/移动。
+
+只有已完成且超过 24 小时的 ledger 记录可自动清理；未完成记录必须人工确认后清理。
+
+### 批次历史
+
+每个批量请求写入一条摘要历史，不写入 100 条互相争抢全局上限的单项记录。摘要包含：
+
+- batch_id；
+- action 和批次标记；
+- requested、各状态计数；
+- operator、ticket、notes；
+- non_atomic_warning 和 consistency_note；
+- 最多 100 项的完整结果引用，包括 source、destination、read_source、home_provider、status、reason_code 和 message。
+
+摘要的结构等价于：
+
+    {
+      "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+      "action": "move",
+      "batch": true,
+      "requested": 2,
+      "completed": 1,
+      "already_missing": 0,
+      "no_op": 0,
+      "failed": 1,
+      "stale_conflict": 0,
+      "not_started": 0,
+      "non_atomic_warning": true,
+      "consistency_note": "External writers are outside the gateway mutation lock.",
+      "items": []
+    }
+
+现有 object_action_history_limit 只限制批次摘要数量。单对象 API 的历史语义保持不变。批次 outcome 只有在 failed、stale_conflict、not_started 都为零时才为 success，否则为 failed，以兼容现有监控汇总。
 
 ## 路径与身份规范
 
-- bucket 必须是当前对象列表返回的精确容器名，去除首尾空白后不能为空，不能包含 `/`、`\` 或控制字符。
-- object key 是相对、非空、以 `/` 分隔的 object key；拒绝首尾 `/`、连续 `//`、`\`、控制字符以及 `.`/`..` 路径段。网关不做大小写折叠或 Unicode 规范化，规范化后的 UTF-8 字符串按精确匹配比较。
-- destination prefix 为空表示目标桶根目录；非空时去除首尾空白，拒绝首个 `/`、`\`、连续 `//`、控制字符和 `.`/`..` 路径段，最后统一为一个 `/`。
-- 每个 source key 的 basename 必须非空；目标 key 为 canonical prefix 加 basename。生成后再次执行全部 key 校验。
-- source identity 使用 `etag`、`size`、`last_modified`。若 provider 没有 etag，则必须至少有 size 与 last_modified；无法取得足够身份时标为 `unverifiable`，不允许进入破坏性批量执行。
+### 路径
+
+- bucket 必须是当前列表返回的精确容器名；去除首尾空白后不能为空，不能包含 /、\ 或控制字符；
+- object key 必须是相对、非空、以 / 分隔的 key；拒绝首尾 /、连续 //、\、控制字符以及 . 和 .. 路径段；
+- destination prefix 为空表示目标桶根目录；非空时拒绝首个 /、\、连续 //、控制字符和 .、.. 路径段，最后 canonicalize 为一个尾随 /；
+- source basename 必须非空，生成 destination 后再次执行全部 key 校验；
+- 网关不做大小写折叠或 Unicode 规范化，规范化后的 UTF-8 字符串按精确匹配比较。
+
+### 身份
+
+对象 identity 使用 ObjectInfo 的 etag、size、last_modified：
+
+- 空或全空白的 optional text 视为 absent；
+- 非空 etag 保留原始字符串（包括引号），按精确字符串比较，并与 size 一起形成 fingerprint；
+- 没有 etag 时，必须有 size 和非空 last_modified，last_modified 保留原始字符串并按精确字符串比较；
+- 不解析日期、不移除 ETag 引号、不做 provider 间格式转换；
+- 无法取得上述最低身份信息时标为 unverifiable，不得进入破坏性批量执行；
+- 没有 etag 时的 size+last_modified 仍是 best-effort 身份，不宣称跨 provider 的强一致版本检查。
 
 ## 错误与安全处理
 
-- 客户端和服务端都验证空选择、重复对象、路径、目标目录、selection/plan 有效期和 100 项上限。
-- 最终网关预检发现任何移动冲突或删除 stale/unverifiable 项时零写入。
-- 执行前重新检查对象状态，应对列表加载后被其他操作者改变的情况。
-- 删除遇到对象已不存在时沿用现有删除成功语义，并清理可清理 metadata；结果标为 `already_missing`。
-- 执行中不自动重试、不自动回滚已成功项；未开始项标为 `not_started`。
-- 完成或部分失败后刷新对象列表、对象状态和共享历史，并清空当前选择。
-- 沿用现有 Admin API 鉴权和错误脱敏边界，不在前端输出凭据或敏感响应体。
+- 客户端和服务端都验证空选择、重复对象、路径、selection/plan 有效期和 100 项上限；
+- selection 过期或提交对象不属于 selection 时返回 selection_expired 或 selection_mismatch；
+- 移动任一冲突、删除任一 stale/unverifiable 在最终预检阶段发现时零写入；
+- 删除远端 NotFound 沿用现有成功收敛语义，结果明确标为 already_missing；
+- 执行期间不自动重试、不自动回滚已完成项；
+- 完成或部分失败后刷新对象列表、状态和共享历史，并清空选择；
+- 沿用现有 Admin 鉴权和错误脱敏边界，不在前端输出凭据或敏感响应体。
 
-## 代码边界
+稳定 reason code 至少包括：
+
+selection_expired、selection_mismatch、plan_expired、invalid_path、duplicate_object、duplicate_destination、source_missing、source_changed、source_unverifiable、home_resolution_conflict、destination_exists、destination_metadata_exists、provider_unsupported、batch_busy、batch_ledger_unavailable、batch_in_progress、idempotency_key_reused、batch_recovery_required。
+
+## 实现边界
 
 预期修改：
 
-- crates/gatewayd/assets/admin/index.html：选择状态、工具栏、管理面板、移动预览、删除确认和逐项结果。
-- crates/gatewayd/src/main.rs：选择快照、批量 DTO、预检与执行路由、网关内对象变更锁、可复用单对象动作核心、幂等 ledger、批次历史摘要、路由与行为测试。
-- docs/object-actions-api-reference.md：批量 API 契约。
-- docs/object-actions-and-history.md：批量操作、冲突和部分失败说明。
+- crates/gatewayd/assets/admin/index.html
+  - 列表选择状态；
+  - batch toolbar；
+  - 单对象管理面板；
+  - 移动预览、删除确认、冲突展示；
+  - 请求禁用、幂等 key、逐项结果和刷新；
+  - advanced object action 区域。
+- crates/gatewayd/src/main.rs
+  - selection snapshot 和 plan cache；
+  - batch DTO、预检和执行路由；
+  - object mutation lock；
+  - 结构化单对象动作核心；
+  - durable idempotency ledger；
+  - batch history payload；
+  - 路由、竞态和错误测试。
+- docs/object-actions-api-reference.md
+  - batch preview/execute、状态和 reason code。
+- docs/object-actions-and-history.md
+  - 批量删除/移动、冲突、best-effort 和部分失败说明。
 
-不修改 provider crate 或 `BlobBackend` 条件协议，也不改变现有单对象 API 请求和响应契约。Control-plane 新增字段必须使用向后兼容的默认值。
+不修改 provider crate 或 BlobBackend 协议，不改变现有单对象 API 请求和响应合同。新增 control-plane 字段必须使用 serde 默认值兼容旧文件。
 
 ## 测试策略
 
-Rust 行为测试至少覆盖：
+### Rust 行为测试
 
-1. 批量删除后远端对象、metadata、复制任务和历史按对象更新。
-2. 批量移动按目标目录和 basename 生成目标 key。
-3. 任一目标冲突时零写入，源和目标不变。
-4. 选中项生成重复目标 key 时预检失败且零写入。
-5. selection/plan 过期、切换列表上下文或对象身份变化时拒绝执行。
-6. 网关内并发 Admin 动作被对象变更锁串行化。
-7. 执行期间单项失败时，响应计数和逐项状态正确，未开始项明确标记。
-8. 删除对象已不存在时返回 `already_missing` 并执行可清理 metadata。
-9. no-op 移动明确报告，且不记录虚假远端成功。
-10. 幂等 key 重复提交返回同一结果，复用 key 提交不同计划被拒绝。
-11. 路径规范化拒绝尾随 slash、`//`、`.`、`..`、反斜杠和空 basename。
-12. 超过 100 项、空字段和未认证请求被拒绝。
+至少覆盖：
 
-Admin 行为测试至少覆盖：
+1. 多对象删除正确更新远端对象、metadata、复制任务和批次摘要；
+2. 批量移动按目标目录和 basename 生成目标 key；
+3. 任一远端目标、目标 metadata 或重复目标 key 冲突时零写入；
+4. no-op 优先级正确，可与真实移动项混合；
+5. selection/plan 过期、primary 改变、home provider 不可读和 source identity 改变时拒绝执行；
+6. stale-placement 删除与 reconcile 执行路径和批量动作共享同一变更锁；
+7. 执行期间单项失败时计数、逐项错误和 not_started 正确；
+8. 删除已不存在对象返回 already_missing 并清理可清理 metadata；
+9. 幂等 key 的 compare-and-reserve、重复完成、处理中、复用冲突和重启恢复行为；
+10. 路径规则拒绝尾随 slash、//、.、..、反斜杠和空 basename；
+11. 100 项上限、空字段、非法 UUID 和未认证请求被拒绝。
+
+### Admin 行为测试
+
+测试真实 state/render 行为，而不是只检查字符串：
 
 - 多选、当前结果全选和清除选择；
-- 切换 bucket/prefix、刷新或来源变化后选择被清空；
-- 管理按钮预填单对象；
-- 移动预览显示 source/home provider、basename 目标和冲突状态；
-- 删除确认只有一层且显示真实删除语义；
+- 切换 bucket/prefix、刷新或来源变化后选择清空；
+- 行管理按钮预填对象；
+- 移动预览显示 read source、home provider、目标 basename 和冲突状态；
+- no-op 与真实移动混合预览；
+- 删除预检成功后才出现唯一确认框；
 - 409 预检不会发起执行请求；
-- 请求期间按钮禁用、重复提交使用同一幂等 key；
-- 部分失败结果逐项可见，完成后列表刷新。
+- 请求期间按钮禁用并复用同一 UUID 幂等 key；
+- 部分失败结果逐项可见，完成后刷新列表。
 
-如果现有仓库没有浏览器测试依赖，增加一个只使用 Node 标准库的 DOM/state harness，测试上述纯选择状态和渲染行为；Rust HTML contract test 继续用于确保生产 HTML 包含必要入口和 API wiring。测试不得只依赖 `html.contains` 来证明交互正确。
-
-实现阶段遵循 RED、GREEN、REFACTOR：每项生产行为先写失败测试并确认失败，再写最小实现；先跑 focused tests，再跑扩大范围验证。
+如果仓库当前没有浏览器测试依赖，增加只使用 Node 标准库的 DOM/state harness，测试选择生命周期、预览状态和结果渲染；现有 Rust HTML contract test 继续用于确认生产 HTML 包含入口和 API wiring，但不能单独作为交互测试。
 
 ## 验收标准
 
-用户能够在同一对象列表中：
+用户能够在同一个对象列表中：
 
-1. 选择一个或多个对象。
-2. 用最少输入移动到目标桶/目录，且保留文件名。
-3. 在移动冲突时得到清晰原因且没有任何移动发生。
-4. 在删除前看到清晰对象摘要和真实删除语义。
-5. 在执行后看到每个对象的结果。
-6. 不需要手工复制 bucket/key，也不会误把 Placement 元数据清理当作云盘文件删除。
-7. 在普通网关内并发操作下不会发生批量预检与另一个 Admin 动作交叉；对于网关外部竞态，界面和历史明确说明非原子边界。
+1. 选择一个或多个当前已加载对象；
+2. 一键打开移动或删除；
+3. 移动时只填写目标桶和目标目录，并保留每个文件名；
+4. 看到列表来源与实际动作归属的区别；
+5. 在任意可观察冲突时看到清晰原因且没有任何批次写入；
+6. 删除前看到明确对象摘要和“删除云盘对象及网关元数据”的语义；
+7. 操作后看到每个对象的最终状态；
+8. 不需要手工复制 bucket/key，也不会把 Placement 元数据清理误认为云盘删除；
+9. 在普通网关内并发 Admin 操作下不会让批量预检和受保护的元数据动作交叉；外部竞态以明确警告呈现。
 
 ## 方案取舍
 
-采用增强现有对象列表的方案，并采用网关内锁、短期 selection/plan、最终预检和幂等 key 的实用一致性边界。它复用已存在的浏览、状态、网关对象动作和历史能力，减少用户路径与实现重复。
+采用增强现有对象列表的方案，并使用网关内锁、短期 selection/plan、最终预检、durable idempotency ledger 和批次摘要历史来控制风险。
 
-不采用独立对象管理页面，因为它会重复列表、筛选和状态信息；也不采用仅每行菜单的方案，因为它不能为批量选择、目标路径和整体结果提供清晰承载。
+不采用独立对象管理页面，因为它会重复列表、筛选和状态信息；不采用仅每行菜单，因为它不能为批量选择、目标路径和整体结果提供清晰承载；不采用 provider 条件移动协议，因为用户已选择实用方案，当前 provider 抽象也没有这种原子能力。
