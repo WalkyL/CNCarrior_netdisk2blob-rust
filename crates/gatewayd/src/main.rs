@@ -15996,6 +15996,32 @@ async fn preview_object_batch_unlocked(
 
         let source_missing = match home_backend.head_object(&source.bucket, &source.key).await {
             Ok(actual) => {
+                let actual = match load_logical_object_record(state, &source.bucket, &source.key) {
+                    Ok(logical) => public_object_info(actual, logical.as_ref()),
+                    Err(error) => {
+                        let message = format!(
+                            "source public identity could not be resolved: {}/{}: {error}",
+                            source.bucket, source.key
+                        );
+                        record_object_batch_failure(
+                            &mut first_failure,
+                            &mut preview_items,
+                            "source_unverifiable",
+                            message.clone(),
+                            object_batch_item(
+                                ordinal,
+                                source,
+                                selection.read_source,
+                                Some(home_provider),
+                                destination,
+                                ObjectBatchItemStatus::Unverifiable,
+                                Some("source_unverifiable"),
+                                message,
+                            ),
+                        );
+                        continue;
+                    }
+                };
                 let actual_identity = object_batch_identity_snapshot(&actual);
                 if !object_batch_identity_is_verifiable(&actual_identity) {
                     let message = format!("source identity is not verifiable: {}/{}", source.bucket, source.key);
@@ -54351,6 +54377,108 @@ mod tests {
         assert_eq!(plan.topology_fingerprint, "rev:0");
         assert_eq!(plan.objects.len(), 1);
         assert_eq!(plan.preview_items, payload.items);
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_accepts_unchanged_gateway_managed_encrypted_public_identity() {
+        let state = test_state();
+        install_test_managed_encryption_application(
+            &state,
+            "batch-enc-app",
+            "batch-enc-access",
+            "batch-enc-secret",
+            "batch-enc-profile",
+            "batch-enc-key",
+        );
+
+        let bucket = "root";
+        let key = "encrypted/batch-preview.txt";
+        let body = Bytes::from_static(b"batch preview encrypted object");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("encrypted preview uri should parse");
+        let headers = signed_headers_for_application(
+            &state.config,
+            "batch-enc-access",
+            "batch-enc-secret",
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.to_string(), key.to_string())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.clone().into(),
+        )
+        .await
+        .expect("encrypted preview source should be stored");
+        backend_for_test(&state, ProviderId::Stub)
+            .put_object(PutObjectRequest {
+                container: "family".to_string(),
+                key: "batch-preview-bucket-marker.txt".to_string(),
+                body: Bytes::from_static(b"target").into(),
+                size: Some(6),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("target bucket marker should be stored");
+
+        let raw = backend_for_test(&state, ProviderId::Stub)
+            .head_object(bucket, key)
+            .await
+            .expect("raw encrypted source should exist");
+        let logical = load_logical_object_record(&state, bucket, key)
+            .expect("logical encrypted metadata should load")
+            .expect("logical encrypted metadata should exist");
+        let public = public_object_info(raw.clone(), Some(&logical));
+        assert_ne!(public.size, raw.size);
+
+        let Json(selection) = list_object_browser_objects(
+            State(state.clone()),
+            Query(ObjectBrowserObjectsQuery {
+                bucket: bucket.to_string(),
+                prefix: Some("encrypted/".to_string()),
+                limit: Some(100),
+            }),
+        )
+        .await
+        .expect("encrypted browser selection should succeed");
+        let listed = selection
+            .objects
+            .iter()
+            .find(|object| object.key == key)
+            .expect("encrypted source should be listed");
+        assert_eq!(listed.size, public.size);
+
+        let Json(payload) = preview_object_batch(
+            State(state.clone()),
+            Json(move_preview_input(
+                &selection.selection_id,
+                vec![batch_object(bucket, key)],
+                "family",
+                "archive/",
+            )),
+        )
+        .await
+        .expect("unchanged encrypted source should preview successfully");
+
+        assert_eq!(payload.items[0].status, admin_api::ObjectBatchItemStatus::Ready);
+        assert_eq!(
+            payload.items[0].destination,
+            Some(batch_object("family", "archive/batch-preview.txt"))
+        );
+        assert_object_exists_on_home(&state, bucket, key).await;
+        assert!(matches!(
+            backend_for_test(&state, ProviderId::Stub)
+                .head_object("family", "archive/batch-preview.txt")
+                .await,
+            Err(BlobError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
