@@ -16544,12 +16544,44 @@ fn batch_counts(items: &[ObjectBatchItemPayload]) -> (usize, usize, usize, usize
     (counts[0], counts[1], counts[2], counts[3], counts[4], counts[5])
 }
 
+fn lookup_object_batch_ledger(
+    state: &AppState,
+    batch_id: &str,
+) -> Result<Option<ObjectBatchLedgerRecord>, ObjectBatchApiError> {
+    let mut control_plane = mutex_recover(state.control_plane.lock());
+    let previous_len = control_plane.object_batch_ledger.len();
+    prune_object_batch_ledger(&mut control_plane.object_batch_ledger, current_unix_ms());
+    if control_plane.object_batch_ledger.len() != previous_len {
+        if let Err(error) = persist_control_plane_state(&state.config.control_plane_file, &control_plane) {
+            return Err(ObjectBatchApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "batch_ledger_unavailable",
+                format!("failed to persist expired batch ledger pruning: {error}"),
+                ObjectBatchAction::Move,
+            ));
+        }
+    }
+    Ok(control_plane.object_batch_ledger.get(batch_id).cloned())
+}
+
 fn persist_object_batch_ledger(state: &AppState, batch_id: &str, update: impl FnOnce(&mut ObjectBatchLedgerRecord)) -> Result<ObjectBatchLedgerRecord, ObjectBatchApiError> {
     let mut control_plane = mutex_recover(state.control_plane.lock());
     let Some(existing) = control_plane.object_batch_ledger.get(batch_id).cloned() else { return Err(ObjectBatchApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "batch_ledger_unavailable", "batch ledger reservation is missing", ObjectBatchAction::Move)); };
     let mut next = existing.clone();
     update(&mut next);
     next.updated_at_unix_ms = current_unix_ms();
+    #[cfg(test)]
+    if existing.provider_call_started_at_unix_ms.is_none()
+        && next.provider_call_started_at_unix_ms.is_some()
+        && consume_test_batch_provider_marker_persist_failure(batch_id)
+    {
+        return Err(ObjectBatchApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "batch_ledger_unavailable",
+            "injected provider marker persistence failure",
+            next.action.unwrap_or(ObjectBatchAction::Move),
+        ));
+    }
     control_plane.object_batch_ledger.insert(batch_id.to_string(), next.clone());
     if let Err(error) = persist_control_plane_state(&state.config.control_plane_file, &control_plane) {
         control_plane.object_batch_ledger.insert(batch_id.to_string(), existing);
@@ -16568,9 +16600,60 @@ fn reserve_object_batch_ledger(state: &AppState, batch_id: &str, plan_id: &str, 
 }
 
 fn persist_object_batch_provider_marker(state: &AppState, batch_id: &str) -> Result<ObjectBatchLedgerRecord, ObjectBatchApiError> {
-    #[cfg(test)]
-    if consume_test_batch_provider_marker_persist_failure(batch_id) { return Err(ObjectBatchApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "batch_ledger_unavailable", "injected provider marker persistence failure", ObjectBatchAction::Move)); }
     persist_object_batch_ledger(state, batch_id, |record| record.provider_call_started_at_unix_ms = Some(current_unix_ms()))
+}
+
+fn persist_object_batch_completion(
+    state: &AppState,
+    batch_id: &str,
+    payload: &ObjectBatchExecutePayload,
+    ticket: Option<String>,
+    notes: Option<String>,
+) -> Result<(), ObjectBatchApiError> {
+    let primary_provider = runtime_topology(state).primary_provider;
+    let history_entry = object_batch_history_entry(
+        payload,
+        primary_provider,
+        ticket,
+        notes,
+    );
+    let mut control_plane = mutex_recover(state.control_plane.lock());
+    let previous = control_plane.clone();
+    let Some(record) = control_plane.object_batch_ledger.get_mut(batch_id) else {
+        return Err(ObjectBatchApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "batch_ledger_unavailable",
+            "batch ledger reservation is missing",
+            payload.action,
+        ));
+    };
+    record.state = ObjectBatchLedgerState::Completed;
+    record.results = payload.results.clone();
+    record.response = Some(payload.clone());
+    control_plane.object_action_history.insert(0, history_entry);
+    control_plane
+        .object_action_history
+        .truncate(state.config.object_action_history_limit);
+    #[cfg(test)]
+    if consume_test_batch_finalize_persist_failure(batch_id) {
+        *control_plane = previous;
+        return Err(ObjectBatchApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "batch_ledger_unavailable",
+            "injected batch finalization persistence failure",
+            payload.action,
+        ));
+    }
+    if let Err(error) = persist_control_plane_state(&state.config.control_plane_file, &control_plane) {
+        *control_plane = previous;
+        return Err(ObjectBatchApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "batch_ledger_unavailable",
+            format!("failed to persist completed batch and history: {error}"),
+            payload.action,
+        ));
+    }
+    Ok(())
 }
 
 fn recover_payload_for_record(batch_id: &str, record: &ObjectBatchLedgerRecord) -> ObjectBatchRecoveryPayload {
@@ -16593,6 +16676,113 @@ fn recover_object_batch_ledger_records(ledger: &mut BTreeMap<String, ObjectBatch
 #[cfg(test)]
 fn recover_object_batch_ledger(state: &AppState) { let mut control_plane = mutex_recover(state.control_plane.lock()); recover_object_batch_ledger_records(&mut control_plane.object_batch_ledger); if let Err(error) = persist_control_plane_state(&state.config.control_plane_file, &control_plane) { warn!(error = %error, "failed to persist recovered object batch ledger"); } }
 
+fn persist_object_batch_rejection(
+    state: &AppState,
+    batch_id: &str,
+    error: &ObjectBatchApiError,
+    results: &[ObjectBatchItemPayload],
+) -> Result<ObjectBatchApiError, ObjectBatchApiError> {
+    let mut saved_error = error.clone();
+    saved_error.state = Some("rejected".to_string());
+    let mut control_plane = mutex_recover(state.control_plane.lock());
+    let Some(existing) = control_plane.object_batch_ledger.get(batch_id).cloned() else {
+        return Err(ObjectBatchApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "batch_ledger_unavailable",
+            "batch ledger reservation is missing",
+            saved_error.action,
+        ));
+    };
+    let mut rejected = existing;
+    rejected.updated_at_unix_ms = current_unix_ms();
+    rejected.state = ObjectBatchLedgerState::Rejected;
+    rejected.provider_call_started_at_unix_ms = None;
+    rejected.results = results.to_vec();
+    rejected.error = Some(saved_error.persisted());
+    control_plane
+        .object_batch_ledger
+        .insert(batch_id.to_string(), rejected);
+    let mut last_error = None;
+    for _ in 0..2 {
+        match persist_control_plane_state(&state.config.control_plane_file, &control_plane) {
+            Ok(()) => return Ok(saved_error),
+            Err(error) => {
+                last_error = Some(ObjectBatchApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "batch_ledger_unavailable",
+                    format!("failed to persist rejected batch: {error}"),
+                    saved_error.action,
+                ));
+            }
+        }
+    }
+    Err(last_error.expect("rejection persistence should record its last error"))
+}
+
+fn persist_object_batch_interruption(
+    state: &AppState,
+    batch_id: &str,
+    results: &[ObjectBatchItemPayload],
+    error: Option<&ObjectBatchApiError>,
+    recovery_message: Option<&str>,
+) -> Result<ObjectBatchRecoveryPayload, ObjectBatchApiError> {
+    let record = {
+        let control_plane = control_plane_snapshot(state);
+        control_plane
+            .object_batch_ledger
+            .get(batch_id)
+            .cloned()
+            .ok_or_else(|| {
+                ObjectBatchApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "batch_ledger_unavailable",
+                    "batch ledger reservation is missing",
+                    ObjectBatchAction::Move,
+                )
+            })?
+    };
+    let mut interrupted = record;
+    interrupted.results = results.to_vec();
+    let recovery = recover_payload_for_record(batch_id, &interrupted);
+    let saved_error = match (error, recovery_message) {
+        (Some(error), _) => Some(error.persisted()),
+        (None, Some(message)) => Some(ObjectBatchPersistedError {
+            status: StatusCode::CONFLICT.as_u16(),
+            code: "batch_recovery_required".to_string(),
+            message: message.to_string(),
+            action: interrupted.action.unwrap_or(ObjectBatchAction::Move),
+            batch_id: Some(batch_id.to_string()),
+            state: Some("interrupted".to_string()),
+            items: Vec::new(),
+            retry_after_secs: None,
+        }),
+        (None, None) => None,
+    };
+    persist_object_batch_ledger(state, batch_id, |record| {
+        record.state = ObjectBatchLedgerState::Interrupted;
+        record.results = results.to_vec();
+        record.recovery = Some(recovery.clone());
+        record.error = saved_error;
+    })?;
+    Ok(recovery)
+}
+
+fn object_batch_recovery_error(
+    action: ObjectBatchAction,
+    batch_id: &str,
+    message: impl Into<String>,
+    recovery: ObjectBatchRecoveryPayload,
+) -> ObjectBatchApiError {
+    ObjectBatchApiError::new(
+        StatusCode::CONFLICT,
+        "batch_recovery_required",
+        message,
+        action,
+    )
+    .for_batch(batch_id, Some("interrupted"))
+    .with_recovery(recovery)
+}
+
 async fn final_preflight_object_batch(state: &AppState, plan: &ObjectBatchPlanRecord) -> Result<Vec<ObjectBatchItemPayload>, ObjectBatchPreviewError> {
     if plan.expires_at_unix_ms <= current_unix_ms() { return Err(ObjectBatchPreviewError::conflict("plan_expired", "batch plan is missing or expired", plan.action, Vec::new())); }
     if plan.objects.is_empty() || plan.topology_fingerprint != topology_fingerprint(state) { return Err(ObjectBatchPreviewError::conflict("topology_changed", "batch plan topology is no longer current", plan.action, Vec::new())); }
@@ -16608,34 +16798,74 @@ fn existing_object_batch_result(record: ObjectBatchLedgerRecord, batch_id: &str,
         ObjectBatchLedgerState::Completed => record.response.ok_or_else(|| ObjectBatchApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "batch_ledger_unavailable", "completed batch response is missing", record.action.unwrap_or(ObjectBatchAction::Move))),
         ObjectBatchLedgerState::Rejected => Err(record.error.as_ref().map(ObjectBatchApiError::from_persisted).unwrap_or_else(|| ObjectBatchApiError::new(StatusCode::CONFLICT, "batch_not_started", "batch was rejected before provider execution", record.action.unwrap_or(ObjectBatchAction::Move)))),
         ObjectBatchLedgerState::InProgress => Err(ObjectBatchApiError::new(StatusCode::CONFLICT, "batch_in_progress", "batch execution is already in progress", record.action.unwrap_or(ObjectBatchAction::Move)).for_batch(batch_id, Some("in_progress")).retry_after(5)),
-        ObjectBatchLedgerState::Interrupted => { let recovery = record.recovery.clone().unwrap_or_else(|| recover_payload_for_record(batch_id, &record)); Err(ObjectBatchApiError::new(StatusCode::CONFLICT, "batch_recovery_required", "batch execution was interrupted and must be reviewed", recovery.action).for_batch(batch_id, Some("interrupted")).with_recovery(recovery)) }
+        ObjectBatchLedgerState::Interrupted => {
+            let recovery = record
+                .recovery
+                .clone()
+                .unwrap_or_else(|| recover_payload_for_record(batch_id, &record));
+            let message = record
+                .error
+                .as_ref()
+                .filter(|error| error.code == "batch_recovery_required")
+                .map(|error| error.message.clone())
+                .unwrap_or_else(|| "batch execution was interrupted and must be reviewed".to_string());
+            Err(ObjectBatchApiError::new(
+                StatusCode::CONFLICT,
+                "batch_recovery_required",
+                message,
+                recovery.action,
+            )
+            .for_batch(batch_id, Some("interrupted"))
+            .with_recovery(recovery))
+        }
     }
 }
 
 async fn execute_object_batch_request(state: &AppState, principal: AdminAuthenticatedPrincipal, input: ObjectBatchExecuteInput) -> Result<ObjectBatchExecutePayload, ObjectBatchApiError> {
     if !canonical_lowercase_uuid_v4(&input.batch_id) { return Err(ObjectBatchApiError::new(StatusCode::BAD_REQUEST, "invalid_path", "batch_id must be a canonical lowercase UUID v4", ObjectBatchAction::Move)); }
     let fingerprint = object_batch_fingerprint(&principal, &input);
-    if let Some(record) = control_plane_snapshot(state).object_batch_ledger.get(&input.batch_id).cloned() { return existing_object_batch_result(record, &input.batch_id, &fingerprint); }
+    if let Some(record) = lookup_object_batch_ledger(state, &input.batch_id)? { return existing_object_batch_result(record, &input.batch_id, &fingerprint); }
     let guard = timeout(Duration::from_secs(5), state.object_mutation_lock.lock()).await.map_err(|_| ObjectBatchApiError::new(StatusCode::CONFLICT, "batch_busy", "object mutation lock timed out", ObjectBatchAction::Move).retry_after(5))?;
-    if let Some(record) = control_plane_snapshot(state).object_batch_ledger.get(&input.batch_id).cloned() { drop(guard); return existing_object_batch_result(record, &input.batch_id, &fingerprint); }
+    if let Some(record) = lookup_object_batch_ledger(state, &input.batch_id)? { drop(guard); return existing_object_batch_result(record, &input.batch_id, &fingerprint); }
     let plan = { let runtime = mutex_recover(state.object_batch_runtime.lock()); runtime.plans.get(&input.plan_id).cloned() }.ok_or_else(|| ObjectBatchApiError::new(StatusCode::CONFLICT, "plan_expired", "batch plan is missing or expired", ObjectBatchAction::Move))?;
     let items = final_preflight_object_batch(state, &plan).await.map_err(|error| ObjectBatchApiError::from_preview(error, &input.batch_id))?;
     reserve_object_batch_ledger(state, &input.batch_id, &input.plan_id, &plan, &fingerprint)?;
     let operator_label = input.operator.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(|value| value.chars().take(256).collect::<String>());
-    if items.iter().any(|item| item.status == ObjectBatchItemStatus::Ready) {
-        if let Err(error) = persist_object_batch_provider_marker(state, &input.batch_id) {
-            let rejected = ObjectBatchApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "batch_ledger_unavailable", error.message, plan.action).for_batch(&input.batch_id, Some("rejected"));
-            let _ = persist_object_batch_ledger(state, &input.batch_id, |record| { record.state = ObjectBatchLedgerState::Rejected; record.provider_call_started_at_unix_ms = None; record.error = Some(rejected.persisted()); });
-            return Err(rejected);
-        }
-    }
     let mut results = Vec::with_capacity(plan.objects.len());
+    let mut provider_marker_persisted = false;
     let mut ordered = plan.objects.clone(); ordered.sort_by(|left, right| left.source.bucket.cmp(&right.source.bucket).then_with(|| left.source.key.cmp(&right.source.key)));
     for object in ordered {
         let preview = items.iter().find(|item| item.ordinal == object.ordinal).cloned().unwrap_or_else(|| batch_item_for_plan(&object, ObjectBatchItemStatus::Ready, None, None, Vec::new()));
         let result = match preview.status {
-            ObjectBatchItemStatus::AlreadyMissing | ObjectBatchItemStatus::NoOp => preview,
+            ObjectBatchItemStatus::AlreadyMissing => {
+                let action = batch_action_input(&plan, &object, operator_label.clone(), input.ticket.clone(), input.notes.clone());
+                match execute_object_action_core_with_options(
+                    state,
+                    &action,
+                    ObjectActionCoreOptions {
+                        metadata_only_delete: true,
+                    },
+                )
+                .await
+                {
+                    Ok(outcome) => batch_item_for_plan(&object, ObjectBatchItemStatus::AlreadyMissing, Some("source_missing"), Some("source object is already missing; gateway metadata cleanup completed".to_string()), outcome.warnings),
+                    Err(error) => batch_error_from_blob(error, &object),
+                }
+            }
+            ObjectBatchItemStatus::NoOp => preview,
             ObjectBatchItemStatus::Ready => {
+                if !provider_marker_persisted {
+                    if let Err(error) = persist_object_batch_provider_marker(state, &input.batch_id) {
+                        let rejected = ObjectBatchApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "batch_ledger_unavailable", error.message, plan.action).for_batch(&input.batch_id, Some("rejected"));
+                        match persist_object_batch_rejection(state, &input.batch_id, &rejected, &results) {
+                            Ok(saved_error) => return Err(saved_error),
+                            Err(persist_error) => {
+                                return Err(persist_error);
+                            }
+                        }
+                    }
+                    provider_marker_persisted = true;
+                }
                 let action = batch_action_input(&plan, &object, operator_label.clone(), input.ticket.clone(), input.notes.clone());
                 match execute_object_action_core(state, &action).await { Ok(outcome) => batch_item_for_plan(&object, ObjectBatchItemStatus::Completed, None, None, outcome.warnings), Err(error) => batch_error_from_blob(error, &object) }
             }
@@ -16643,25 +16873,33 @@ async fn execute_object_batch_request(state: &AppState, principal: AdminAuthenti
         };
         results.push(result.clone()); results.sort_by_key(|item| item.ordinal);
         if let Err(error) = persist_object_batch_ledger(state, &input.batch_id, |record| record.results = results.clone()) {
-            let mut interrupted = control_plane_snapshot(state).object_batch_ledger.get(&input.batch_id).cloned().unwrap_or(ObjectBatchLedgerRecord { updated_at_unix_ms: current_unix_ms(), plan_id: input.plan_id.clone(), fingerprint: fingerprint.clone(), state: ObjectBatchLedgerState::Interrupted, action: Some(plan.action), objects: plan.objects.clone(), provider_call_started_at_unix_ms: Some(current_unix_ms()), results: results.clone(), response: None, error: None, recovery: None });
-            interrupted.results = results.clone();
-            let recovery = recover_payload_for_record(&input.batch_id, &interrupted);
-            let _ = persist_object_batch_ledger(state, &input.batch_id, |record| { record.state = ObjectBatchLedgerState::Interrupted; record.recovery = Some(recovery.clone()); });
-            return Err(ObjectBatchApiError::new(StatusCode::CONFLICT, "batch_recovery_required", error.message, plan.action).for_batch(&input.batch_id, Some("interrupted")).with_recovery(recovery));
+            return match persist_object_batch_interruption(state, &input.batch_id, &results, None, None) {
+                Ok(recovery) => Err(object_batch_recovery_error(plan.action, &input.batch_id, error.message, recovery)),
+                Err(interruption_error) => Err(interruption_error),
+            };
         }
         if result.status == ObjectBatchItemStatus::Failed {
             let remaining = plan.objects.iter().filter(|candidate| !results.iter().any(|item| item.ordinal == candidate.ordinal)).cloned().collect::<Vec<_>>();
             for object in remaining { results.push(batch_item_for_plan(&object, ObjectBatchItemStatus::NotStarted, Some("not_started"), Some("Batch stopped after an earlier item failed.".to_string()), Vec::new())); }
             results.sort_by_key(|item| item.ordinal);
-            let _ = persist_object_batch_ledger(state, &input.batch_id, |record| record.results = results.clone());
+            if let Err(error) = persist_object_batch_ledger(state, &input.batch_id, |record| record.results = results.clone()) {
+                return match persist_object_batch_interruption(state, &input.batch_id, &results, None, Some(&error.message)) {
+                    Ok(recovery) => Err(object_batch_recovery_error(plan.action, &input.batch_id, error.message, recovery)),
+                    Err(interruption_error) => Err(interruption_error),
+                };
+            }
             break;
         }
     }
     results.sort_by_key(|item| item.ordinal);
     let (completed, already_missing, no_op, failed, stale_conflict, not_started) = batch_counts(&results);
     let payload = ObjectBatchExecutePayload { batch_id: input.batch_id.clone(), action: plan.action, authenticated_principal: principal.0, operator_label, requested: plan.objects.len(), completed, already_missing, no_op, failed, stale_conflict, not_started, non_atomic_warning: true, consistency_note: "External writers are outside the gateway mutation lock.".to_string(), results: results.clone() };
-    persist_object_batch_ledger(state, &input.batch_id, |record| { record.state = ObjectBatchLedgerState::Completed; record.results = results.clone(); record.response = Some(payload.clone()); })?;
-    record_object_batch_history(state, &payload, input.ticket, input.notes);
+    if let Err(error) = persist_object_batch_completion(state, &input.batch_id, &payload, input.ticket, input.notes) {
+        return match persist_object_batch_interruption(state, &input.batch_id, &results, None, Some(&error.message)) {
+            Ok(recovery) => Err(object_batch_recovery_error(plan.action, &input.batch_id, error.message, recovery)),
+            Err(interruption_error) => Err(interruption_error),
+        };
+    }
     drop(guard);
     Ok(payload)
 }
@@ -16673,12 +16911,51 @@ async fn execute_object_batch(State(state): State<AppState>, headers: HeaderMap,
     execute_object_batch_request(&state, principal, input).await.map(Json)
 }
 
-fn record_object_batch_history(state: &AppState, payload: &ObjectBatchExecutePayload, ticket: Option<String>, notes: Option<String>) {
-    let primary_provider = runtime_topology(state).primary_provider;
-    let mut control_plane = mutex_recover(state.control_plane.lock());
-    control_plane.object_action_history.insert(0, ObjectActionHistoryEntryPayload { executed_at_unix_ms: current_unix_ms(), primary_provider: primary_provider.as_str().to_string(), action: match payload.action { ObjectBatchAction::Delete => "batch_delete", ObjectBatchAction::Move => "batch_move" }.to_string(), description: format!("execute {} object batch", payload.requested), outcome: if payload.failed == 0 && payload.stale_conflict == 0 && payload.not_started == 0 { "success" } else { "failed" }.to_string(), message: payload.consistency_note.clone(), operator: payload.operator_label.clone(), ticket, notes, warnings: payload.results.iter().flat_map(|item| item.warnings.clone()).collect(), references: Vec::new(), authenticated_principal: payload.authenticated_principal.clone(), operator_label: payload.operator_label.clone(), batch: true, requested: payload.requested, completed: payload.completed, already_missing: payload.already_missing, no_op: payload.no_op, failed: payload.failed, stale_conflict: payload.stale_conflict, not_started: payload.not_started, non_atomic_warning: payload.non_atomic_warning, consistency_note: payload.consistency_note.clone(), items: payload.results.clone() });
-    control_plane.object_action_history.truncate(state.config.object_action_history_limit);
-    if let Err(error) = persist_control_plane_state(&state.config.control_plane_file, &control_plane) { warn!(error = %error, "failed to persist object batch history"); }
+fn object_batch_history_entry(
+    payload: &ObjectBatchExecutePayload,
+    primary_provider: ProviderId,
+    ticket: Option<String>,
+    notes: Option<String>,
+) -> ObjectActionHistoryEntryPayload {
+    ObjectActionHistoryEntryPayload {
+        executed_at_unix_ms: current_unix_ms(),
+        primary_provider: primary_provider.as_str().to_string(),
+        action: match payload.action {
+            ObjectBatchAction::Delete => "batch_delete",
+            ObjectBatchAction::Move => "batch_move",
+        }
+        .to_string(),
+        description: format!("execute {} object batch", payload.requested),
+        outcome: if payload.failed == 0 && payload.stale_conflict == 0 && payload.not_started == 0 {
+            "success"
+        } else {
+            "failed"
+        }
+        .to_string(),
+        message: payload.consistency_note.clone(),
+        operator: payload.operator_label.clone(),
+        ticket,
+        notes,
+        warnings: payload
+            .results
+            .iter()
+            .flat_map(|item| item.warnings.clone())
+            .collect(),
+        references: Vec::new(),
+        authenticated_principal: payload.authenticated_principal.clone(),
+        operator_label: payload.operator_label.clone(),
+        batch: true,
+        requested: payload.requested,
+        completed: payload.completed,
+        already_missing: payload.already_missing,
+        no_op: payload.no_op,
+        failed: payload.failed,
+        stale_conflict: payload.stale_conflict,
+        not_started: payload.not_started,
+        non_atomic_warning: payload.non_atomic_warning,
+        consistency_note: payload.consistency_note.clone(),
+        items: payload.results.clone(),
+    }
 }
 
 async fn clear_object_action_history_api(
@@ -16749,6 +17026,19 @@ async fn execute_object_action_core(
     state: &AppState,
     input: &ObjectActionInput,
 ) -> Result<ObjectActionCoreOutcome, BlobError> {
+    execute_object_action_core_with_options(state, input, ObjectActionCoreOptions::default()).await
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ObjectActionCoreOptions {
+    metadata_only_delete: bool,
+}
+
+async fn execute_object_action_core_with_options(
+    state: &AppState,
+    input: &ObjectActionInput,
+    options: ObjectActionCoreOptions,
+) -> Result<ObjectActionCoreOutcome, BlobError> {
     #[cfg(test)]
     if consume_test_batch_core_failure(input) {
         return Err(BlobError::Upstream(
@@ -16770,6 +17060,22 @@ async fn execute_object_action_core(
                 .metadata_store
                 .object_protection_plan(&bucket, &key)
                 .map_err(|error| BlobError::Upstream(error.to_string()))?;
+            if options.metadata_only_delete {
+                if let Err(error) = delete_object_metadata_records(&state, &bucket, &key) {
+                    let rollback_note = rollback_delete_after_failure_with_note(
+                        &state,
+                        &bucket,
+                        &key,
+                        previous_placement_record,
+                        previous_logical_record,
+                        previous_protection_plan_record,
+                    );
+                    return Err(BlobError::Upstream(format!(
+                        "gateway metadata cleanup failed for {bucket}/{key}: {error}; {rollback_note}"
+                    )));
+                }
+                return Ok(ObjectActionCoreOutcome::default());
+            }
             let protection_plan = load_object_protection_plan(&state, &bucket, &key)?;
             let backend = backend_for_provider(&state, home_provider)?;
             let delete_sync_targets = protection_plan
@@ -35387,6 +35693,9 @@ static WAL_COMMIT_FAILURES_REMAINING: std::sync::OnceLock<Mutex<u32>> = std::syn
 static BATCH_PROVIDER_MARKER_PERSIST_FAILURES_REMAINING: std::sync::OnceLock<Mutex<HashMap<String, u32>>> =
     std::sync::OnceLock::new();
 #[cfg(test)]
+static BATCH_FINALIZE_PERSIST_FAILURES_REMAINING: std::sync::OnceLock<Mutex<HashMap<String, u32>>> =
+    std::sync::OnceLock::new();
+#[cfg(test)]
 static BATCH_CORE_FAILURES_REMAINING: std::sync::OnceLock<Mutex<HashMap<String, u32>>> =
     std::sync::OnceLock::new();
 
@@ -35486,6 +35795,38 @@ fn consume_test_batch_provider_marker_persist_failure(batch_id: &str) -> bool {
     if *remaining == 0 { return false; }
     *remaining -= 1;
     if *remaining == 0 { failures.remove(batch_id); }
+    true
+}
+
+#[cfg(test)]
+fn set_test_batch_finalize_persist_failures(batch_id: &str, remaining: u32) {
+    let mut failures = BATCH_FINALIZE_PERSIST_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("batch finalization failure gate should not be poisoned");
+    if remaining == 0 {
+        failures.remove(batch_id);
+    } else {
+        failures.insert(batch_id.to_string(), remaining);
+    }
+}
+
+#[cfg(test)]
+fn consume_test_batch_finalize_persist_failure(batch_id: &str) -> bool {
+    let mut failures = BATCH_FINALIZE_PERSIST_FAILURES_REMAINING
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .expect("batch finalization failure gate should not be poisoned");
+    let Some(remaining) = failures.get_mut(batch_id) else {
+        return false;
+    };
+    if *remaining == 0 {
+        return false;
+    }
+    *remaining -= 1;
+    if *remaining == 0 {
+        failures.remove(batch_id);
+    }
     true
 }
 
@@ -54641,6 +54982,42 @@ mod tests {
         .0
     }
 
+    async fn create_delete_plan_for_test(
+        state: &AppState,
+        source_bucket: &str,
+        source_keys: &[&str],
+    ) -> admin_api::ObjectBatchPreviewPayload {
+        for key in source_keys {
+            seed_object_at(state, source_bucket, key, b"batch delete source").await;
+        }
+        let Json(selection) = list_object_browser_objects(
+            State(state.clone()),
+            Query(ObjectBrowserObjectsQuery {
+                bucket: source_bucket.to_string(),
+                prefix: None,
+                limit: Some(MAX_OBJECT_BROWSER_LIMIT),
+            }),
+        )
+        .await
+        .expect("batch delete selection should succeed");
+        preview_object_batch(
+            State(state.clone()),
+            Json(admin_api::ObjectBatchPreviewInput {
+                action: admin_api::ObjectBatchAction::Delete,
+                selection_id: selection.selection_id,
+                objects: source_keys
+                    .iter()
+                    .map(|key| batch_object(source_bucket, key))
+                    .collect(),
+                destination_bucket: None,
+                destination_prefix: None,
+            }),
+        )
+        .await
+        .expect("batch delete preview should succeed")
+        .0
+    }
+
     fn insert_test_in_progress_batch_ledger(
         state: &AppState,
         batch_id: &str,
@@ -54679,6 +55056,31 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.completed, 1);
         assert_object_exists_on_home(&state, "family", "archive/a.txt").await;
+        let control_plane = control_plane_snapshot(&state);
+        let record = control_plane
+            .object_batch_ledger
+            .get("550e8400-e29b-41d4-a716-446655440000")
+            .expect("completed ledger should exist");
+        assert_eq!(record.state, ObjectBatchLedgerState::Completed);
+        assert_eq!(record.response.as_ref(), Some(&first));
+        assert_eq!(
+            control_plane
+                .object_action_history
+                .iter()
+                .filter(|entry| entry.batch && entry.authenticated_principal == "admin:admin")
+                .count(),
+            1
+        );
+        let reloaded = load_control_plane_state(
+            &state.config.control_plane_file,
+            &state.config.credentials_dir,
+            default_control_plane_state(&state.config),
+            state.config.onedrive.enabled,
+        )
+        .expect("completed batch should reload from disk");
+        assert_eq!(reloaded.object_batch_ledger["550e8400-e29b-41d4-a716-446655440000"].state, ObjectBatchLedgerState::Completed);
+        assert_eq!(reloaded.object_batch_ledger["550e8400-e29b-41d4-a716-446655440000"].response.as_ref(), Some(&first));
+        assert_eq!(reloaded.object_action_history.iter().filter(|entry| entry.batch).count(), 1);
     }
 
     #[tokio::test]
@@ -54751,6 +55153,282 @@ mod tests {
 
         assert_eq!(error.status, StatusCode::BAD_REQUEST);
         assert_eq!(error.code, "invalid_path");
+    }
+
+    #[tokio::test]
+    async fn object_batch_execute_already_missing_delete_cleans_gateway_metadata() {
+        let mut state = test_state();
+        let plan = create_delete_plan_for_test(&state, "root", &["docs/missing-cleanup.txt"]).await;
+        backend_for_test(&state, ProviderId::Stub)
+            .delete_object("root", "docs/missing-cleanup.txt")
+            .await
+            .expect("raw provider object should be removable");
+        replace_backend(
+            &mut state,
+            ProviderId::Stub,
+            Arc::new(DeleteFailureStubBackend::new(
+                "delete-must-not-run",
+                "already-missing cleanup unexpectedly called provider delete",
+            )),
+        );
+
+        let result = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id,
+                batch_id: "550e8400-e29b-41d4-a716-446655440008".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect("already-missing cleanup should complete");
+
+        assert_eq!(result.already_missing, 1);
+        assert_eq!(result.completed, 0);
+        assert_eq!(result.results[0].status, ObjectBatchItemStatus::AlreadyMissing);
+        assert!(state
+            .metadata_store
+            .object_placement("root", "docs/missing-cleanup.txt")
+            .expect("placement lookup should succeed")
+            .is_none());
+        assert!(load_logical_object_record(&state, "root", "docs/missing-cleanup.txt")
+            .expect("logical lookup should succeed")
+            .is_none());
+        assert!(state
+            .metadata_store
+            .object_protection_plan("root", "docs/missing-cleanup.txt")
+            .expect("protection lookup should succeed")
+            .is_none());
+        assert!(control_plane_snapshot(&state)
+            .object_batch_ledger
+            .get("550e8400-e29b-41d4-a716-446655440008")
+            .is_some_and(|record| record.provider_call_started_at_unix_ms.is_none()));
+    }
+
+    #[tokio::test]
+    async fn object_batch_execute_marker_starts_at_first_provider_mutation_and_rejection_replays() {
+        let mut state = test_state();
+        let plan = create_delete_plan_for_test(
+            &state,
+            "root",
+            &["docs/missing-first.txt", "docs/provider-second.txt"],
+        )
+        .await;
+    backend_for_test(&state, ProviderId::Stub)
+        .delete_object("root", "docs/missing-first.txt")
+        .await
+        .expect("first raw provider object should be removable");
+        let delete_failure_backend = DeleteFailureStubBackend::new(
+            "delete-must-not-run-before-marker",
+            "metadata-only delete unexpectedly called provider delete",
+        );
+        delete_failure_backend
+            .inner
+            .put_object(PutObjectRequest {
+                container: "root".to_string(),
+                key: "docs/provider-second.txt".to_string(),
+                body: ObjectBody::from_bytes(Bytes::from_static(b"batch delete source")),
+                size: Some(19),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("second object should remain in failure backend");
+        replace_backend(
+            &mut state,
+            ProviderId::Stub,
+            Arc::new(delete_failure_backend),
+        );
+        let batch_id = "550e8400-e29b-41d4-a716-446655440009";
+        set_test_batch_provider_marker_persist_failures(batch_id, 1);
+
+        let first_error = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id.clone(),
+                batch_id: batch_id.to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect_err("marker failure should reject before the second provider mutation");
+        set_test_batch_provider_marker_persist_failures(batch_id, 0);
+
+        assert_eq!(first_error.code, "batch_ledger_unavailable");
+        assert!(state
+            .metadata_store
+            .object_placement("root", "docs/missing-first.txt")
+            .expect("first placement lookup should succeed")
+            .is_none());
+        assert_object_exists_on_home(&state, "root", "docs/provider-second.txt").await;
+        assert_eq!(
+            control_plane_snapshot(&state)
+                .object_batch_ledger
+                .get(batch_id)
+                .map(|record| record.state),
+            Some(ObjectBatchLedgerState::Rejected)
+        );
+        let control_plane = control_plane_snapshot(&state);
+        let record = control_plane
+            .object_batch_ledger
+            .get(batch_id)
+            .expect("rejected ledger should exist");
+        let saved_error = record.error.as_ref().expect("rejection error should be saved");
+        assert_eq!(saved_error.status, first_error.status.as_u16());
+        assert_eq!(saved_error.code, first_error.code);
+        assert_eq!(saved_error.message, first_error.message);
+        assert_eq!(saved_error.items, first_error.items);
+        assert_eq!(record.results.len(), 1);
+        assert_eq!(record.results[0].status, ObjectBatchItemStatus::AlreadyMissing);
+        assert!(record.provider_call_started_at_unix_ms.is_none());
+
+        let replay_error = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id,
+                batch_id: batch_id.to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect_err("rejected marker failure should replay exactly");
+        assert_eq!(replay_error, first_error);
+    }
+
+    #[tokio::test]
+    async fn object_batch_execute_prunes_expired_ledger_before_lookup() {
+        let state = test_state();
+        let plan = create_move_plan_for_test(
+            &state,
+            "root",
+            &["docs/expired-key.txt"],
+            "family",
+            "archive/",
+        )
+        .await;
+        let batch_id = "550e8400-e29b-41d4-a716-446655440010";
+        {
+            let mut control_plane = state.control_plane.lock().expect("control plane should lock");
+            control_plane.object_batch_ledger.insert(
+                batch_id.to_string(),
+                ObjectBatchLedgerRecord {
+                    updated_at_unix_ms: current_unix_ms()
+                        .saturating_sub(OBJECT_BATCH_LEDGER_RETENTION_MS + 1),
+                    plan_id: "expired-plan".to_string(),
+                    fingerprint: "expired-fingerprint".to_string(),
+                    state: ObjectBatchLedgerState::Completed,
+                    action: Some(ObjectBatchAction::Move),
+                    objects: Vec::new(),
+                    provider_call_started_at_unix_ms: Some(current_unix_ms()),
+                    results: Vec::new(),
+                    response: None,
+                    error: None,
+                    recovery: None,
+                },
+            );
+            persist_control_plane_state(&state.config.control_plane_file, &control_plane)
+                .expect("expired ledger should persist");
+        }
+
+        let result = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id,
+                batch_id: batch_id.to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect("expired idempotency key should be reusable");
+
+        assert_eq!(result.completed, 1);
+        assert_object_exists_on_home(&state, "family", "archive/expired-key.txt").await;
+        assert!(control_plane_snapshot(&state)
+            .object_batch_ledger
+            .get(batch_id)
+            .is_some_and(|record| record.fingerprint != "expired-fingerprint"));
+    }
+
+    #[tokio::test]
+    async fn object_batch_execute_final_persistence_failure_recovers_without_completed_history() {
+        let state = test_state();
+        let plan = create_move_plan_for_test(
+            &state,
+            "root",
+            &["docs/final-persist-failure.txt"],
+            "family",
+            "archive/",
+        )
+        .await;
+        let batch_id = "550e8400-e29b-41d4-a716-446655440011";
+        set_test_batch_finalize_persist_failures(batch_id, 1);
+
+        let error = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id.clone(),
+                batch_id: batch_id.to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect_err("final durable update failure should require recovery");
+        set_test_batch_finalize_persist_failures(batch_id, 0);
+
+        assert_eq!(error.code, "batch_recovery_required");
+        let control_plane = control_plane_snapshot(&state);
+        let record = control_plane
+            .object_batch_ledger
+            .get(batch_id)
+            .expect("interrupted ledger should remain durable");
+        assert_eq!(record.state, ObjectBatchLedgerState::Interrupted);
+        assert!(record.response.is_none());
+        assert!(record.recovery.is_some());
+        assert!(!control_plane.object_action_history.iter().any(|entry| {
+            entry.batch && entry.items.iter().any(|item| item.source.key == "docs/final-persist-failure.txt")
+        }));
+        let reloaded = load_control_plane_state(
+            &state.config.control_plane_file,
+            &state.config.credentials_dir,
+            default_control_plane_state(&state.config),
+            state.config.onedrive.enabled,
+        )
+        .expect("interrupted batch should reload from disk");
+        assert_eq!(reloaded.object_batch_ledger[batch_id].state, ObjectBatchLedgerState::Interrupted);
+        assert!(reloaded.object_action_history.iter().all(|entry| {
+            !entry.batch || !entry.items.iter().any(|item| item.source.key == "docs/final-persist-failure.txt")
+        }));
+
+        let replay_error = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id,
+                batch_id: batch_id.to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect_err("interrupted finalization must not replay");
+        assert_eq!(replay_error, error);
+        assert_object_exists_on_home(&state, "family", "archive/final-persist-failure.txt").await;
     }
 
     #[test]
