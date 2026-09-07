@@ -48345,8 +48345,7 @@ mod tests {
         assert!(html.contains("这个动作只会删除网关里的 placement、logical object、protection plan 元数据，不会删除任何云盘文件"));
         assert!(html.contains("并同时删除网关 metadata"));
         assert!(html.contains("这与上方只清理残留 Placement 元数据的操作不同"));
-        assert!(html.contains("'Idempotency-Key': batchId"));
-        assert!(html.contains("batch_id: batchId"));
+        assert!(html.contains("fetchJson('/api/object-actions/batch', { method: 'POST', headers: { 'Idempotency-Key': batchId }, body: JSON.stringify(body) })"));
         assert!(html.contains("function loadObjectBrowserBuckets("));
         assert!(html.contains("function loadObjectPlacementProviders("));
         assert!(html.contains("function loadObjectPlacementRecords("));

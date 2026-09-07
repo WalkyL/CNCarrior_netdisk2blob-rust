@@ -25,12 +25,19 @@ assert.deepEqual(
   "selection follows deterministic current-result order",
 );
 
+api.setPlan(state, { planId: "stale-plan", action: "move" });
+state.executionId = "123e4567-e89b-42d3-a456-426614174000";
+const replacementRevision = state.revision;
 api.replaceList(state, {
   selectionId: "s2",
   bucket: "root",
   keys: ["next/c.txt"],
 });
 assert.deepEqual(Array.from(api.selectedKeys(state)), [], "replacement selection resets state");
+assert.equal(state.planId, "", "replacement clears the stale plan");
+assert.equal(state.action, "", "replacement clears the stale action");
+assert.equal(state.executionId, "", "replacement clears stale idempotency state");
+assert.ok(state.revision > replacementRevision, "replacement invalidates pending previews");
 
 api.setSelected(state, "stale/old.txt", true);
 api.selectAll(state);
@@ -89,5 +96,54 @@ api.resetAfterResult(state);
 assert.deepEqual(Array.from(api.selectedKeys(state)), [], "terminal results clear selection");
 assert.equal(state.planId, "", "terminal results clear the plan");
 assert.equal(state.executionId, "", "terminal results clear idempotency state");
+
+const raceState = api.create();
+api.replaceList(raceState, {
+  selectionId: "race-selection",
+  bucket: "root",
+  keys: ["docs/a.txt", "docs/b.txt"],
+});
+api.selectAll(raceState);
+const selectionToken = api.beginPreview(raceState, {
+  action: "delete",
+  selection_id: "race-selection",
+  objects: [
+    { bucket: "root", key: "docs/a.txt" },
+    { bucket: "root", key: "docs/b.txt" },
+  ],
+});
+api.setSelected(raceState, "docs/b.txt", false);
+assert.equal(
+  api.isCurrentPreview(raceState, selectionToken),
+  false,
+  "a selection change makes an in-flight preview response stale",
+);
+
+api.selectAll(raceState);
+const destinationToken = api.beginPreview(raceState, {
+  action: "move",
+  selection_id: "race-selection",
+  objects: [
+    { bucket: "root", key: "docs/a.txt" },
+    { bucket: "root", key: "docs/b.txt" },
+  ],
+  destination_bucket: "family",
+  destination_prefix: "first/",
+});
+api.invalidate(raceState, "move");
+assert.equal(
+  api.isCurrentPreview(raceState, destinationToken),
+  false,
+  "a destination change makes an in-flight preview response stale",
+);
+
+api.setPlan(raceState, { planId: "retry-plan", action: "move" });
+raceState.executionId = uuid1;
+assert.equal(api.finalizeExecution(raceState, { state: "in_progress" }), false);
+assert.equal(raceState.planId, "retry-plan", "in-progress execution retains its plan");
+assert.equal(raceState.executionId, uuid1, "in-progress execution retains its idempotency UUID");
+assert.equal(api.finalizeExecution(raceState, { batch_id: uuid1, results: [] }), true);
+assert.equal(raceState.planId, "", "terminal execution clears its plan");
+assert.equal(raceState.executionId, "", "terminal execution clears its idempotency UUID");
 
 console.log("admin object batch state harness: PASS");

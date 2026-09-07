@@ -5228,29 +5228,54 @@ Copyright (c) 2026 walky
     let objectActionHistoryLimit = 12;
     /* object-batch-state:start */
     (() => {
-      const clearPlan = state => {
+      const clearPlan = (state, action = '') => {
         state.planId = '';
-        state.action = '';
+        state.action = action;
         state.executionId = '';
+        state.previewSignature = '';
       };
       const selectedKeys = state => state.resultKeys.filter(key => state.selected.has(key));
       const normalizePrefix = value => String(value || '').trim().replace(/^\/+|\/+$/g, '');
       const basename = key => String(key || '').split('/').filter(Boolean).pop() || '';
+      const sameKeys = (left, right) => left.length === right.length && left.every((key, index) => key === right[index]);
+      const invalidate = (state, action = '') => {
+        state.revision += 1;
+        clearPlan(state, action);
+        return state.revision;
+      };
+      const previewSignature = request => JSON.stringify({
+        selectionId: String(request?.selection_id || ''),
+        bucket: String(request?.bucket || request?.objects?.[0]?.bucket || ''),
+        keys: (request?.objects || []).map(object => String(object?.key || '')),
+        action: String(request?.action || ''),
+        destinationBucket: String(request?.destination_bucket || ''),
+        destinationPrefix: String(request?.destination_prefix || ''),
+      });
       const api = {
         create() {
-          return { selectionId: '', bucket: '', resultKeys: [], selected: new Set(), planId: '', action: '', executionId: '' };
+          return {
+            selectionId: '',
+            bucket: '',
+            resultKeys: [],
+            selected: new Set(),
+            planId: '',
+            action: '',
+            executionId: '',
+            previewSignature: '',
+            revision: 0,
+          };
         },
         replaceList(state, list) {
           const selectionId = String(list?.selectionId || '');
           const bucket = String(list?.bucket || '');
           const keys = Array.from(new Set((list?.keys || []).map(key => String(key))));
-          const replacement = state.selectionId !== selectionId || state.bucket !== bucket;
+          const replacement = state.selectionId !== selectionId || state.bucket !== bucket || !sameKeys(state.resultKeys, keys);
           state.selectionId = selectionId;
           state.bucket = bucket;
           state.resultKeys = keys;
           if (replacement) {
             state.selected.clear();
-            clearPlan(state);
+            invalidate(state);
           } else {
             state.selected = new Set(selectedKeys(state));
           }
@@ -5258,21 +5283,54 @@ Copyright (c) 2026 walky
         setSelected(state, key, selected) {
           key = String(key || '');
           if (!state.resultKeys.includes(key)) return;
+          const changed = selected ? !state.selected.has(key) : state.selected.has(key);
+          if (!changed) return;
           if (selected) state.selected.add(key); else state.selected.delete(key);
-          clearPlan(state);
+          invalidate(state);
         },
         selectOnly(state, key) {
           state.selected.clear();
           if (state.resultKeys.includes(String(key || ''))) state.selected.add(String(key));
-          clearPlan(state);
+          invalidate(state);
         },
         selectAll(state) {
           state.selected = new Set(state.resultKeys);
-          clearPlan(state);
+          invalidate(state);
         },
         clearSelection(state) {
           state.selected.clear();
-          clearPlan(state);
+          invalidate(state);
+        },
+        invalidate,
+        setAction(state, action) {
+          return invalidate(state, String(action || ''));
+        },
+        beginBrowse(state) {
+          state.selectionId = '';
+          state.bucket = '';
+          state.resultKeys = [];
+          state.selected.clear();
+          return invalidate(state);
+        },
+        isCurrentRevision(state, revision) {
+          return state.revision === revision;
+        },
+        beginPreview(state, request) {
+          const signature = previewSignature(request);
+          const revision = invalidate(state, String(request?.action || ''));
+          state.previewSignature = signature;
+          return { revision, signature, action: state.action };
+        },
+        isCurrentPreview(state, token) {
+          return !!token && state.revision === token.revision && state.previewSignature === token.signature;
+        },
+        installPreviewPlan(state, token, planId) {
+          if (!api.isCurrentPreview(state, token)) return false;
+          state.planId = String(planId || '');
+          state.action = token.action;
+          state.executionId = '';
+          state.previewSignature = '';
+          return !!state.planId;
         },
         selectedKeys,
         buildMove(state, destination) {
@@ -5308,7 +5366,17 @@ Copyright (c) 2026 walky
         },
         resetAfterResult(state) {
           state.selected.clear();
-          clearPlan(state);
+          invalidate(state);
+        },
+        isTerminalExecution(payload) {
+          const stateName = String(payload?.state || '').toLowerCase();
+          if (stateName) return ['completed', 'rejected', 'interrupted'].includes(stateName);
+          return typeof payload?.batch_id === 'string' && Array.isArray(payload?.results);
+        },
+        finalizeExecution(state, payload) {
+          if (!api.isTerminalExecution(payload)) return false;
+          api.resetAfterResult(state);
+          return true;
         },
       };
       globalThis.ccbgObjectBatchState = api;
@@ -11346,18 +11414,22 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         return;
       }
       if (!payload) {
+        const previousRevision = objectBrowserState.batch.revision;
         objectBatchStateApi.replaceList(objectBrowserState.batch, { selectionId: '', bucket: '', keys: [] });
+        if (objectBrowserState.batch.revision !== previousRevision) clearObjectBatchConfirmation();
         container.innerHTML = '';
         renderObjectBrowserBucketSummary();
         renderObjectBatchPanel();
         return;
       }
       const objects = payload.objects || [];
+      const previousRevision = objectBrowserState.batch.revision;
       objectBatchStateApi.replaceList(objectBrowserState.batch, {
         selectionId: payload.selection_id,
         bucket: payload.bucket,
         keys: objects.map(object => object.key),
       });
+      if (objectBrowserState.batch.revision !== previousRevision) clearObjectBatchConfirmation();
       const sourceLabel = objectBrowserSourceLabel(payload.source_provider, payload.fallback_from);
       const prefixLabel = payload.prefix || tr('common.na', {}, 'n/a');
       summaryNode.textContent = tr(
@@ -11488,6 +11560,11 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       }
       const prefix = document.getElementById('object-browser-prefix').value.trim();
       const limit = Number(document.getElementById('object-browser-limit').value || '{DEFAULT_OBJECT_BROWSER_LIMIT}');
+      const browseRevision = objectBatchStateApi.beginBrowse(objectBrowserState.batch);
+      clearObjectBatchConfirmation();
+      objectBrowserState.objects_payload = null;
+      document.getElementById('object-browser-results').innerHTML = '';
+      renderObjectBatchPanel();
       setObjectBrowserFeedback(tr('object.browser.feedback.loading_objects', {}, 'Loading objects…'), 'warn');
       try {
         const query = new URLSearchParams({ bucket });
@@ -11498,11 +11575,17 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           query.set('limit', String(limit));
         }
         const payload = await fetchJson(`/api/object-browser/objects?${query.toString()}`);
+        if (!objectBatchStateApi.isCurrentRevision(objectBrowserState.batch, browseRevision)) return;
         renderObjectBrowserResults(payload);
         setObjectBrowserFeedback(tr('object.browser.feedback.objects_loaded', {}, 'Objects loaded.'), 'ok');
       } catch (error) {
+        if (!objectBatchStateApi.isCurrentRevision(objectBrowserState.batch, browseRevision)) return;
+        objectBatchStateApi.beginBrowse(objectBrowserState.batch);
+        clearObjectBatchConfirmation();
+        objectBrowserState.objects_payload = null;
         document.getElementById('object-browser-results').innerHTML = '';
         document.getElementById('object-browser-summary').textContent = error.message;
+        renderObjectBatchPanel();
         setObjectBrowserFeedback(error.message, 'warn');
       }
     }
@@ -11571,6 +11654,11 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
     function clearObjectBatchConfirmation() {
       document.getElementById('object-batch-delete-confirmation').classList.add('hidden');
     }
+    function invalidateObjectBatchState(action = '') {
+      const revision = objectBatchStateApi.invalidate(objectBrowserState.batch, action);
+      clearObjectBatchConfirmation();
+      return revision;
+    }
     function objectBatchRequest(action) {
       const state = objectBrowserState.batch;
       const objects = selectedObjectBatchObjects();
@@ -11585,13 +11673,19 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
     async function previewObjectBatch(action) {
       const state = objectBrowserState.batch;
       if (!state.selectionId || !selectedObjectBatchObjects().length) return;
-      objectBatchStateApi.setPlan(state, { planId: '', action });
+      let body;
+      try {
+        body = objectBatchRequest(action);
+      } catch (error) {
+        setObjectBatchFeedback(error.message || String(error), 'warn');
+        return;
+      }
+      const token = objectBatchStateApi.beginPreview(state, { ...body, bucket: state.bucket });
       clearObjectBatchConfirmation();
       document.getElementById('object-batch-preview').innerHTML = '';
       document.getElementById('object-batch-results').innerHTML = '';
       renderObjectBatchPanel();
       try {
-        const body = objectBatchRequest(action);
         const localMove = action === 'move' ? objectBatchStateApi.buildMove(state, {
           destinationBucket: body.destination_bucket,
           destinationPrefix: body.destination_prefix,
@@ -11604,7 +11698,8 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         }
         setObjectBatchFeedback(`正在预览${action === 'move' ? '移动' : '删除'}…`, 'warn');
         const payload = await fetchJson('/api/object-actions/batch/preview', { method: 'POST', body: JSON.stringify(body) });
-        objectBatchStateApi.setPlan(state, { planId: payload.plan_id, action });
+        if (!objectBatchStateApi.isCurrentPreview(state, token)) return;
+        if (!objectBatchStateApi.installPreviewPlan(state, token, payload.plan_id)) return;
         renderObjectBatchPreview(payload);
         const conflict = (payload.items || []).some(item => item.status === 'conflict' || item.status === 'unverifiable');
         if (conflict) {
@@ -11621,6 +11716,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           setObjectBatchFeedback('移动预览成功，请确认目标后执行。', 'ok');
         }
       } catch (error) {
+        if (!objectBatchStateApi.isCurrentPreview(state, token)) return;
         clearObjectBatchConfirmation();
         if (error.payload?.items?.length) {
           document.getElementById('object-batch-preview').innerHTML = renderObjectBatchItems(error.payload.items, '预览冲突，未执行任何操作');
@@ -11631,8 +11727,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
     }
     function invalidateObjectBatchPlan() {
       if (objectBrowserState.batch.action !== 'move') return;
-      objectBatchStateApi.setPlan(objectBrowserState.batch, { planId: '', action: 'move' });
-      clearObjectBatchConfirmation();
+      invalidateObjectBatchState('move');
       renderObjectBatchPanel();
     }
     async function executeObjectBatch() {
@@ -11651,10 +11746,11 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         const payload = await fetchJson('/api/object-actions/batch', { method: 'POST', headers: { 'Idempotency-Key': batchId }, body: JSON.stringify(body) });
         document.getElementById('object-batch-results').innerHTML = `<div class="hint">批次 ${escapeHtml(payload.batch_id || batchId)} · 完成 ${escapeHtml(String(payload.completed ?? 0))} · 失败 ${escapeHtml(String(payload.failed ?? 0))}</div>${payload.consistency_note ? `<div class="hint">${escapeHtml(payload.consistency_note)}</div>` : ''}${renderObjectBatchItems(payload.results, '执行结果')}`;
         if (payload.non_atomic_warning) setObjectBatchFeedback('批量操作完成，但外部写入不受网关锁保护。', 'warn'); else setObjectBatchFeedback('批量操作完成。', 'ok');
-        objectBatchStateApi.resetAfterResult(state);
-        clearObjectBatchConfirmation();
-        renderObjectBatchPanel();
-        await browseObjectBrowserObjects();
+        if (objectBatchStateApi.finalizeExecution(state, payload)) {
+          clearObjectBatchConfirmation();
+          renderObjectBatchPanel();
+          await browseObjectBrowserObjects();
+        }
       } catch (error) {
         const payload = error.payload || {};
         const resultItems = payload.items || payload.saved_results || [];
@@ -11663,8 +11759,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           ? renderObjectBatchRecovery(payload)
           : (renderObjectBatchItems(resultItems, '错误详情') || `<div class="flash status-warn">${escapeHtml(`${payload.code || 'batch_error'} · ${typedMessage}`)}</div>`);
         setObjectBatchFeedback(typedMessage, 'warn');
-        if (resultItems.length || payload.state) {
-          objectBatchStateApi.resetAfterResult(state);
+        if (objectBatchStateApi.finalizeExecution(state, payload)) {
           clearObjectBatchConfirmation();
           renderObjectBatchPanel();
           await browseObjectBrowserObjects();
@@ -20879,6 +20974,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       const manageButton = event.target.closest('button[data-object-browser-manage]');
       if (manageButton) {
         objectBatchStateApi.selectOnly(objectBrowserState.batch, manageButton.dataset.objectBrowserManage || '');
+        clearObjectBatchConfirmation();
         renderObjectBrowserResults(objectBrowserState.objects_payload);
         return;
       }
@@ -20895,24 +20991,22 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       const checkbox = event.target.closest('input[data-object-browser-select]');
       if (!checkbox) return;
       objectBatchStateApi.setSelected(objectBrowserState.batch, checkbox.dataset.objectBrowserSelect || '', checkbox.checked);
+      clearObjectBatchConfirmation();
       renderObjectBrowserResults(objectBrowserState.objects_payload);
     });
     document.getElementById('object-browser-select-all').addEventListener('change', event => {
       if (event.target.checked) objectBatchStateApi.selectAll(objectBrowserState.batch);
       else objectBatchStateApi.clearSelection(objectBrowserState.batch);
+      clearObjectBatchConfirmation();
       renderObjectBrowserResults(objectBrowserState.objects_payload);
     });
     document.getElementById('object-batch-move').addEventListener('click', () => {
-      objectBrowserState.batch.action = 'move';
-      objectBrowserState.batch.planId = '';
-      objectBrowserState.batch.executionId = '';
+      objectBatchStateApi.setAction(objectBrowserState.batch, 'move');
       clearObjectBatchConfirmation();
       renderObjectBatchPanel();
     });
     document.getElementById('object-batch-delete').addEventListener('click', () => {
-      objectBrowserState.batch.action = 'delete';
-      objectBrowserState.batch.planId = '';
-      objectBrowserState.batch.executionId = '';
+      objectBatchStateApi.setAction(objectBrowserState.batch, 'delete');
       clearObjectBatchConfirmation();
       renderObjectBatchPanel();
       previewObjectBatch('delete');
