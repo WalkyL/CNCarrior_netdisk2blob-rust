@@ -899,7 +899,30 @@ Content-Type: application/json
   "not_started": 0,
   "non_atomic_warning": true,
   "consistency_note": "External writers are outside the gateway mutation lock.",
-  "results": []
+  "results": [
+    {
+      "ordinal": 0,
+      "source": { "bucket": "root", "key": "photos/2026/a.jpg" },
+      "read_source": "unicom",
+      "home_provider": "unicom",
+      "destination": { "bucket": "family", "key": "archive/a.jpg" },
+      "status": "completed",
+      "reason_code": null,
+      "message": null,
+      "warnings": []
+    },
+    {
+      "ordinal": 1,
+      "source": { "bucket": "root", "key": "photos/2026/b.jpg" },
+      "read_source": "unicom",
+      "home_provider": "unicom",
+      "destination": { "bucket": "family", "key": "archive/b.jpg" },
+      "status": "failed",
+      "reason_code": "provider_error",
+      "message": "gateway metadata update failed after remote move",
+      "warnings": []
+    }
+  ]
 }
 ```
 
@@ -928,7 +951,19 @@ interrupted 返回 `409 Conflict`、`batch_recovery_required` 和以下恢复合
   "requested": 2,
   "saved_count": 1,
   "unresolved_count": 1,
-  "saved_results": [],
+  "saved_results": [
+    {
+      "ordinal": 0,
+      "source": { "bucket": "root", "key": "photos/a.jpg" },
+      "read_source": "unicom",
+      "home_provider": "unicom",
+      "destination": { "bucket": "family", "key": "archive/a.jpg" },
+      "status": "completed",
+      "reason_code": null,
+      "message": null,
+      "warnings": []
+    }
+  ],
   "unresolved_items": [
     {
       "ordinal": 1,
@@ -948,6 +983,8 @@ interrupted 返回 `409 Conflict`、`batch_recovery_required` 和以下恢复合
 ### 10.4 v1 封闭 reason code
 
 v1 batch reason code 是封闭列表：`selection_expired`、`selection_mismatch`、`plan_expired`、`topology_changed`、`invalid_path`、`duplicate_object`、`duplicate_destination`、`source_missing`、`source_changed`、`source_unverifiable`、`home_resolution_conflict`、`destination_exists`、`destination_metadata_exists`、`destination_bucket_missing`、`destination_bucket_unverifiable`、`provider_unsupported`、`provider_error`、`not_started`、`batch_busy`、`batch_ledger_full`、`batch_ledger_unavailable`、`batch_in_progress`、`idempotency_key_reused`、`batch_not_started`、`batch_recovery_required`、`recovery_required`。
+
+`provider_error` 是 residual execution-stage `BlobError` 的机械映射：除 `NotImplemented`、`NotFound` 和 `Configuration` 以外的 `BlobError` 都映射为该 code。它可来自 provider、metadata、replication 或其他动作核心执行错误，不能据此断言已开始的 provider 调用失败。
 
 未知 code 必须按通用错误处理并阻止继续执行；新增 code 需要 Admin API 版本变更。
 
