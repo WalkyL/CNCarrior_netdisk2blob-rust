@@ -28,6 +28,8 @@
 当前 `gatewayd` 已支持:
 
 - `POST /api/object-actions`
+- `POST /api/object-actions/batch/preview`
+- `POST /api/object-actions/batch`
 - `POST /api/object-actions/history/clear`
 - `GET /api/status` 返回 `object_action_history`
 - `GET /api/status` 返回运行态 `runtime` 摘要
@@ -203,7 +205,27 @@ OneDrive 当前已经支持:
 
 如果预览已经显示风险，而这不是你预期的动作，先不要执行。
 
-### 5.3 before/after 检查
+### 5.3 批量选择、移动与删除
+
+对象浏览器每次加载成功都会给当前结果建立短期 selection。`Select all` 只选择当前已经渲染的列表行，不代表桶内未加载、未匹配 prefix 或下一页的对象；单批最多 100 项。selection 和后续 preview plan 都只有 5 分钟有效期。
+
+以下操作会清空选择、丢弃 selection、关闭批量面板并清除预览：切换 bucket、修改 prefix 后重新浏览、重载桶或对象列表、read source/fallback source 改变、列表请求失败、页面重新加载，以及批量操作完成或部分失败。列表 reload 后不要继续使用先前显示的预览或确认框，应从新列表重新选择。
+
+批量移动只需要输入目标 bucket 和目标 prefix；空 prefix 表示目标桶根目录。每个对象保留自己的 basename，例如 `root/photos/2026/a.jpg` 移到 `family` 的 `archive/` 后为 `family/archive/a.jpg`。预览会列出 source、read source、权威 home provider、destination、状态、reason code 和 warnings，并在目标对象、目标网关 metadata、目标桶或生成的重复目标存在冲突时阻止执行。预览成功后，执行前仍会复查冲突，因此预览不是外部写入锁。
+
+批量删除始终先预览，页面只在预览可执行时显示一次应用内删除确认。该确认针对当前计划；取消、重新选择、刷新列表或计划过期都会关闭它。确认的语义是删除权威云端对象并清理关联 gateway metadata/复制状态。不要把它与 Placement 卡片里的“删除残留 Placement”混淆：后者只删除 gateway Placement metadata，绝不删除云盘文件。
+
+预览中的 `already_missing` 表示权威云端对象已经不存在；执行只尝试 metadata cleanup，不能把它当作新发生的云端 delete。`stale_conflict`、`unverifiable`、目标冲突或目标桶问题不会写入对象。批量执行后若一个 item 失败，已完成行不会回滚，未开始行标为 `not_started`；逐项结果和 warnings 必须一起作为实际结果阅读。
+
+### 5.4 批量结果、历史与中断恢复
+
+批量结果会显示每项状态、reason code、消息和 warnings，以及 completed/failed 等汇总。`operator` 是可选的人类可读标签；可信身份是服务器从 Admin 会话或机器凭据路径解析的 `authenticated_principal`，两者会一起进入批次响应和共享历史。
+
+历史会记录批次摘要、逐项结果和 warnings。`non_atomic_warning`/`consistency_note` 提醒的是实际边界：网关锁协调本进程内控制面操作，但外部 provider、S3 兼容存储和其他外部写入者不在该锁中。若远端动作已经成功但 WAL finalization 无法写入完成标记，结果会带 warning；这不会倒推远端动作失败或自动回滚。
+
+若页面返回 `interrupted` / `batch_recovery_required`，不要再次点击原计划或复用原 UUID。先导出或保存响应中的 `saved_results` 与 `unresolved_items`，逐项到权威 provider 检查 source/destination 的实际状态和 metadata，然后重新浏览对象列表、创建新的 selection、重新预览，并用新的 UUID 执行后续必要动作。`rejected` 是 provider 调用前的零写入终态，可重放原错误；`in_progress` 表示同一 key 仍在运行；completed 只重放已保存结果。
+
+### 5.5 before/after 检查
 
 每次动作执行后，页面会显示被影响对象的 before/after 检查结果。
 
@@ -223,7 +245,7 @@ OneDrive 当前已经支持:
 - fallback gate 是否改变
 - 元数据是否已经转向目标 key
 
-### 5.4 共享历史
+### 5.6 共享历史
 
 共享历史现在提供:
 
@@ -243,7 +265,7 @@ OneDrive 当前已经支持:
 - 不是“当前浏览器 tab 的私有状态”
 - 不是“某一个操作者的个人历史”
 
-### 5.5 控制面自动刷新
+### 5.7 控制面自动刷新
 
 Admin Web 顶部现在提供:
 

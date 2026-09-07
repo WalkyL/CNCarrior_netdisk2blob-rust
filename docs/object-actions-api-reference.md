@@ -784,7 +784,174 @@ POST /api/providers/{provider}/limit-probe
 - `rename` 可同时覆盖“改名”和“跨目录移动”
 - `copy` 成功前可能会多一次短暂轮询
 
-## 10. 相关文档
+## 10. 批量对象动作 API
+
+批量接口只支持 `delete` 和 `move`。调用顺序固定为：先通过 `GET /api/object-browser/objects` 获取当前列表和 `selection_id`，再 `POST /api/object-actions/batch/preview`，最后使用该预览返回的 `plan_id` 调用 `POST /api/object-actions/batch`。预览和最终执行预检都不会把浏览器提交的身份字段当作可信事实；服务端会重新验证选择、拓扑、对象身份、目标桶和目标冲突。
+
+`selection_id` 与预览计划都只有 5 分钟有效期。一次预览最多提交 100 个对象，且 `objects` 必须是该 `selection_id` 所代表的当前列表结果的子集。
+
+### 10.1 POST /api/object-actions/batch/preview
+
+用途：为当前选择建立一个只读、短期的 delete 或 move 计划。成功预览不会写入 provider、S3 兼容存储、对象 metadata、复制队列或幂等 ledger。
+
+路由常量：`/api/object-actions/batch/preview`。
+
+移动请求示例：
+
+```json
+{
+  "action": "move",
+  "selection_id": "selection-opaque-id",
+  "objects": [
+    { "bucket": "root", "key": "photos/2026/a.jpg" },
+    { "bucket": "root", "key": "photos/2026/b.jpg" }
+  ],
+  "destination_bucket": "family",
+  "destination_prefix": "archive/"
+}
+```
+
+删除请求不带目标字段：
+
+```json
+{
+  "action": "delete",
+  "selection_id": "selection-opaque-id",
+  "objects": [
+    { "bucket": "root", "key": "photos/2026/a.jpg" }
+  ]
+}
+```
+
+move 的 `destination_prefix` 可以是空字符串，表示目标桶根目录。服务端以每个源 key 的 basename 生成目标 key；例如 `root/photos/2026/a.jpg` 移到 `family` 的 `archive/`，目标为 `family/archive/a.jpg`。重复 source、重复生成的目标、非法路径、selection 之外的对象或超过 100 项都被拒绝。
+
+成功返回 `200 OK`：
+
+```json
+{
+  "plan_id": "plan-opaque-id",
+  "plan_expires_at": 1778947975011,
+  "topology_fingerprint": "rev:7",
+  "items": [
+    {
+      "ordinal": 0,
+      "source": { "bucket": "root", "key": "photos/2026/a.jpg" },
+      "read_source": "unicom",
+      "home_provider": "unicom",
+      "destination": { "bucket": "family", "key": "archive/a.jpg" },
+      "status": "ready",
+      "reason_code": null,
+      "message": "object is ready for batch execution",
+      "warnings": []
+    }
+  ]
+}
+```
+
+`plan_expires_at` 是 Unix 毫秒时间戳。每个 item 都带 source、read source、权威 `home_provider`、可选 destination、status、可选 `reason_code`/`message` 和 `warnings`，供操作者逐项判断。delete 的远端对象已不存在时可显示 `already_missing`；执行时只会尝试可清理的网关 metadata，不能把它理解成已发生真实云端删除。
+
+预览的 `400 Bad Request` 用于输入、路径、重复项或数量错误。`409 Conflict` 用于已过期/不匹配 selection、拓扑变化、源身份变化、目标桶不可用或目标冲突。任何这些预检错误均是零写入：不会开始对象动作或建立可执行计划。移动预检检查目标对象、目标 gateway metadata 和目标桶；最终执行前会在同一网关变更锁内再次检查，因此预览之后出现的目标冲突也会以零写入失败。
+
+### 10.2 POST /api/object-actions/batch
+
+用途：执行一个已成功预览的计划。
+
+路由常量：`/api/object-actions/batch`。
+
+请求必须含 `Idempotency-Key`，并且该 header 必须与 body 的 `batch_id` 完全相等，二者都必须是 canonical lowercase UUID v4：
+
+```text
+^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$
+```
+
+```http
+POST /api/object-actions/batch
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: application/json
+```
+
+```json
+{
+  "plan_id": "plan-opaque-id",
+  "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+  "operator": "alice",
+  "ticket": "CHG-2026-0903",
+  "notes": "archive photos"
+}
+```
+
+`authenticated_principal` 由 Admin 鉴权中间件在服务端解析并写入响应和历史，不能由请求体覆盖。`operator` 只是可选的、trim 后最长 256 字符的 `operator_label` 审计备注，不是可信身份；`ticket` 和 `notes` 同样是可选审计字段。
+
+成功或同 fingerprint 的 completed 重放返回 `200 OK` 和原保存的结果：
+
+```json
+{
+  "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+  "action": "move",
+  "authenticated_principal": "admin:alice",
+  "operator_label": "alice",
+  "requested": 2,
+  "completed": 1,
+  "already_missing": 0,
+  "no_op": 0,
+  "failed": 1,
+  "stale_conflict": 0,
+  "not_started": 0,
+  "non_atomic_warning": true,
+  "consistency_note": "External writers are outside the gateway mutation lock.",
+  "results": []
+}
+```
+
+`results` 是逐项最终结果，使用与预览相同的 item 字段。计数字段覆盖 completed、already_missing、no_op、failed、stale_conflict 和 not_started，且 `requested` 与结果数对应。执行中一个 item 失败后，已完成项保留，未开始项以 `status: "not_started"`、`reason_code: "not_started"` 返回；该批次不是事务回滚。
+
+网关内对象变更锁最多等待 5 秒。锁忙或同 key 正在执行返回 `409 Conflict`、`Retry-After: 5`，分别使用 `batch_busy` 或 `batch_in_progress`。plan 过期、拓扑变化或最终预检发现的目标/源冲突也返回 `409 Conflict`，并且 reservation 与 provider 调用之前的这些失败保持零写入。ledger 已满返回 `503 Service Unavailable` (`batch_ledger_full`)；ledger 持久化不可用返回 `500 Internal Server Error` (`batch_ledger_unavailable`)。
+
+批量 delete/move 共用单对象结构化动作核心。预检对 delete 要求通用 delete 能力，对 move 要求通用 write 和 delete 能力；缺少这些能力时返回 `provider_unsupported`。当前 `BlobBackend` 没有独立 move capability 位，所以 native `move_object` 在执行阶段返回 `NotImplemented` 时，该 item 也以 `status: "failed"` 和 `reason_code: "provider_unsupported"` 真实报告，而不是误报为目标冲突。
+
+provider 调用、包括外部 provider 与 S3 兼容写入，是网关原子边界之外的非原子副作用。网关锁不能阻止外部写入者；因此每个执行和恢复结果都包含 `non_atomic_warning` 与 `consistency_note`。远端动作成功后的 WAL finalization 失败只会把 WAL warning 写入 item `warnings`、批次结果和历史，不会回滚已经成功的远端 delete/move，也不会把该 item 改判为 failed。
+
+### 10.3 幂等、拒绝与恢复
+
+同一 `batch_id` 在保留期内绑定 authenticated principal 和完整请求 fingerprint。completed 会重放保存的 `200` 响应；rejected 会重放保存的零写入错误 HTTP status/body；不同 fingerprint 返回 `409 Conflict` 和 `idempotency_key_reused`。ledger 最多保留 64 条，所有状态按最后更新时间保留 24 小时。
+
+状态为 `in_progress` 的同 key 请求不会重放动作。若进程重启时尚未持久化第一个 provider 调用标记，记录会变为 `rejected`，code 为 `batch_not_started`；一旦该标记存在，重启或最终持久化不确定性会变为 `interrupted`，绝不自动重放 provider 工作。
+
+interrupted 返回 `409 Conflict`、`batch_recovery_required` 和以下恢复合同：
+
+```json
+{
+  "batch_id": "550e8400-e29b-41d4-a716-446655440000",
+  "action": "move",
+  "state": "interrupted",
+  "code": "batch_recovery_required",
+  "requested": 2,
+  "saved_count": 1,
+  "unresolved_count": 1,
+  "saved_results": [],
+  "unresolved_items": [
+    {
+      "ordinal": 1,
+      "source": { "bucket": "root", "key": "photos/b.jpg" },
+      "destination": { "bucket": "family", "key": "archive/b.jpg" },
+      "reason_code": "recovery_required",
+      "message": "Provider result was not durably recorded before restart."
+    }
+  ],
+  "non_atomic_warning": true,
+  "consistency_note": "The gateway cannot determine whether the in-flight provider call committed before restart."
+}
+```
+
+恢复不变量为 `requested = saved_count + unresolved_count = saved_results.length + unresolved_items.length`。同一个 interrupted key 在保留期内始终重放同一恢复合同；操作者必须检查实际对象状态，重新浏览并创建新的 selection、plan 和 UUID，不能用原 key 重试。
+
+### 10.4 v1 封闭 reason code
+
+v1 batch reason code 是封闭列表：`selection_expired`、`selection_mismatch`、`plan_expired`、`topology_changed`、`invalid_path`、`duplicate_object`、`duplicate_destination`、`source_missing`、`source_changed`、`source_unverifiable`、`home_resolution_conflict`、`destination_exists`、`destination_metadata_exists`、`destination_bucket_missing`、`destination_bucket_unverifiable`、`provider_unsupported`、`provider_error`、`not_started`、`batch_busy`、`batch_ledger_full`、`batch_ledger_unavailable`、`batch_in_progress`、`idempotency_key_reused`、`batch_not_started`、`batch_recovery_required`、`recovery_required`。
+
+未知 code 必须按通用错误处理并阻止继续执行；新增 code 需要 Admin API 版本变更。
+
+## 11. 相关文档
 
 - [docs/object-actions-and-history.md](/home/walky/carrier-cloud-blob-gateway/docs/object-actions-and-history.md:1)
 - [docs/auth-step-by-step.md](/home/walky/carrier-cloud-blob-gateway/docs/auth-step-by-step.md:1)

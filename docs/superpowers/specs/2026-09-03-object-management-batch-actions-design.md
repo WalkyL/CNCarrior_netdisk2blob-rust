@@ -359,7 +359,7 @@ interrupted 恢复响应使用独立的批次级合同，不使用普通执行�
 
 客户端和服务端都验证空选择、重复对象、路径、目标桶、selection/plan 有效期和 100 项上限。预检失败、锁忙、ledger 错误和恢复错误都返回稳定的 machine-readable code、message 和适用的 item/批次信息。
 
-v1 reason code 是封闭枚举：selection_expired、selection_mismatch、plan_expired、topology_changed、invalid_path、duplicate_object、duplicate_destination、source_missing、source_changed、source_unverifiable、home_resolution_conflict、destination_exists、destination_metadata_exists、destination_bucket_missing、destination_bucket_unverifiable、provider_unsupported、batch_busy、batch_ledger_full、batch_ledger_unavailable、batch_in_progress、idempotency_key_reused、batch_not_started、batch_recovery_required、recovery_required。未来新增 code 必须通过 Admin API 版本变更；旧 UI 将未知 code 显示为通用错误并阻止继续。
+v1 reason code 是封闭枚举：selection_expired、selection_mismatch、plan_expired、topology_changed、invalid_path、duplicate_object、duplicate_destination、source_missing、source_changed、source_unverifiable、home_resolution_conflict、destination_exists、destination_metadata_exists、destination_bucket_missing、destination_bucket_unverifiable、provider_unsupported、provider_error、not_started、batch_busy、batch_ledger_full、batch_ledger_unavailable、batch_in_progress、idempotency_key_reused、batch_not_started、batch_recovery_required、recovery_required。`provider_error` 是已开始的 provider 调用返回的非 NotImplemented、NotFound 或 Configuration 错误；`not_started` 标记前一项失败后停止、从未开始的剩余项。未来新增 code 必须通过 Admin API 版本变更；旧 UI 将未知 code 显示为通用错误并阻止继续。
 
 ## 实现边界
 
