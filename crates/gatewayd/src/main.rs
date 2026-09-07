@@ -17062,7 +17062,7 @@ async fn execute_object_action_core_with_options(
                 .map_err(|error| BlobError::Upstream(error.to_string()))?;
             if options.metadata_only_delete {
                 if let Err(error) = delete_object_metadata_records(&state, &bucket, &key) {
-                    let rollback_note = rollback_delete_after_failure_with_note(
+                    let rollback_note = rollback_metadata_only_delete_after_failure_with_note(
                         &state,
                         &bucket,
                         &key,
@@ -34076,6 +34076,29 @@ fn rollback_delete_after_failure_with_note(
     };
 
     format!("remote delete already succeeded; {metadata_note}")
+}
+
+fn rollback_metadata_only_delete_after_failure_with_note(
+    state: &AppState,
+    bucket: &str,
+    key: &str,
+    previous_placement_record: Option<ObjectPlacementRecord>,
+    previous_logical: Option<LogicalObjectRecord>,
+    previous_protection_plan: Option<ObjectProtectionPlanRecord>,
+) -> String {
+    let metadata_note = match ensure_previous_object_metadata_state(
+        state,
+        bucket,
+        key,
+        previous_placement_record,
+        previous_logical,
+        previous_protection_plan,
+    ) {
+        Ok(()) => "metadata rollback succeeded".to_string(),
+        Err(error) => format!("metadata rollback failed: {error}"),
+    };
+
+    format!("remote delete was not attempted; {metadata_note}")
 }
 
 async fn rollback_rename_after_failure_with_note(
@@ -55206,6 +55229,55 @@ mod tests {
             .object_batch_ledger
             .get("550e8400-e29b-41d4-a716-446655440008")
             .is_some_and(|record| record.provider_call_started_at_unix_ms.is_none()));
+    }
+
+    #[tokio::test]
+    async fn object_batch_execute_already_missing_cleanup_failure_has_truthful_message() {
+        let state = test_state();
+        let key = "docs/missing-cleanup-failure.txt";
+        let plan = create_delete_plan_for_test(&state, "root", &[key]).await;
+        backend_for_test(&state, ProviderId::Stub)
+            .delete_object("root", key)
+            .await
+            .expect("raw provider object should be removable");
+        set_test_delete_object_metadata_failures("root", key, 1);
+
+        let result = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id,
+                batch_id: "550e8400-e29b-41d4-a716-446655440012".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect("cleanup failure should be reported as an item failure");
+        set_test_delete_object_metadata_failures("root", key, 0);
+
+        let message = result.results[0]
+            .message
+            .as_deref()
+            .expect("failed item should have a message");
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.results[0].status, ObjectBatchItemStatus::Failed);
+        assert!(message.contains("remote delete was not attempted"));
+        assert!(!message.contains("remote delete already succeeded"));
+        assert!(state
+            .metadata_store
+            .object_placement("root", key)
+            .expect("placement lookup should succeed")
+            .is_some());
+        assert!(load_logical_object_record(&state, "root", key)
+            .expect("logical lookup should succeed")
+            .is_some());
+        assert!(state
+            .metadata_store
+            .object_protection_plan("root", key)
+            .expect("protection lookup should succeed")
+            .is_some());
     }
 
     #[tokio::test]
