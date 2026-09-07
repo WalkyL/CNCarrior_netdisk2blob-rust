@@ -97,6 +97,28 @@ assert.deepEqual(Array.from(api.selectedKeys(state)), [], "terminal results clea
 assert.equal(state.planId, "", "terminal results clear the plan");
 assert.equal(state.executionId, "", "terminal results clear idempotency state");
 
+const lifecycleState = api.create();
+api.replaceList(lifecycleState, {
+  selectionId: "lifecycle-selection",
+  bucket: "root",
+  keys: ["docs/a.txt"],
+});
+api.selectAll(lifecycleState);
+api.setPlan(lifecycleState, { planId: "lifecycle-plan", action: "delete" });
+lifecycleState.executionId = uuid1;
+const lifecycleRevision = lifecycleState.revision;
+const reloadRevision = api.beginListReload(lifecycleState);
+assert.equal(reloadRevision, lifecycleState.revision, "list reload returns its lifecycle revision");
+assert.ok(reloadRevision > lifecycleRevision, "list reload supersedes older lifecycle responses");
+assert.equal(api.isCurrentRevision(lifecycleState, lifecycleRevision), false, "list reload rejects the superseded response");
+assert.equal(lifecycleState.selectionId, "", "list reload clears the visible selection identity");
+assert.equal(lifecycleState.bucket, "", "list reload clears the visible source bucket");
+assert.deepEqual(Array.from(lifecycleState.resultKeys), [], "list reload clears visible result keys");
+assert.deepEqual(Array.from(api.selectedKeys(lifecycleState)), [], "list reload clears the invisible selection");
+assert.equal(lifecycleState.planId, "", "list reload clears the pending plan");
+assert.equal(lifecycleState.action, "", "list reload clears the pending action");
+assert.equal(lifecycleState.executionId, "", "list reload clears the pending idempotency UUID");
+
 const raceState = api.create();
 api.replaceList(raceState, {
   selectionId: "race-selection",

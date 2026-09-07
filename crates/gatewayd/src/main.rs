@@ -48347,6 +48347,8 @@ mod tests {
         assert!(html.contains("这与上方只清理残留 Placement 元数据的操作不同"));
         assert!(html.contains("fetchJson('/api/object-actions/batch', { method: 'POST', headers: { 'Idempotency-Key': batchId }, body: JSON.stringify(body) })"));
         assert!(html.contains("function loadObjectBrowserBuckets("));
+        assert!(html.contains("const bucketReloadRevision = objectBatchStateApi.beginListReload(objectBrowserState.batch);"));
+        assert!(html.contains("if (!objectBatchStateApi.isCurrentRevision(objectBrowserState.batch, bucketReloadRevision)) return;"));
         assert!(html.contains("function loadObjectPlacementProviders("));
         assert!(html.contains("function loadObjectPlacementRecords("));
         assert!(html.contains("function loadObjectReconcilePreview("));

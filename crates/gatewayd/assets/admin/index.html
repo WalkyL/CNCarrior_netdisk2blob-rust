@@ -5305,7 +5305,7 @@ Copyright (c) 2026 walky
         setAction(state, action) {
           return invalidate(state, String(action || ''));
         },
-        beginBrowse(state) {
+        beginListReload(state) {
           state.selectionId = '';
           state.bucket = '';
           state.resultKeys = [];
@@ -11497,10 +11497,14 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         renderObjectBrowserResults(objectBrowserState.objects_payload);
         return;
       }
+      const bucketReloadRevision = objectBatchStateApi.beginListReload(objectBrowserState.batch);
+      clearObjectBatchConfirmation();
+      renderObjectBrowserResults(null);
       setObjectBrowserFeedback(tr('object.browser.feedback.loading_buckets', {}, 'Loading live buckets…'), 'warn');
       objectBrowserState.loading_buckets = true;
       try {
         const payload = await fetchJson('/api/object-browser/buckets');
+        if (!objectBatchStateApi.isCurrentRevision(objectBrowserState.batch, bucketReloadRevision)) return;
         objectBrowserState.buckets_loaded = true;
         objectBrowserState.source_provider = payload.source_provider || '';
         objectBrowserState.fallback_from = payload.fallback_from || null;
@@ -11513,6 +11517,9 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         renderContentPoliciesEditor();
         setObjectBrowserFeedback(tr('object.browser.feedback.buckets_loaded', {}, 'Buckets loaded.'), 'ok');
       } catch (error) {
+        if (!objectBatchStateApi.isCurrentRevision(objectBrowserState.batch, bucketReloadRevision)) return;
+        objectBatchStateApi.beginListReload(objectBrowserState.batch);
+        clearObjectBatchConfirmation();
         objectBrowserState.buckets_loaded = false;
         objectBrowserState.source_provider = '';
         objectBrowserState.fallback_from = null;
@@ -11523,7 +11530,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         renderObjectPlacementRecordBucketOptions();
         renderObjectReconcileBucketOptions();
         renderContentPoliciesEditor();
-        document.getElementById('object-browser-results').innerHTML = '';
+        renderObjectBrowserResults(null);
         document.getElementById('object-browser-summary').textContent = error.message;
         setObjectBrowserFeedback(error.message, 'warn');
       } finally {
@@ -11560,7 +11567,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       }
       const prefix = document.getElementById('object-browser-prefix').value.trim();
       const limit = Number(document.getElementById('object-browser-limit').value || '{DEFAULT_OBJECT_BROWSER_LIMIT}');
-      const browseRevision = objectBatchStateApi.beginBrowse(objectBrowserState.batch);
+      const browseRevision = objectBatchStateApi.beginListReload(objectBrowserState.batch);
       clearObjectBatchConfirmation();
       objectBrowserState.objects_payload = null;
       document.getElementById('object-browser-results').innerHTML = '';
@@ -11580,7 +11587,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         setObjectBrowserFeedback(tr('object.browser.feedback.objects_loaded', {}, 'Objects loaded.'), 'ok');
       } catch (error) {
         if (!objectBatchStateApi.isCurrentRevision(objectBrowserState.batch, browseRevision)) return;
-        objectBatchStateApi.beginBrowse(objectBrowserState.batch);
+        objectBatchStateApi.beginListReload(objectBrowserState.batch);
         clearObjectBatchConfirmation();
         objectBrowserState.objects_payload = null;
         document.getElementById('object-browser-results').innerHTML = '';
