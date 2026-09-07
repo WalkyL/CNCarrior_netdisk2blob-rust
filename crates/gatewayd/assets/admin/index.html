@@ -678,8 +678,26 @@ Copyright (c) 2026 walky
     .object-reconcile-controls { display:grid; grid-template-columns: 140px minmax(150px, 0.9fr) minmax(220px, 1.3fr) 120px auto; gap: 10px; margin-top: 12px; align-items:end; }
     .object-browser-actions { display:flex; flex-wrap:wrap; gap: 8px; align-items:center; }
     .object-browser-results { margin-top: 10px; }
+    .object-browser-shell .hidden { display:none !important; }
     .object-browser-key { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
     .object-browser-action-cell { white-space: nowrap; width: 1%; }
+    .object-browser-select-cell { width: 42px; min-width: 42px; text-align:center; }
+    .object-browser-select-cell input[type="checkbox"], .object-batch-toolbar input[type="checkbox"] { width: 15px; height: 15px; margin: 0; }
+    .object-browser-table { table-layout: fixed; min-width: 720px; }
+    .object-browser-table .object-browser-size-cell { width: 110px; }
+    .object-browser-table .object-browser-modified-cell { width: 180px; }
+    .object-browser-table .object-browser-action-cell { width: 104px; }
+    .object-batch-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:10px; padding:8px 0; border-top:1px solid var(--border); }
+    .object-batch-toolbar .actions { margin:0; gap:8px; }
+    .object-batch-select-all { display:inline-flex; align-items:center; gap:6px; margin:0; font-size:13px; color:var(--ink); }
+    .object-batch-panel { margin-top:12px; padding-top:12px; border-top:1px solid var(--border); }
+    .object-batch-panel h4 { margin:0 0 6px; font-size:14px; }
+    .object-batch-source-summary { margin-bottom:10px; overflow-wrap:anywhere; }
+    .object-batch-fields { display:grid; grid-template-columns:minmax(180px, 1fr) minmax(220px, 1.3fr); gap:10px; align-items:end; }
+    .object-batch-audit { display:grid; grid-template-columns:repeat(3, minmax(150px, 1fr)); gap:10px; margin-top:10px; }
+    .object-batch-confirmation { margin-top:10px; padding:10px 12px; border-left:3px solid var(--warn); background:rgba(180, 83, 9, 0.07); }
+    .object-batch-confirmation p { margin:0 0 8px; }
+    .object-batch-preview, .object-batch-results { margin-top:10px; }
     .object-placement-record-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap: 10px; margin-top: 12px; }
     .object-placement-record-toolbar .actions { margin: 0; gap: 8px; }
     .object-placement-record-selection { display:flex; flex-wrap:wrap; align-items:center; gap: 8px; color: var(--muted); font-size: 13px; }
@@ -1120,6 +1138,7 @@ Copyright (c) 2026 walky
       .object-reconcile-controls { grid-template-columns: 1fr; }
       .object-placement-controls { flex-direction: column; align-items: stretch; }
       .object-browser-action-cell { width:auto; white-space:normal; }
+      .object-batch-fields, .object-batch-audit { grid-template-columns:1fr; }
       .top-status-main,
       .top-status-side { grid-template-columns: 1fr; }
       .top-status-object-ops-row { grid-template-columns: 1fr; }
@@ -1636,7 +1655,44 @@ Copyright (c) 2026 walky
         </div>
         <div id="object-browser-feedback" class="flash"></div>
         <div id="object-browser-summary" class="hint">先加载桶列表，再开始浏览对象。</div>
+        <div id="object-batch-toolbar" class="object-batch-toolbar hidden">
+          <strong id="object-batch-selected-count">已选择 0 个对象</strong>
+          <label class="object-batch-select-all"><input id="object-browser-select-all" type="checkbox" />选择当前结果</label>
+          <div class="actions">
+            <button id="object-batch-move" class="secondary" type="button">移动</button>
+            <button id="object-batch-delete" class="secondary" type="button">删除</button>
+            <button id="object-batch-clear" class="secondary" type="button">清除选择</button>
+          </div>
+        </div>
         <div id="object-browser-results" class="table-wrap object-browser-results"></div>
+        <div id="object-batch-panel" class="object-batch-panel hidden">
+          <h4>管理已选对象</h4>
+          <div id="object-batch-source-summary" class="hint object-batch-source-summary"></div>
+          <div id="object-batch-move-fields" class="object-batch-fields hidden">
+            <div><label>目标桶</label><select id="object-batch-destination-bucket"><option value="">先加载桶列表</option></select></div>
+            <div><label>目标前缀</label><input id="object-batch-destination-prefix" type="text" placeholder="archive/2026/" /></div>
+          </div>
+          <div class="object-batch-audit">
+            <div><label>操作人标签（可选）</label><input id="object-batch-operator" type="text" placeholder="alice" /></div>
+            <div><label>工单 / 变更号（可选）</label><input id="object-batch-ticket" type="text" placeholder="CHG-2026-0514" /></div>
+            <div><label>备注（可选）</label><input id="object-batch-notes" type="text" placeholder="变更原因或回滚信息" /></div>
+          </div>
+          <div class="actions">
+            <button id="object-batch-preview-move" class="secondary hidden" type="button">预览移动</button>
+            <button id="object-batch-execute-move" class="hidden" type="button">执行移动</button>
+          </div>
+          <div id="object-batch-feedback" class="flash"></div>
+          <div id="object-batch-preview" class="object-batch-preview"></div>
+          <div id="object-batch-delete-confirmation" class="object-batch-confirmation hidden" role="region" aria-label="删除确认">
+            <p><strong>删除云盘对象及网关元数据</strong></p>
+            <p>此操作会删除当前归属云盘中的真实对象，并同时删除网关 metadata；这与上方只清理残留 Placement 元数据的操作不同。</p>
+            <div class="actions">
+              <button id="object-batch-confirm-delete" type="button">确认删除</button>
+              <button id="object-batch-cancel-delete" class="secondary" type="button">取消</button>
+            </div>
+          </div>
+          <div id="object-batch-results" class="object-batch-results"></div>
+        </div>
       </div>
       <div class="grid" style="margin-top: 0;">
         <div>
@@ -1661,7 +1717,9 @@ Copyright (c) 2026 walky
     </section>
     <section class="card" style="margin-top: 16px;">
       <h2>文件操作</h2>
-      <p>在这里对单个对象执行重命名、复制或移动。网关会先在当前归属云盘完成第一跳写入，再同步更新复制元数据，保证后续读取保持一致。</p>
+      <details>
+      <summary>Advanced Object Actions / 高级对象操作</summary>
+      <p>在这里对单个对象执行重命名或复制。批量移动和删除请从上方实时对象列表选择对象后操作。</p>
       <div id="object-action-guide" class="object-guide-grid"></div>
       <div class="grid" style="margin-top: 0;">
         <div>
@@ -1669,7 +1727,6 @@ Copyright (c) 2026 walky
           <select id="object-action-kind">
             <option value="rename">rename</option>
             <option value="copy">copy</option>
-            <option value="move">move</option>
           </select>
         </div>
       </div>
@@ -1789,6 +1846,7 @@ Copyright (c) 2026 walky
       <details>
         <summary>原始文件操作负载</summary>
         <pre id="object-action-json">提交一次文件操作后，这里会显示请求负载和执行结果。</pre>
+      </details>
       </details>
     </section>
     </div>
@@ -5168,6 +5226,95 @@ Copyright (c) 2026 walky
     };
     let objectActionHistory = [];
     let objectActionHistoryLimit = 12;
+    /* object-batch-state:start */
+    (() => {
+      const clearPlan = state => {
+        state.planId = '';
+        state.action = '';
+        state.executionId = '';
+      };
+      const selectedKeys = state => state.resultKeys.filter(key => state.selected.has(key));
+      const normalizePrefix = value => String(value || '').trim().replace(/^\/+|\/+$/g, '');
+      const basename = key => String(key || '').split('/').filter(Boolean).pop() || '';
+      const api = {
+        create() {
+          return { selectionId: '', bucket: '', resultKeys: [], selected: new Set(), planId: '', action: '', executionId: '' };
+        },
+        replaceList(state, list) {
+          const selectionId = String(list?.selectionId || '');
+          const bucket = String(list?.bucket || '');
+          const keys = Array.from(new Set((list?.keys || []).map(key => String(key))));
+          const replacement = state.selectionId !== selectionId || state.bucket !== bucket;
+          state.selectionId = selectionId;
+          state.bucket = bucket;
+          state.resultKeys = keys;
+          if (replacement) {
+            state.selected.clear();
+            clearPlan(state);
+          } else {
+            state.selected = new Set(selectedKeys(state));
+          }
+        },
+        setSelected(state, key, selected) {
+          key = String(key || '');
+          if (!state.resultKeys.includes(key)) return;
+          if (selected) state.selected.add(key); else state.selected.delete(key);
+          clearPlan(state);
+        },
+        selectOnly(state, key) {
+          state.selected.clear();
+          if (state.resultKeys.includes(String(key || ''))) state.selected.add(String(key));
+          clearPlan(state);
+        },
+        selectAll(state) {
+          state.selected = new Set(state.resultKeys);
+          clearPlan(state);
+        },
+        clearSelection(state) {
+          state.selected.clear();
+          clearPlan(state);
+        },
+        selectedKeys,
+        buildMove(state, destination) {
+          const destinationBucket = String(destination?.destinationBucket || '').trim();
+          const prefix = normalizePrefix(destination?.destinationPrefix);
+          const objects = selectedKeys(state).map(key => ({ bucket: state.bucket, key }));
+          const destinations = objects.map(object => ({ bucket: destinationBucket, key: [prefix, basename(object.key)].filter(Boolean).join('/') }));
+          const counts = new Map();
+          destinations.forEach(item => {
+            const id = `${item.bucket}/${item.key}`;
+            counts.set(id, (counts.get(id) || 0) + 1);
+          });
+          const duplicateDestinations = Array.from(counts.entries()).filter(([, count]) => count > 1).map(([id]) => id);
+          return { objects, destinations, duplicateDestinations };
+        },
+        setPlan(state, plan) {
+          const planId = String(plan?.planId || '');
+          const action = String(plan?.action || '');
+          if (state.planId !== planId || state.action !== action) state.executionId = '';
+          state.planId = planId;
+          state.action = action;
+        },
+        executionId(state, planId, randomUUID) {
+          planId = String(planId || '');
+          if (state.planId === planId && state.executionId) return state.executionId;
+          const value = String(randomUUID()).toLowerCase();
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+            throw new Error('crypto.randomUUID must return a canonical UUID v4');
+          }
+          state.planId = planId;
+          state.executionId = value;
+          return value;
+        },
+        resetAfterResult(state) {
+          state.selected.clear();
+          clearPlan(state);
+        },
+      };
+      globalThis.ccbgObjectBatchState = api;
+    })();
+    /* object-batch-state:end */
+    const objectBatchStateApi = globalThis.ccbgObjectBatchState;
     let objectBrowserState = {
       loading_buckets: false,
       buckets_loaded: false,
@@ -5175,6 +5322,7 @@ Copyright (c) 2026 walky
       fallback_from: null,
       buckets: [],
       objects_payload: null,
+      batch: objectBatchStateApi.create(),
     };
     let objectPlacementState = {
       loading: false,
@@ -11148,6 +11296,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         'object-action-rename-bucket',
         'object-action-source-bucket',
         'object-action-destination-bucket',
+        'object-batch-destination-bucket',
       ].forEach(id => {
         const select = document.getElementById(id);
         if (!select) {
@@ -11197,11 +11346,18 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         return;
       }
       if (!payload) {
+        objectBatchStateApi.replaceList(objectBrowserState.batch, { selectionId: '', bucket: '', keys: [] });
         container.innerHTML = '';
         renderObjectBrowserBucketSummary();
+        renderObjectBatchPanel();
         return;
       }
       const objects = payload.objects || [];
+      objectBatchStateApi.replaceList(objectBrowserState.batch, {
+        selectionId: payload.selection_id,
+        bucket: payload.bucket,
+        keys: objects.map(object => object.key),
+      });
       const sourceLabel = objectBrowserSourceLabel(payload.source_provider, payload.fallback_from);
       const prefixLabel = payload.prefix || tr('common.na', {}, 'n/a');
       summaryNode.textContent = tr(
@@ -11222,24 +11378,28 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
             </tbody>
           </table>
         `;
+        renderObjectBatchPanel();
         return;
       }
+      const selected = new Set(objectBatchStateApi.selectedKeys(objectBrowserState.batch));
       container.innerHTML = `
         <table class="object-browser-table">
           <thead>
             <tr>
+              <th class="object-browser-select-cell" aria-label="选择"></th>
               <th>${escapeHtml(tr('object.browser.table.key', {}, 'Key'))}</th>
-              <th>${escapeHtml(tr('object.browser.table.size', {}, 'Size'))}</th>
-              <th>${escapeHtml(tr('object.browser.table.modified', {}, 'Modified'))}</th>
-              <th>${escapeHtml(tr('object.browser.table.action', {}, 'Action'))}</th>
+              <th class="object-browser-size-cell">${escapeHtml(tr('object.browser.table.size', {}, 'Size'))}</th>
+              <th class="object-browser-modified-cell">${escapeHtml(tr('object.browser.table.modified', {}, 'Modified'))}</th>
+              <th class="object-browser-action-cell">管理</th>
             </tr>
           </thead>
           <tbody>
             ${objects.map(object => `
               <tr>
+                <td class="object-browser-select-cell"><input type="checkbox" data-object-browser-select="${escapeHtmlAttr(object.key)}" ${selected.has(object.key) ? 'checked' : ''} aria-label="选择 ${escapeHtmlAttr(object.key)}" /></td>
                 <td class="object-browser-key">${escapeHtml(object.key)}</td>
-                <td>${escapeHtml(formatBytes(object.size))}</td>
-                <td>${escapeHtml((() => {
+                <td class="object-browser-size-cell">${escapeHtml(formatBytes(object.size))}</td>
+                <td class="object-browser-modified-cell">${escapeHtml((() => {
                   const modifiedAt = object.last_modified ? Date.parse(object.last_modified) : null;
                   return formatTimestamp(Number.isFinite(modifiedAt) ? modifiedAt : null);
                 })())}</td>
@@ -11247,15 +11407,15 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
                   <button
                     class="secondary"
                     type="button"
-                    data-object-browser-bucket="${escapeHtmlAttr(payload.bucket)}"
-                    data-object-browser-inspect="${escapeHtmlAttr(object.key)}"
-                  >${escapeHtml(tr('object.browser.table.inspect', {}, 'Inspect'))}</button>
+                    data-object-browser-manage="${escapeHtmlAttr(object.key)}"
+                  >Manage</button>
                 </td>
               </tr>
             `).join('')}
           </tbody>
         </table>
       `;
+      renderObjectBatchPanel();
     }
     async function loadObjectBrowserBuckets(force = false) {
       if (objectBrowserState.loading_buckets) {
@@ -11344,6 +11504,171 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         document.getElementById('object-browser-results').innerHTML = '';
         document.getElementById('object-browser-summary').textContent = error.message;
         setObjectBrowserFeedback(error.message, 'warn');
+      }
+    }
+    function objectBatchAction() {
+      return objectBrowserState.batch.action || '';
+    }
+    function selectedObjectBatchObjects() {
+      return objectBatchStateApi.selectedKeys(objectBrowserState.batch)
+        .map(key => ({ bucket: objectBrowserState.batch.bucket, key }));
+    }
+    function setObjectBatchFeedback(message, tone) {
+      const node = document.getElementById('object-batch-feedback');
+      if (!node) return;
+      node.textContent = localizeUiMessage(message);
+      node.className = tone === 'ok' ? 'flash status-ok' : 'flash status-warn';
+    }
+    function objectBatchStatusLabel(item) {
+      return `${item.status || 'unknown'}${item.reason_code ? ` · ${item.reason_code}` : ''}`;
+    }
+    function renderObjectBatchItems(items, title) {
+      if (!Array.isArray(items) || !items.length) return '';
+      return `<div class="hint"><strong>${escapeHtml(title)}</strong></div><div class="table-wrap"><table><thead><tr><th>源对象</th><th>目标</th><th>状态</th><th>消息 / 警告</th></tr></thead><tbody>${items.map(item => {
+        const destination = item.destination ? `${item.destination.bucket}/${item.destination.key}` : '-';
+        const warnings = Array.isArray(item.warnings) ? item.warnings.join('；') : '';
+        return `<tr><td class="mono">${escapeHtml(`${item.source?.bucket || ''}/${item.source?.key || ''}`)}</td><td class="mono">${escapeHtml(destination)}</td><td>${escapeHtml(objectBatchStatusLabel(item))}</td><td>${escapeHtml([item.message, warnings].filter(Boolean).join('；') || '-')}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
+    }
+    function renderObjectBatchRecovery(payload) {
+      const saved = renderObjectBatchItems(payload.saved_results || [], '已保存结果');
+      const unresolved = renderObjectBatchItems((payload.unresolved_items || []).map(item => ({
+        ...item,
+        status: 'unresolved',
+        warnings: [],
+      })), '待恢复对象');
+      const warning = payload.non_atomic_warning ? ' · 注意：外部写入不受网关锁保护' : '';
+      return `<div class="hint">批次 ${escapeHtml(payload.batch_id || '')} · 已保存 ${escapeHtml(String(payload.saved_count ?? 0))} · 待恢复 ${escapeHtml(String(payload.unresolved_count ?? 0))}${escapeHtml(warning)}</div>${payload.consistency_note ? `<div class="hint">${escapeHtml(payload.consistency_note)}</div>` : ''}${saved}${unresolved}`;
+    }
+    function renderObjectBatchPanel() {
+      const toolbar = document.getElementById('object-batch-toolbar');
+      const panel = document.getElementById('object-batch-panel');
+      if (!toolbar || !panel) return;
+      const selected = objectBatchStateApi.selectedKeys(objectBrowserState.batch);
+      const visible = objectBrowserState.batch.resultKeys;
+      const hasSelection = selected.length > 0;
+      const hasResults = document.getElementById('object-batch-results').hasChildNodes();
+      toolbar.classList.toggle('hidden', !hasSelection);
+      panel.classList.toggle('hidden', !hasSelection && !hasResults);
+      document.getElementById('object-batch-selected-count').textContent = `已选择 ${selected.length} 个对象`;
+      const selectAll = document.getElementById('object-browser-select-all');
+      selectAll.checked = visible.length > 0 && selected.length === visible.length;
+      selectAll.indeterminate = selected.length > 0 && selected.length < visible.length;
+      document.getElementById('object-batch-source-summary').textContent = hasSelection
+        ? `来源桶：${objectBrowserState.batch.bucket} · ${selected.join('、')}`
+        : (hasResults ? '已清除本次选择；下方保留最近一次执行结果。' : '');
+      document.getElementById('object-batch-move-fields').classList.toggle('hidden', objectBatchAction() !== 'move');
+      document.getElementById('object-batch-preview-move').classList.toggle('hidden', objectBatchAction() !== 'move');
+      document.getElementById('object-batch-execute-move').classList.toggle('hidden', objectBatchAction() !== 'move' || !objectBrowserState.batch.planId);
+    }
+    function renderObjectBatchPreview(payload) {
+      const node = document.getElementById('object-batch-preview');
+      const items = payload?.items || [];
+      node.innerHTML = payload
+        ? `<div class="hint">预览计划 ${escapeHtml(payload.plan_id || '')} · 计划有效期 ${escapeHtml(formatTimestamp(payload.plan_expires_at))}</div>${renderObjectBatchItems(items, '预览结果')}`
+        : '';
+    }
+    function clearObjectBatchConfirmation() {
+      document.getElementById('object-batch-delete-confirmation').classList.add('hidden');
+    }
+    function objectBatchRequest(action) {
+      const state = objectBrowserState.batch;
+      const objects = selectedObjectBatchObjects();
+      const body = { action, selection_id: state.selectionId, objects };
+      if (action === 'move') {
+        body.destination_bucket = document.getElementById('object-batch-destination-bucket').value.trim();
+        body.destination_prefix = document.getElementById('object-batch-destination-prefix').value.trim();
+        if (!body.destination_bucket) throw new Error('移动需要目标桶；目标前缀可以留空以移动到桶根目录。');
+      }
+      return body;
+    }
+    async function previewObjectBatch(action) {
+      const state = objectBrowserState.batch;
+      if (!state.selectionId || !selectedObjectBatchObjects().length) return;
+      objectBatchStateApi.setPlan(state, { planId: '', action });
+      clearObjectBatchConfirmation();
+      document.getElementById('object-batch-preview').innerHTML = '';
+      document.getElementById('object-batch-results').innerHTML = '';
+      renderObjectBatchPanel();
+      try {
+        const body = objectBatchRequest(action);
+        const localMove = action === 'move' ? objectBatchStateApi.buildMove(state, {
+          destinationBucket: body.destination_bucket,
+          destinationPrefix: body.destination_prefix,
+        }) : null;
+        if (localMove?.duplicateDestinations.length) {
+          clearObjectBatchConfirmation();
+          document.getElementById('object-batch-preview').innerHTML = `<div class="flash status-warn">目标冲突：${escapeHtml(localMove.duplicateDestinations.join('、'))}。请调整目标前缀后重试。</div>`;
+          setObjectBatchFeedback('预览未执行：目标路径重复。', 'warn');
+          return;
+        }
+        setObjectBatchFeedback(`正在预览${action === 'move' ? '移动' : '删除'}…`, 'warn');
+        const payload = await fetchJson('/api/object-actions/batch/preview', { method: 'POST', body: JSON.stringify(body) });
+        objectBatchStateApi.setPlan(state, { planId: payload.plan_id, action });
+        renderObjectBatchPreview(payload);
+        const conflict = (payload.items || []).some(item => item.status === 'conflict' || item.status === 'unverifiable');
+        if (conflict) {
+          clearObjectBatchConfirmation();
+          document.getElementById('object-batch-execute-move').classList.add('hidden');
+          setObjectBatchFeedback('预览发现冲突，未执行任何操作。', 'warn');
+          return;
+        }
+        if (action === 'delete') {
+          document.getElementById('object-batch-delete-confirmation').classList.remove('hidden');
+          setObjectBatchFeedback('删除预览成功，请确认后执行。', 'ok');
+        } else {
+          document.getElementById('object-batch-execute-move').classList.remove('hidden');
+          setObjectBatchFeedback('移动预览成功，请确认目标后执行。', 'ok');
+        }
+      } catch (error) {
+        clearObjectBatchConfirmation();
+        if (error.payload?.items?.length) {
+          document.getElementById('object-batch-preview').innerHTML = renderObjectBatchItems(error.payload.items, '预览冲突，未执行任何操作');
+        }
+        setObjectBatchFeedback(error.payload?.message || error.message || String(error), 'warn');
+      }
+      renderObjectBatchPanel();
+    }
+    function invalidateObjectBatchPlan() {
+      if (objectBrowserState.batch.action !== 'move') return;
+      objectBatchStateApi.setPlan(objectBrowserState.batch, { planId: '', action: 'move' });
+      clearObjectBatchConfirmation();
+      renderObjectBatchPanel();
+    }
+    async function executeObjectBatch() {
+      const state = objectBrowserState.batch;
+      if (!state.planId || !state.action) return;
+      const batchId = objectBatchStateApi.executionId(state, state.planId, () => crypto.randomUUID());
+      const body = {
+        plan_id: state.planId,
+        batch_id: batchId,
+        operator: document.getElementById('object-batch-operator').value.trim() || null,
+        ticket: document.getElementById('object-batch-ticket').value.trim() || null,
+        notes: document.getElementById('object-batch-notes').value.trim() || null,
+      };
+      try {
+        setObjectBatchFeedback('正在执行批量操作…', 'warn');
+        const payload = await fetchJson('/api/object-actions/batch', { method: 'POST', headers: { 'Idempotency-Key': batchId }, body: JSON.stringify(body) });
+        document.getElementById('object-batch-results').innerHTML = `<div class="hint">批次 ${escapeHtml(payload.batch_id || batchId)} · 完成 ${escapeHtml(String(payload.completed ?? 0))} · 失败 ${escapeHtml(String(payload.failed ?? 0))}</div>${payload.consistency_note ? `<div class="hint">${escapeHtml(payload.consistency_note)}</div>` : ''}${renderObjectBatchItems(payload.results, '执行结果')}`;
+        if (payload.non_atomic_warning) setObjectBatchFeedback('批量操作完成，但外部写入不受网关锁保护。', 'warn'); else setObjectBatchFeedback('批量操作完成。', 'ok');
+        objectBatchStateApi.resetAfterResult(state);
+        clearObjectBatchConfirmation();
+        renderObjectBatchPanel();
+        await browseObjectBrowserObjects();
+      } catch (error) {
+        const payload = error.payload || {};
+        const resultItems = payload.items || payload.saved_results || [];
+        const typedMessage = payload.message || payload.consistency_note || error.message || String(error);
+        document.getElementById('object-batch-results').innerHTML = payload.unresolved_items
+          ? renderObjectBatchRecovery(payload)
+          : (renderObjectBatchItems(resultItems, '错误详情') || `<div class="flash status-warn">${escapeHtml(`${payload.code || 'batch_error'} · ${typedMessage}`)}</div>`);
+        setObjectBatchFeedback(typedMessage, 'warn');
+        if (resultItems.length || payload.state) {
+          objectBatchStateApi.resetAfterResult(state);
+          clearObjectBatchConfirmation();
+          renderObjectBatchPanel();
+          await browseObjectBrowserObjects();
+        }
       }
     }
     async function inspectObjectBrowserObject(bucket, key) {
@@ -11918,7 +12243,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         },
         {
           title: tr('object.guide.choose.title', {}, '2. Choose the safest action'),
-          body: tr('object.guide.choose.body', {}, 'Rename changes one path. Copy keeps the old file and creates a second one. Move creates the destination first, then deletes the source when the destination succeeds.'),
+          body: tr('object.guide.choose.body', {}, 'Rename changes one path. Copy keeps the old file and creates a second one. Use the selected-object workflow above for moves.'),
         },
         {
           title: tr('object.guide.audit.title', {}, '3. Fill audit fields'),
@@ -20551,6 +20876,12 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       }
     });
     document.getElementById('object-browser-results').addEventListener('click', event => {
+      const manageButton = event.target.closest('button[data-object-browser-manage]');
+      if (manageButton) {
+        objectBatchStateApi.selectOnly(objectBrowserState.batch, manageButton.dataset.objectBrowserManage || '');
+        renderObjectBrowserResults(objectBrowserState.objects_payload);
+        return;
+      }
       const button = event.target.closest('button[data-object-browser-inspect]');
       if (!button) {
         return;
@@ -20560,6 +20891,43 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         button.dataset.objectBrowserInspect || '',
       );
     });
+    document.getElementById('object-browser-results').addEventListener('change', event => {
+      const checkbox = event.target.closest('input[data-object-browser-select]');
+      if (!checkbox) return;
+      objectBatchStateApi.setSelected(objectBrowserState.batch, checkbox.dataset.objectBrowserSelect || '', checkbox.checked);
+      renderObjectBrowserResults(objectBrowserState.objects_payload);
+    });
+    document.getElementById('object-browser-select-all').addEventListener('change', event => {
+      if (event.target.checked) objectBatchStateApi.selectAll(objectBrowserState.batch);
+      else objectBatchStateApi.clearSelection(objectBrowserState.batch);
+      renderObjectBrowserResults(objectBrowserState.objects_payload);
+    });
+    document.getElementById('object-batch-move').addEventListener('click', () => {
+      objectBrowserState.batch.action = 'move';
+      objectBrowserState.batch.planId = '';
+      objectBrowserState.batch.executionId = '';
+      clearObjectBatchConfirmation();
+      renderObjectBatchPanel();
+    });
+    document.getElementById('object-batch-delete').addEventListener('click', () => {
+      objectBrowserState.batch.action = 'delete';
+      objectBrowserState.batch.planId = '';
+      objectBrowserState.batch.executionId = '';
+      clearObjectBatchConfirmation();
+      renderObjectBatchPanel();
+      previewObjectBatch('delete');
+    });
+    document.getElementById('object-batch-clear').addEventListener('click', () => {
+      objectBatchStateApi.clearSelection(objectBrowserState.batch);
+      clearObjectBatchConfirmation();
+      renderObjectBrowserResults(objectBrowserState.objects_payload);
+    });
+    document.getElementById('object-batch-preview-move').addEventListener('click', () => previewObjectBatch('move'));
+    document.getElementById('object-batch-execute-move').addEventListener('click', executeObjectBatch);
+    document.getElementById('object-batch-confirm-delete').addEventListener('click', executeObjectBatch);
+    document.getElementById('object-batch-cancel-delete').addEventListener('click', clearObjectBatchConfirmation);
+    document.getElementById('object-batch-destination-bucket').addEventListener('change', invalidateObjectBatchPlan);
+    document.getElementById('object-batch-destination-prefix').addEventListener('input', invalidateObjectBatchPlan);
     document.getElementById('inspect-object-status').addEventListener('click', inspectObjectStatus);
     document.getElementById('object-action-kind').addEventListener('change', renderObjectActionEditor);
     document.getElementById('run-object-action').addEventListener('click', runObjectAction);
