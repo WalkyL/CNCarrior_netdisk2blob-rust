@@ -12,6 +12,7 @@ const api = sandbox.globalThis.ccbgObjectBatchState;
 assert.ok(api, "batch state API is exposed");
 
 const state = api.create();
+assert.equal(state.executing, false, "batch execution starts idle");
 api.replaceList(state, {
   selectionId: "s1",
   bucket: "root",
@@ -46,6 +47,17 @@ assert.deepEqual(
   ["next/c.txt"],
   "select-all includes only the current result",
 );
+
+api.setPlan(state, { planId: "manage-plan", action: "delete" });
+const manageRevision = state.revision;
+api.selectOnly(state, "next/c.txt");
+assert.deepEqual(
+  Array.from(api.selectedKeys(state)),
+  ["next/c.txt"],
+  "Manage selects exactly its current result row",
+);
+assert.equal(state.planId, "", "Manage clears any destructive preview plan");
+assert.ok(state.revision > manageRevision, "Manage invalidates stale preview state");
 
 api.replaceList(state, {
   selectionId: "s3",
@@ -164,8 +176,38 @@ raceState.executionId = uuid1;
 assert.equal(api.finalizeExecution(raceState, { state: "in_progress" }), false);
 assert.equal(raceState.planId, "retry-plan", "in-progress execution retains its plan");
 assert.equal(raceState.executionId, uuid1, "in-progress execution retains its idempotency UUID");
+assert.equal(api.beginExecution(raceState), true, "a planned batch enters the busy state once");
+assert.equal(raceState.executing, true, "pending execution is observable by controls");
+assert.equal(api.beginExecution(raceState), false, "a second execute is rejected while pending");
+assert.equal(api.finishExecution(raceState, { state: "in_progress" }), false);
+assert.equal(raceState.executing, false, "request completion clears the busy state");
+assert.equal(raceState.planId, "retry-plan", "in-progress response still retains its plan");
+assert.equal(raceState.executionId, uuid1, "in-progress response still retains its idempotency UUID");
 assert.equal(api.finalizeExecution(raceState, { batch_id: uuid1, results: [] }), true);
 assert.equal(raceState.planId, "", "terminal execution clears its plan");
 assert.equal(raceState.executionId, "", "terminal execution clears its idempotency UUID");
+
+const confirmation = api.deleteConfirmation([
+  { source: { bucket: "root", key: "docs/a.txt" } },
+  { source: { bucket: "root", key: "docs/b.txt" } },
+  { source: { bucket: "family", key: "images/c.png" } },
+  { source: { bucket: "family", key: "images/d.png" } },
+  { source: { bucket: "root", key: "logs/e.log" } },
+  { source: { bucket: "root", key: "logs/f.log" } },
+  { source: { bucket: "root", key: "logs/g.log" } },
+]);
+assert.equal(confirmation.count, 7, "delete confirmation reports selected count");
+assert.deepEqual(
+  Array.from(confirmation.entries),
+  [
+    "root/docs/a.txt",
+    "root/docs/b.txt",
+    "family/images/c.png",
+    "family/images/d.png",
+    "root/logs/e.log",
+  ],
+  "delete confirmation lists at most the first five objects",
+);
+assert.equal(confirmation.remainder, 2, "delete confirmation reports the remainder");
 
 console.log("admin object batch state harness: PASS");

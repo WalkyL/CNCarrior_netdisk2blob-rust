@@ -207,15 +207,15 @@ OneDrive 当前已经支持:
 
 ### 5.3 批量选择、移动与删除
 
-对象浏览器每次加载成功都会给当前结果建立短期 selection。`Select all` 只选择当前已经渲染的列表行，不代表桶内未加载、未匹配 prefix 或下一页的对象；单批最多 100 项。selection 和后续 preview plan 都只有 5 分钟有效期。
+对象浏览器每次加载成功都会给当前结果建立短期 selection。`Select all` 只选择当前已经渲染的列表行，不代表桶内未加载、未匹配 prefix 或下一页的对象；单批最多 100 项。selection 和后续 preview plan 各自有独立的 5 分钟有效期；计划生成后不依赖较早 selection 继续存活。
 
 以下操作会清空选择、丢弃 selection、关闭批量面板并清除预览：切换 bucket、修改 prefix 后重新浏览、重载桶或对象列表、read source/fallback source 改变、列表请求失败、页面重新加载，以及批量操作完成或部分失败。列表 reload 后不要继续使用先前显示的预览或确认框，应从新列表重新选择。
 
-批量移动只需要输入目标 bucket 和目标 prefix；空 prefix 表示目标桶根目录。每个对象保留自己的 basename，例如 `root/photos/2026/a.jpg` 移到 `family` 的 `archive/` 后为 `family/archive/a.jpg`。预览会列出 source、read source、权威 home provider、destination、状态、reason code 和 warnings，并在目标对象、目标网关 metadata、目标桶或生成的重复目标存在冲突时阻止执行。预览成功后，执行前仍会复查冲突，因此预览不是外部写入锁。
+批量移动只需要输入目标 bucket 和目标 prefix；空 prefix 表示目标桶根目录。每个对象保留自己的 basename，例如 `root/photos/2026/a.jpg` 移到 `family` 的 `archive/` 后为 `family/archive/a.jpg`。预览和结果表会分别列出 source、read source、权威 home provider、destination、状态、reason code 和 warnings，并在目标对象、目标网关 metadata、目标桶或生成的重复目标存在冲突时阻止执行。预览不会在远端 HEAD 期间占用全局对象变更锁；执行持锁完成整批预检，并在每一项调用动作核心前按计划保存的身份和 home provider 再检查一次，因此预览不是外部写入锁。
 
-批量删除始终先预览，页面只在预览可执行时显示一次应用内删除确认。该确认针对当前计划；取消、重新选择、刷新列表或计划过期都会关闭它。确认的语义是删除权威云端对象并清理关联 gateway metadata/复制状态。不要把它与 Placement 卡片里的“删除残留 Placement”混淆：后者只删除 gateway Placement metadata，绝不删除云盘文件。
+批量删除始终先预览，页面只在预览可执行时显示一次应用内删除确认。确认区显示所选数量、前 5 个 bucket/key，以及超过 5 个时的剩余数量。该确认针对当前计划；取消、重新选择、刷新列表或计划过期都会关闭它。确认的语义是删除权威云端对象并清理关联 gateway metadata/复制状态。不要把它与 Placement 卡片里的“删除残留 Placement”混淆：后者只删除 gateway Placement metadata，绝不删除云盘文件。
 
-预览中的 `already_missing` 表示权威云端对象已经不存在；执行只尝试 metadata cleanup，不能把它当作新发生的云端 delete。`stale_conflict`、`unverifiable`、目标冲突或目标桶问题不会写入对象。批量执行后若一个 item 失败，已完成行不会回滚，未开始行标为 `not_started`；逐项结果和 warnings 必须一起作为实际结果阅读。
+预览中的 `already_missing` 表示权威云端对象已经不存在；执行只尝试 metadata cleanup，不能把它当作新发生的云端 delete。若前一项完成后才检测到后续 source 变化、home provider 变化、目标对象或目标 metadata 出现，该行以 `stale_conflict` 和对应 reason code 停止，剩余行标为 `not_started`，且这些行不会进入动作核心。普通 item 失败同样保留已完成行并停止后续项；逐项结果和 warnings 必须一起作为实际结果阅读。
 
 ### 5.4 批量结果、历史与中断恢复
 

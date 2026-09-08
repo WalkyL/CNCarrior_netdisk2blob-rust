@@ -1657,38 +1657,39 @@ Copyright (c) 2026 walky
         <div id="object-browser-summary" class="hint">先加载桶列表，再开始浏览对象。</div>
         <div id="object-batch-toolbar" class="object-batch-toolbar hidden">
           <strong id="object-batch-selected-count">已选择 0 个对象</strong>
-          <label class="object-batch-select-all"><input id="object-browser-select-all" type="checkbox" />选择当前结果</label>
+          <label class="object-batch-select-all"><input id="object-browser-select-all" data-object-batch-control type="checkbox" />选择当前结果</label>
           <div class="actions">
-            <button id="object-batch-move" class="secondary" type="button">移动</button>
-            <button id="object-batch-delete" class="secondary" type="button">删除</button>
-            <button id="object-batch-clear" class="secondary" type="button">清除选择</button>
+            <button id="object-batch-move" data-object-batch-control class="secondary" type="button">移动</button>
+            <button id="object-batch-delete" data-object-batch-control class="secondary" type="button">删除</button>
+            <button id="object-batch-clear" data-object-batch-control class="secondary" type="button">清除选择</button>
           </div>
         </div>
         <div id="object-browser-results" class="table-wrap object-browser-results"></div>
-        <div id="object-batch-panel" class="object-batch-panel hidden">
+        <div id="object-batch-panel" class="object-batch-panel hidden" tabindex="-1">
           <h4>管理已选对象</h4>
           <div id="object-batch-source-summary" class="hint object-batch-source-summary"></div>
           <div id="object-batch-move-fields" class="object-batch-fields hidden">
-            <div><label>目标桶</label><select id="object-batch-destination-bucket"><option value="">先加载桶列表</option></select></div>
-            <div><label>目标前缀</label><input id="object-batch-destination-prefix" type="text" placeholder="archive/2026/" /></div>
+            <div><label>目标桶</label><select id="object-batch-destination-bucket" data-object-batch-control><option value="">先加载桶列表</option></select></div>
+            <div><label>目标前缀</label><input id="object-batch-destination-prefix" data-object-batch-control type="text" placeholder="archive/2026/" /></div>
           </div>
           <div class="object-batch-audit">
-            <div><label>操作人标签（可选）</label><input id="object-batch-operator" type="text" placeholder="alice" /></div>
-            <div><label>工单 / 变更号（可选）</label><input id="object-batch-ticket" type="text" placeholder="CHG-2026-0514" /></div>
-            <div><label>备注（可选）</label><input id="object-batch-notes" type="text" placeholder="变更原因或回滚信息" /></div>
+            <div><label>操作人标签（可选）</label><input id="object-batch-operator" data-object-batch-control type="text" placeholder="alice" /></div>
+            <div><label>工单 / 变更号（可选）</label><input id="object-batch-ticket" data-object-batch-control type="text" placeholder="CHG-2026-0514" /></div>
+            <div><label>备注（可选）</label><input id="object-batch-notes" data-object-batch-control type="text" placeholder="变更原因或回滚信息" /></div>
           </div>
           <div class="actions">
-            <button id="object-batch-preview-move" class="secondary hidden" type="button">预览移动</button>
-            <button id="object-batch-execute-move" class="hidden" type="button">执行移动</button>
+            <button id="object-batch-preview-move" data-object-batch-control class="secondary hidden" type="button">预览移动</button>
+            <button id="object-batch-execute-move" data-object-batch-control class="hidden" type="button">执行移动</button>
           </div>
           <div id="object-batch-feedback" class="flash"></div>
           <div id="object-batch-preview" class="object-batch-preview"></div>
           <div id="object-batch-delete-confirmation" class="object-batch-confirmation hidden" role="region" aria-label="删除确认">
             <p><strong>删除云盘对象及网关元数据</strong></p>
             <p>此操作会删除当前归属云盘中的真实对象，并同时删除网关 metadata；这与上方只清理残留 Placement 元数据的操作不同。</p>
+            <div id="object-batch-delete-summary"></div>
             <div class="actions">
-              <button id="object-batch-confirm-delete" type="button">确认删除</button>
-              <button id="object-batch-cancel-delete" class="secondary" type="button">取消</button>
+              <button id="object-batch-confirm-delete" data-object-batch-control type="button">确认删除</button>
+              <button id="object-batch-cancel-delete" data-object-batch-control class="secondary" type="button">取消</button>
             </div>
           </div>
           <div id="object-batch-results" class="object-batch-results"></div>
@@ -5263,6 +5264,7 @@ Copyright (c) 2026 walky
             executionId: '',
             previewSignature: '',
             revision: 0,
+            executing: false,
           };
         },
         replaceList(state, list) {
@@ -5365,8 +5367,14 @@ Copyright (c) 2026 walky
           return value;
         },
         resetAfterResult(state) {
+          state.executing = false;
           state.selected.clear();
           invalidate(state);
+        },
+        beginExecution(state) {
+          if (state.executing || !state.planId || !state.action) return false;
+          state.executing = true;
+          return true;
         },
         isTerminalExecution(payload) {
           const stateName = String(payload?.state || '').toLowerCase();
@@ -5377,6 +5385,17 @@ Copyright (c) 2026 walky
           if (!api.isTerminalExecution(payload)) return false;
           api.resetAfterResult(state);
           return true;
+        },
+        finishExecution(state, payload) {
+          state.executing = false;
+          return api.finalizeExecution(state, payload);
+        },
+        deleteConfirmation(items) {
+          const entries = (Array.isArray(items) ? items : [])
+            .map(item => `${item?.source?.bucket || ''}/${item?.source?.key || ''}`)
+            .slice(0, 5);
+          const count = Array.isArray(items) ? items.length : 0;
+          return { count, entries, remainder: Math.max(0, count - entries.length) };
         },
       };
       globalThis.ccbgObjectBatchState = api;
@@ -11468,7 +11487,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           <tbody>
             ${objects.map(object => `
               <tr>
-                <td class="object-browser-select-cell"><input type="checkbox" data-object-browser-select="${escapeHtmlAttr(object.key)}" ${selected.has(object.key) ? 'checked' : ''} aria-label="选择 ${escapeHtmlAttr(object.key)}" /></td>
+                <td class="object-browser-select-cell"><input type="checkbox" data-object-batch-control data-object-browser-select="${escapeHtmlAttr(object.key)}" ${selected.has(object.key) ? 'checked' : ''} aria-label="选择 ${escapeHtmlAttr(object.key)}" /></td>
                 <td class="object-browser-key">${escapeHtml(object.key)}</td>
                 <td class="object-browser-size-cell">${escapeHtml(formatBytes(object.size))}</td>
                 <td class="object-browser-modified-cell">${escapeHtml((() => {
@@ -11479,6 +11498,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
                   <button
                     class="secondary"
                     type="button"
+                    data-object-batch-control
                     data-object-browser-manage="${escapeHtmlAttr(object.key)}"
                   >Manage</button>
                 </td>
@@ -11614,10 +11634,10 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
     }
     function renderObjectBatchItems(items, title) {
       if (!Array.isArray(items) || !items.length) return '';
-      return `<div class="hint"><strong>${escapeHtml(title)}</strong></div><div class="table-wrap"><table><thead><tr><th>源对象</th><th>目标</th><th>状态</th><th>消息 / 警告</th></tr></thead><tbody>${items.map(item => {
+      return `<div class="hint"><strong>${escapeHtml(title)}</strong></div><div class="table-wrap"><table><thead><tr><th>源对象</th><th>读取来源</th><th>归属云盘</th><th>目标</th><th>状态</th><th>消息 / 警告</th></tr></thead><tbody>${items.map(item => {
         const destination = item.destination ? `${item.destination.bucket}/${item.destination.key}` : '-';
         const warnings = Array.isArray(item.warnings) ? item.warnings.join('；') : '';
-        return `<tr><td class="mono">${escapeHtml(`${item.source?.bucket || ''}/${item.source?.key || ''}`)}</td><td class="mono">${escapeHtml(destination)}</td><td>${escapeHtml(objectBatchStatusLabel(item))}</td><td>${escapeHtml([item.message, warnings].filter(Boolean).join('；') || '-')}</td></tr>`;
+        return `<tr><td class="mono">${escapeHtml(`${item.source?.bucket || ''}/${item.source?.key || ''}`)}</td><td>${escapeHtml(item.read_source ? providerLabel(item.read_source) : '-')}</td><td>${escapeHtml(item.home_provider ? providerLabel(item.home_provider) : '-')}</td><td class="mono">${escapeHtml(destination)}</td><td>${escapeHtml(objectBatchStatusLabel(item))}</td><td>${escapeHtml([item.message, warnings].filter(Boolean).join('；') || '-')}</td></tr>`;
       }).join('')}</tbody></table></div>`;
     }
     function renderObjectBatchRecovery(payload) {
@@ -11650,6 +11670,13 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       document.getElementById('object-batch-move-fields').classList.toggle('hidden', objectBatchAction() !== 'move');
       document.getElementById('object-batch-preview-move').classList.toggle('hidden', objectBatchAction() !== 'move');
       document.getElementById('object-batch-execute-move').classList.toggle('hidden', objectBatchAction() !== 'move' || !objectBrowserState.batch.planId);
+      document.querySelectorAll('[data-object-batch-control]').forEach(control => {
+        control.disabled = objectBrowserState.batch.executing;
+      });
+      const executeMove = document.getElementById('object-batch-execute-move');
+      executeMove.textContent = objectBrowserState.batch.executing ? '正在执行…' : '执行移动';
+      const confirmDelete = document.getElementById('object-batch-confirm-delete');
+      confirmDelete.textContent = objectBrowserState.batch.executing ? '正在执行…' : '确认删除';
     }
     function renderObjectBatchPreview(payload) {
       const node = document.getElementById('object-batch-preview');
@@ -11660,6 +11687,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
     }
     function clearObjectBatchConfirmation() {
       document.getElementById('object-batch-delete-confirmation').classList.add('hidden');
+      document.getElementById('object-batch-delete-summary').innerHTML = '';
     }
     function invalidateObjectBatchState(action = '') {
       const revision = objectBatchStateApi.invalidate(objectBrowserState.batch, action);
@@ -11716,6 +11744,12 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           return;
         }
         if (action === 'delete') {
+          const summary = objectBatchStateApi.deleteConfirmation(payload.items || []);
+          document.getElementById('object-batch-delete-summary').innerHTML = `
+            <p>已选择 ${escapeHtml(String(summary.count))} 个对象：</p>
+            <ul>${summary.entries.map(entry => `<li class="mono">${escapeHtml(entry)}</li>`).join('')}</ul>
+            ${summary.remainder ? `<p>另有 ${escapeHtml(String(summary.remainder))} 个对象。</p>` : ''}
+          `;
           document.getElementById('object-batch-delete-confirmation').classList.remove('hidden');
           setObjectBatchFeedback('删除预览成功，请确认后执行。', 'ok');
         } else {
@@ -11741,6 +11775,8 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
       const state = objectBrowserState.batch;
       if (!state.planId || !state.action) return;
       const batchId = objectBatchStateApi.executionId(state, state.planId, () => crypto.randomUUID());
+      if (!objectBatchStateApi.beginExecution(state)) return;
+      renderObjectBatchPanel();
       const body = {
         plan_id: state.planId,
         batch_id: batchId,
@@ -11753,7 +11789,7 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         const payload = await fetchJson('/api/object-actions/batch', { method: 'POST', headers: { 'Idempotency-Key': batchId }, body: JSON.stringify(body) });
         document.getElementById('object-batch-results').innerHTML = `<div class="hint">批次 ${escapeHtml(payload.batch_id || batchId)} · 完成 ${escapeHtml(String(payload.completed ?? 0))} · 失败 ${escapeHtml(String(payload.failed ?? 0))}</div>${payload.consistency_note ? `<div class="hint">${escapeHtml(payload.consistency_note)}</div>` : ''}${renderObjectBatchItems(payload.results, '执行结果')}`;
         if (payload.non_atomic_warning) setObjectBatchFeedback('批量操作完成，但外部写入不受网关锁保护。', 'warn'); else setObjectBatchFeedback('批量操作完成。', 'ok');
-        if (objectBatchStateApi.finalizeExecution(state, payload)) {
+        if (objectBatchStateApi.finishExecution(state, payload)) {
           clearObjectBatchConfirmation();
           renderObjectBatchPanel();
           await browseObjectBrowserObjects();
@@ -11766,11 +11802,14 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
           ? renderObjectBatchRecovery(payload)
           : (renderObjectBatchItems(resultItems, '错误详情') || `<div class="flash status-warn">${escapeHtml(`${payload.code || 'batch_error'} · ${typedMessage}`)}</div>`);
         setObjectBatchFeedback(typedMessage, 'warn');
-        if (objectBatchStateApi.finalizeExecution(state, payload)) {
+        if (objectBatchStateApi.finishExecution(state, payload)) {
           clearObjectBatchConfirmation();
           renderObjectBatchPanel();
           await browseObjectBrowserObjects();
         }
+      } finally {
+        if (state.executing) objectBatchStateApi.finishExecution(state, {});
+        renderObjectBatchPanel();
       }
     }
     async function inspectObjectBrowserObject(bucket, key) {
@@ -20983,6 +21022,9 @@ return `<option value="${escapeHtmlAttr(optionValue)}" ${optionValue === value ?
         objectBatchStateApi.selectOnly(objectBrowserState.batch, manageButton.dataset.objectBrowserManage || '');
         clearObjectBatchConfirmation();
         renderObjectBrowserResults(objectBrowserState.objects_payload);
+        const managementPanel = document.getElementById('object-batch-panel');
+        managementPanel.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        managementPanel.focus({ preventScroll: true });
         return;
       }
       const button = event.target.closest('button[data-object-browser-inspect]');

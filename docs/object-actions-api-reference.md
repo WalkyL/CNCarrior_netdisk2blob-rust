@@ -788,11 +788,11 @@ POST /api/providers/{provider}/limit-probe
 
 批量接口只支持 `delete` 和 `move`。调用顺序固定为：先通过 `GET /api/object-browser/objects` 获取当前列表和 `selection_id`，再 `POST /api/object-actions/batch/preview`，最后使用该预览返回的 `plan_id` 调用 `POST /api/object-actions/batch`。预览和最终执行预检都不会把浏览器提交的身份字段当作可信事实；服务端会重新验证选择、拓扑、对象身份、目标桶和目标冲突。
 
-`selection_id` 与预览计划都只有 5 分钟有效期。一次预览最多提交 100 个对象，且 `objects` 必须是该 `selection_id` 所代表的当前列表结果的子集。
+`selection_id` 与预览计划各自拥有独立的 5 分钟有效期。selection 只用于建立预览；计划成功生成后，即使较早创建的 selection 已过期或从运行时缓存中清除，只要计划本身仍在有效期内，执行仍按计划保存的身份、read source 和 `home_provider` 重新验证。一次预览最多提交 100 个对象，且 `objects` 必须是该 `selection_id` 所代表的当前列表结果的子集。
 
 ### 10.1 POST /api/object-actions/batch/preview
 
-用途：为当前选择建立一个只读、短期的 delete 或 move 计划。成功预览不会写入 provider、S3 兼容存储、对象 metadata、复制队列或幂等 ledger。
+用途：为当前选择建立一个只读、短期的 delete 或 move 计划。成功预览不会写入 provider、S3 兼容存储、对象 metadata、复制队列或幂等 ledger，也不会在远端 HEAD 检查期间占用全局对象变更锁。拓扑安全由计划保存的 fingerprint 和执行阶段持锁复查保证。
 
 路由常量：`/api/object-actions/batch/preview`。
 
@@ -850,7 +850,7 @@ move 的 `destination_prefix` 可以是空字符串，表示目标桶根目录�
 
 `plan_expires_at` 是 Unix 毫秒时间戳。每个 item 都带 source、read source、权威 `home_provider`、可选 destination、status、可选 `reason_code`/`message` 和 `warnings`，供操作者逐项判断。delete 的远端对象已不存在时可显示 `already_missing`；执行时只会尝试可清理的网关 metadata，不能把它理解成已发生真实云端删除。
 
-预览的 `400 Bad Request` 用于输入、路径、重复项或数量错误。`409 Conflict` 用于已过期/不匹配 selection、拓扑变化、源身份变化、目标桶不可用或目标冲突。任何这些预检错误均是零写入：不会开始对象动作或建立可执行计划。移动预检检查目标对象、目标 gateway metadata 和目标桶；最终执行前会在同一网关变更锁内再次检查，因此预览之后出现的目标冲突也会以零写入失败。
+预览的 `400 Bad Request` 用于输入、路径、重复项或数量错误。`409 Conflict` 用于已过期/不匹配 selection、拓扑变化、源身份变化、目标桶不可用或目标冲突。任何这些预检错误均是零写入：不会开始对象动作或建立可执行计划。移动预检检查目标对象、目标 gateway metadata 和目标桶；最终执行先在同一网关变更锁内完成整批零写入检查。reservation 后，每一项调用动作核心前还会使用计划保存的对象身份和 `home_provider` 再次检查 source、目标对象及目标 gateway metadata。若前一项完成后才出现 source 或 destination 冲突，该项返回 `stale_conflict` 并保留具体 reason code，后续项返回 `not_started`，冲突项及后续项都不会调用动作核心。
 
 ### 10.2 POST /api/object-actions/batch
 

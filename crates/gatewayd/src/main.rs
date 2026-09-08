@@ -15822,17 +15822,6 @@ async fn preview_object_batch(
     State(state): State<AppState>,
     Json(input): Json<ObjectBatchPreviewInput>,
 ) -> Result<Json<ObjectBatchPreviewPayload>, ObjectBatchPreviewError> {
-    let action = input.action;
-    let _guard = timeout(Duration::from_secs(5), state.object_mutation_lock.lock())
-        .await
-        .map_err(|_| {
-            ObjectBatchPreviewError::conflict(
-                "batch_busy",
-                "object mutation lock timed out",
-                action,
-                Vec::new(),
-            )
-        })?;
     preview_object_batch_unlocked(&state, input).await
 }
 
@@ -16783,13 +16772,362 @@ fn object_batch_recovery_error(
     .with_recovery(recovery)
 }
 
-async fn final_preflight_object_batch(state: &AppState, plan: &ObjectBatchPlanRecord) -> Result<Vec<ObjectBatchItemPayload>, ObjectBatchPreviewError> {
-    if plan.expires_at_unix_ms <= current_unix_ms() { return Err(ObjectBatchPreviewError::conflict("plan_expired", "batch plan is missing or expired", plan.action, Vec::new())); }
-    if plan.objects.is_empty() || plan.topology_fingerprint != topology_fingerprint(state) { return Err(ObjectBatchPreviewError::conflict("topology_changed", "batch plan topology is no longer current", plan.action, Vec::new())); }
-    let mut objects = plan.objects.clone(); objects.sort_by_key(|object| object.ordinal);
-    let (destination_bucket, destination_prefix) = match plan.action { ObjectBatchAction::Delete => (None, None), ObjectBatchAction::Move => { let destination = objects.first().and_then(|object| object.destination.as_ref()).expect("move plan should retain destination"); let prefix = destination.key.rsplit_once('/').map(|(prefix, _)| format!("{prefix}/")).unwrap_or_default(); (Some(destination.bucket.clone()), Some(prefix)) } };
-    let payload = preview_object_batch_unlocked(state, ObjectBatchPreviewInput { action: plan.action, selection_id: plan.selection_id.clone(), objects: objects.into_iter().map(|object| object.source).collect(), destination_bucket, destination_prefix }).await?;
-    let mut runtime = mutex_recover(state.object_batch_runtime.lock()); runtime.plans.remove(&payload.0.plan_id); Ok(payload.0.items)
+fn object_batch_item_blocks_execution(item: &ObjectBatchItemPayload) -> bool {
+    !matches!(
+        item.status,
+        ObjectBatchItemStatus::Ready
+            | ObjectBatchItemStatus::AlreadyMissing
+            | ObjectBatchItemStatus::NoOp
+    )
+}
+
+fn object_batch_static_reason_code(code: Option<&str>) -> &'static str {
+    match code {
+        Some("home_resolution_conflict") => "home_resolution_conflict",
+        Some("source_changed") => "source_changed",
+        Some("provider_unsupported") => "provider_unsupported",
+        Some("source_missing") => "source_missing",
+        Some("invalid_path") => "invalid_path",
+        Some("destination_bucket_missing") => "destination_bucket_missing",
+        Some("destination_bucket_unverifiable") => "destination_bucket_unverifiable",
+        Some("destination_metadata_exists") => "destination_metadata_exists",
+        Some("destination_exists") => "destination_exists",
+        _ => "source_unverifiable",
+    }
+}
+
+async fn revalidate_object_batch_plan_item(
+    state: &AppState,
+    plan: &ObjectBatchPlanRecord,
+    object: &ObjectBatchPlannedObject,
+) -> ObjectBatchItemPayload {
+    let current_home = match persisted_or_primary_home_provider(
+        state,
+        &object.source.bucket,
+        &object.source.key,
+    ) {
+        Ok(provider) => provider,
+        Err(error) => {
+            return batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::Unverifiable,
+                Some("source_unverifiable"),
+                Some(error.to_string()),
+                Vec::new(),
+            );
+        }
+    };
+    if current_home != object.home_provider {
+        return batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::Conflict,
+            Some("home_resolution_conflict"),
+            Some(format!(
+                "authoritative home changed from {} to {} for {}/{}",
+                object.home_provider.as_str(),
+                current_home.as_str(),
+                object.source.bucket,
+                object.source.key
+            )),
+            Vec::new(),
+        );
+    }
+    let backend = match backend_for_provider(state, object.home_provider) {
+        Ok(backend) => backend,
+        Err(error) => {
+            return batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::Unverifiable,
+                Some("source_unverifiable"),
+                Some(error.to_string()),
+                Vec::new(),
+            );
+        }
+    };
+    if !object_batch_identity_is_verifiable(&object.identity) {
+        return batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::Unverifiable,
+            Some("source_unverifiable"),
+            Some(format!(
+                "source identity is not verifiable: {}/{}",
+                object.source.bucket, object.source.key
+            )),
+            Vec::new(),
+        );
+    }
+
+    let source_missing = match backend
+        .head_object(&object.source.bucket, &object.source.key)
+        .await
+    {
+        Ok(actual) => {
+            let actual = match load_logical_object_record(
+                state,
+                &object.source.bucket,
+                &object.source.key,
+            ) {
+                Ok(logical) => public_object_info(actual, logical.as_ref()),
+                Err(error) => {
+                    return batch_item_for_plan(
+                        object,
+                        ObjectBatchItemStatus::Unverifiable,
+                        Some("source_unverifiable"),
+                        Some(format!(
+                            "source public identity could not be resolved: {}/{}: {error}",
+                            object.source.bucket, object.source.key
+                        )),
+                        Vec::new(),
+                    );
+                }
+            };
+            let actual_identity = object_batch_identity_snapshot(&actual);
+            if !object_batch_identity_is_verifiable(&actual_identity) {
+                return batch_item_for_plan(
+                    object,
+                    ObjectBatchItemStatus::Unverifiable,
+                    Some("source_unverifiable"),
+                    Some(format!(
+                        "source identity is not verifiable: {}/{}",
+                        object.source.bucket, object.source.key
+                    )),
+                    Vec::new(),
+                );
+            }
+            if !object_batch_identity_matches(&object.identity, &actual_identity) {
+                return batch_item_for_plan(
+                    object,
+                    ObjectBatchItemStatus::StaleConflict,
+                    Some("source_changed"),
+                    Some(format!(
+                        "source identity changed: {}/{}",
+                        object.source.bucket, object.source.key
+                    )),
+                    Vec::new(),
+                );
+            }
+            false
+        }
+        Err(BlobError::NotFound(_)) => {
+            if object.home_provider != object.read_source {
+                return batch_item_for_plan(
+                    object,
+                    ObjectBatchItemStatus::Conflict,
+                    Some("home_resolution_conflict"),
+                    Some(format!(
+                        "read source {} can read the object but authoritative home {} cannot",
+                        object.read_source.as_str(),
+                        object.home_provider.as_str()
+                    )),
+                    Vec::new(),
+                );
+            }
+            true
+        }
+        Err(error) => {
+            return batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::Unverifiable,
+                Some("source_unverifiable"),
+                Some(error.to_string()),
+                Vec::new(),
+            );
+        }
+    };
+
+    let capabilities = backend.capabilities();
+    let unsupported = match plan.action {
+        ObjectBatchAction::Delete => !capabilities.delete,
+        ObjectBatchAction::Move => !capabilities.write || !capabilities.delete,
+    };
+    if unsupported {
+        return batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::Conflict,
+            Some("provider_unsupported"),
+            Some(format!(
+                "provider {} lacks required object capabilities",
+                object.home_provider.as_str()
+            )),
+            Vec::new(),
+        );
+    }
+    if source_missing {
+        return if plan.action == ObjectBatchAction::Delete {
+            batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::AlreadyMissing,
+                Some("source_missing"),
+                Some(
+                    "source object is already missing; only gateway cleanup can be planned"
+                        .to_string(),
+                ),
+                Vec::new(),
+            )
+        } else {
+            batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::Conflict,
+                Some("source_missing"),
+                Some(format!(
+                    "source object is missing: {}/{}",
+                    object.source.bucket, object.source.key
+                )),
+                Vec::new(),
+            )
+        };
+    }
+    if plan.action == ObjectBatchAction::Delete {
+        return batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::Ready,
+            None,
+            Some("object is ready for batch deletion".to_string()),
+            Vec::new(),
+        );
+    }
+
+    let Some(destination) = object.destination.as_ref() else {
+        return batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::Conflict,
+            Some("invalid_path"),
+            Some("move plan is missing its destination".to_string()),
+            Vec::new(),
+        );
+    };
+    match backend.head_container(&destination.bucket).await {
+        Ok(_) => {}
+        Err(BlobError::NotFound(_)) => {
+            return batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::Conflict,
+                Some("destination_bucket_missing"),
+                Some(format!(
+                    "destination bucket does not exist: {}",
+                    destination.bucket
+                )),
+                Vec::new(),
+            );
+        }
+        Err(error) => {
+            return batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::Unverifiable,
+                Some("destination_bucket_unverifiable"),
+                Some(format!("destination bucket could not be verified: {error}")),
+                Vec::new(),
+            );
+        }
+    }
+    if object.source.bucket == destination.bucket && object.source.key == destination.key {
+        return batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::NoOp,
+            None,
+            Some("source and destination are identical".to_string()),
+            Vec::new(),
+        );
+    }
+    match destination_has_gateway_metadata(state, &destination.bucket, &destination.key) {
+        Ok(true) => {
+            return batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::Conflict,
+                Some("destination_metadata_exists"),
+                Some(format!(
+                    "destination gateway metadata already exists: {}/{}",
+                    destination.bucket, destination.key
+                )),
+                Vec::new(),
+            );
+        }
+        Ok(false) => {}
+        Err(error) => {
+            return batch_item_for_plan(
+                object,
+                ObjectBatchItemStatus::Unverifiable,
+                Some("destination_bucket_unverifiable"),
+                Some(format!("destination metadata could not be verified: {error}")),
+                Vec::new(),
+            );
+        }
+    }
+    match backend.head_object(&destination.bucket, &destination.key).await {
+        Ok(_) => batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::Conflict,
+            Some("destination_exists"),
+            Some(format!(
+                "destination object already exists: {}/{}",
+                destination.bucket, destination.key
+            )),
+            Vec::new(),
+        ),
+        Err(BlobError::NotFound(_)) => batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::Ready,
+            None,
+            Some("object is ready for batch execution".to_string()),
+            Vec::new(),
+        ),
+        Err(error) => batch_item_for_plan(
+            object,
+            ObjectBatchItemStatus::Unverifiable,
+            Some("destination_bucket_unverifiable"),
+            Some(format!("destination object could not be verified: {error}")),
+            Vec::new(),
+        ),
+    }
+}
+
+async fn final_preflight_object_batch(
+    state: &AppState,
+    plan: &ObjectBatchPlanRecord,
+) -> Result<Vec<ObjectBatchItemPayload>, ObjectBatchPreviewError> {
+    if plan.expires_at_unix_ms <= current_unix_ms() {
+        return Err(ObjectBatchPreviewError::conflict(
+            "plan_expired",
+            "batch plan is missing or expired",
+            plan.action,
+            Vec::new(),
+        ));
+    }
+    if plan.objects.is_empty() || plan.topology_fingerprint != topology_fingerprint(state) {
+        return Err(ObjectBatchPreviewError::conflict(
+            "topology_changed",
+            "batch plan topology is no longer current",
+            plan.action,
+            Vec::new(),
+        ));
+    }
+    let mut objects = plan.objects.iter().collect::<Vec<_>>();
+    objects.sort_by_key(|object| object.ordinal);
+    let mut items = Vec::with_capacity(objects.len());
+    for object in objects {
+        items.push(revalidate_object_batch_plan_item(state, plan, object).await);
+    }
+    let failure = items
+        .iter()
+        .find(|item| object_batch_item_blocks_execution(item))
+        .map(|failure| {
+            (
+                object_batch_static_reason_code(failure.reason_code.as_deref()),
+                failure
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "batch plan revalidation failed".to_string()),
+            )
+        });
+    if let Some((code, message)) = failure {
+        return Err(ObjectBatchPreviewError::conflict(
+            code,
+            message,
+            plan.action,
+            items,
+        ));
+    }
+    Ok(items)
 }
 
 fn existing_object_batch_result(record: ObjectBatchLedgerRecord, batch_id: &str, fingerprint: &str) -> Result<ObjectBatchExecutePayload, ObjectBatchApiError> {
@@ -16828,15 +17166,22 @@ async fn execute_object_batch_request(state: &AppState, principal: AdminAuthenti
     let guard = timeout(Duration::from_secs(5), state.object_mutation_lock.lock()).await.map_err(|_| ObjectBatchApiError::new(StatusCode::CONFLICT, "batch_busy", "object mutation lock timed out", ObjectBatchAction::Move).retry_after(5))?;
     if let Some(record) = lookup_object_batch_ledger(state, &input.batch_id)? { drop(guard); return existing_object_batch_result(record, &input.batch_id, &fingerprint); }
     let plan = { let runtime = mutex_recover(state.object_batch_runtime.lock()); runtime.plans.get(&input.plan_id).cloned() }.ok_or_else(|| ObjectBatchApiError::new(StatusCode::CONFLICT, "plan_expired", "batch plan is missing or expired", ObjectBatchAction::Move))?;
-    let items = final_preflight_object_batch(state, &plan).await.map_err(|error| ObjectBatchApiError::from_preview(error, &input.batch_id))?;
+    final_preflight_object_batch(state, &plan).await.map_err(|error| ObjectBatchApiError::from_preview(error, &input.batch_id))?;
     reserve_object_batch_ledger(state, &input.batch_id, &input.plan_id, &plan, &fingerprint)?;
     let operator_label = input.operator.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(|value| value.chars().take(256).collect::<String>());
     let mut results = Vec::with_capacity(plan.objects.len());
     let mut provider_marker_persisted = false;
     let mut ordered = plan.objects.clone(); ordered.sort_by(|left, right| left.source.bucket.cmp(&right.source.bucket).then_with(|| left.source.key.cmp(&right.source.key)));
     for object in ordered {
-        let preview = items.iter().find(|item| item.ordinal == object.ordinal).cloned().unwrap_or_else(|| batch_item_for_plan(&object, ObjectBatchItemStatus::Ready, None, None, Vec::new()));
-        let result = match preview.status {
+        let mut revalidated = revalidate_object_batch_plan_item(state, &plan, &object).await;
+        let late_conflict = object_batch_item_blocks_execution(&revalidated);
+        if late_conflict {
+            revalidated.status = ObjectBatchItemStatus::StaleConflict;
+            if revalidated.reason_code.is_none() {
+                revalidated.reason_code = Some("source_changed".to_string());
+            }
+        }
+        let result = match revalidated.status {
             ObjectBatchItemStatus::AlreadyMissing => {
                 let action = batch_action_input(&plan, &object, operator_label.clone(), input.ticket.clone(), input.notes.clone());
                 match execute_object_action_core_with_options(
@@ -16852,7 +17197,7 @@ async fn execute_object_batch_request(state: &AppState, principal: AdminAuthenti
                     Err(error) => batch_error_from_blob(error, &object),
                 }
             }
-            ObjectBatchItemStatus::NoOp => preview,
+            ObjectBatchItemStatus::NoOp => revalidated,
             ObjectBatchItemStatus::Ready => {
                 if !provider_marker_persisted {
                     if let Err(error) = persist_object_batch_provider_marker(state, &input.batch_id) {
@@ -16869,7 +17214,7 @@ async fn execute_object_batch_request(state: &AppState, principal: AdminAuthenti
                 let action = batch_action_input(&plan, &object, operator_label.clone(), input.ticket.clone(), input.notes.clone());
                 match execute_object_action_core(state, &action).await { Ok(outcome) => batch_item_for_plan(&object, ObjectBatchItemStatus::Completed, None, None, outcome.warnings), Err(error) => batch_error_from_blob(error, &object) }
             }
-            _ => preview,
+            _ => revalidated,
         };
         results.push(result.clone()); results.sort_by_key(|item| item.ordinal);
         if let Err(error) = persist_object_batch_ledger(state, &input.batch_id, |record| record.results = results.clone()) {
@@ -16878,7 +17223,7 @@ async fn execute_object_batch_request(state: &AppState, principal: AdminAuthenti
                 Err(interruption_error) => Err(interruption_error),
             };
         }
-        if result.status == ObjectBatchItemStatus::Failed {
+        if result.status == ObjectBatchItemStatus::Failed || late_conflict {
             let remaining = plan.objects.iter().filter(|candidate| !results.iter().any(|item| item.ordinal == candidate.ordinal)).cloned().collect::<Vec<_>>();
             for object in remaining { results.push(batch_item_for_plan(&object, ObjectBatchItemStatus::NotStarted, Some("not_started"), Some("Batch stopped after an earlier item failed.".to_string()), Vec::new())); }
             results.sort_by_key(|item| item.ordinal);
@@ -47873,6 +48218,14 @@ mod tests {
             .expect("admin page body should read");
         let html = String::from_utf8(body.to_vec()).expect("admin page should be utf-8");
 
+        assert!(html.contains("id=\"object-batch-panel\""));
+        assert!(html.contains("tabindex=\"-1\""));
+        assert!(html.contains("id=\"object-batch-delete-summary\""));
+        assert!(html.contains("<th>读取来源</th><th>归属云盘</th>"));
+        assert!(html.contains("data-object-browser-manage"));
+        assert!(html.contains("managementPanel.scrollIntoView"));
+        assert!(html.contains("managementPanel.focus"));
+        assert!(html.contains("data-object-batch-control"));
         assert!(html.contains("class=\"top-status-layout\""));
         assert!(html.contains("class=\"top-status-runtime-strip\""));
         assert!(html.contains("class=\"top-status-side\""));
@@ -48337,10 +48690,19 @@ mod tests {
         assert!(html.contains("id=\"object-batch-move\""));
         assert!(html.contains("id=\"object-batch-delete\""));
         assert!(html.contains("id=\"object-batch-confirm-delete\""));
+        assert!(html.contains("id=\"object-batch-delete-summary\""));
         assert_eq!(html.matches("id=\"object-batch-delete-confirmation\"").count(), 1);
         assert!(html.contains("/api/object-actions/batch/preview"));
         assert!(html.contains("/api/object-actions/batch"));
         assert!(html.contains("object-batch-state:start"));
+        assert!(html.contains("<th>读取来源</th><th>归属云盘</th>"));
+        assert!(html.contains("item.read_source"));
+        assert!(html.contains("item.home_provider"));
+        assert!(html.contains("data-object-batch-control"));
+        assert!(html.contains("objectBatchStateApi.beginExecution(state)"));
+        assert!(html.contains("objectBatchStateApi.finishExecution(state, payload)"));
+        assert!(html.contains("managementPanel.scrollIntoView({ block: 'start', behavior: 'smooth' })"));
+        assert!(html.contains("managementPanel.focus({ preventScroll: true })"));
         assert!(html.contains("删除云盘对象及网关元数据"));
         assert!(html.contains("这个动作只会删除网关里的 placement、logical object、protection plan 元数据，不会删除任何云盘文件"));
         assert!(html.contains("并同时删除网关 metadata"));
@@ -54982,6 +55344,93 @@ mod tests {
         }
     }
 
+    enum BatchLateMutation {
+        ReplaceSource { bucket: String, key: String },
+        CreateDestination { bucket: String, key: String },
+    }
+
+    struct MutatingAfterFirstMoveStubBackend {
+        inner: StubBackend,
+        mutation: BatchLateMutation,
+        mutated: AtomicBool,
+    }
+
+    impl MutatingAfterFirstMoveStubBackend {
+        fn new(mutation: BatchLateMutation) -> Self {
+            Self {
+                inner: StubBackend::new(),
+                mutation,
+                mutated: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobBackend for MutatingAfterFirstMoveStubBackend {
+        fn name(&self) -> &'static str {
+            "batch-late-mutation"
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn health(&self) -> Result<ServiceHealth, BlobError> {
+            self.inner.health().await
+        }
+
+        async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
+            self.inner.list_containers().await
+        }
+
+        async fn list_objects(
+            &self,
+            request: ListObjectsRequest,
+        ) -> Result<Vec<ObjectInfo>, BlobError> {
+            self.inner.list_objects(request).await
+        }
+
+        async fn get_object(
+            &self,
+            container: &str,
+            key: &str,
+        ) -> Result<ObjectPayload, BlobError> {
+            self.inner.get_object(container, key).await
+        }
+
+        async fn put_object(
+            &self,
+            request: PutObjectRequest,
+        ) -> Result<blob_core::PutObjectResult, BlobError> {
+            self.inner.put_object(request).await
+        }
+
+        async fn delete_object(&self, container: &str, key: &str) -> Result<(), BlobError> {
+            self.inner.delete_object(container, key).await
+        }
+
+        async fn move_object(&self, request: MoveObjectRequest) -> Result<(), BlobError> {
+            self.inner.move_object(request).await?;
+            if !self.mutated.swap(true, Ordering::SeqCst) {
+                let (container, key) = match &self.mutation {
+                    BatchLateMutation::ReplaceSource { bucket, key }
+                    | BatchLateMutation::CreateDestination { bucket, key } => (bucket, key),
+                };
+                self.inner
+                    .put_object(PutObjectRequest {
+                        container: container.clone(),
+                        key: key.clone(),
+                        body: ObjectBody::from_bytes(Bytes::from_static(b"late external write")),
+                        size: Some(19),
+                        content_type: Some("text/plain".to_string()),
+                        preferred_upload_part_size_bytes: None,
+                    })
+                    .await?;
+            }
+            Ok(())
+        }
+    }
+
     async fn create_move_plan_for_test(
         state: &AppState,
         source_bucket: &str,
@@ -55131,6 +55580,161 @@ mod tests {
         assert_eq!(error.code, "destination_exists");
         assert!(control_plane_snapshot(&state).object_batch_ledger.is_empty());
         assert_object_exists_on_home(&state, "root", "docs/a.txt").await;
+    }
+
+    #[tokio::test]
+    async fn object_batch_execute_stops_when_later_source_changes_after_first_item() {
+        let mut state = test_state();
+        replace_backend(
+            &mut state,
+            ProviderId::Stub,
+            Arc::new(MutatingAfterFirstMoveStubBackend::new(
+                BatchLateMutation::ReplaceSource {
+                    bucket: "root".to_string(),
+                    key: "docs/b.txt".to_string(),
+                },
+            )),
+        );
+        let plan = create_move_plan_for_test(
+            &state,
+            "root",
+            &["docs/a.txt", "docs/b.txt"],
+            "family",
+            "archive/",
+        )
+        .await;
+
+        let result = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id,
+                batch_id: "550e8400-e29b-41d4-a716-446655440013".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect("late source conflict should return a truthful partial result");
+
+        assert_eq!((result.completed, result.stale_conflict, result.not_started), (1, 1, 0));
+        assert_eq!(result.results[1].reason_code.as_deref(), Some("source_changed"));
+        assert_object_exists_on_home(&state, "root", "docs/b.txt").await;
+        assert!(matches!(
+            backend_for_test(&state, ProviderId::Stub)
+                .head_object("family", "archive/b.txt")
+                .await,
+            Err(BlobError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn object_batch_execute_stops_when_later_destination_appears_after_first_item() {
+        let mut state = test_state();
+        replace_backend(
+            &mut state,
+            ProviderId::Stub,
+            Arc::new(MutatingAfterFirstMoveStubBackend::new(
+                BatchLateMutation::CreateDestination {
+                    bucket: "family".to_string(),
+                    key: "archive/b.txt".to_string(),
+                },
+            )),
+        );
+        let plan = create_move_plan_for_test(
+            &state,
+            "root",
+            &["docs/a.txt", "docs/b.txt", "docs/c.txt"],
+            "family",
+            "archive/",
+        )
+        .await;
+
+        let result = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id,
+                batch_id: "550e8400-e29b-41d4-a716-446655440014".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect("late destination conflict should return a truthful partial result");
+
+        assert_eq!((result.completed, result.stale_conflict, result.not_started), (1, 1, 1));
+        assert_eq!(result.results[1].reason_code.as_deref(), Some("destination_exists"));
+        assert_object_exists_on_home(&state, "root", "docs/b.txt").await;
+        assert_object_exists_on_home(&state, "root", "docs/c.txt").await;
+    }
+
+    #[tokio::test]
+    async fn object_batch_execute_uses_valid_plan_after_selection_expires() {
+        let state = test_state();
+        let plan = create_move_plan_for_test(
+            &state,
+            "root",
+            &["docs/plan-owned.txt"],
+            "family",
+            "archive/",
+        )
+        .await;
+        {
+            let mut runtime = state.object_batch_runtime.lock().expect("batch runtime should lock");
+            runtime.selections.clear();
+            assert!(runtime.plans[&plan.plan_id].expires_at_unix_ms > current_unix_ms());
+        }
+
+        let result = execute_object_batch_request(
+            &state,
+            AdminAuthenticatedPrincipal("admin:admin".to_string()),
+            ObjectBatchExecuteInput {
+                plan_id: plan.plan_id,
+                batch_id: "550e8400-e29b-41d4-a716-446655440015".to_string(),
+                operator: None,
+                ticket: None,
+                notes: None,
+            },
+        )
+        .await
+        .expect("a valid plan must outlive its expired selection");
+
+        assert_eq!(result.completed, 1);
+        assert_object_exists_on_home(&state, "family", "archive/plan-owned.txt").await;
+    }
+
+    #[tokio::test]
+    async fn object_batch_preview_does_not_wait_for_mutation_lock() {
+        let state = test_state();
+        let selection = seed_object_browser_selection(
+            &state,
+            "root",
+            vec![("docs/preview-with-lock.txt", b"source")],
+        )
+        .await;
+        let _guard = state.object_mutation_lock.lock().await;
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            preview_object_batch(
+                State(state.clone()),
+                Json(ObjectBatchPreviewInput {
+                    action: ObjectBatchAction::Delete,
+                    selection_id: selection.selection_id,
+                    objects: vec![batch_object("root", "docs/preview-with-lock.txt")],
+                    destination_bucket: None,
+                    destination_prefix: None,
+                }),
+            ),
+        )
+        .await
+        .expect("read-only preview must not wait for the mutation lock")
+        .expect("preview should succeed");
+
+        assert_eq!(result.0.items[0].status, ObjectBatchItemStatus::Ready);
     }
 
     #[tokio::test]
