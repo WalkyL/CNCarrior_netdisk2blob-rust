@@ -291,3 +291,43 @@
 
 - [Object Delete Convergence spec](SPEC.md#object-delete-convergence)
 - [PVE/LXC deployment guide](pve-lxc-deployment.md)
+
+## Batch Object Management Closeout (2026-09)
+
+- A batch plan must own its own expiry and identity snapshot. It must not depend
+  on the shorter-lived browser selection remaining in an in-memory cache.
+- Preview is read-only and must not hold the global mutation lock across remote
+  HEAD calls. Execution rechecks topology while holding the lock, then
+  revalidates each item immediately before invoking the shared action core.
+- Every late source or destination conflict must stop that item and all later
+  items before their action-core calls. Persist completed, stale-conflict, and
+  not-started rows with truthful counts; never treat an external write as part
+  of the gateway transaction.
+- `already_missing` delete is metadata convergence, not a successful remote
+  deletion. Its failure message must not claim that a provider delete occurred.
+- Provider-start markers, idempotency ledger pruning, and final history must be
+  persisted in the order used by recovery. A completed response without its
+  history summary is not a valid durable state.
+- Admin batch UI must bind preview responses to the current selection and
+  destination. Selection/list reloads invalidate plans and confirmations;
+  `in_progress` keeps the same plan and UUID available for retry.
+- Review feedback exposed several plausible-looking tests that were wired to
+  the wrong fault injector. Verify the injected failure reaches the intended
+  metadata/provider stage and assert restoration of all affected metadata
+  tables, not only one placement row.
+- On Windows, the default product build-runner image may not contain Cargo.
+  The release-build image with Cargo/Zig and an explicit PowerShell Podman
+  mount produced the current Linux ELF; Git Bash path conversion can turn
+  `/workspace` into an invalid host path.
+- PowerShell-to-SSH shell heredocs can fail before reaching the remote host or
+  carry CRLF into shell traps. Use a bounded script payload and verify the
+  remote service, PID, hashes, listener, and health endpoints after restart.
+- `.43` currently runs the deployed binary as the `walky` user service
+  `ccbg-43.service`. Service health is good, but real provider acceptance is
+  blocked until `CCBG_UNICOM_TOKEN` is configured. Keep the old binary backup
+  until provider acceptance is complete.
+- The remaining known limitations are non-blocking: process-global WAL test
+  fault injection races under parallel tests, duplicate JSON key rejection is
+  not preserved by the legacy migration probe, some browser folder-marker
+  keys need a future list/UI policy, and provider credentials/live cloud
+  mutation were not part of local CI evidence.
