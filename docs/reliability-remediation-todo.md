@@ -19,10 +19,10 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | T05a | Mobile family error propagation | architecture | pending |
 | T05b | Mobile non-destructive staged overwrite | T05a | pending |
 | T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | pending |
-| T07 | Four-provider exact list prefix preservation | Mobile file waits T05 | pending |
+| T07 | Four-provider exact list prefix preservation | Mobile file waits T05 | complete |
 | T08a | Action-scoped CDP checkpoints | architecture | pending |
 | T08b | Explicit JavaScript value binding/catalog migration | T08a | pending |
-| T09 | Encryption declared-size validation | architecture | pending |
+| T09 | Encryption declared-size validation | architecture | complete |
 | T10 | Smoke harness failure propagation/regression | architecture | pending |
 | T11 | Integration acceptance and allowed-model reviews | completed tasks | pending |
 
@@ -42,3 +42,23 @@ Review findings 1/3 → T01/T02; 2 → T03; 4 → T04; 5/6 → T05a/T05b; 7/8/9 
 ### Per-task report format
 
 Each task appends: model/route, owned files, RED command and failing assertion, GREEN command and counts, independent reviewer/model/result, integration status and remaining concerns. A task is accepted only after green tests and allowed-model review; implementation-only progress remains unaccepted.
+
+### T07 — Four-provider exact list prefix preservation
+
+- Route: direct implementation (model TEST-DIFF was worthless, re-implemented starts_with on a local array; PROD-DIFF second hunks did not match).
+- Owned files: `crates/provider-unicom/src/lib.rs`, `crates/provider-telecom/src/lib.rs`, `crates/provider-onedrive/src/lib.rs`.
+- Change: stop normalizing `request.prefix` (the `docs/` trailing slash was being trimmed to `docs`); pass the raw prefix to both the directory-walk predicate and the leaf `object_key.starts_with`. For Unicom, `directory_may_contain_prefix` now receives the raw prefix.
+- Tests: added `list_objects_prefix_is_segment_boundary_aware` in each crate, seeding a `docs-archive` sibling directory (via mock fixtures / real put_object) and asserting: `docs/` returns only `docs/*`; `docs` (raw substring) also returns `docs-archive/*`; `docs-archive/` returns only `docs-archive/*`; partial file prefix still works.
+- GREEN: `cargo test -p provider-unicom --lib` = 29 passed; `-p provider-telecom --lib` = 21 passed (one fixture ordering assertion updated: `root_entry_count=3` → `4`); `-p provider-onedrive --lib` = 51 passed.
+- Review: pending (needs GLM-5.3 or Kimi-K3).
+- Integration: committed `95006a7`. Remaining concern: none functional; Mobile list still uses its own path and waits on T05.
+
+### T09 — Encryption declared-size validation
+
+- Route: `agnes-3.0-flash` with focused excerpt (initial `sensenova-6.8-flash-lite` returned empty diffs on the 53KB source).
+- Owned files: `crates/object-crypto/src/lib.rs`.
+- Change: `EncryptStreamState` gains `expected_plaintext_size`, `consumed_plaintext`, `terminal_error`; the `encrypt_upload` unfold closure checks-adds per chunk and, at EOF, emits a single terminal `BlobError::BodyStream` when the consumed byte count differs from the declared `plaintext_size`.
+- Tests: 7 new (`encrypt_rejects_short_plaintext`, `encrypt_rejects_long_plaintext`, `encrypt_rejects_nonempty_zero_size`, `encrypt_validates_fragmented_stream_size`, `encrypt_propagates_source_error`, `encrypt_exact_size_roundtrip`, `encrypt_zero_size_roundtrip`); 8 baseline fixtures corrected from `plaintext_size: 32` to the actual short plaintext length.
+- GREEN: `cargo test -p object-crypto` = 33 passed.
+- Review: pending.
+- Integration: committed `22bb34c`.
