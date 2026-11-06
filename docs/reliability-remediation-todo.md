@@ -13,7 +13,7 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | ID | Deliverable | Dependencies | State |
 |---|---|---|---|
 | T01 | Durable versions/claims/schema and backup compatibility | architecture | complete |
-| T02 | DB-first enqueue/retry, striped worker locks, recovery | T01 | pending |
+| T02 | DB-first enqueue/retry, striped worker locks, recovery | T01 | complete |
 | T03 | Checked DLQ replay and API outcomes | T01, T02 | pending |
 | T04 | Recoverable overwrite/staging/WAL | T01–T03 | pending |
 | T05a | Mobile family error propagation | architecture | complete |
@@ -132,3 +132,13 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - Baseline check: three gatewayd tests (`notify_webhook_posts_only_when_alert_state_changes`, `object_action_delete_writes_replayable_wal_metadata`, `object_action_core_surfaces_wal_commit_warning_without_rollback`) fail identically on baseline `0f52dc9` with my changes stashed — pre-existing, unrelated to T01.
 - Review: pending (needs GLM-5.3 or Kimi-K3).
 - Integration: committed `f7e0ecf`.
+
+### T02 — Persist-first replication and striped per-object locking
+
+- Route: direct implementation (serial gateway/metadata lane; T02 must not be concurrent with other gatewayd edits).
+- Owned files: `crates/replication-engine/src/lib.rs`, `crates/metadata-store/src/lib.rs`, `crates/gatewayd/src/main.rs`.
+- Change: `ReplicationEngine` splits construction from publication — new `prepare_put`/`prepare_delete` build jobs without publishing, `publish_existing` publishes already-persisted versioned rows, and `enqueue_put`/`enqueue_delete` become prepare+publish conveniences. All production enqueue helpers (`enqueue_put_object_replication_jobs`, `enqueue_delete_object_replication_jobs`, `enqueue_admin_object_action_replication_jobs`, `enqueue_copy_object_replication_jobs`, `persist_replication_jobs`, WAL-replay put/delete) now persist via `enqueue_jobs_with_versions` first and publish only the returned versioned rows; a store failure publishes nothing. `AppState` gains a 64-way `replication_stripes: Arc<[TokioMutex<()>]>` table hashed on `(target,bucket,key)`; the worker acquires the stripe across the current-version check, remote mutation, and status persistence. The worker claims jobs via `try_claim_job` (version-conditional, exclusive), completes via `mark_job_completed_if_current` (rejects a superseded attempt), and marks superseded attempts via `mark_job_superseded` instead of dead-lettering. `ensure_job_is_current` now compares `object_version`, not `job_id`. Startup calls `recover_in_progress_jobs` to release claims left by a crashed worker before re-notifying pending rows. `mark_job_dead_letter` now also releases the claim.
+- Tests (RED → GREEN): metadata-store `try_claim_job_requires_current_version_and_pending_status`, `mark_job_completed_if_current_rejects_superseded`, `mark_job_superseded_marks_failed_and_releases_claim`, `recover_in_progress_jobs_clears_all_claims`; engine `prepare_does_not_publish_until_publish_existing`; gatewayd `older_put_then_new_delete_finishes_deleted`, `older_delete_then_new_put_finishes_new`, `enqueue_store_failure_publishes_no_job`, `duplicate_hint_executes_once`, `committed_pending_job_recovers_without_notification`.
+- GREEN: `cargo test -p metadata-store --lib` = 40 passed; `cargo test -p replication-engine` = 34 passed; `cargo test -p gatewayd --bin gatewayd -- replication` = 33 passed; full `cargo test -p gatewayd` = 414 passed, 3 failed (identical pre-existing baseline failures: `notify_webhook_posts_only_when_alert_state_changes`, `object_action_delete_writes_replayable_wal_metadata`, `object_action_core_surfaces_wal_commit_warning_without_rollback` — reproduced on baseline `0f52dc9` with T01/T02 stashed).
+- Review: pending (needs GLM-5.3 or Kimi-K3).
+- Integration: pending commit.

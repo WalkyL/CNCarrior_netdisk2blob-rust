@@ -259,6 +259,7 @@ struct AppState {
     backends: Arc<Mutex<Vec<ConfiguredBackend>>>,
     replication: Arc<ReplicationEngine>,
     metadata_store: Arc<MetadataStore>,
+    replication_stripes: Arc<[TokioMutex<()>]>,
     auth: Arc<AuthBrokerState>,
     control_plane: Arc<Mutex<ControlPlaneState>>,
     object_mutation_lock: Arc<TokioMutex<()>>,
@@ -7316,6 +7317,19 @@ async fn main() -> Result<()> {
             "pruned retained metadata history on startup"
         );
     }
+    // Release claims left by a previous process (orphan claims and any
+    // in-progress markers) before re-notifying pending rows, so a restart can
+    // resume work that a crashed worker left mid-flight.
+    let recovered_claims = metadata_store
+        .recover_in_progress_jobs()
+        .context("failed to recover in-progress replication claims")?;
+    if recovered_claims > 0 {
+        info!(
+            recovered_claims,
+            "released abandoned replication claims at startup"
+        );
+    }
+
     let mut restored_jobs = metadata_store
         .load_pending_jobs(None)
         .context("failed to restore pending replication jobs")?;
@@ -7351,6 +7365,10 @@ async fn main() -> Result<()> {
         backends: Arc::new(Mutex::new(backends)),
         replication,
         metadata_store,
+        replication_stripes: (0..REPLICATION_LOCK_STRIPES)
+            .map(|_| TokioMutex::new(()))
+            .collect::<Vec<_>>()
+            .into(),
         auth: Arc::new(AuthBrokerState::new()),
         control_plane: Arc::new(Mutex::new(control_plane)),
         object_mutation_lock: Arc::new(TokioMutex::new(())),
@@ -22594,7 +22612,7 @@ async fn replay_gateway_write_ahead_log_from_remote(state: &AppState) -> Result<
                     onedrive_enabled: missing_targets.contains(&ProviderId::Onedrive),
                     replication_mode: ReplicationMode::AsyncBackup,
                 };
-                let jobs = state.replication.enqueue_put(
+                let jobs = state.replication.prepare_put(
                     &recovery_topology,
                     Some(record.home_provider.as_str().to_string()),
                     record.bucket.clone(),
@@ -22610,10 +22628,11 @@ async fn replay_gateway_write_ahead_log_from_remote(state: &AppState) -> Result<
                         .as_ref()
                         .and_then(|value| value.logical_content_type.clone()),
                 );
-                state
+                let versioned = state
                     .metadata_store
-                    .enqueue_jobs(&jobs)
+                    .enqueue_jobs_with_versions(&jobs)
                     .map_err(|error| BlobError::Upstream(error.to_string()))?;
+                state.replication.publish_existing(versioned);
                 last_replayed_lsn = Some(last_replayed_lsn.unwrap_or(0).max(record.lsn));
             }
             GatewayWriteAheadLogOperation::Delete => {
@@ -22648,16 +22667,17 @@ async fn replay_gateway_write_ahead_log_from_remote(state: &AppState) -> Result<
                         onedrive_enabled: false,
                         replication_mode: ReplicationMode::AsyncBackup,
                     };
-                    let jobs = state.replication.enqueue_delete(
+                    let jobs = state.replication.prepare_delete(
                         &delete_topology,
                         Some(record.home_provider.as_str().to_string()),
                         record.bucket.clone(),
                         record.key.clone(),
                     );
-                    state
+                    let versioned = state
                         .metadata_store
-                        .enqueue_jobs(&jobs)
+                        .enqueue_jobs_with_versions(&jobs)
                         .map_err(|error| BlobError::Upstream(error.to_string()))?;
+                    state.replication.publish_existing(versioned);
                 }
                 last_replayed_lsn = Some(last_replayed_lsn.unwrap_or(0).max(record.lsn));
             }
@@ -22864,7 +22884,7 @@ async fn enqueue_replication_put_for_object(
             }
         }
     };
-    Ok(state.replication.enqueue_put(
+    Ok(state.replication.prepare_put(
         &effective_topology,
         Some(source_provider.as_str().to_string()),
         bucket.to_string(),
@@ -22907,6 +22927,22 @@ async fn enqueue_copy_object_replication_plan(
         .await
 }
 
+/// Number of per-object replication lock stripes. A stripe serializes workers
+/// operating on the same (target, bucket, key) tuple within this process.
+const REPLICATION_LOCK_STRIPES: usize = 64;
+
+/// Hashes a full (target, bucket, key) tuple to a stripe index so that all
+/// operations for one object serialize on a single lock, while distinct
+/// objects may proceed in parallel.
+fn replication_stripe_index(target: &str, bucket: &str, key: &str) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    target.hash(&mut hasher);
+    bucket.hash(&mut hasher);
+    key.hash(&mut hasher);
+    (hasher.finish() as usize) % REPLICATION_LOCK_STRIPES
+}
+
 fn enqueue_copy_object_replication_jobs(
     state: &AppState,
     bucket: &str,
@@ -22936,7 +22972,9 @@ fn enqueue_copy_object_replication_jobs(
             }
         }
     }
-    state.metadata_store.enqueue_jobs(jobs)
+    let versioned = state.metadata_store.enqueue_jobs_with_versions(jobs)?;
+    state.replication.publish_existing(versioned);
+    Ok(())
 }
 
 fn enqueue_delete_object_replication_jobs(
@@ -22968,7 +23006,9 @@ fn enqueue_delete_object_replication_jobs(
             }
         }
     }
-    state.metadata_store.enqueue_jobs(jobs)
+    let versioned = state.metadata_store.enqueue_jobs_with_versions(jobs)?;
+    state.replication.publish_existing(versioned);
+    Ok(())
 }
 
 fn enqueue_admin_object_action_replication_jobs(
@@ -23000,7 +23040,9 @@ fn enqueue_admin_object_action_replication_jobs(
             }
         }
     }
-    state.metadata_store.enqueue_jobs(jobs)
+    let versioned = state.metadata_store.enqueue_jobs_with_versions(jobs)?;
+    state.replication.publish_existing(versioned);
+    Ok(())
 }
 
 fn enqueue_put_object_replication_jobs(
@@ -23032,7 +23074,9 @@ fn enqueue_put_object_replication_jobs(
             }
         }
     }
-    state.metadata_store.enqueue_jobs(jobs)
+    let versioned = state.metadata_store.enqueue_jobs_with_versions(jobs)?;
+    state.replication.publish_existing(versioned);
+    Ok(())
 }
 
 fn maybe_inject_post_put_logical_persist_failure(bucket: &str, key: &str) -> Result<(), BlobError> {
@@ -23081,7 +23125,7 @@ fn enqueue_replication_delete_for_object(
             }
         }
     };
-    Ok(state.replication.enqueue_delete(
+    Ok(state.replication.prepare_delete(
         &effective_topology,
         Some(source_provider.as_str().to_string()),
         bucket.to_string(),
@@ -23090,19 +23134,26 @@ fn enqueue_replication_delete_for_object(
 }
 
 fn persist_replication_jobs(state: &AppState, jobs: &[ReplicationJob], reason: &'static str) {
-    if let Err(error) = state.metadata_store.enqueue_jobs(jobs) {
-        warn!(
-            reason,
-            queued_jobs = jobs.len(),
-            error = %error,
-            "failed to persist replication jobs"
-        );
-    } else if !jobs.is_empty() {
-        info!(
-            reason,
-            queued_jobs = jobs.len(),
-            "replication jobs enqueued"
-        );
+    match state.metadata_store.enqueue_jobs_with_versions(jobs) {
+        Ok(versioned) if !versioned.is_empty() => {
+            // Persistence succeeded first; publish the versioned rows so
+            // workers only observe durable jobs.
+            state.replication.publish_existing(versioned);
+            info!(
+                reason,
+                queued_jobs = jobs.len(),
+                "replication jobs enqueued"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            warn!(
+                reason,
+                queued_jobs = jobs.len(),
+                error = %error,
+                "failed to persist replication jobs"
+            );
+        }
     }
 }
 
@@ -24894,7 +24945,7 @@ async fn apply_reconcile_replica_plan_only(
             onedrive_enabled: runtime_topology(state).onedrive_enabled,
             replication_mode: runtime_topology(state).replication_mode,
         };
-        jobs.extend(state.replication.enqueue_put(
+        jobs.extend(state.replication.prepare_put(
             &put_topology,
             Some(record.provider.clone()),
             record.bucket.clone(),
@@ -24926,7 +24977,7 @@ async fn apply_reconcile_replica_plan_only(
             onedrive_enabled: runtime_topology(state).onedrive_enabled,
             replication_mode: runtime_topology(state).replication_mode,
         };
-        jobs.extend(state.replication.enqueue_delete(
+        jobs.extend(state.replication.prepare_delete(
             &delete_topology,
             Some(record.provider.clone()),
             record.bucket.clone(),
@@ -25135,7 +25186,7 @@ async fn execute_historical_object_rewrite(
             onedrive_enabled: runtime_topology(state).onedrive_enabled,
             replication_mode: runtime_topology(state).replication_mode,
         };
-        jobs.extend(state.replication.enqueue_delete(
+        jobs.extend(state.replication.prepare_delete(
             &delete_topology,
             Some(desired.desired_home_provider.as_str().to_string()),
             record.bucket.clone(),
@@ -26677,6 +26728,42 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
         return false;
     };
 
+    // Serialize all operations for the same (target, bucket, key) tuple. The
+    // stripe is held across the current-version check, the remote mutation,
+    // and the status persistence, so a newer operation can never be overtaken
+    // by an older one under the same lock.
+    let stripe_index = replication_stripe_index(&job.target, &job.object.bucket, &job.object.key);
+    let stripe = &state.replication_stripes[stripe_index];
+    let _stripe_guard = stripe.lock().await;
+
+    // Claim the job exclusively. A superseded or already-claimed job is
+    // skipped without remote I/O; the claim is the in-progress marker.
+    let claimed = match state.metadata_store.try_claim_job(
+        job.job_id,
+        job.object_version,
+        current_unix_ms() as u128,
+    ) {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            warn!(
+                worker_id,
+                job_id = job.job_id,
+                error = %error,
+                "failed to claim replication job for execution"
+            );
+            return true;
+        }
+    };
+    if !claimed {
+        warn!(
+            worker_id,
+            job_id = job.job_id,
+            object_version = job.object_version,
+            "replication job skipped: superseded or already claimed"
+        );
+        return true;
+    }
+
     let attempts = job.attempts.saturating_add(1);
     match process_replication_job(state, &job).await {
         Ok(()) => {
@@ -26684,22 +26771,32 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
             completed_job.attempts = attempts;
             completed_job.last_error = None;
             state.replication.record_completed(completed_job);
-            match state.metadata_store.mark_job_status(
+            match state.metadata_store.mark_job_completed_if_current(
                 job.job_id,
-                replication_engine::ReplicationStatus::Completed,
+                job.object_version,
                 attempts,
-                None,
             ) {
-                Ok(prune_result) => {
-                    if prune_result.total_deleted() > 0 {
-                        info!(
-                            worker_id,
-                            job_id = job.job_id,
-                            deleted_completed_jobs = prune_result.deleted_completed_jobs,
-                            deleted_failed_jobs = prune_result.deleted_failed_jobs,
-                            "pruned metadata history after completed replication job"
-                        );
-                    }
+                Ok(true) => {
+                    info!(
+                        worker_id,
+                        job_id = job.job_id,
+                        target = %job.target,
+                        bucket = %job.object.bucket,
+                        key = %job.object.key,
+                        attempts,
+                        "replication job completed"
+                    );
+                }
+                Ok(false) => {
+                    // A newer operation for the tuple landed while we ran; the
+                    // remote mutation is now stale. Leave the newer job to
+                    // supersede this one; the claim was already removed.
+                    warn!(
+                        worker_id,
+                        job_id = job.job_id,
+                        object_version = job.object_version,
+                        "replication job completed but was superseded by a newer operation"
+                    );
                 }
                 Err(error) => {
                     warn!(
@@ -26710,15 +26807,6 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
                     );
                 }
             }
-            info!(
-                worker_id,
-                job_id = job.job_id,
-                target = %job.target,
-                bucket = %job.object.bucket,
-                key = %job.object.key,
-                attempts,
-                "replication job completed"
-            );
         }
         Err(error) => {
             let retry_policy = replication_retry_policy(&state.config);
@@ -26740,6 +26828,15 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
                         error = %store_error,
                         "failed to persist scheduled replication retry"
                     );
+                } else if let Err(claim_error) =
+                    state.metadata_store.release_job_claim(retry_job.job_id)
+                {
+                    warn!(
+                        worker_id,
+                        job_id = retry_job.job_id,
+                        error = %claim_error,
+                        "failed to release replication claim after scheduling retry"
+                    );
                 }
                 warn!(
                     worker_id,
@@ -26759,6 +26856,33 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
                 state
                     .replication
                     .record_failed(failed_job, error_message.clone());
+                let is_superseded = matches!(state.metadata_store.latest_job_for_object(
+                    &job.target,
+                    &job.object.bucket,
+                    &job.object.key,
+                ), Ok(Some(latest)) if latest.object_version > job.object_version);
+                if is_superseded {
+                    // A newer operation for the tuple exists; this attempt is
+                    // obsolete. Mark it superseded (Failed + diagnostic) and
+                    // release the claim instead of dead-lettering it.
+                    if let Err(supersede_error) =
+                        state.metadata_store.mark_job_superseded(job.job_id)
+                    {
+                        warn!(
+                            worker_id,
+                            job_id = job.job_id,
+                            error = %supersede_error,
+                            "failed to mark superseded replication job"
+                        );
+                    }
+                    warn!(
+                        worker_id,
+                        job_id = job.job_id,
+                        object_version = job.object_version,
+                        "replication job superseded by newer operation"
+                    );
+                    return true;
+                }
                 let reason = if error.kind == ReplicationFailureKind::Permanent {
                     "permanent_failure"
                 } else {
@@ -26954,10 +27078,18 @@ fn ensure_job_is_current(
         })?;
 
     if let Some(latest) = latest {
-        if latest.job_id > job.job_id {
+        // Compare logical object versions, not execution job_ids: a newer
+        // operation always carries a higher version, so an older attempt
+        // (even one with a larger job_id from a replay) is superseded.
+        if latest.object_version > job.object_version {
             return Err(ReplicationFailure::permanent(format!(
-                "replication job {} was superseded by newer job {} for {}/{} on {}",
-                job.job_id, latest.job_id, job.object.bucket, job.object.key, job.target
+                "replication job {} (version {}) was superseded by version {} for {}/{} on {}",
+                job.job_id,
+                job.object_version,
+                latest.object_version,
+                job.object.bucket,
+                job.object.key,
+                job.target
             )));
         }
     }
@@ -35363,7 +35495,7 @@ async fn execute_put_upload(
             bucket, key
         ))));
     }
-    let mut jobs = state.replication.enqueue_put(
+    let mut jobs = state.replication.prepare_put(
         &effective_topology,
         Some(home_provider.as_str().to_string()),
         bucket.clone(),
@@ -35384,7 +35516,7 @@ async fn execute_put_upload(
             onedrive_enabled: effective_topology.onedrive_enabled,
             replication_mode: effective_topology.replication_mode,
         };
-        jobs.extend(state.replication.enqueue_delete(
+        jobs.extend(state.replication.prepare_delete(
             &delete_topology,
             Some(home_provider.as_str().to_string()),
             bucket.clone(),
@@ -39658,6 +39790,10 @@ mod tests {
                 config.replication_recent_limit,
             )),
             metadata_store,
+            replication_stripes: (0..REPLICATION_LOCK_STRIPES)
+                .map(|_| TokioMutex::new(()))
+                .collect::<Vec<_>>()
+                .into(),
             auth: Arc::new(AuthBrokerState::new()),
             control_plane: Arc::new(Mutex::new(ControlPlaneState {
                 topology: config.topology.clone(),
@@ -55364,6 +55500,10 @@ mod tests {
                 config.replication_recent_limit,
             )),
             metadata_store,
+            replication_stripes: (0..REPLICATION_LOCK_STRIPES)
+                .map(|_| TokioMutex::new(()))
+                .collect::<Vec<_>>()
+                .into(),
             auth: Arc::new(AuthBrokerState::new()),
             control_plane: Arc::new(Mutex::new(control_plane)),
             object_mutation_lock: Arc::new(TokioMutex::new(())),
@@ -58678,6 +58818,304 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn older_put_then_new_delete_finishes_deleted() {
+        let mut state = test_state();
+        let target_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Onedrive, target_backend.clone());
+
+        backend_for_test(&state, ProviderId::Stub)
+            .put_object(PutObjectRequest {
+                container: "placeholder".to_string(),
+                key: "worker/order.txt".to_string(),
+                body: Bytes::from_static(b"old bytes").into(),
+                size: Some(9),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("source object should exist");
+
+        // Enqueue an old PUT (version 1), then a new DELETE (version 2) for
+        // the same tuple. Persist + publish in DB-first order.
+        let put_jobs = state.replication.prepare_put(
+            &runtime_topology(&state),
+            Some(ProviderId::Stub.as_str().to_string()),
+            "placeholder",
+            "worker/order.txt",
+            None,
+            9,
+            Some("text/plain".to_string()),
+        );
+        let put_jobs = state
+            .metadata_store
+            .enqueue_jobs_with_versions(&put_jobs)
+            .expect("put jobs should persist");
+        let delete_jobs = state.replication.prepare_delete(
+            &runtime_topology(&state),
+            Some(ProviderId::Stub.as_str().to_string()),
+            "placeholder",
+            "worker/order.txt",
+        );
+        let delete_jobs = state
+            .metadata_store
+            .enqueue_jobs_with_versions(&delete_jobs)
+            .expect("delete jobs should persist");
+        state.replication.publish_existing(put_jobs.clone());
+        state.replication.publish_existing(delete_jobs.clone());
+
+        // Drive the worker: it must skip the superseded PUT and apply the
+        // DELETE, leaving the target object absent.
+        assert!(process_next_replication_job(0, &state).await);
+        assert!(process_next_replication_job(0, &state).await);
+
+        assert!(
+            target_backend
+                .get_object("placeholder", "worker/order.txt")
+                .await
+                .is_err(),
+            "the newer DELETE must win; the older PUT must be skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn older_delete_then_new_put_finishes_new() {
+        let mut state = test_state();
+        let target_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Onedrive, target_backend.clone());
+
+        backend_for_test(&state, ProviderId::Stub)
+            .put_object(PutObjectRequest {
+                container: "placeholder".to_string(),
+                key: "worker/order2.txt".to_string(),
+                body: Bytes::from_static(b"new bytes").into(),
+                size: Some(9),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("source object should exist");
+
+        // An old DELETE (version 1) is superseded by a new PUT (version 2).
+        let delete_jobs = state.replication.prepare_delete(
+            &runtime_topology(&state),
+            Some(ProviderId::Stub.as_str().to_string()),
+            "placeholder",
+            "worker/order2.txt",
+        );
+        let delete_jobs = state
+            .metadata_store
+            .enqueue_jobs_with_versions(&delete_jobs)
+            .expect("delete jobs should persist");
+        let put_jobs = state.replication.prepare_put(
+            &runtime_topology(&state),
+            Some(ProviderId::Stub.as_str().to_string()),
+            "placeholder",
+            "worker/order2.txt",
+            None,
+            9,
+            Some("text/plain".to_string()),
+        );
+        let put_jobs = state
+            .metadata_store
+            .enqueue_jobs_with_versions(&put_jobs)
+            .expect("put jobs should persist");
+        state.replication.publish_existing(delete_jobs.clone());
+        state.replication.publish_existing(put_jobs.clone());
+
+        assert!(process_next_replication_job(0, &state).await);
+        assert!(process_next_replication_job(0, &state).await);
+
+        let present = target_backend
+            .get_object("placeholder", "worker/order2.txt")
+            .await
+            .expect("the newer PUT must leave the object present");
+        assert_eq!(
+            present
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"new bytes",
+            "the older DELETE must be superseded by the newer PUT"
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_pending_job_recovers_without_notification() {
+        let mut state = test_state();
+        let target_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Onedrive, target_backend.clone());
+
+        backend_for_test(&state, ProviderId::Stub)
+            .put_object(PutObjectRequest {
+                container: "placeholder".to_string(),
+                key: "worker/recovered.txt".to_string(),
+                body: Bytes::from_static(b"copy through worker").into(),
+                size: Some(18),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("source object should exist");
+
+        // Persist a job but deliberately do NOT publish it, simulating a lost
+        // wake-up after the store commit succeeded.
+        let put_jobs = state.replication.prepare_put(
+            &runtime_topology(&state),
+            Some(ProviderId::Stub.as_str().to_string()),
+            "placeholder",
+            "worker/recovered.txt",
+            None,
+            9,
+            Some("text/plain".to_string()),
+        );
+        state
+            .metadata_store
+            .enqueue_jobs_with_versions(&put_jobs)
+            .expect("put jobs should persist");
+        assert_eq!(state.replication.snapshot().pending_count, 0);
+
+        // Startup recovery republishes the persisted pending row.
+        let restored = state
+            .metadata_store
+            .load_pending_jobs(None)
+            .expect("pending jobs should load");
+        assert_eq!(restored.len(), 1);
+        state.replication.restore_pending(restored);
+        assert_eq!(state.replication.snapshot().pending_count, 1);
+
+        assert!(process_next_replication_job(0, &state).await);
+        let present = target_backend
+            .get_object("placeholder", "worker/recovered.txt")
+            .await
+            .expect("recovered job should run and copy the object");
+        assert_eq!(
+            present
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"copy through worker",
+            "the recovered job must complete idempotently"
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_store_failure_publishes_no_job() {
+        let mut state = test_state();
+        let target_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Onedrive, target_backend.clone());
+
+        backend_for_test(&state, ProviderId::Stub)
+            .put_object(PutObjectRequest {
+                container: "placeholder".to_string(),
+                key: "worker/store-fail.txt".to_string(),
+                body: Bytes::from_static(b"should not publish").into(),
+                size: Some(18),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("source object should exist");
+
+        // Force the store enqueue to fail. The prepared job must NOT be
+        // published: a worker must never observe an unpersisted job.
+        set_test_put_object_replication_enqueue_failures(
+            "placeholder",
+            "worker/store-fail.txt",
+            1,
+        );
+
+        let jobs = state.replication.prepare_put(
+            &runtime_topology(&state),
+            Some(ProviderId::Stub.as_str().to_string()),
+            "placeholder",
+            "worker/store-fail.txt",
+            None,
+            18,
+            Some("text/plain".to_string()),
+        );
+        let result =
+            enqueue_put_object_replication_jobs(&state, "placeholder", "worker/store-fail.txt", &jobs);
+        assert!(result.is_err(), "injected store failure must propagate");
+        assert_eq!(
+            state.replication.snapshot().pending_count,
+            0,
+            "no job may be published when persistence fails"
+        );
+        assert_eq!(
+            state
+                .metadata_store
+                .load_pending_jobs(None)
+                .expect("pending should load")
+                .len(),
+            0,
+            "no job row may survive a failed enqueue"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_hint_executes_once() {
+        let mut state = test_state();
+        let target_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Onedrive, target_backend.clone());
+
+        backend_for_test(&state, ProviderId::Stub)
+            .put_object(PutObjectRequest {
+                container: "placeholder".to_string(),
+                key: "worker/dup.txt".to_string(),
+                body: Bytes::from_static(b"exactly once").into(),
+                size: Some(12),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("source object should exist");
+
+        let jobs = state.replication.prepare_put(
+            &runtime_topology(&state),
+            Some(ProviderId::Stub.as_str().to_string()),
+            "placeholder",
+            "worker/dup.txt",
+            None,
+            12,
+            Some("text/plain".to_string()),
+        );
+        let versioned = state
+            .metadata_store
+            .enqueue_jobs_with_versions(&jobs)
+            .expect("jobs should persist");
+        // Duplicate hint: the same persisted job is published twice.
+        state.replication.publish_existing(versioned.clone());
+        state.replication.publish_existing(versioned);
+
+        // The claim guard makes the second hint a no-op; only one attempt
+        // mutates the remote target.
+        assert!(process_next_replication_job(0, &state).await);
+        assert!(process_next_replication_job(0, &state).await);
+        assert!(
+            !process_next_replication_job(0, &state).await,
+            "the duplicate hint must not cause a second execution"
+        );
+
+        let present = target_backend
+            .get_object("placeholder", "worker/dup.txt")
+            .await
+            .expect("object should be copied exactly once");
+        assert_eq!(
+            present
+                .body
+                .collect()
+                .await
+                .expect("body should collect")
+                .as_ref(),
+            b"exactly once"
+        );
+    }
+
+    #[tokio::test]
     async fn retryable_replication_failures_are_requeued_and_then_complete() {
         let mut state = test_state();
         let target_backend: DynBackend = Arc::new(FlakyWriteBackend::new(
@@ -58699,7 +59137,7 @@ mod tests {
             .await
             .expect("source object should exist");
 
-        let jobs = state.replication.enqueue_put(
+        let jobs = state.replication.prepare_put(
             &runtime_topology(&state),
             Some(ProviderId::Stub.as_str().to_string()),
             "placeholder",
@@ -58708,10 +59146,11 @@ mod tests {
             16,
             Some("text/plain".to_string()),
         );
-        state
+        let versioned = state
             .metadata_store
-            .enqueue_jobs(&jobs)
+            .enqueue_jobs_with_versions(&jobs)
             .expect("jobs should persist");
+        state.replication.publish_existing(versioned);
 
         assert!(process_next_replication_job(0, &state).await);
 
@@ -58798,7 +59237,7 @@ mod tests {
             .await
             .expect("source object should exist");
 
-        let jobs = state.replication.enqueue_put(
+        let jobs = state.replication.prepare_put(
             &runtime_topology(&state),
             Some(ProviderId::Stub.as_str().to_string()),
             "placeholder",
@@ -58807,10 +59246,11 @@ mod tests {
             13,
             Some("text/plain".to_string()),
         );
-        state
+        let versioned = state
             .metadata_store
-            .enqueue_jobs(&jobs)
+            .enqueue_jobs_with_versions(&jobs)
             .expect("jobs should persist");
+        state.replication.publish_existing(versioned);
 
         assert!(process_next_replication_job(0, &state).await);
         let retry_snapshot = state.replication.snapshot();

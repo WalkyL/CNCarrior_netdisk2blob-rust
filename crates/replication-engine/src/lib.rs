@@ -133,7 +133,12 @@ impl ReplicationEngine {
         self.next_job_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub fn enqueue_put(
+    /// Constructs put jobs for a topology WITHOUT publishing them to the
+    /// in-memory queue. The caller persists the returned jobs (via
+    /// `MetadataStore::enqueue_jobs_with_versions`) and then publishes the
+    /// versioned jobs with `publish_existing`. This keeps persistence ahead of
+    /// publication so a worker never observes an unpersisted job.
+    pub fn prepare_put(
         &self,
         topology: &TopologyPolicy,
         source_provider: Option<String>,
@@ -143,7 +148,7 @@ impl ReplicationEngine {
         size: u64,
         content_type: Option<String>,
     ) -> Vec<ReplicationJob> {
-        self.enqueue_jobs(
+        self.prepare_jobs(
             topology,
             source_provider,
             ReplicationOperation::Put,
@@ -157,14 +162,17 @@ impl ReplicationEngine {
         )
     }
 
-    pub fn enqueue_delete(
+    /// Constructs delete jobs for a topology WITHOUT publishing them to the
+    /// in-memory queue. The caller persists, then publishes with
+    /// `publish_existing`.
+    pub fn prepare_delete(
         &self,
         topology: &TopologyPolicy,
         source_provider: Option<String>,
         bucket: impl Into<String>,
         key: impl Into<String>,
     ) -> Vec<ReplicationJob> {
-        self.enqueue_jobs(
+        self.prepare_jobs(
             topology,
             source_provider,
             ReplicationOperation::Delete,
@@ -176,6 +184,52 @@ impl ReplicationEngine {
                 content_type: None,
             },
         )
+    }
+
+    /// Publishes already-persisted, already-versioned jobs into the in-memory
+    /// queue. Used after `prepare_put`/`prepare_delete` + a successful store
+    /// enqueue, and for recovery/republish of rows found in SQLite.
+    pub fn publish_existing(&self, jobs: Vec<ReplicationJob>) {
+        let mut pending = self
+            .pending_jobs
+            .lock()
+            .expect("replication queue poisoned");
+        pending.extend(jobs);
+    }
+
+    pub fn enqueue_put(
+        &self,
+        topology: &TopologyPolicy,
+        source_provider: Option<String>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+        etag: Option<String>,
+        size: u64,
+        content_type: Option<String>,
+    ) -> Vec<ReplicationJob> {
+        let jobs = self.prepare_put(
+            topology,
+            source_provider,
+            bucket,
+            key,
+            etag,
+            size,
+            content_type,
+        );
+        self.publish_existing(jobs.clone());
+        jobs
+    }
+
+    pub fn enqueue_delete(
+        &self,
+        topology: &TopologyPolicy,
+        source_provider: Option<String>,
+        bucket: impl Into<String>,
+        key: impl Into<String>,
+    ) -> Vec<ReplicationJob> {
+        let jobs = self.prepare_delete(topology, source_provider, bucket, key);
+        self.publish_existing(jobs.clone());
+        jobs
     }
 
     pub fn pending_jobs(&self) -> Vec<ReplicationJob> {
@@ -301,17 +355,13 @@ impl ReplicationEngine {
         recent.clear();
     }
 
-    fn enqueue_jobs(
+    fn prepare_jobs(
         &self,
         topology: &TopologyPolicy,
         source_provider: Option<String>,
         operation: ReplicationOperation,
         object: ReplicationObjectRef,
     ) -> Vec<ReplicationJob> {
-        let mut pending = self
-            .pending_jobs
-            .lock()
-            .expect("replication queue poisoned");
         let mut created = Vec::with_capacity(topology.sync_targets.len());
 
         for target in &topology.sync_targets {
@@ -331,7 +381,6 @@ impl ReplicationEngine {
                 last_error: None,
                 object_version: 0,
             };
-            pending.push_back(job.clone());
             created.push(job);
         }
 
@@ -543,6 +592,29 @@ mod tests {
         assert_eq!(snapshot.pending_count, 1);
         assert_eq!(snapshot.recent_jobs.len(), 0);
         assert_eq!(snapshot.recent_count, 0);
+    }
+
+    #[test]
+    fn prepare_does_not_publish_until_publish_existing() {
+        let engine = ReplicationEngine::new();
+        let jobs = engine.prepare_put(
+            &topology(),
+            Some("unicom".to_string()),
+            "bucket-a",
+            "new.txt",
+            None,
+            42,
+            None,
+        );
+        assert!(!jobs.is_empty());
+        // Preparing must not publish to the in-memory queue.
+        assert_eq!(engine.snapshot().pending_count, 0);
+        assert_eq!(engine.pop_next_ready(), None);
+
+        engine.publish_existing(jobs.clone());
+        assert_eq!(engine.snapshot().pending_count, jobs.len());
+        let popped = engine.pop_next_ready().expect("published job should dequeue");
+        assert_eq!(popped.object.key, "new.txt");
     }
 
     #[test]

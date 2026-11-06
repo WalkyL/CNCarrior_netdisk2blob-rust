@@ -369,6 +369,141 @@ impl MetadataStore {
         Ok(removed)
     }
 
+    /// Atomically claims a pending or due retry job for execution, but only
+    /// when the job's logical `object_version` is still the current version
+    /// for its (target, bucket, key) tuple. The claim row is the in-progress
+    /// marker; the job row's status is unchanged. A job that is already
+    /// claimed, not pending/retry, or superseded returns `false`.
+    pub fn try_claim_job(
+        &self,
+        job_id: u64,
+        object_version: u64,
+        claimed_at_unix_ms: u128,
+    ) -> Result<bool, MetadataError> {
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+
+        // The job must be pending or due, carry the caller's expected logical
+        // version, and still be the current version for its tuple.
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO replication_job_claims (job_id, claimed_at_unix_ms)
+                 SELECT j.job_id, ?2 FROM replication_jobs j
+                 WHERE j.job_id = ?1
+                   AND j.status IN ('pending', 'retry_scheduled')
+                   AND j.object_version = ?3
+                   AND j.object_version = COALESCE((
+                        SELECT v.current_version FROM replication_object_versions v
+                        WHERE v.target = j.target AND v.bucket = j.bucket AND v.key = j.key
+                   ), 0)",
+                params![
+                    job_id as i64,
+                    claimed_at_unix_ms as i64,
+                    object_version as i64,
+                ],
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        transaction.commit().map_err(MetadataError::Sqlite)?;
+        Ok(inserted > 0)
+    }
+
+    /// Marks a job completed, deleting its claim in the same transaction, but
+    /// only when the job's logical `object_version` is still current. Returns
+    /// `false` without mutating state when the job was superseded by a newer
+    /// version for the tuple.
+    pub fn mark_job_completed_if_current(
+        &self,
+        job_id: u64,
+        object_version: u64,
+        attempts: u32,
+    ) -> Result<bool, MetadataError> {
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+
+        let is_current = transaction
+            .query_row(
+                "SELECT object_version = (
+                    SELECT COALESCE(MAX(object_version), 0) FROM replication_jobs
+                    WHERE target = j.target AND bucket = j.bucket AND key = j.key
+                 )
+                 FROM replication_jobs j WHERE job_id = ?1",
+                [job_id as i64],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        if !is_current {
+            return Ok(false);
+        }
+
+        transaction
+            .execute(
+                "UPDATE replication_jobs
+                 SET status = ?1, attempts = ?2, last_error = NULL, next_attempt_at_unix_ms = NULL
+                 WHERE job_id = ?3 AND object_version = ?4",
+                params![
+                    ReplicationStatus::Completed.as_str(),
+                    i64::from(attempts),
+                    job_id as i64,
+                    object_version as i64,
+                ],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        transaction
+            .execute(
+                "DELETE FROM replication_job_claims WHERE job_id = ?1",
+                [job_id as i64],
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        prune_history(&transaction, self.retention)?;
+        transaction.commit().map_err(MetadataError::Sqlite)?;
+        Ok(true)
+    }
+
+    /// Marks a job superseded by a newer operation for its tuple: status
+    /// `Failed` with a stable diagnostic, excluding it from retry/replay via
+    /// the current-version guard. The claim is removed in the same
+    /// transaction.
+    pub fn mark_job_superseded(&self, job_id: u64) -> Result<(), MetadataError> {
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+        transaction
+            .execute(
+                "UPDATE replication_jobs
+                 SET status = ?1, last_error = ?2, next_attempt_at_unix_ms = NULL
+                 WHERE job_id = ?3",
+                params![
+                    ReplicationStatus::Failed.as_str(),
+                    "superseded by newer operation",
+                    job_id as i64,
+                ],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        transaction
+            .execute(
+                "DELETE FROM replication_job_claims WHERE job_id = ?1",
+                [job_id as i64],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        transaction.commit().map_err(MetadataError::Sqlite)?;
+        Ok(())
+    }
+
+    /// Recovers in-progress jobs at startup: clears every claim row so jobs
+    /// that a crashed worker left mid-flight are re-notified as pending. The
+    /// job rows themselves remain in their `pending`/`retry_scheduled`
+    /// status; only the in-progress marker is removed. Returns the number of
+    /// claims cleared.
+    pub fn recover_in_progress_jobs(&self) -> Result<usize, MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        let removed = connection
+            .execute("DELETE FROM replication_job_claims", [])
+            .map_err(MetadataError::Sqlite)?;
+        Ok(removed)
+    }
+
     /// Returns the current durable version for a tuple, or `None` when no
     /// operation for the tuple has been persisted yet.
     pub fn current_object_version(
@@ -685,6 +820,13 @@ impl MetadataStore {
                     last_error,
                     reason,
                 ],
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        transaction
+            .execute(
+                "DELETE FROM replication_job_claims WHERE job_id = ?1",
+                [job_id as i64],
             )
             .map_err(MetadataError::Sqlite)?;
 
@@ -4451,6 +4593,158 @@ mod tests {
             !store.claim_job(7, 2_000).expect("claim should still be held"),
             "a live job's claim must survive abandoned-claim cleanup"
         );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn try_claim_job_requires_current_version_and_pending_status() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        store
+            .enqueue_jobs_with_versions(&[sample_job(1)])
+            .expect("first version should persist");
+        store
+            .enqueue_jobs_with_versions(&[sample_job(2)])
+            .expect("second version should persist");
+
+        // Job 1 is superseded (version 1 vs current 2) — claim must fail.
+        assert!(
+            !store
+                .try_claim_job(1, 1, 1_000)
+                .expect("superseded claim should be rejected"),
+            "an old-version job must not be claimable"
+        );
+        // Job 2 is current — claim succeeds.
+        assert!(
+            store
+                .try_claim_job(2, 2, 1_000)
+                .expect("current claim should succeed"),
+            "the current-version job must be claimable"
+        );
+        // A second claim for the already-claimed job is rejected.
+        assert!(
+            !store
+                .try_claim_job(2, 2, 2_000)
+                .expect("duplicate claim should be rejected"),
+            "a claimed job must not be claimable twice"
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn mark_job_completed_if_current_rejects_superseded() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        store
+            .enqueue_jobs_with_versions(&[sample_job(1)])
+            .expect("first version should persist");
+        store
+            .enqueue_jobs_with_versions(&[sample_job(2)])
+            .expect("second version should persist");
+
+        // Old job completing after a newer op for the same tuple must not
+        // clobber the newer version's status.
+        assert!(
+            !store
+                .mark_job_completed_if_current(1, 1, 1)
+                .expect("superseded completion should be rejected"),
+            "an old-version job must not mark completed"
+        );
+        let old_job = store
+            .latest_job_for_object("onedrive", "bucket-a", "hello.txt")
+            .expect("job should load")
+            .expect("job should exist");
+        assert!(
+            matches!(old_job.status, ReplicationStatus::Pending),
+            "the superseded job must remain pending, not completed"
+        );
+
+        // The current job completes normally.
+        assert!(store
+            .try_claim_job(2, 2, 1_000)
+            .expect("current claim should succeed"));
+        assert!(
+            store
+                .mark_job_completed_if_current(2, 2, 1)
+                .expect("current completion should succeed"),
+            "the current-version job must mark completed"
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn mark_job_superseded_marks_failed_and_releases_claim() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        store
+            .enqueue_jobs_with_versions(&[sample_job(1)])
+            .expect("first version should persist");
+        assert!(store
+            .try_claim_job(1, 1, 1_000)
+            .expect("claim should succeed"));
+
+        store
+            .mark_job_superseded(1)
+            .expect("supersede should succeed");
+
+        let job = store
+            .latest_job_for_object("onedrive", "bucket-a", "hello.txt")
+            .expect("job should load")
+            .expect("job should exist");
+        assert_eq!(job.status, ReplicationStatus::Failed);
+        assert_eq!(
+            job.last_error.as_deref(),
+            Some("superseded by newer operation")
+        );
+        // The claim must have been released so nothing blocks recovery or a
+        // fresh attempt for the job.
+        assert_eq!(
+            store
+                .recover_in_progress_jobs()
+                .expect("recovery should succeed"),
+            0,
+            "the supersede must release the job's claim"
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn recover_in_progress_jobs_clears_all_claims() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut job1 = sample_job(1);
+        let mut job2 = sample_job(2);
+        job2.object.bucket = "bucket-b".to_string();
+        job2.object.key = "other.txt".to_string();
+
+        store
+            .enqueue_jobs_with_versions(&[job1.clone(), job2.clone()])
+            .expect("jobs should persist");
+        // Both are distinct tuples, each at current version 1.
+        assert!(store
+            .try_claim_job(1, 1, 1_000)
+            .expect("claim should succeed"));
+        assert!(store
+            .try_claim_job(2, 1, 1_000)
+            .expect("claim should succeed"));
+
+        let removed = store
+            .recover_in_progress_jobs()
+            .expect("recovery should succeed");
+        assert_eq!(removed, 2, "all in-progress claims must be cleared");
+
+        // After recovery both jobs are re-claimable (pending again).
+        assert!(store
+            .try_claim_job(1, 1, 2_000)
+            .expect("claim after recovery should succeed"));
 
         fs::remove_file(db_path).ok();
     }
