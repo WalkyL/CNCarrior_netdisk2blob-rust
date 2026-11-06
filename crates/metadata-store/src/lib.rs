@@ -7,6 +7,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use replication_engine::{
@@ -222,6 +223,7 @@ impl MetadataStore {
             retention: options.retention,
         };
         store.init_schema()?;
+        store.backfill_object_versions()?;
         Ok(store)
     }
 
@@ -248,6 +250,146 @@ impl MetadataStore {
         transaction.commit().map_err(MetadataError::Sqlite)
     }
 
+    /// Enqueues new replication jobs, assigning each target/bucket/key tuple a
+    /// monotonically increasing logical version. Retrying or saving an
+    /// existing attempt never increments the version; only a brand-new
+    /// operation for the tuple does.
+    ///
+    /// The job ids passed in are authoritative; every job is inserted in the
+    /// same transaction as its version allocation, so a failure rolls back
+    /// both the row and the version bump.
+    pub fn enqueue_jobs_with_versions(
+        &self,
+        jobs: &[ReplicationJob],
+    ) -> Result<Vec<ReplicationJob>, MetadataError> {
+        if jobs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+        let now = now_unix_ms() as i64;
+        let mut enqueued = Vec::with_capacity(jobs.len());
+
+        for job in jobs {
+            let next_version =
+                bump_object_version(&transaction, &job.target, &job.object.bucket, &job.object.key, now)?;
+            let versioned = ReplicationJob {
+                object_version: next_version,
+                ..job.clone()
+            };
+            upsert_job(&transaction, &versioned)?;
+            enqueued.push(versioned);
+        }
+
+        transaction.commit().map_err(MetadataError::Sqlite)?;
+        Ok(enqueued)
+    }
+
+    /// Seeds `replication_object_versions` from persisted job rows, choosing
+    /// the maximum `object_version` observed for each (target, bucket, key)
+    /// tuple. Legacy rows (version 0) are backfilled deterministically from
+    /// their job_id once, so a reopened store never regresses a tuple.
+    pub fn backfill_object_versions(&self) -> Result<(), MetadataError> {
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+
+        // Backfill legacy rows that still carry version 0: derive a stable
+        // version from job_id so every distinct legacy job is ordered.
+        transaction
+            .execute(
+                "UPDATE replication_jobs
+                 SET object_version = job_id
+                 WHERE object_version = 0",
+                [],
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        // Seed current versions with the maximum persisted version per tuple.
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO replication_object_versions (target, bucket, key, current_version, updated_at_unix_ms)
+                 SELECT target, bucket, key, MAX(object_version), MAX(enqueued_at_unix_ms)
+                 FROM replication_jobs
+                 GROUP BY target, bucket, key",
+                [],
+            )
+            .map_err(MetadataError::Sqlite)?;
+
+        transaction.commit().map_err(MetadataError::Sqlite)
+    }
+
+    /// Atomically claims a job for execution. A claim is exclusive per job:
+    /// a second claim for an already-claimed job returns `false` and performs
+    /// no work. Returns `true` and inserts the claim on the first attempt.
+    pub fn claim_job(&self, job_id: u64, claimed_at_unix_ms: u128) -> Result<bool, MetadataError> {
+        let mut connection = self.connection.lock().expect("metadata store poisoned");
+        let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO replication_job_claims (job_id, claimed_at_unix_ms)
+                 VALUES (?1, ?2)",
+                params![job_id as i64, claimed_at_unix_ms as i64],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        transaction.commit().map_err(MetadataError::Sqlite)?;
+        Ok(inserted > 0)
+    }
+
+    /// Releases a job claim. Completing, retrying, or failing a job removes
+    /// its claim transactionally with the status update.
+    pub fn release_job_claim(&self, job_id: u64) -> Result<(), MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        connection
+            .execute(
+                "DELETE FROM replication_job_claims WHERE job_id = ?1",
+                [job_id as i64],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        Ok(())
+    }
+
+    /// Clears claims whose job_id no longer has a live row, or whose claim was
+    /// made by a process that no longer owns it. Used at startup to release
+    /// abandoned claims so a restart can resume them.
+    pub fn clear_abandoned_job_claims(&self) -> Result<usize, MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        let removed = connection
+            .execute(
+                "DELETE FROM replication_job_claims
+                 WHERE job_id IN (
+                     SELECT job_id FROM replication_job_claims c
+                     WHERE NOT EXISTS (
+                         SELECT 1 FROM replication_jobs j WHERE j.job_id = c.job_id
+                     )
+                 )",
+                [],
+            )
+            .map_err(MetadataError::Sqlite)?;
+        Ok(removed)
+    }
+
+    /// Returns the current durable version for a tuple, or `None` when no
+    /// operation for the tuple has been persisted yet.
+    pub fn current_object_version(
+        &self,
+        target: &str,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<u64>, MetadataError> {
+        let connection = self.connection.lock().expect("metadata store poisoned");
+        let version = connection
+            .query_row(
+                "SELECT current_version FROM replication_object_versions
+                 WHERE target = ?1 AND bucket = ?2 AND key = ?3",
+                params![target, bucket, key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(MetadataError::Sqlite)?;
+        Ok(version.map(|value| value as u64))
+    }
+
     pub fn save_job(&self, job: &ReplicationJob) -> Result<(), MetadataError> {
         self.enqueue_jobs(std::slice::from_ref(job))
     }
@@ -259,14 +401,14 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         let sql = match limit {
             Some(_) => {
-                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error, object_version
                  FROM replication_jobs
                  WHERE status IN ('pending', 'retry_scheduled')
                  ORDER BY job_id ASC
                  LIMIT ?1"
             }
             None => {
-                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error, object_version
                  FROM replication_jobs
                  WHERE status IN ('pending', 'retry_scheduled')
                  ORDER BY job_id ASC"
@@ -340,7 +482,7 @@ impl MetadataStore {
 
         let job = transaction
             .query_row(
-                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error, object_version
                  FROM replication_jobs
                  WHERE job_id = ?1",
                 [job_id as i64],
@@ -413,7 +555,7 @@ impl MetadataStore {
         let failed_jobs = {
             let mut statement = transaction
                 .prepare(
-                    "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+                    "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error, jobs.object_version
                      FROM replication_jobs jobs
                      INNER JOIN (
                         SELECT bucket, key, MAX(job_id) AS max_job_id
@@ -489,7 +631,7 @@ impl MetadataStore {
 
         let original_job = transaction
             .query_row(
-                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error, object_version
                  FROM replication_jobs
                  WHERE job_id = ?1",
                 [job_id as i64],
@@ -579,7 +721,7 @@ impl MetadataStore {
             (Some(_), true) => connection
                 .prepare(
                     "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error,
-                            dlq.status, dlq.dead_lettered_at_unix_ms, dlq.reason, dlq.replay_count, dlq.last_replayed_job_id, dlq.last_replayed_at_unix_ms
+                            dlq.status, dlq.dead_lettered_at_unix_ms, dlq.reason, dlq.replay_count, dlq.last_replayed_job_id, dlq.last_replayed_at_unix_ms, jobs.object_version
                      FROM replication_dead_letters dlq
                      INNER JOIN replication_jobs jobs ON jobs.job_id = dlq.original_job_id
                      WHERE dlq.target = ?1
@@ -590,7 +732,7 @@ impl MetadataStore {
             (Some(_), false) => connection
                 .prepare(
                     "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error,
-                            dlq.status, dlq.dead_lettered_at_unix_ms, dlq.reason, dlq.replay_count, dlq.last_replayed_job_id, dlq.last_replayed_at_unix_ms
+                            dlq.status, dlq.dead_lettered_at_unix_ms, dlq.reason, dlq.replay_count, dlq.last_replayed_job_id, dlq.last_replayed_at_unix_ms, jobs.object_version
                      FROM replication_dead_letters dlq
                      INNER JOIN replication_jobs jobs ON jobs.job_id = dlq.original_job_id
                      WHERE dlq.target = ?1 AND dlq.status = 'open'
@@ -601,7 +743,7 @@ impl MetadataStore {
             (None, true) => connection
                 .prepare(
                     "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error,
-                            dlq.status, dlq.dead_lettered_at_unix_ms, dlq.reason, dlq.replay_count, dlq.last_replayed_job_id, dlq.last_replayed_at_unix_ms
+                            dlq.status, dlq.dead_lettered_at_unix_ms, dlq.reason, dlq.replay_count, dlq.last_replayed_job_id, dlq.last_replayed_at_unix_ms, jobs.object_version
                      FROM replication_dead_letters dlq
                      INNER JOIN replication_jobs jobs ON jobs.job_id = dlq.original_job_id
                      ORDER BY dlq.dead_lettered_at_unix_ms DESC, dlq.original_job_id DESC
@@ -611,7 +753,7 @@ impl MetadataStore {
             (None, false) => connection
                 .prepare(
                     "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error,
-                            dlq.status, dlq.dead_lettered_at_unix_ms, dlq.reason, dlq.replay_count, dlq.last_replayed_job_id, dlq.last_replayed_at_unix_ms
+                            dlq.status, dlq.dead_lettered_at_unix_ms, dlq.reason, dlq.replay_count, dlq.last_replayed_job_id, dlq.last_replayed_at_unix_ms, jobs.object_version
                      FROM replication_dead_letters dlq
                      INNER JOIN replication_jobs jobs ON jobs.job_id = dlq.original_job_id
                      WHERE dlq.status = 'open'
@@ -695,7 +837,7 @@ impl MetadataStore {
 
         let original_job = transaction
             .query_row(
-                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error, object_version
                  FROM replication_jobs
                  WHERE job_id = ?1",
                 [original_job_id as i64],
@@ -770,7 +912,7 @@ impl MetadataStore {
         let original_jobs = {
             let mut statement = transaction
                 .prepare(
-                    "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+                    "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error, jobs.object_version
                      FROM replication_dead_letters dlq
                      INNER JOIN replication_jobs jobs ON jobs.job_id = dlq.original_job_id
                      WHERE dlq.target = ?1 AND dlq.status = 'open'
@@ -856,7 +998,7 @@ impl MetadataStore {
 
         let mut statement = connection
             .prepare(
-                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error, object_version
                  FROM replication_jobs
                  ORDER BY job_id DESC
                  LIMIT ?1",
@@ -887,7 +1029,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         connection
             .query_row(
-                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
+                "SELECT job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error, object_version
                  FROM replication_jobs
                  WHERE target = ?1 AND bucket = ?2 AND key = ?3
                  ORDER BY job_id DESC
@@ -907,7 +1049,7 @@ impl MetadataStore {
         let connection = self.connection.lock().expect("metadata store poisoned");
         let mut statement = connection
             .prepare(
-                "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+                "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error, jobs.object_version
                  FROM replication_jobs jobs
                  INNER JOIN (
                     SELECT key, MAX(job_id) AS max_job_id
@@ -932,7 +1074,7 @@ impl MetadataStore {
         target: Option<&str>,
     ) -> Result<Vec<ReplicationJob>, MetadataError> {
         let connection = self.connection.lock().expect("metadata store poisoned");
-        let sql_all = "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+        let sql_all = "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error, jobs.object_version
                  FROM replication_jobs jobs
                  INNER JOIN (
                     SELECT target, bucket, key, MAX(job_id) AS max_job_id
@@ -942,7 +1084,7 @@ impl MetadataStore {
                  ON latest.max_job_id = jobs.job_id
                  WHERE jobs.status = 'failed'
                  ORDER BY jobs.job_id DESC";
-        let sql_target = "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+        let sql_target = "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error, jobs.object_version
                  FROM replication_jobs jobs
                  INNER JOIN (
                     SELECT target, bucket, key, MAX(job_id) AS max_job_id
@@ -1482,6 +1624,12 @@ impl MetadataStore {
             .execute("DELETE FROM replication_jobs", [])
             .map_err(MetadataError::Sqlite)?;
         transaction
+            .execute("DELETE FROM replication_object_versions", [])
+            .map_err(MetadataError::Sqlite)?;
+        transaction
+            .execute("DELETE FROM replication_job_claims", [])
+            .map_err(MetadataError::Sqlite)?;
+        transaction
             .execute("DELETE FROM object_placements", [])
             .map_err(MetadataError::Sqlite)?;
         transaction
@@ -1497,6 +1645,18 @@ impl MetadataStore {
         for job in pending_replication_jobs {
             upsert_job(&transaction, job)?;
         }
+        // Rebuild current versions from the restored jobs, preserving the
+        // logical versions carried by the backup so a restored tuple never
+        // regresses below its previously persisted version.
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO replication_object_versions (target, bucket, key, current_version, updated_at_unix_ms)
+                 SELECT target, bucket, key, MAX(object_version), MAX(enqueued_at_unix_ms)
+                 FROM replication_jobs
+                 GROUP BY target, bucket, key",
+                [],
+            )
+            .map_err(MetadataError::Sqlite)?;
         for record in object_placements {
             transaction
                 .execute(
@@ -1807,10 +1967,25 @@ impl MetadataStore {
                     attempts INTEGER NOT NULL,
                     enqueued_at_unix_ms INTEGER NOT NULL,
                     next_attempt_at_unix_ms INTEGER NULL,
-                    last_error TEXT NULL
+                    last_error TEXT NULL,
+                    object_version INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_replication_jobs_status_job_id
                     ON replication_jobs(status, job_id);
+                CREATE INDEX IF NOT EXISTS idx_replication_jobs_tuple_version
+                    ON replication_jobs(target, bucket, key, object_version, job_id);
+                CREATE TABLE IF NOT EXISTS replication_object_versions (
+                    target TEXT NOT NULL,
+                    bucket TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    current_version INTEGER NOT NULL,
+                    updated_at_unix_ms INTEGER NOT NULL,
+                    PRIMARY KEY(target, bucket, key)
+                );
+                CREATE TABLE IF NOT EXISTS replication_job_claims (
+                    job_id INTEGER PRIMARY KEY,
+                    claimed_at_unix_ms INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS replication_dead_letters (
                     original_job_id INTEGER PRIMARY KEY,
                     target TEXT NOT NULL,
@@ -1907,6 +2082,13 @@ impl MetadataStore {
                     &connection,
                     "next_attempt_at_unix_ms",
                     "INTEGER NULL",
+                )
+            })
+            .and_then(|_| {
+                ensure_replication_jobs_column(
+                    &connection,
+                    "object_version",
+                    "INTEGER NOT NULL DEFAULT 0",
                 )
             })
             .and_then(|_| ensure_logical_objects_column(&connection, "etag", "TEXT NULL"))
@@ -2239,13 +2421,55 @@ fn prune_status_history(
     Ok(deleted)
 }
 
+fn bump_object_version(
+    transaction: &rusqlite::Transaction<'_>,
+    target: &str,
+    bucket: &str,
+    key: &str,
+    now_unix_ms: i64,
+) -> Result<u64, MetadataError> {
+    let next_version = transaction
+        .query_row(
+            "SELECT current_version FROM replication_object_versions
+             WHERE target = ?1 AND bucket = ?2 AND key = ?3",
+            params![target, bucket, key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(MetadataError::Sqlite)?
+        .map(|value| value as u64)
+        .unwrap_or(0)
+        .saturating_add(1);
+
+    transaction
+        .execute(
+            "INSERT INTO replication_object_versions (target, bucket, key, current_version, updated_at_unix_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(target, bucket, key) DO UPDATE SET
+                 current_version = excluded.current_version,
+                 updated_at_unix_ms = excluded.updated_at_unix_ms",
+            params![target, bucket, key, next_version as i64, now_unix_ms],
+        )
+        .map_err(MetadataError::Sqlite)?;
+
+    Ok(next_version)
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after unix epoch")
+        .as_millis()
+}
+
 fn upsert_job(connection: &Connection, job: &ReplicationJob) -> Result<(), MetadataError> {
     connection
         .execute(
             "INSERT INTO replication_jobs (
                 job_id, target, source_provider, operation, bucket, key, etag, size, content_type,
-                status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error,
+                object_version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(job_id) DO UPDATE SET
                 target = excluded.target,
                 source_provider = excluded.source_provider,
@@ -2259,7 +2483,8 @@ fn upsert_job(connection: &Connection, job: &ReplicationJob) -> Result<(), Metad
                 attempts = excluded.attempts,
                 enqueued_at_unix_ms = excluded.enqueued_at_unix_ms,
                 next_attempt_at_unix_ms = excluded.next_attempt_at_unix_ms,
-                last_error = excluded.last_error",
+                last_error = excluded.last_error,
+                object_version = excluded.object_version",
             params![
                 job.job_id as i64,
                 job.target,
@@ -2275,6 +2500,7 @@ fn upsert_job(connection: &Connection, job: &ReplicationJob) -> Result<(), Metad
                 job.enqueued_at_unix_ms as i64,
                 job.next_attempt_at_unix_ms.map(|value| value as i64),
                 job.last_error,
+                job.object_version as i64,
             ],
         )
         .map_err(MetadataError::Sqlite)?;
@@ -2328,6 +2554,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplicationJob> {
         enqueued_at_unix_ms: row.get::<_, i64>(11)? as u128,
         next_attempt_at_unix_ms: row.get::<_, Option<i64>>(12)?.map(|value| value as u128),
         last_error: row.get(13)?,
+        object_version: row.get::<_, i64>(14)? as u64,
     })
 }
 
@@ -2365,6 +2592,11 @@ fn row_to_dead_letter_entry(
                 .map_err(MetadataError::Sqlite)?
                 .map(|value| value as u128),
             last_error: row.get(13).map_err(MetadataError::Sqlite)?,
+            object_version: row
+                .get::<_, Option<i64>>(20)
+                .map_err(MetadataError::Sqlite)?
+                .map(|value| value as u64)
+                .unwrap_or(0),
         },
         status: ReplicationDeadLetterStatus::parse(&dlq_status_value)?,
         dead_lettered_at_unix_ms: row.get::<_, i64>(15).map_err(MetadataError::Sqlite)? as u64,
@@ -2394,7 +2626,7 @@ fn latest_status_aggregate(
 ) -> Result<LatestStatusAggregate, MetadataError> {
     let mut statement = connection
         .prepare(
-            "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+            "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error, jobs.object_version
              FROM replication_jobs jobs
              INNER JOIN (
                  SELECT target, bucket, key, MAX(job_id) AS max_job_id
@@ -2426,7 +2658,7 @@ fn latest_status_aggregate(
 fn target_statuses(connection: &Connection) -> Result<Vec<MetadataTargetStatus>, MetadataError> {
     let mut statement = connection
         .prepare(
-            "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error
+            "SELECT jobs.job_id, jobs.target, jobs.source_provider, jobs.operation, jobs.bucket, jobs.key, jobs.etag, jobs.size, jobs.content_type, jobs.status, jobs.attempts, jobs.enqueued_at_unix_ms, jobs.next_attempt_at_unix_ms, jobs.last_error, jobs.object_version
              FROM replication_jobs jobs
              INNER JOIN (
                  SELECT target, bucket, key, MAX(job_id) AS max_job_id
@@ -2566,6 +2798,7 @@ mod tests {
             enqueued_at_unix_ms: 1234,
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         }
     }
 
@@ -4053,6 +4286,213 @@ mod tests {
                 .multipart_upload_session("upload-expired")
                 .expect("session lookup should succeed")
                 .is_none()
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn versioned_enqueue_allocates_per_target_object() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut job1 = sample_job(1);
+        let mut job2 = sample_job(2);
+        let mut job3 = sample_job(3);
+        job3.object.bucket = "bucket-b".to_string();
+        job3.object.key = "other.txt".to_string();
+
+        let enqueued = store
+            .enqueue_jobs_with_versions(&[job1.clone(), job2.clone(), job3.clone()])
+            .expect("versioned enqueue should succeed");
+
+        // Each brand-new operation for a tuple bumps that tuple's version.
+        assert_eq!(enqueued[0].object_version, 1);
+        assert_eq!(enqueued[1].object_version, 2);
+        assert_eq!(enqueued[2].object_version, 1);
+
+        assert_eq!(
+            store
+                .current_object_version("onedrive", "bucket-a", "hello.txt")
+                .expect("version lookup should succeed"),
+            Some(2)
+        );
+        assert_eq!(
+            store
+                .current_object_version("onedrive", "bucket-b", "other.txt")
+                .expect("version lookup should succeed"),
+            Some(1)
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn legacy_jobs_backfill_versions_on_reopen() {
+        let db_path = temp_db_path();
+        {
+            let store = MetadataStore::open(&db_path).expect("store should open");
+            // A legacy row written through the un-versioned path carries
+            // object_version 0 and leaves no version tuple behind.
+            store
+                .enqueue_jobs(&[sample_job(5)])
+                .expect("legacy job should persist");
+            assert_eq!(
+                store
+                    .current_object_version("onedrive", "bucket-a", "hello.txt")
+                    .expect("version lookup should succeed"),
+                None
+            );
+        }
+
+        // Reopening the store backfills legacy rows deterministically from
+        // job_id and seeds current versions.
+        let reopened = MetadataStore::open(&db_path).expect("store should reopen");
+        assert_eq!(
+            reopened
+                .current_object_version("onedrive", "bucket-a", "hello.txt")
+                .expect("version lookup should succeed"),
+            Some(5)
+        );
+        let jobs = reopened.load_pending_jobs(None).expect("jobs should load");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].object_version, 5, "legacy job should be backfilled from job_id");
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn failed_enqueue_rolls_back_version_and_job() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        // Inject a trigger so inserting a job for target 'fail' aborts the
+        // transaction, letting us observe the batch's atomicity.
+        store
+            .connection
+            .lock()
+            .expect("store should not be poisoned")
+            .execute_batch(
+                "CREATE TRIGGER fail_replication_jobs
+                 BEFORE INSERT ON replication_jobs
+                 WHEN NEW.target = 'fail'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected enqueue failure');
+                 END;",
+            )
+            .expect("trigger should be created");
+
+        let first = sample_job(1);
+        let mut failing = sample_job(2);
+        failing.target = "fail".to_string();
+
+        let error = store
+            .enqueue_jobs_with_versions(&[first.clone(), failing])
+            .expect_err("the failing insert should abort the whole batch");
+        assert!(
+            error.to_string().contains("injected enqueue failure"),
+            "unexpected error: {error}"
+        );
+
+        // Neither the version bump nor the earlier job's row survives.
+        assert_eq!(
+            store
+                .current_object_version("onedrive", "bucket-a", "hello.txt")
+                .expect("version lookup should succeed"),
+            None,
+            "the version bump must roll back with the failed transaction"
+        );
+        let pending = store.load_pending_jobs(None).expect("pending should load");
+        assert!(
+            pending.iter().all(|job| job.job_id != 1),
+            "the first job must roll back with the failed transaction"
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn job_claim_is_exclusive() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        assert!(store.claim_job(42, 1_000).expect("first claim should succeed"));
+        assert!(
+            !store.claim_job(42, 2_000).expect("second claim should be rejected"),
+            "a second claim for an already-claimed job must be rejected"
+        );
+
+        store.release_job_claim(42).expect("release should succeed");
+        assert!(
+            store.claim_job(42, 3_000).expect("claim after release should succeed"),
+            "releasing a claim should permit a fresh claim"
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn startup_releases_abandoned_claims() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        // A claim for a job_id with no live row is abandoned and must be
+        // released at startup.
+        assert!(store.claim_job(999, 1_000).expect("claim should succeed"));
+        // A claim for a live job is not abandoned.
+        store.enqueue_jobs(&[sample_job(7)]).expect("job should persist");
+        assert!(store.claim_job(7, 1_000).expect("claim should succeed"));
+
+        let removed = store
+            .clear_abandoned_job_claims()
+            .expect("cleanup should succeed");
+        assert_eq!(removed, 1, "only the orphan claim should be cleared");
+        assert!(
+            !store.claim_job(7, 2_000).expect("claim should still be held"),
+            "a live job's claim must survive abandoned-claim cleanup"
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn metadata_export_restore_preserves_current_versions() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        store
+            .enqueue_jobs_with_versions(&[sample_job(1)])
+            .expect("first version should persist");
+        store
+            .enqueue_jobs_with_versions(&[sample_job(2)])
+            .expect("second version should persist");
+
+        let pending = store.load_pending_jobs(None).expect("pending should load");
+        assert_eq!(pending.len(), 2);
+
+        // Simulate an export + restore: replace all state with the jobs that
+        // were exported. Current versions must survive the round trip.
+        store
+            .replace_backup_state(
+                &[],
+                &[],
+                &[],
+                &pending,
+                &GatewayWriteAheadLogStateRecord {
+                    next_lsn: 1,
+                    last_checkpoint_lsn: None,
+                    last_replayed_lsn: None,
+                    updated_at_unix_ms: 0,
+                },
+            )
+            .expect("restore should succeed");
+
+        assert_eq!(
+            store
+                .current_object_version("onedrive", "bucket-a", "hello.txt")
+                .expect("version lookup should succeed"),
+            Some(2),
+            "restore must preserve the max persisted version for a tuple"
         );
 
         fs::remove_file(db_path).ok();

@@ -40034,6 +40034,7 @@ mod tests {
             enqueued_at_unix_ms: 1,
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         };
 
         state
@@ -40072,6 +40073,7 @@ mod tests {
             enqueued_at_unix_ms: 1,
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         }
     }
 
@@ -42492,6 +42494,7 @@ mod tests {
             enqueued_at_unix_ms: u128::from(now_unix_ms.saturating_sub(1_000)),
             next_attempt_at_unix_ms: None,
             last_error: Some("temporary outage".to_string()),
+            object_version: 0,
         };
         state
             .metadata_store
@@ -42755,6 +42758,7 @@ mod tests {
             enqueued_at_unix_ms: u128::from(now_unix_ms.saturating_sub(30_000)),
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         };
         state.replication.enqueue_existing_job(pending_job.clone());
         state
@@ -57463,6 +57467,7 @@ mod tests {
                 enqueued_at_unix_ms: 1,
                 next_attempt_at_unix_ms: None,
                 last_error: None,
+                object_version: 0,
             }])
             .expect("pending job should persist");
 
@@ -60204,6 +60209,7 @@ mod tests {
             enqueued_at_unix_ms: 400,
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         };
         state
             .metadata_store
@@ -60371,6 +60377,7 @@ mod tests {
                 enqueued_at_unix_ms: 1,
                 next_attempt_at_unix_ms: None,
                 last_error: None,
+                object_version: 0,
             });
 
         let error = validate_gateway_backup_bundle_for_import(&state, bundle)

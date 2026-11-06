@@ -12,7 +12,7 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 
 | ID | Deliverable | Dependencies | State |
 |---|---|---|---|
-| T01 | Durable versions/claims/schema and backup compatibility | architecture | pending |
+| T01 | Durable versions/claims/schema and backup compatibility | architecture | complete |
 | T02 | DB-first enqueue/retry, striped worker locks, recovery | T01 | pending |
 | T03 | Checked DLQ replay and API outcomes | T01, T02 | pending |
 | T04 | Recoverable overwrite/staging/WAL | T01–T03 | pending |
@@ -121,3 +121,14 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: `cargo test -p provider-mobile --lib` = 29 passed.
 - Review: pending.
 - Integration: committed `6421343`. Finding #10 now complete across Unicom, Telecom, OneDrive, and Mobile.
+
+### T01 — Durable replication contracts (versions/claims/schema)
+
+- Route: direct implementation (prior `sensenova-6.8-flash-lite`/`deepseek-flash` attempts exhausted the token budget on the 3.7K-line metadata-store; direct editing is the reliable path).
+- Owned files: `crates/replication-engine/src/lib.rs`, `crates/metadata-store/src/lib.rs`, `crates/gatewayd/src/main.rs`.
+- Change: `ReplicationJob` gains `#[serde(default)] pub object_version: u64`; metadata-store schema gains `object_version INTEGER NOT NULL DEFAULT 0` on `replication_jobs` (plus `idx_replication_jobs_tuple_version`), a `replication_object_versions(target,bucket,key,current_version,updated_at_unix_ms)` table, and `replication_job_claims(job_id,claimed_at_unix_ms)`. New methods: `enqueue_jobs_with_versions` (increments each tuple's version and inserts rows in one transaction), `backfill_object_versions` (legacy rows backfilled deterministically from `job_id`; current versions seeded by `MAX(object_version)` per tuple, run on every open), `claim_job`/`release_job_claim` (exclusive per job), `clear_abandoned_job_claims` (orphan claims released at startup), `current_object_version`. `replace_backup_state` deletes versions+claims and re-seeds versions from restored jobs. Every `row_to_job`/`row_to_dead_letter_entry` SELECT updated to carry `object_version` (dead-letter SELECTs place it last so `dlq.status` stays at column 14).
+- Tests (RED → GREEN): `versioned_enqueue_allocates_per_target_object`, `legacy_jobs_backfill_versions_on_reopen`, `failed_enqueue_rolls_back_version_and_job` (injected trigger aborts the batch; version bump + prior row roll back), `job_claim_is_exclusive`, `startup_releases_abandoned_claims`, `metadata_export_restore_preserves_current_versions`.
+- GREEN: `cargo test -p metadata-store` = 36 passed; `cargo test -p replication-engine` = 33 passed; `cargo test --workspace --no-run` compiles all test binaries; `cargo check --workspace` clean.
+- Baseline check: three gatewayd tests (`notify_webhook_posts_only_when_alert_state_changes`, `object_action_delete_writes_replayable_wal_metadata`, `object_action_core_surfaces_wal_commit_warning_without_rollback`) fail identically on baseline `0f52dc9` with my changes stashed — pre-existing, unrelated to T01.
+- Review: pending (needs GLM-5.3 or Kimi-K3).
+- Integration: pending commit.

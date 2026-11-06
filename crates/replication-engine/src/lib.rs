@@ -90,6 +90,8 @@ pub struct ReplicationJob {
     #[serde(default)]
     pub next_attempt_at_unix_ms: Option<u128>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub object_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -327,6 +329,7 @@ impl ReplicationEngine {
                 enqueued_at_unix_ms: now_unix_ms(),
                 next_attempt_at_unix_ms: None,
                 last_error: None,
+                object_version: 0,
             };
             pending.push_back(job.clone());
             created.push(job);
@@ -463,6 +466,7 @@ mod tests {
                 enqueued_at_unix_ms: 100,
                 next_attempt_at_unix_ms: Some(2_000),
                 last_error: Some("temporary upstream outage".to_string()),
+                object_version: 0,
             },
             ReplicationJob {
                 job_id: 2,
@@ -481,6 +485,7 @@ mod tests {
                 enqueued_at_unix_ms: 101,
                 next_attempt_at_unix_ms: None,
                 last_error: None,
+                object_version: 0,
             },
         ]);
 
@@ -529,6 +534,7 @@ mod tests {
             enqueued_at_unix_ms: 9_999,
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         };
         engine.replace_pending(vec![replacement.clone()]);
 
@@ -718,6 +724,7 @@ mod tests {
             enqueued_at_unix_ms: 100,
             next_attempt_at_unix_ms: Some(50_000),
             last_error: None,
+            object_version: 0,
         });
 
         assert!(engine.pop_next_ready_at(1000).is_none());
@@ -747,6 +754,7 @@ mod tests {
                 enqueued_at_unix_ms: 100,
                 next_attempt_at_unix_ms: Some(50_000),
                 last_error: None,
+                object_version: 0,
             });
         }
 
@@ -822,6 +830,7 @@ mod tests {
             enqueued_at_unix_ms: 100,
             next_attempt_at_unix_ms: Some(5000),
             last_error: Some("temp error".to_string()),
+            object_version: 0,
         };
         engine.schedule_retry(job.clone());
         let snapshot = engine.snapshot();
@@ -849,6 +858,7 @@ mod tests {
             enqueued_at_unix_ms: 100,
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         };
         engine.enqueue_existing_job(job.clone());
         let snapshot = engine.snapshot();
@@ -901,6 +911,7 @@ mod tests {
             enqueued_at_unix_ms: 100,
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         }]);
         let next_id = engine.allocate_job_id();
         assert_eq!(next_id, 51);
@@ -927,6 +938,7 @@ mod tests {
             enqueued_at_unix_ms: 1000,
             next_attempt_at_unix_ms: None,
             last_error: None,
+            object_version: 0,
         };
         let json = serde_json::to_string(&job).unwrap();
         let decoded: ReplicationJob = serde_json::from_str(&json).unwrap();
