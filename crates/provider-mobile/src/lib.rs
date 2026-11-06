@@ -1625,14 +1625,22 @@ impl MobileBlobAdapter {
         match container {
             MOBILE_ROOT_CONTAINER => Ok(self.root_folder_id()?.to_string()),
             MOBILE_FAMILY_CONTAINER => {
-                if self.family_disk_info_if_available().await.is_none() {
-                    return Err(BlobError::NotFound(format!(
+                // Propagate a transient upstream failure rather than treating
+                // it as object absence: a 500/timeout/401 on getFamilyDiskInfo
+                // is NOT proof the container is missing, and an idempotent
+                // delete must not silently succeed on a live upstream error.
+                // Only an explicit "family not enabled" response is absence.
+                match self.family_disk_info().await? {
+                    Some(_) => self
+                        .family_root_folder_id()
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            BlobError::NotFound(format!("container not found: {container}"))
+                        }),
+                    None => Err(BlobError::NotFound(format!(
                         "container not found: {container}"
-                    )));
+                    ))),
                 }
-                self.family_root_folder_id()
-                    .map(str::to_string)
-                    .ok_or_else(|| BlobError::NotFound(format!("container not found: {container}")))
             }
             _ => Err(BlobError::NotFound(format!(
                 "container not found: {container}"
@@ -1858,6 +1866,32 @@ impl MobileBlobAdapter {
             .ok_or_else(|| BlobError::Upstream(format!("{operation} returned no data payload")))
     }
 
+    /// Family disk-info resolution that distinguishes a genuine "family not
+    /// enabled" response (`Ok(None)`) from a transport/parse failure (`Err`).
+    /// Object operations must NOT treat a transport failure as object absence.
+    async fn family_disk_info(&self) -> Result<Option<MobileDiskInfoData>, BlobError> {
+        let url = self.config.family_disk_info_url.as_str();
+        let operation = "China Mobile getFamilyDiskInfo";
+        let response = self
+            .send_json::<MobileDiskInfoResponse>(
+                url,
+                json!({
+                    "userDomainId": self.user_domain_id()?,
+                }),
+                operation,
+            )
+            .await?;
+        if !response.success {
+            // Explicitly disabled: this is genuine absence, not a transport
+            // failure, so object ops may report NotFound.
+            return Ok(None);
+        }
+        response
+            .data
+            .map(Some)
+            .ok_or_else(|| BlobError::Upstream(format!("{operation} returned no data payload")))
+    }
+
     fn disk_capacity(data: &MobileDiskInfoData) -> Option<StorageCapacity> {
         let total = data.disk_size.map(mebibytes_to_bytes);
         let free = data.free_disk_size.map(mebibytes_to_bytes);
@@ -1948,10 +1982,6 @@ impl MobileBlobAdapter {
                 },
             ],
         }
-    }
-
-    async fn family_disk_info_if_available(&self) -> Option<MobileDiskInfoData> {
-        self.disk_info(MobileScope::Family).await.ok()
     }
 
     async fn list_scope_objects(
@@ -3473,6 +3503,58 @@ mod tests {
         let containers = adapter.list_containers().await.expect("list containers");
         assert_eq!(containers.len(), 1);
         assert_eq!(containers[0].name, MOBILE_ROOT_CONTAINER);
+    }
+
+    async fn mock_family_disk_info_server_error() -> impl axum::response::IntoResponse {
+        (StatusCode::INTERNAL_SERVER_ERROR, "upstream failure")
+    }
+
+    #[tokio::test]
+    async fn family_transient_error_is_not_masked_as_not_found() {
+        // Finding #5: family_disk_info_if_available swallowed every error via
+        // .ok(), so a transient upstream failure (500/timeout) was converted
+        // into NotFound, and an idempotent delete treated it as success. Object
+        // operations must propagate the real error instead.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile family-error server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile family-error local addr");
+        let base_url = format!("http://{address}");
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_health_list))
+            .route("/health/personal", post(mock_health_personal_disk_info))
+            .route("/health/family", post(mock_family_disk_info_server_error));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile family-error server");
+        });
+
+        let mut config = sample_config();
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.personal_disk_info_url = format!("{base_url}/health/personal");
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        config.family_root_folder_id = Some("family-root".to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        // Listing the family container must NOT report the object as absent;
+        // the upstream error must propagate.
+        let error = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(MOBILE_FAMILY_CONTAINER.to_string()),
+                prefix: None,
+                limit: None,
+            })
+            .await
+            .expect_err("family list should surface the upstream failure");
+        assert!(
+            !matches!(error, BlobError::NotFound(_)),
+            "transient family disk-info failure must not be masked as NotFound: {error}"
+        );
     }
 
     #[test]
