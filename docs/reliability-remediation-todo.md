@@ -16,7 +16,7 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | T02 | DB-first enqueue/retry, striped worker locks, recovery | T01 | pending |
 | T03 | Checked DLQ replay and API outcomes | T01, T02 | pending |
 | T04 | Recoverable overwrite/staging/WAL | T01–T03 | pending |
-| T05a | Mobile family error propagation | architecture | pending |
+| T05a | Mobile family error propagation | architecture | complete |
 | T05b | Mobile non-destructive staged overwrite | T05a | pending |
 | T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | pending |
 | T07 | Four-provider exact list prefix preservation | Mobile file waits T05 | complete |
@@ -92,3 +92,22 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: Python regression under WSL Debian passed; `bash -n` on both LXC scripts; real `bash deploy/lxc/_smoke_test.sh` = 5/5 with `RESULT: PASS`.
 - Review: pending.
 - Integration: committed `124de30`.
+
+### T05a — Mobile family error propagation (finding #5)
+
+- Route: direct implementation.
+- Owned files: `crates/provider-mobile/src/lib.rs`.
+- Change: `native_root_folder_id_for_container` no longer resolves the family root via `family_disk_info_if_available().await.ok()` (which swallowed timeout/401/500 into `NotFound`). New `family_disk_info()` helper returns `Ok(None)` only for an explicit `success:false` "family not enabled" response and `Err` for transport/parse failures, which object operations now propagate. Removed the dead `.ok()` wrapper.
+- Tests: `family_transient_error_is_not_masked_as_not_found` (500 on `getFamilyDiskInfo` → `list_objects` must not be `NotFound`).
+- GREEN: `cargo test -p provider-mobile --lib` = 28 passed (before prefix addition); family group = 5 passed including the previously-masked `list_containers_keeps_root_when_family_disk_info_is_unavailable`.
+- Review: pending.
+- Integration: committed `575c763`.
+
+### T07 (Mobile portion) — Mobile exact list prefix preservation (finding #10)
+
+- Owned files: `crates/provider-mobile/src/lib.rs`.
+- Change: `list_scope_objects` uses raw `request.prefix` (no `normalize_object_key`) for both the directory walk and the leaf `starts_with`; `directory_may_contain_prefix` aligned with S3 raw-substring semantics so prefix `docs` also reaches `docs-archive` while `docs/` stays isolated.
+- Tests: `list_objects_prefix_is_segment_boundary_aware` (docs + docs-archive nested under the managed root).
+- GREEN: `cargo test -p provider-mobile --lib` = 29 passed.
+- Review: pending.
+- Integration: committed `6421343`. Finding #10 now complete across Unicom, Telecom, OneDrive, and Mobile.
