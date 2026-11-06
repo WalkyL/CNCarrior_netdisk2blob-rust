@@ -12270,6 +12270,51 @@ fn is_primary_stale(state: &AppState) -> bool {
     record.requires_reauth.unwrap_or(false)
 }
 
+/// Flags a provider credential lease as `reauth_required` immediately when a
+/// data-plane request surfaces an auth failure, instead of waiting for the next
+/// lease-probe cycle (which can be up to `provider_credential_lease_probe_interval_seconds`
+/// away, or worse, masked until the probe actually runs).
+///
+/// This is the request-side fast-fail half of the P0 availability work: a PUT /
+/// GET / DELETE that hits "invalid login" flips the lease record right away so
+/// fencing (`is_primary_stale`), alerting (`build_admin_alerts`), and the next
+/// readiness probe all see the degraded state promptly. It is best-effort and
+/// never fails the request itself.
+fn note_provider_auth_failure_on_request(state: &AppState, provider: ProviderId, error: &str) {
+    if !provider_error_implies_reauth(provider, error) {
+        return;
+    }
+    let Ok(mut record) = load_provider_credential_lease_record(&state.config, provider) else {
+        return;
+    };
+    let now = current_unix_ms();
+    let already_flagged = record.requires_reauth.unwrap_or(false);
+    if record.first_failure_at_unix_ms.is_none() {
+        record.first_failure_at_unix_ms = Some(now);
+    }
+    record.last_verified_at_unix_ms = Some(now);
+    record.last_error = Some(error.to_string());
+    if !already_flagged {
+        record.status = Some("reauth_required".to_string());
+        record.summary = Some(format!(
+            "Gateway request detected an auth failure for {}. Capture a fresh session and save it again.",
+            provider_label(provider)
+        ));
+    }
+    record.requires_reauth = Some(true);
+    if let Err(persist_error) = persist_provider_credential_lease_record(&state.config, provider, &record) {
+        warn!(
+            provider = provider.as_str(),
+            error = %persist_error,
+            "failed to persist request-side reauth flag"
+        );
+        return;
+    }
+    // Wake the lease-probe loop so the next probe runs immediately rather than
+    // after the poll interval.
+    state.credential_lease_probe_wake.notify_one();
+}
+
 fn build_admin_alerts(
     state: &AppState,
     provider_health: &[BackendPayload],
@@ -12815,38 +12860,49 @@ fn alerts_fingerprint(alerts: &[AdminAlertPayload]) -> String {
     sha256_hex(&payload)
 }
 
+/// Returns true when an error message implies the provider credentials can no
+/// longer be used directly (i.e. the login/session has expired or is invalid).
+///
+/// This is the single source of truth for "this failure means re-auth" and is
+/// reused both by the lease-probe summary and by the request-side fast-fail
+/// path, so a request that surfaces an auth error can immediately flag the
+/// lease instead of waiting for the next probe.
+fn provider_error_implies_reauth(provider: ProviderId, message: &str) -> bool {
+    match provider {
+        ProviderId::Unicom => {
+            message.contains("HTTP 401")
+                || message.contains("RSP_CODE=9999")
+                || message.contains("RSP_CODE=1001")
+                || message.contains("无效登录信息")
+                || message.contains("missing environment variable: CCBG_UNICOM_TOKEN")
+                || message.contains("inline token is empty")
+        }
+        ProviderId::Telecom => {
+            message.contains("HTTP 401")
+                || message.contains("cookieUserSession is null or invalid")
+                || message.contains("session expired")
+                || message.contains("missing China Telecom Access Token")
+                || message.contains("missing China Telecom Browser ID")
+                || message.contains("missing China Telecom Cookie Header")
+        }
+        ProviderId::Mobile => {
+            message.contains("HTTP 401")
+                || message.contains("missing environment variable: CCBG_MOBILE_TOKEN")
+                || message.contains("authorization")
+                || message.contains("cookie")
+        }
+        ProviderId::Onedrive => message.contains("401") || message.contains("expired"),
+        ProviderId::Stub => false,
+    }
+}
+
 fn provider_credential_lease_summary_from_health(
     provider: ProviderId,
     health: &blob_core::ServiceHealth,
 ) -> (String, String, bool, Option<String>) {
     let joined_notes = health.notes.join(" | ");
     let provider_name = provider_label(provider);
-    let requires_reauth = match provider {
-        ProviderId::Unicom => {
-            joined_notes.contains("HTTP 401")
-                || joined_notes.contains("RSP_CODE=9999")
-                || joined_notes.contains("RSP_CODE=1001")
-                || joined_notes.contains("无效登录信息")
-                || joined_notes.contains("missing environment variable: CCBG_UNICOM_TOKEN")
-                || joined_notes.contains("inline token is empty")
-        }
-        ProviderId::Telecom => {
-            joined_notes.contains("HTTP 401")
-                || joined_notes.contains("cookieUserSession is null or invalid")
-                || joined_notes.contains("session expired")
-                || joined_notes.contains("missing China Telecom Access Token")
-                || joined_notes.contains("missing China Telecom Browser ID")
-                || joined_notes.contains("missing China Telecom Cookie Header")
-        }
-        ProviderId::Mobile => {
-            joined_notes.contains("HTTP 401")
-                || joined_notes.contains("missing environment variable: CCBG_MOBILE_TOKEN")
-                || joined_notes.contains("authorization")
-                || joined_notes.contains("cookie")
-        }
-        ProviderId::Onedrive => joined_notes.contains("401") || joined_notes.contains("expired"),
-        ProviderId::Stub => false,
-    };
+    let requires_reauth = provider_error_implies_reauth(provider, &joined_notes);
     let last_error = if joined_notes.is_empty() {
         None
     } else {
@@ -33112,6 +33168,35 @@ async fn healthz(
     Ok(Json(backend.health().await?))
 }
 
+/// Returns true when the data plane is considered ready to serve writes.
+///
+/// This is the single authoritative readiness predicate shared by `/readyz` and
+/// the extended `/healthz` payload. It deliberately avoids the `all()`-over-empty
+/// vacuous-true trap: an empty provider list is *not* ready. Readiness requires:
+///
+/// 1. Exactly one provider holds the `primary` role (a missing primary, or more
+///    than one primary, is a configuration anomaly and must not be treated as
+///    ready), AND
+/// 2. That primary provider's health is not `Unavailable`.
+///
+/// Provider authentication expiry is modelled as `Unavailable`, so login
+/// expiration correctly renders readiness `false` while the process stays alive
+/// (liveness is a separate concern handled by `/healthz` on 61080 and the
+/// systemd unit).
+fn data_plane_readiness_ready(provider_health: &[BackendPayload]) -> bool {
+    let primaries: Vec<&BackendPayload> = provider_health
+        .iter()
+        .filter(|provider| provider.roles.iter().any(|role| *role == "primary"))
+        .collect();
+    if primaries.len() != 1 {
+        return false;
+    }
+    !matches!(
+        primaries[0].health.status,
+        blob_core::HealthStatus::Unavailable
+    )
+}
+
 #[derive(Debug, Serialize)]
 struct ExtendedHealthPayload {
     status: &'static str,
@@ -33136,10 +33221,7 @@ async fn metrics_healthz(
         &object_action_history,
         &alerts,
     );
-    let ready = provider_health.iter().all(|provider| {
-        provider.role != "primary"
-            || !matches!(provider.health.status, blob_core::HealthStatus::Unavailable)
-    });
+    let ready = data_plane_readiness_ready(&provider_health);
 
     Ok(Json(ExtendedHealthPayload {
         status: if ready { "ok" } else { "degraded" },
@@ -33153,10 +33235,7 @@ async fn metrics_healthz(
 
 async fn metrics_readyz(State(state): State<AppState>) -> Result<StatusCode, ApiError> {
     let provider_health = provider_health_payloads(&state).await?;
-    let primary_ready = provider_health.iter().all(|provider| {
-        provider.role != "primary"
-            || !matches!(provider.health.status, blob_core::HealthStatus::Unavailable)
-    });
+    let primary_ready = data_plane_readiness_ready(&provider_health);
 
     Ok(if primary_ready {
         StatusCode::OK
@@ -34987,6 +35066,7 @@ async fn execute_put_upload(
                 ProviderIoOperationKind::Write,
                 &error.to_string(),
             );
+            note_provider_auth_failure_on_request(&state, home_provider, &error.to_string());
             let _ = restore_previous_object_write_state(
                 state,
                 &bucket,
@@ -35357,6 +35437,7 @@ async fn get_object(
                 ProviderIoOperationKind::Read,
                 &error.to_string(),
             );
+            note_provider_auth_failure_on_request(&state, resolved.source.provider, &error.to_string());
             map_object_error(error, &bucket, &key)
         })?;
     let observed_body = observe_provider_read_body(
@@ -41217,6 +41298,120 @@ mod tests {
                 .iter()
                 .any(|alert| alert.title.contains("unavailable"))
         );
+    }
+
+    fn test_capabilities() -> blob_core::BackendCapabilities {
+        blob_core::BackendCapabilities {
+            read: false,
+            write: false,
+            delete: false,
+            multipart_upload: false,
+            streaming_get: false,
+            streaming_put: false,
+            max_single_upload_bytes: None,
+            max_single_download_bytes: None,
+            upload_part_size_bytes: None,
+        }
+    }
+
+    fn backend_payload_for_test(
+        provider: &'static str,
+        roles: &[&'static str],
+        health: blob_core::ServiceHealth,
+    ) -> BackendPayload {
+        BackendPayload {
+            role: roles.first().copied().unwrap_or("standby"),
+            provider,
+            roles: roles.to_vec(),
+            limit_profile: None,
+            health,
+            io: ProviderIoObservationsPayload::default(),
+            resources: ProviderResourceObservationsPayload::default(),
+        }
+    }
+
+    #[test]
+    fn data_plane_readiness_ready_rejects_empty_primary_set() {
+        // The old `all()`-over-empty predicate returned true for an empty list
+        // (vacuous truth). An absent primary must NOT be treated as ready.
+        assert!(!data_plane_readiness_ready(&[]));
+    }
+
+    #[test]
+    fn data_plane_readiness_ready_rejects_multiple_primaries() {
+        let healthy = blob_core::ServiceHealth {
+            backend: "unicom".to_string(),
+            status: blob_core::HealthStatus::Healthy,
+            capabilities: test_capabilities(),
+            scopes: Vec::new(),
+            notes: Vec::new(),
+        };
+        let payload = vec![
+            backend_payload_for_test("unicom", &["primary"], healthy.clone()),
+            backend_payload_for_test("telecom", &["primary"], healthy.clone()),
+        ];
+        assert!(!data_plane_readiness_ready(&payload));
+    }
+
+    #[test]
+    fn data_plane_readiness_ready_rejects_unavailable_primary() {
+        let unavailable = blob_core::ServiceHealth {
+            backend: "unicom".to_string(),
+            status: blob_core::HealthStatus::Unavailable,
+            capabilities: test_capabilities(),
+            scopes: Vec::new(),
+            notes: vec!["login expired".to_string()],
+        };
+        let payload = vec![backend_payload_for_test("unicom", &["primary"], unavailable)];
+        assert!(!data_plane_readiness_ready(&payload));
+    }
+
+    #[test]
+    fn data_plane_readiness_ready_accepts_single_healthy_primary() {
+        let healthy = blob_core::ServiceHealth {
+            backend: "unicom".to_string(),
+            status: blob_core::HealthStatus::Healthy,
+            capabilities: test_capabilities(),
+            scopes: Vec::new(),
+            notes: Vec::new(),
+        };
+        let payload = vec![backend_payload_for_test("unicom", &["primary"], healthy)];
+        assert!(data_plane_readiness_ready(&payload));
+    }
+
+    #[test]
+    fn note_provider_auth_failure_flags_lease_on_reauth_error() {
+        let state = test_state();
+        // Unicom "invalid login" surfaces as RSP_CODE=1001 / 无效登录信息.
+        note_provider_auth_failure_on_request(
+            &state,
+            ProviderId::Unicom,
+            "QueryAllFiles returned RSP_CODE=1001 (无效登录信息)",
+        );
+        let record =
+            load_provider_credential_lease_record(&state.config, ProviderId::Unicom).unwrap();
+        assert_eq!(record.requires_reauth, Some(true));
+        assert_eq!(record.status.as_deref(), Some("reauth_required"));
+        assert!(record.first_failure_at_unix_ms.is_some());
+        assert!(record
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("RSP_CODE=1001"));
+    }
+
+    #[test]
+    fn note_provider_auth_failure_ignores_non_auth_error() {
+        let state = test_state();
+        // A transient network error is NOT an auth failure and must not flag reauth.
+        note_provider_auth_failure_on_request(
+            &state,
+            ProviderId::Unicom,
+            "connection reset by peer",
+        );
+        let record =
+            load_provider_credential_lease_record(&state.config, ProviderId::Unicom).unwrap();
+        assert_ne!(record.requires_reauth, Some(true));
     }
 
     #[tokio::test]
