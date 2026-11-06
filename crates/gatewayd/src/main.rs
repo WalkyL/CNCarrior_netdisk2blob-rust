@@ -4825,6 +4825,11 @@ struct AppConfig {
     notify_poll_interval_seconds: u64,
     provider_lease_poll_interval_seconds: u64,
     provider_credential_lease_probe_interval_seconds: u64,
+    /// Warn when a provider's credential lease has not been re-verified within
+    /// this window, even if it still reports active. Mirrors the
+    /// `gateway_backup_stale` alert: it surfaces detection latency early rather
+    /// than waiting for the next probe to flip to reauth_required.
+    credential_verification_stale_after_ms: Option<u64>,
     replication_failed_alert_threshold: usize,
     replication_failed_alert_min_age_ms: u64,
     control_plane_file: String,
@@ -5922,6 +5927,9 @@ impl AppConfig {
                 300,
             )
             .max(30),
+            credential_verification_stale_after_ms: env_opt_u64(
+                "CCBG_CREDENTIAL_VERIFICATION_STALE_AFTER_MS",
+            ),
             replication_failed_alert_threshold: env_usize(
                 "CCBG_REPLICATION_FAILED_ALERT_THRESHOLD",
                 1,
@@ -8012,6 +8020,7 @@ fn test_app_config() -> AppConfig {
         notify_poll_interval_seconds: 15,
         provider_lease_poll_interval_seconds: 30,
         provider_credential_lease_probe_interval_seconds: 300,
+        credential_verification_stale_after_ms: None,
         replication_failed_alert_threshold: 1,
         replication_failed_alert_min_age_ms: 0,
         control_plane_file: "./data/control-plane.json".to_string(),
@@ -12751,6 +12760,51 @@ fn build_admin_alerts(
                     detail: format!("lease_status={} | {}", lease.status, lease.summary),
                 },
             );
+        }
+        // Early-warning on credential verification latency. A lease can still
+        // report active while the probe loop has not re-verified it for a long
+        // time (e.g. the health() probe hung, or the loop was starved). Surface
+        // that detection latency as a warn instead of waiting for a 503. Only
+        // applies to providers the lease-probe loop actually re-verifies;
+        // OneDrive has no probe loop, so a stale marker there is not meaningful.
+        if let (Ok(provider_id), Some(last_verified_at_unix_ms)) =
+            (ProviderId::parse(lease.provider), lease.last_verified_at_unix_ms)
+        {
+            if !provider_supports_credential_lease_probe(provider_id) {
+                continue;
+            }
+            let stale_after_ms = state
+                .config
+                .credential_verification_stale_after_ms
+                .unwrap_or_else(|| {
+                    state
+                        .config
+                        .provider_credential_lease_probe_interval_seconds
+                        .saturating_mul(1000)
+                        .saturating_mul(3)
+                });
+            if stale_after_ms > 0
+                && now_unix_ms.saturating_sub(last_verified_at_unix_ms) > stale_after_ms
+            {
+                push_alert(
+                    &mut alerts,
+                    AdminAlertPayload {
+                        id: format!("{}_credential_verification_stale", lease.provider),
+                        severity: "warn",
+                        title: format!(
+                            "{} credential verification is stale",
+                            lease.label
+                        ),
+                        detail: format!(
+                            "lease_status={} | last_verified_unix_ms={} ({}ms ago) | {}",
+                            lease.status,
+                            last_verified_at_unix_ms,
+                            now_unix_ms.saturating_sub(last_verified_at_unix_ms),
+                            lease.summary
+                        ),
+                    },
+                );
+            }
         }
     }
 
@@ -33141,6 +33195,14 @@ fn env_u64(key: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_opt_u64(key: &str) -> Option<u64> {
+    env_opt(key).and_then(|value| {
+        value.parse().map_err(|_| {
+            warn!(%key, %value, "failed to parse env var as optional u64, ignoring");
+        }).ok()
+    })
+}
+
 fn env_byte_size_limit(key: &str) -> Result<Option<u64>, BlobError> {
     env_opt(key)
         .map(|value| {
@@ -39374,6 +39436,7 @@ mod tests {
             notify_poll_interval_seconds: 15,
             provider_lease_poll_interval_seconds: 30,
             provider_credential_lease_probe_interval_seconds: 300,
+            credential_verification_stale_after_ms: None,
             replication_failed_alert_threshold: 1,
             replication_failed_alert_min_age_ms: 0,
             control_plane_file: temp_db_path().replace(".db", "-control-plane.json"),
@@ -42115,6 +42178,83 @@ mod tests {
                 && lease.status == "pending_verification"
                 && !lease.requires_reauth
         }));
+    }
+
+    #[tokio::test]
+    async fn stale_credential_verification_emits_warning_alert() {
+        let mut state = test_state();
+        // Tighten the staleness threshold so a lease verified long ago trips the
+        // early warning even while it still reports active.
+        Arc::make_mut(&mut state.config).credential_verification_stale_after_ms = Some(60_000);
+        let now = current_unix_ms();
+        let stale_at = now.saturating_sub(5_000_000);
+        persist_provider_credential_lease_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialLeaseRecord {
+                provider: Some("unicom".to_string()),
+                status: Some("active".to_string()),
+                summary: Some("Unicom lease active".to_string()),
+                requires_reauth: Some(false),
+                captured_at_unix_ms: Some(stale_at),
+                last_verified_at_unix_ms: Some(stale_at),
+                last_success_at_unix_ms: Some(stale_at),
+                last_error: None,
+                first_failure_at_unix_ms: None,
+                credential_generation: None,
+            },
+        )
+        .expect("unicom lease record should persist");
+
+        let Json(status) = admin_status(State(state), HeaderMap::new())
+            .await
+            .expect("admin status should succeed");
+
+        let alert = status
+            .alerts
+            .iter()
+            .find(|alert| alert.id == "unicom_credential_verification_stale")
+            .expect("stale verification alert should exist");
+        assert_eq!(alert.severity, "warn");
+        assert!(alert.title.contains("China Unicom credential verification is stale"));
+        assert!(alert.detail.contains("lease_status=active"));
+    }
+
+    #[tokio::test]
+    async fn fresh_credential_verification_does_not_emit_warning_alert() {
+        let state = test_state();
+        let now = current_unix_ms();
+        // A recently verified lease (verified just now) with the default
+        // 3x-probe-interval threshold must not trip the stale warning.
+        persist_provider_credential_lease_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialLeaseRecord {
+                provider: Some("unicom".to_string()),
+                status: Some("active".to_string()),
+                summary: Some("Unicom lease active".to_string()),
+                requires_reauth: Some(false),
+                captured_at_unix_ms: Some(now),
+                last_verified_at_unix_ms: Some(now),
+                last_success_at_unix_ms: Some(now),
+                last_error: None,
+                first_failure_at_unix_ms: None,
+                credential_generation: None,
+            },
+        )
+        .expect("unicom lease record should persist");
+
+        let Json(status) = admin_status(State(state), HeaderMap::new())
+            .await
+            .expect("admin status should succeed");
+
+        assert!(
+            status
+                .alerts
+                .iter()
+                .all(|alert| alert.id != "unicom_credential_verification_stale"),
+            "freshly verified lease should not emit a stale verification warning"
+        );
     }
 
     #[tokio::test]
