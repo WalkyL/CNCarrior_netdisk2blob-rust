@@ -131,4 +131,4 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: `cargo test -p metadata-store` = 36 passed; `cargo test -p replication-engine` = 33 passed; `cargo test --workspace --no-run` compiles all test binaries; `cargo check --workspace` clean.
 - Baseline check: three gatewayd tests (`notify_webhook_posts_only_when_alert_state_changes`, `object_action_delete_writes_replayable_wal_metadata`, `object_action_core_surfaces_wal_commit_warning_without_rollback`) fail identically on baseline `0f52dc9` with my changes stashed — pre-existing, unrelated to T01.
 - Review: pending (needs GLM-5.3 or Kimi-K3).
-- Integration: pending commit.
+- Integration: committed `f7e0ecf`.
