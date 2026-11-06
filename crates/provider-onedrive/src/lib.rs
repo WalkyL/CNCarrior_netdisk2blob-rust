@@ -1235,7 +1235,7 @@ impl BlobBackend for OneDriveBlobAdapter {
             return Ok(Vec::new());
         };
 
-        let prefix = request.prefix.as_deref().map(normalize_path);
+        let prefix = request.prefix.as_deref();
         let mut objects = Vec::new();
         let container_folder = self.resolve_container_folder(container).await?;
         let mut stack = vec![(container_folder.id, String::new())];
@@ -2413,6 +2413,100 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a.txt".to_string(), "nested/b.txt".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn list_objects_prefix_is_segment_boundary_aware() {
+        // Regression (finding #10): prefix "docs/" must match only the "docs"
+        // directory, not the sibling "docs-archive" directory.
+        let server = MockServer::start().await;
+        let adapter = OneDriveBlobAdapter::new(test_config(&server.base_url));
+
+        for (key, body) in [
+            ("docs/a.txt", b"A".as_slice()),
+            ("docs/b.txt", b"B".as_slice()),
+            ("docs-archive/old.txt", b"C".as_slice()),
+            ("media/p.png", b"D".as_slice()),
+        ] {
+            adapter
+                .put_object(PutObjectRequest {
+                    container: "alpha".to_string(),
+                    key: key.to_string(),
+                    body: Bytes::copy_from_slice(body).into(),
+                    size: Some(body.len() as u64),
+                    content_type: Some("text/plain".to_string()),
+                    preferred_upload_part_size_bytes: None,
+                })
+                .await
+                .expect("seed object should succeed");
+        }
+
+        // Exact directory prefix (with trailing slash) must not leak the sibling.
+        let with_trailing_slash = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some("alpha".to_string()),
+                prefix: Some("docs/".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list with docs/ prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            with_trailing_slash,
+            vec!["docs/a.txt".to_string(), "docs/b.txt".to_string()]
+        );
+
+        // No trailing slash, exact directory name: per S3 raw-substring prefix
+        // semantics this ALSO matches the sibling "docs-archive" subtree.
+        let no_slash = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some("alpha".to_string()),
+                prefix: Some("docs".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list with docs prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            no_slash,
+            vec![
+                "docs-archive/old.txt".to_string(),
+                "docs/a.txt".to_string(),
+                "docs/b.txt".to_string(),
+            ]
+        );
+
+        // A raw sibling name must still be reachable via its own prefix.
+        let archive = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some("alpha".to_string()),
+                prefix: Some("docs-archive/".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list with docs-archive/ prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(archive, vec!["docs-archive/old.txt".to_string()]);
+
+        // A file-prefix (partial object key) still works as a plain substring prefix.
+        let file_prefix = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some("alpha".to_string()),
+                prefix: Some("docs/a".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list with partial file prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(file_prefix, vec!["docs/a.txt".to_string()]);
     }
 
     #[tokio::test]

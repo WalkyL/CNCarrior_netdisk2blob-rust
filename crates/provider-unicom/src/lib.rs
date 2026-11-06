@@ -1676,7 +1676,7 @@ impl UnicomBlobAdapter {
             return Ok(Vec::new());
         }
 
-        let normalized_prefix = request.prefix.as_deref().map(normalize_object_key);
+        let requested_prefix = request.prefix.as_deref();
         let mut objects = BTreeMap::new();
         let start_directory_id = match self.managed_container_root(container)? {
             Some(provider_root) => match self
@@ -1714,7 +1714,7 @@ impl UnicomBlobAdapter {
                         })?;
                         let child_prefix = join_relative_key(&folder_prefix, child_name);
 
-                        if normalized_prefix.as_deref().is_none_or(|prefix| {
+                        if requested_prefix.is_none_or(|prefix| {
                             directory_may_contain_prefix(&child_prefix, prefix)
                         }) {
                             stack.push((entry.id.clone(), child_prefix));
@@ -1727,7 +1727,7 @@ impl UnicomBlobAdapter {
                     }
 
                     let object_key = entry.object_key(&folder_prefix)?;
-                    if normalized_prefix
+                    if requested_prefix
                         .as_deref()
                         .is_none_or(|prefix| object_key.starts_with(prefix))
                     {
@@ -3960,6 +3960,12 @@ mod tests {
                         "parentDirectoryId": "0",
                     }),
                     json!({
+                        "id": "dir-docs-archive",
+                        "name": "docs-archive",
+                        "type": 0,
+                        "parentDirectoryId": "0",
+                    }),
+                    json!({
                         "id": "file-root",
                         "name": "zzz-root.txt",
                         "type": 1,
@@ -4012,6 +4018,18 @@ mod tests {
                 })],
             ),
             (
+                "dir-docs-archive".to_string(),
+                vec![json!({
+                    "id": "file-archive",
+                    "name": "old.txt",
+                    "type": 1,
+                    "parentDirectoryId": "dir-docs-archive",
+                    "fileSize": 8,
+                    "updateTime": "20260425110000",
+                    "suffix": "txt",
+                })],
+            ),
+            (
                 "dir-media".to_string(),
                 vec![json!({
                     "id": "file-photo",
@@ -4053,6 +4071,7 @@ mod tests {
             ("file-beta".to_string(), b"123456".to_vec()),
             ("file-zeta".to_string(), b"123456789".to_vec()),
             ("file-photo".to_string(), b"hello-photo".to_vec()),
+            ("file-archive".to_string(), b"old-arch".to_vec()),
             ("family-file".to_string(), b"family-notes".to_vec()),
         ])
     }
@@ -4346,6 +4365,7 @@ mod tests {
         assert_eq!(
             all_keys,
             vec![
+                "docs-archive/old.txt",
                 "docs/alpha.txt",
                 "docs/beta.json",
                 "docs/nested/zeta.log",
@@ -4353,12 +4373,12 @@ mod tests {
                 "zzz-root.txt",
             ]
         );
-        assert_eq!(all_objects[0].size, 5);
+        assert_eq!(all_objects[1].size, 5);
         assert_eq!(
-            all_objects[0].last_modified.as_deref(),
+            all_objects[1].last_modified.as_deref(),
             Some("2026-04-25T12:30:45.000Z")
         );
-        assert_eq!(all_objects[0].content_type.as_deref(), Some("text/plain"));
+        assert_eq!(all_objects[1].content_type.as_deref(), Some("text/plain"));
 
         let limited_objects = adapter
             .list_objects(ListObjectsRequest {
@@ -4380,6 +4400,101 @@ mod tests {
         assert!(requested_parents.contains(&"0"));
         assert!(requested_parents.contains(&"dir-docs"));
         assert!(requested_parents.contains(&"dir-nested"));
+    }
+
+    #[tokio::test]
+    async fn list_objects_prefix_is_segment_boundary_aware() {
+        // Regression (finding #10): prefix "docs/" must match only the "docs"
+        // directory, not the sibling "docs-archive" directory.
+        let token = "341e39ff-91a6-4a86-9a98-6cd41501b2a8";
+        let server = MockServer::start(sample_entries(), sample_file_bodies(), token).await;
+        let adapter = mock_unicom_adapter(&server.base_url, token);
+
+        // Exact directory prefix (with trailing slash) must not leak the sibling.
+        let with_trailing_slash = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(UNICOM_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs/".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list with docs/ prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            with_trailing_slash,
+            vec!["docs/alpha.txt", "docs/beta.json", "docs/nested/zeta.log"]
+        );
+
+        // No trailing slash, exact directory name: per S3 raw-substring prefix
+        // semantics this ALSO matches the sibling "docs-archive" subtree, so
+        // both are returned. Callers wanting only the "docs" directory must
+        // pass "docs/" (with the trailing slash).
+        let no_slash = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(UNICOM_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list with docs prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            no_slash,
+            vec![
+                "docs-archive/old.txt",
+                "docs/alpha.txt",
+                "docs/beta.json",
+                "docs/nested/zeta.log",
+            ]
+        );
+
+        // A raw sibling name must still be reachable via its own prefix.
+        let archive = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(UNICOM_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs-archive/".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list with docs-archive/ prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(archive, vec!["docs-archive/old.txt"]);
+
+        // Empty prefix matches everything (directory walk must be unrestricted).
+        let all = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(UNICOM_ROOT_CONTAINER.to_string()),
+                prefix: None,
+                limit: None,
+            })
+            .await
+            .expect("list all should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(all.len(), 6);
+        assert!(all.contains(&"docs/alpha.txt".to_string()));
+        assert!(all.contains(&"docs-archive/old.txt".to_string()));
+
+        // A file-prefix (partial object key) still works as a plain substring prefix.
+        let file_prefix = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(UNICOM_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs/alpha".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list with partial file prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(file_prefix, vec!["docs/alpha.txt"]);
     }
 
     #[tokio::test]

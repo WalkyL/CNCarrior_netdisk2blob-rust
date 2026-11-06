@@ -2725,7 +2725,7 @@ impl TelecomBlobAdapter {
         }
 
         let scope = self.container_scope(container)?;
-        let normalized_prefix = request.prefix.as_deref().map(normalize_object_key);
+        let requested_prefix = request.prefix.as_deref();
         let Some(start_folder_id) = self
             .resolve_scope_container_root_folder_id(container)
             .await?
@@ -2756,7 +2756,7 @@ impl TelecomBlobAdapter {
                     })?;
                     let child_prefix = join_relative_key(&folder_prefix, child_name);
 
-                    if normalized_prefix
+                    if requested_prefix
                         .as_deref()
                         .is_none_or(|prefix| directory_may_contain_prefix(&child_prefix, prefix))
                     {
@@ -2766,7 +2766,7 @@ impl TelecomBlobAdapter {
 
                 for file in page.file_list {
                     let object_key = file.object_key(&folder_prefix)?;
-                    if normalized_prefix
+                    if requested_prefix
                         .as_deref()
                         .is_none_or(|prefix| object_key.starts_with(prefix))
                     {
@@ -5295,6 +5295,15 @@ AwIDAQAB\n\
                         "fileCount": 1,
                     }),
                     json!({
+                        "isFolder": true,
+                        "id": "dir-docs-archive",
+                        "parentId": DEFAULT_ROOT_FOLDER_ID,
+                        "name": "docs-archive",
+                        "createDate": "2026-04-17 00:14:15",
+                        "lastOpTime": "2026-04-17 00:14:15",
+                        "fileCount": 1,
+                    }),
+                    json!({
                         "isFolder": false,
                         "id": "file-root",
                         "parentId": DEFAULT_ROOT_FOLDER_ID,
@@ -5361,6 +5370,19 @@ AwIDAQAB\n\
                     "size": 11,
                     "createDate": "2026-04-25 14:00:00",
                     "lastOpTime": "2026-04-25 14:00:00",
+                })],
+            ),
+            (
+                "dir-docs-archive".to_string(),
+                vec![json!({
+                    "isFolder": false,
+                    "id": "file-archive",
+                    "parentId": "dir-docs-archive",
+                    "name": "old.txt",
+                    "fileSize": 8,
+                    "createDate": "2026-04-25 11:00:00",
+                    "lastOpTime": "2026-04-25 11:00:00",
+                    "md5": "archive-md5",
                 })],
             ),
         ])
@@ -5556,7 +5578,7 @@ AwIDAQAB\n\
             health
                 .notes
                 .iter()
-                .any(|note| note.contains("root_entry_count=3"))
+                .any(|note| note.contains("root_entry_count=4"))
         );
         assert_eq!(health.scopes.len(), 1);
         assert_eq!(health.scopes[0].kind, StorageScopeKind::Personal);
@@ -5812,6 +5834,7 @@ AwIDAQAB\n\
         assert_eq!(
             all_keys,
             vec![
+                "docs-archive/old.txt",
                 "docs/alpha.txt",
                 "docs/beta.json",
                 "docs/nested/zeta.log",
@@ -5820,10 +5843,10 @@ AwIDAQAB\n\
             ]
         );
         assert_eq!(
-            all_objects[0].last_modified.as_deref(),
+            all_objects[1].last_modified.as_deref(),
             Some("2026-04-25T12:30:45.000Z")
         );
-        assert_eq!(all_objects[0].content_type.as_deref(), Some("text/plain"));
+        assert_eq!(all_objects[1].content_type.as_deref(), Some("text/plain"));
 
         let limited = adapter
             .list_objects(ListObjectsRequest {
@@ -5835,6 +5858,93 @@ AwIDAQAB\n\
             .expect("telecom limited list_objects should succeed");
         assert_eq!(limited.len(), 1);
         assert_eq!(limited[0].key, "docs/alpha.txt");
+    }
+
+    #[tokio::test]
+    async fn list_objects_prefix_is_segment_boundary_aware() {
+        // Regression (finding #10): prefix "docs/" must match only the "docs"
+        // directory, not the sibling "docs-archive" directory.
+        let server = MockServer::start(
+            sample_entries(),
+            sample_file_bodies(),
+            "unused-token",
+            false,
+        )
+        .await;
+        let adapter = mock_telecom_adapter(
+            &server.base_url,
+            "browser-id-123",
+            "JSESSIONID=abc; COOKIE_LOGIN_USER=def",
+            None,
+        );
+
+        // Exact directory prefix (with trailing slash) must not leak the sibling.
+        let with_trailing_slash = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(TELECOM_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs/".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("telecom list with docs/ prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            with_trailing_slash,
+            vec!["docs/alpha.txt", "docs/beta.json", "docs/nested/zeta.log"]
+        );
+
+        // No trailing slash, exact directory name: per S3 raw-substring prefix
+        // semantics this ALSO matches the sibling "docs-archive" subtree.
+        let no_slash = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(TELECOM_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("telecom list with docs prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            no_slash,
+            vec![
+                "docs-archive/old.txt",
+                "docs/alpha.txt",
+                "docs/beta.json",
+                "docs/nested/zeta.log",
+            ]
+        );
+
+        // A raw sibling name must still be reachable via its own prefix.
+        let archive = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(TELECOM_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs-archive/".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("telecom list with docs-archive/ prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(archive, vec!["docs-archive/old.txt"]);
+
+        // A file-prefix (partial object key) still works as a plain substring prefix.
+        let file_prefix = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(TELECOM_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs/alpha".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("telecom list with partial file prefix should succeed")
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(file_prefix, vec!["docs/alpha.txt"]);
     }
 
     #[tokio::test]
