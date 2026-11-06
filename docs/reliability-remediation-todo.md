@@ -20,8 +20,8 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | T05b | Mobile non-destructive staged overwrite | T05a | pending |
 | T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | pending |
 | T07 | Four-provider exact list prefix preservation | Mobile file waits T05 | complete |
-| T08a | Action-scoped CDP checkpoints | architecture | pending |
-| T08b | Explicit JavaScript value binding/catalog migration | T08a | pending |
+| T08a | Action-scoped CDP checkpoints | architecture | complete |
+| T08b | Explicit JavaScript value binding/catalog migration | T08a | complete |
 | T09 | Encryption declared-size validation | architecture | complete |
 | T10 | Smoke harness failure propagation/regression | architecture | pending |
 | T11 | Integration acceptance and allowed-model reviews | completed tasks | pending |
@@ -62,3 +62,23 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: `cargo test -p object-crypto` = 33 passed.
 - Review: pending.
 - Integration: committed `22bb34c`.
+
+### T08a — Action-scoped CDP checkpoints
+
+- Route: direct implementation (prior model PROD-DIFF set the checkpoint after dispatch, still missing the just-sent request; TEST-DIFF referenced a nonexistent session).
+- Owned files: `crates/browser-cdp/src/lib.rs`, `crates/blob-core/src/browser_flow.rs`.
+- Change: `CdpEventState` gains `request_floor_sequence: Option<u64>`; `mark_request_checkpoint()` records the current sequence before an action dispatches; `take_request_floor()` consumes it (falling back to the documented current-time floor for standalone waits). `BrowserFlowSession::mark_action_request_checkpoint` is a default no-op so non-CDP sessions and the test mock are unchanged; the executor calls it before navigate/click/set_input/invoke_operation/set_files/dispatch_events.
+- Tests: `request_checkpoint_captures_action_request_and_excludes_preaction`, `request_checkpoint_consumed_by_following_wait`.
+- GREEN: `cargo test -p browser-cdp --lib` = 24 passed; `cargo test -p blob-core --lib` = 36 passed.
+- Review: pending.
+- Integration: committed `6636f5d`.
+
+### T08b — Explicit JavaScript value binding/catalog migration
+
+- Route: direct implementation.
+- Owned files: `crates/blob-core/src/browser_flow.rs`, `config/browser-flows/unicom-web.json`.
+- Change: add `bind_javascript_template` which serializes each placeholder via `serde_json::to_string` (quoted+escaped JS string literal; bare literals for numbers/bools/null); `bind_operation` uses it for `operation.source`. Migrate the 5 Unicom JS expressions so `'{{inputs.x}}'` becomes `{{inputs.x}}` (quotes removed; JSON encoding supplies them exactly once).
+- Tests: `bind_operation_encodes_javascript_values_without_injection` (payload `'); alert('pwned'); //` must stay inside one quoted literal).
+- GREEN: `cargo test -p blob-core --lib` = 37 passed.
+- Review: pending.
+- Integration: committed `8a115ce`.
