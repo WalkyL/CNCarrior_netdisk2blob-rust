@@ -14,7 +14,7 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 |---|---|---|---|
 | T01 | Durable versions/claims/schema and backup compatibility | architecture | complete |
 | T02 | DB-first enqueue/retry, striped worker locks, recovery | T01 | complete |
-| T03 | Checked DLQ replay and API outcomes | T01, T02 | pending |
+| T03 | Checked DLQ replay and API outcomes | T01, T02 | complete |
 | T04 | Recoverable overwrite/staging/WAL | T01–T03 | pending |
 | T05a | Mobile family error propagation | architecture | complete |
 | T05b | Mobile non-destructive staged overwrite | T05a | complete |
@@ -142,3 +142,13 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: `cargo test -p metadata-store --lib` = 40 passed; `cargo test -p replication-engine` = 34 passed; `cargo test -p gatewayd --bin gatewayd -- replication` = 33 passed; full `cargo test -p gatewayd` = 414 passed, 3 failed (identical pre-existing baseline failures: `notify_webhook_posts_only_when_alert_state_changes`, `object_action_delete_writes_replayable_wal_metadata`, `object_action_core_surfaces_wal_commit_warning_without_rollback` — reproduced on baseline `0f52dc9` with T01/T02 stashed).
 - Review: pending (needs GLM-5.3 or Kimi-K3).
 - Integration: committed `f6cb3ea`.
+
+### T03 — Checked DLQ replay and API outcomes (finding #2)
+
+- Route: direct implementation (serial gateway/metadata lane).
+- Owned files: `crates/metadata-store/src/lib.rs`, `crates/admin-api/src/lib.rs`, `crates/mcp-server/src/client.rs`, `crates/mcp-server/src/server.rs`, `crates/gatewayd/src/main.rs`.
+- Change: DLQ replay is now version-checked in the same transaction as the status transition. `ReplicationDeadLetterStatus::Superseded` added; `replay_dead_letter_job` and `replay_dead_letter_jobs_for_target` return `ReplayOutcome::{Replayed(ReplicationJob), Superseded{...}}`; a stale entry (a newer operation for the same target/bucket/key tuple already advanced the durable version) is marked `superseded` and produces no executable job, so DLQ replay can no longer resurrect a superseded operation. The batch variant deduplicates open entries per `(target,bucket,key)` (newest job_id only) and marks older duplicates superseded. Gateway APIs match on the outcome: a replayed job is published via `enqueue_existing_job`; a superseded entry is reported with `replayed_job_id: None` and `status: "superseded"`. `ReplicationDlqReplayPayload.replayed_job_id` is now `Option<u64>`; `ReplicationDlqTargetReplayPayload.replayed_jobs` counts only actually-replayed jobs.
+- Tests (RED → GREEN): metadata-store `stale_dlq_replay_marks_superseded_and_creates_no_job` (newer op bumps tuple to v2; replaying the v1 DLQ entry yields `Superseded`, no new job row, entry no longer open), `current_dlq_replay_creates_new_job_same_version` (replay preserves the tuple version and re-arms the pending job), `batch_replay_dedupes_per_tuple_and_marks_older_superseded` (two open entries for one tuple + one other: newest replays, older superseded, other replays).
+- GREEN: `cargo test -p metadata-store` = 43 passed; `cargo test -p gatewayd --bin gatewayd -- replay` = 13 passed (filtered); `cargo test -p admin-api` = 8 passed; `cargo test -p mcp-server` = 68 passed; `cargo check --workspace` clean.
+- Review: pending (needs GLM-5.3 or Kimi-K3).
+- Integration: pending commit.
