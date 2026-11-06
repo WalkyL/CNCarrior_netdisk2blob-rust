@@ -23,7 +23,7 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | T08a | Action-scoped CDP checkpoints | architecture | complete |
 | T08b | Explicit JavaScript value binding/catalog migration | T08a | complete |
 | T09 | Encryption declared-size validation | architecture | complete |
-| T10 | Smoke harness failure propagation/regression | architecture | pending |
+| T10 | Smoke harness failure propagation/regression | architecture | complete |
 | T11 | Integration acceptance and allowed-model reviews | completed tasks | pending |
 
 ## Coverage map
@@ -82,3 +82,13 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: `cargo test -p blob-core --lib` = 37 passed.
 - Review: pending.
 - Integration: committed `8a115ce`.
+
+### T10 — Smoke harness exit semantics
+
+- Route: direct implementation.
+- Owned files: `deploy/lxc/_smoke_test.sh`, `scripts/test-lxc-smoke-harness.py`.
+- Change: add a `FAILURES` accumulator flipped by every failing case and by mock startup failures; exit 1 when nonzero. `cleanup` trap on EXIT/INT/TERM stops the harness-owned mock and removes only the harness mktemp dir.
+- Tests: new `scripts/test-lxc-smoke-harness.py` (copies harness + failing smoke.sh double into a temp dir, invokes Bash, asserts FAIL → nonzero). RED against the old harness (printed FAIL but exited 0); GREEN now.
+- GREEN: Python regression under WSL Debian passed; `bash -n` on both LXC scripts; real `bash deploy/lxc/_smoke_test.sh` = 5/5 with `RESULT: PASS`.
+- Review: pending.
+- Integration: committed `124de30`.
