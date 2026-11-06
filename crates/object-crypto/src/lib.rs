@@ -181,14 +181,40 @@ pub fn encrypt_upload(
             chunk_plaintext_bytes,
             chunk_nonce_prefix,
             next_chunk_index: 0,
+            expected_plaintext_size: metadata.plaintext_size,
+            consumed_plaintext: 0,
+            terminal_error: None,
         },
         |mut state| async move {
             if let Some(header) = state.header.take() {
                 return Some((Ok(header), state));
             }
 
+            if let Some(error_msg) = state.terminal_error.take() {
+                return Some((Err(BlobError::BodyStream(error_msg)), state));
+            }
+
             match state.chunker.next_chunk(state.chunk_plaintext_bytes).await {
                 Ok(Some(plaintext)) => {
+                    let new_consumed = state
+                        .consumed_plaintext
+                        .checked_add(plaintext.len() as u64)
+                        .ok_or_else(|| {
+                            BlobError::BodyStream(
+                                "encrypted plaintext length overflows u64".to_string(),
+                            )
+                        });
+                    match new_consumed {
+                        Ok(value) if value <= state.expected_plaintext_size => {
+                            state.consumed_plaintext = value;
+                        }
+                        Ok(_) | Err(_) => {
+                            let msg = "encrypted plaintext exceeds declared size".to_string();
+                            state.terminal_error = Some(msg.clone());
+                            return Some((Err(BlobError::BodyStream(msg)), state));
+                        }
+                    }
+
                     let nonce = chunk_nonce(state.chunk_nonce_prefix, state.next_chunk_index);
                     state.next_chunk_index = state.next_chunk_index.saturating_add(1);
                     let encrypted = match state.cipher.encrypt(
@@ -218,7 +244,14 @@ pub fn encrypt_upload(
                     frame.extend_from_slice(&encrypted);
                     Some((Ok(Bytes::from(frame)), state))
                 }
-                Ok(None) => None,
+                Ok(None) => {
+                    if state.consumed_plaintext != state.expected_plaintext_size {
+                        let msg = "encrypted plaintext is shorter than declared size".to_string();
+                        state.terminal_error = Some(msg.clone());
+                        return Some((Err(BlobError::BodyStream(msg)), state));
+                    }
+                    None
+                }
                 Err(error) => Some((Err(error), state)),
             }
         },
@@ -804,6 +837,9 @@ struct EncryptStreamState {
     chunk_plaintext_bytes: usize,
     chunk_nonce_prefix: [u8; CHUNK_NONCE_PREFIX_LEN],
     next_chunk_index: u64,
+    expected_plaintext_size: u64,
+    consumed_plaintext: u64,
+    terminal_error: Option<String>,
 }
 
 struct DecryptStreamState {
@@ -817,7 +853,7 @@ struct DecryptStreamState {
 
 #[cfg(test)]
 mod tests {
-    use blob_core::ObjectBody;
+    use blob_core::{BlobError, ObjectBody};
     use bytes::{Bytes, BytesMut};
     use futures_util::stream;
 
@@ -992,6 +1028,184 @@ mod tests {
     }
 
     // === Round-trip edge cases ===
+
+    #[tokio::test]
+    async fn encrypt_rejects_short_plaintext() {
+        let request = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 10,
+            logical_content_type: None,
+        };
+        let upload = encrypt_upload(
+            ObjectBody::from_bytes(Bytes::from_static(b"hello")),
+            request,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let result = upload.body.collect().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn encrypt_rejects_long_plaintext() {
+        let request = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 5,
+            logical_content_type: None,
+        };
+        let upload = encrypt_upload(
+            ObjectBody::from_bytes(Bytes::from_static(b"hello world")),
+            request,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let result = upload.body.collect().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn encrypt_rejects_nonempty_zero_size() {
+        let request = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 0,
+            logical_content_type: None,
+        };
+        let upload = encrypt_upload(
+            ObjectBody::from_bytes(Bytes::from_static(b"x")),
+            request,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let result = upload.body.collect().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn encrypt_validates_fragmented_stream_size() {
+        let request_11 = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 10,
+            logical_content_type: None,
+        };
+        let upload_11 = encrypt_upload(
+            ObjectBody::from_stream(stream::iter([
+                Ok(Bytes::from_static(b"hello ")),
+                Ok(Bytes::from_static(b"world")),
+            ])),
+            request_11,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let result_11 = upload_11.body.collect().await;
+        assert!(result_11.is_err());
+
+        let request_9 = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 10,
+            logical_content_type: None,
+        };
+        let upload_9 = encrypt_upload(
+            ObjectBody::from_stream(stream::iter([
+                Ok(Bytes::from_static(b"hello")),
+                Ok(Bytes::from_static(b"wor")),
+            ])),
+            request_9,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let result_9 = upload_9.body.collect().await;
+        assert!(result_9.is_err());
+    }
+
+    #[tokio::test]
+    async fn encrypt_propagates_source_error() {
+        let request = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 6,
+            logical_content_type: None,
+        };
+        let source_stream = stream::iter([
+            Ok(Bytes::from_static(b"hello")),
+            Err(BlobError::BodyStream("boom".to_string())),
+        ]);
+        let upload = encrypt_upload(
+            ObjectBody::from_stream(source_stream),
+            request,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let result = upload.body.collect().await;
+        assert!(result.is_err());
+        let error_message = format!("{:?}", result.unwrap_err());
+        assert!(error_message.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn encrypt_exact_size_roundtrip() {
+        let plaintext = b"exact match";
+        let request = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: plaintext.len() as u64,
+            logical_content_type: None,
+        };
+        let upload = encrypt_upload(
+            ObjectBody::from_bytes(Bytes::from_static(plaintext)),
+            request,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let encrypted = upload.body.collect().await.expect("collect");
+        let prepared = prepare_decrypt_download(encrypted.into(), [0x22; 32])
+            .await
+            .expect("prepare");
+        let decrypted = prepared.body.collect().await.expect("collect");
+        assert_eq!(decrypted.as_ref(), plaintext);
+    }
+
+    #[tokio::test]
+    async fn encrypt_zero_size_roundtrip() {
+        let request = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 0,
+            logical_content_type: None,
+        };
+        let upload = encrypt_upload(
+            ObjectBody::from_stream(stream::iter(std::iter::empty::<Result<Bytes, BlobError>>())),
+            request,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let encrypted = upload.body.collect().await.expect("collect");
+        let prepared = prepare_decrypt_download(encrypted.into(), [0x22; 32])
+            .await
+            .expect("prepare");
+        let decrypted = prepared.body.collect().await.expect("collect");
+        assert!(decrypted.is_empty());
+    }
 
     #[tokio::test]
     async fn encrypt_roundtrip_zero_size_object() {
@@ -1180,7 +1394,7 @@ mod tests {
             key_id: "k".to_string(),
             algorithm_preference: AlgorithmPreference::Auto,
             chunk_plaintext_bytes: 1024,
-            plaintext_size: 32,
+            plaintext_size: b"wrong key test data".len() as u64,
             logical_content_type: None,
         };
         let upload = encrypt_upload(
@@ -1204,7 +1418,7 @@ mod tests {
             key_id: "k".to_string(),
             algorithm_preference: AlgorithmPreference::Auto,
             chunk_plaintext_bytes: 1024,
-            plaintext_size: 32,
+            plaintext_size: b"tamper detection test data".len() as u64,
             logical_content_type: None,
         };
         let upload = encrypt_upload(
@@ -1232,7 +1446,7 @@ mod tests {
             key_id: "k".to_string(),
             algorithm_preference: AlgorithmPreference::Auto,
             chunk_plaintext_bytes: 1024,
-            plaintext_size: 32,
+            plaintext_size: b"header tamper test".len() as u64,
             logical_content_type: None,
         };
         let upload = encrypt_upload(
@@ -1260,7 +1474,7 @@ mod tests {
             key_id: "k".to_string(),
             algorithm_preference: AlgorithmPreference::Auto,
             chunk_plaintext_bytes: 1024,
-            plaintext_size: 32,
+            plaintext_size: b"header truncation test".len() as u64,
             logical_content_type: None,
         };
         let upload = encrypt_upload(
@@ -1289,7 +1503,7 @@ mod tests {
             key_id: "k".to_string(),
             algorithm_preference: AlgorithmPreference::Auto,
             chunk_plaintext_bytes: 1024,
-            plaintext_size: 32,
+            plaintext_size: b"magic test".len() as u64,
             logical_content_type: None,
         };
         let upload = encrypt_upload(
@@ -1315,7 +1529,7 @@ mod tests {
             key_id: "k".to_string(),
             algorithm_preference: AlgorithmPreference::Auto,
             chunk_plaintext_bytes: 1024,
-            plaintext_size: 32,
+            plaintext_size: b"small header test".len() as u64,
             logical_content_type: None,
         };
         let upload = encrypt_upload(
@@ -1341,7 +1555,7 @@ mod tests {
             key_id: "k".to_string(),
             algorithm_preference: AlgorithmPreference::Auto,
             chunk_plaintext_bytes: 1024,
-            plaintext_size: 32,
+            plaintext_size: b"algo id test".len() as u64,
             logical_content_type: None,
         };
         let upload = encrypt_upload(
@@ -1399,7 +1613,7 @@ mod tests {
             key_id: "k".to_string(),
             algorithm_preference: AlgorithmPreference::Auto,
             chunk_plaintext_bytes: 1024,
-            plaintext_size: 32,
+            plaintext_size: b"garbage test data".len() as u64,
             logical_content_type: None,
         };
         let upload = encrypt_upload(
