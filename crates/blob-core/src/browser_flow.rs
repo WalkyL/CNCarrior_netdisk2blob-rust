@@ -1574,8 +1574,72 @@ fn bind_operation(
     if let Some(frame) = &mut bound.frame {
         *frame = bind_string_template(frame, context)?;
     }
-    bound.source = bind_string_template(&bound.source, context)?;
+    bound.source = bind_javascript_template(&bound.source, context)?;
     Ok(bound)
+}
+
+/// Bind a JavaScript expression template. Unlike [`bind_string_template`],
+/// each placeholder is serialized as a JSON value via `serde_json::to_string`,
+/// so a string value becomes a quoted JS string literal with `"`, `\`,
+/// control characters and U+2028/U+2029 escaped. The surrounding quotes in
+/// the catalog expression must be removed so the value is spliced exactly
+/// once and can never break out of a JS literal.
+fn bind_javascript_template(
+    raw: &str,
+    context: &BrowserFlowBindingContext,
+) -> Result<String, BlobError> {
+    #[derive(Debug)]
+    enum Segment {
+        Literal(String),
+        Placeholder { token: String, value: Value },
+    }
+
+    let mut segments = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = raw[cursor..].find("{{") {
+        let start = cursor + relative_start;
+        let token_start = start + 2;
+        let relative_end = raw[token_start..].find("}}").ok_or_else(|| {
+            BlobError::Configuration(format!(
+                "unterminated browser flow javascript template: {raw}"
+            ))
+        })?;
+        let token_end = token_start + relative_end;
+        if start > cursor {
+            segments.push(Segment::Literal(raw[cursor..start].to_string()));
+        }
+        let token = raw[token_start..token_end].trim().to_string();
+        let value = lookup_template_value(&token, context)?;
+        segments.push(Segment::Placeholder { token, value });
+        cursor = token_end + 2;
+    }
+
+    if segments.is_empty() {
+        return Ok(raw.to_string());
+    }
+
+    if cursor < raw.len() {
+        segments.push(Segment::Literal(raw[cursor..].to_string()));
+    }
+
+    let mut rendered = String::new();
+    for segment in segments {
+        match segment {
+            Segment::Literal(value) => rendered.push_str(&value),
+            Segment::Placeholder { token, value } => {
+                // JSON encoding yields a JS-safe literal: strings are quoted
+                // and escaped, numbers/bools/null are bare literals.
+                let encoded = serde_json::to_string(&value).map_err(|error| {
+                    BlobError::Configuration(format!(
+                        "browser flow javascript template {token} is not JSON-serializable: {error}"
+                    ))
+                })?;
+                rendered.push_str(&encoded);
+            }
+        }
+    }
+
+    Ok(rendered)
 }
 
 fn bind_json_value(value: &Value, context: &BrowserFlowBindingContext) -> Result<Value, BlobError> {
@@ -2312,9 +2376,9 @@ mod tests {
     use super::{
         BrowserFlowBindingContext, BrowserFlowCatalog, BrowserFlowCatalogCollection,
         BrowserFlowExecutionMode, BrowserFlowExecutionStepStatus, BrowserFlowExecutor,
-        BrowserFlowSession, BrowserFlowSessionExecutor, BrowserFlowStep,
+        BrowserFlowOperation, BrowserFlowSession, BrowserFlowSessionExecutor, BrowserFlowStep,
         BrowserFlowVisualCaptchaRequest, BrowserFlowVisualLayoutValidationRequest,
-        DryRunBrowserFlowExecutor,
+        DryRunBrowserFlowExecutor, bind_operation,
     };
     use crate::BlobError;
 
@@ -4329,5 +4393,40 @@ mod tests {
                 "dispatch_events:form.file_input:input,change".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn bind_operation_encodes_javascript_values_without_injection() {
+        // Finding #12: a placeholder interpolated into a JS string literal was
+        // spliced raw, so a value like `'); alert(1); //` could escape the
+        // literal and inject executable code. The binder must JSON-encode the
+        // value so it stays a single safe JS string literal.
+        let context = BrowserFlowBindingContext {
+            inputs: BTreeMap::from([(
+                "entry_name".to_string(),
+                Value::String("'); alert('pwned'); //".to_string()),
+            )]),
+            runtime: BTreeMap::new(),
+        };
+        let operation = BrowserFlowOperation {
+            id: "delete-entry".to_string(),
+            page: None,
+            frame: None,
+            kind: super::BrowserFlowOperationKind::Javascript,
+            // The migrated catalog form has NO surrounding quotes: the binder
+            // supplies the JSON-encoded (quoted) literal.
+            source: "const entryName = {{inputs.entry_name}}; entryName;".to_string(),
+            notes: Vec::new(),
+        };
+
+        let bound = bind_operation(&operation, &context).expect("operation should bind");
+
+        // The whole payload must remain inside one quoted JS string literal.
+        assert_eq!(
+            bound.source,
+            "const entryName = \"'); alert('pwned'); //\"; entryName;".to_string()
+        );
+        // No unescaped single-quote or newline can terminate the literal early.
+        assert!(!bound.source.contains("'; alert"));
     }
 }
