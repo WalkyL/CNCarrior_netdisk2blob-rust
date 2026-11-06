@@ -4906,6 +4906,11 @@ struct ProviderCredentialRecord {
     capture_cdp_endpoint_url: Option<String>,
     #[serde(default)]
     capture_cdp_target_selector: Option<String>,
+    /// Monotonic generation of this credential set. Bumped every time the
+    /// operator saves fresh credentials so a stale in-flight probe result
+    /// derived from a previous credential set cannot overwrite the new state.
+    #[serde(default)]
+    credential_generation: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -4942,6 +4947,11 @@ struct ProviderCredentialLeaseRecord {
     summary: Option<String>,
     #[serde(default)]
     requires_reauth: Option<bool>,
+    /// Monotonic generation of the credential set this lease was derived from.
+    /// When an operator saves new credentials, this bumps; a lease probe result
+    /// stamped with an older generation must not overwrite the newer state.
+    #[serde(default)]
+    credential_generation: Option<u64>,
     #[serde(default)]
     captured_at_unix_ms: Option<u64>,
     #[serde(default)]
@@ -5821,6 +5831,7 @@ impl From<ProviderCredentialInput> for ProviderCredentialRecord {
             browser_profile: value.browser_profile,
             capture_cdp_endpoint_url: None,
             capture_cdp_target_selector: None,
+            credential_generation: 0,
         }
         .normalize()
     }
@@ -12287,6 +12298,16 @@ fn note_provider_auth_failure_on_request(state: &AppState, provider: ProviderId,
     let Ok(mut record) = load_provider_credential_lease_record(&state.config, provider) else {
         return;
     };
+    // If the credential set changed since this lease was derived, the request
+    // failure may be from the previous credential set. Do not let a stale
+    // request-side failure overwrite a freshly saved credential set.
+    let current_generation =
+        load_provider_credential_record_or_default(&state.config, provider).credential_generation;
+    if record.credential_generation.is_some()
+        && record.credential_generation != Some(current_generation)
+    {
+        return;
+    }
     let now = current_unix_ms();
     let already_flagged = record.requires_reauth.unwrap_or(false);
     if record.first_failure_at_unix_ms.is_none() {
@@ -12302,6 +12323,7 @@ fn note_provider_auth_failure_on_request(state: &AppState, provider: ProviderId,
         ));
     }
     record.requires_reauth = Some(true);
+    record.credential_generation = Some(current_generation);
     if let Err(persist_error) = persist_provider_credential_lease_record(&state.config, provider, &record) {
         warn!(
             provider = provider.as_str(),
@@ -13007,12 +13029,21 @@ async fn maybe_probe_provider_credential_lease(
     if !provider_has_credential_lease_inputs(provider, &credentials) {
         return Ok(());
     }
+    let starting_generation = credentials.credential_generation;
 
     let backend = backend_for_provider(state, provider)?;
     let health = match backend.health().await {
         Ok(health) => health,
         Err(error) => unavailable_health(&backend, error),
     };
+    // If the operator saved new credentials while this probe was in flight, the
+    // probe result is derived from the old credential set and must not overwrite
+    // the state of the freshly saved credentials.
+    let current_generation =
+        load_provider_credential_record_or_default(&state.config, provider).credential_generation;
+    if current_generation != starting_generation {
+        return Ok(());
+    }
     let (status, summary, requires_reauth, last_error) =
         provider_credential_lease_summary_from_health(provider, &health);
     let previous =
@@ -13037,6 +13068,7 @@ async fn maybe_probe_provider_credential_lease(
             status: Some(status),
             summary: Some(summary),
             requires_reauth: Some(requires_reauth),
+            credential_generation: Some(current_generation),
             captured_at_unix_ms: previous.captured_at_unix_ms,
             last_verified_at_unix_ms: Some(now),
             last_success_at_unix_ms: success_at,
@@ -27636,7 +27668,15 @@ fn persist_provider_credential_record(
         return Ok(());
     }
 
-    let body = serde_json::to_string_pretty(record).map_err(|error| {
+    // Bump the credential generation on every save so a stale in-flight probe
+    // result derived from the previous credential set cannot overwrite the
+    // state of a freshly saved credential set.
+    let mut next = record.clone();
+    let current_generation =
+        load_provider_credential_record_or_default(config, provider).credential_generation;
+    next.credential_generation = current_generation.saturating_add(1);
+
+    let body = serde_json::to_string_pretty(&next).map_err(|error| {
         BlobError::Configuration(format!(
             "failed to encode provider credential file {}: {error}",
             path.display()
@@ -28156,6 +28196,8 @@ fn reset_provider_credential_lease_on_save(
     provider: ProviderId,
 ) -> Result<(), BlobError> {
     let now = current_unix_ms();
+    let generation =
+        load_provider_credential_record_or_default(config, provider).credential_generation;
     persist_provider_credential_lease_record(
         config,
         provider,
@@ -28167,6 +28209,7 @@ fn reset_provider_credential_lease_on_save(
                     .to_string(),
             ),
             requires_reauth: Some(false),
+            credential_generation: Some(generation),
             captured_at_unix_ms: Some(now),
             last_verified_at_unix_ms: None,
             last_success_at_unix_ms: None,
@@ -30447,6 +30490,7 @@ fn merge_provider_credential_input_with_existing(
         browser_profile: input.browser_profile,
         capture_cdp_endpoint_url: input.capture_cdp_endpoint_url.or(existing.capture_cdp_endpoint_url),
         capture_cdp_target_selector: input.capture_cdp_target_selector.or(existing.capture_cdp_target_selector),
+        credential_generation: existing.credential_generation,
     }
     .normalize()
 }
@@ -41414,6 +41458,59 @@ mod tests {
         assert_ne!(record.requires_reauth, Some(true));
     }
 
+    #[test]
+    fn persist_provider_credential_bumps_generation() {
+        let state = test_state();
+        let provider = ProviderId::Unicom;
+        let record = ProviderCredentialRecord::from(ProviderCredentialInput {
+            token: Some("token-v1".to_string()),
+            ..Default::default()
+        });
+        persist_provider_credential_record(&state.config, provider, &record).unwrap();
+        let after_first =
+            load_provider_credential_record_or_default(&state.config, provider).credential_generation;
+        assert_eq!(after_first, 1);
+
+        persist_provider_credential_record(&state.config, provider, &record).unwrap();
+        let after_second =
+            load_provider_credential_record_or_default(&state.config, provider).credential_generation;
+        assert_eq!(after_second, 2);
+    }
+
+    #[test]
+    fn note_provider_auth_failure_respects_credential_generation() {
+        let state = test_state();
+        let provider = ProviderId::Unicom;
+        // Save credentials (generation bumps to 1) and reset the lease to bind it
+        // to the current generation.
+        let record = ProviderCredentialRecord::from(ProviderCredentialInput {
+            token: Some("token-v1".to_string()),
+            ..Default::default()
+        });
+        persist_provider_credential_record(&state.config, provider, &record).unwrap();
+        reset_provider_credential_lease_on_save(&state.config, provider).unwrap();
+        let generation =
+            load_provider_credential_record_or_default(&state.config, provider).credential_generation;
+        assert_eq!(generation, 1);
+
+        // Now simulate a lease record still bound to the OLD generation (0): a
+        // request-side failure derived from a previous credential set must NOT
+        // overwrite the freshly saved credentials.
+        let mut stale_lease =
+            load_provider_credential_lease_record(&state.config, provider).unwrap();
+        stale_lease.credential_generation = Some(0);
+        persist_provider_credential_lease_record(&state.config, provider, &stale_lease).unwrap();
+
+        note_provider_auth_failure_on_request(
+            &state,
+            provider,
+            "QueryAllFiles returned RSP_CODE=1001 (无效登录信息)",
+        );
+        let after =
+            load_provider_credential_lease_record(&state.config, provider).unwrap();
+        assert_ne!(after.requires_reauth, Some(true));
+    }
+
     #[tokio::test]
     async fn notify_webhook_posts_only_when_alert_state_changes() {
         let (webhook_url, received, shutdown) = spawn_test_webhook_server().await;
@@ -41887,6 +41984,7 @@ mod tests {
                 last_success_at_unix_ms: Some(1_699_999_999_999),
                 last_error: Some("HTTP 401 from upstream".to_string()),
                 first_failure_at_unix_ms: None,
+                credential_generation: None,
             },
         )
         .expect("unicom lease record should persist");
@@ -41946,6 +42044,7 @@ mod tests {
                 last_success_at_unix_ms: Some(1_699_999_999_999),
                 last_error: Some("HTTP 401 from upstream".to_string()),
                 first_failure_at_unix_ms: None,
+                credential_generation: None,
             },
         )
         .expect("unicom lease record should persist");
@@ -41981,6 +42080,7 @@ mod tests {
                 last_success_at_unix_ms: Some(1_700_000_000_100),
                 last_error: None,
                 first_failure_at_unix_ms: None,
+                credential_generation: None,
             },
         )
         .expect("unicom lease record should persist");
@@ -41997,6 +42097,7 @@ mod tests {
                 last_success_at_unix_ms: None,
                 last_error: None,
                 first_failure_at_unix_ms: None,
+                credential_generation: None,
             },
         )
         .expect("telecom lease record should persist");
@@ -42032,6 +42133,7 @@ mod tests {
                 last_success_at_unix_ms: Some(1_699_999_999_999),
                 last_error: Some("HTTP 401 from upstream".to_string()),
                 first_failure_at_unix_ms: Some(12345),
+                credential_generation: None,
             },
         )
         .expect("unicom lease should persist");
@@ -42079,6 +42181,7 @@ mod tests {
                 last_success_at_unix_ms: Some(1_699_999_999_999),
                 last_error: Some("HTTP 401".to_string()),
                 first_failure_at_unix_ms: None,
+                credential_generation: None,
             },
         )
         .expect("unicom lease should persist");
@@ -42153,6 +42256,7 @@ mod tests {
                 last_success_at_unix_ms: Some(1_700_000_000_321),
                 last_error: None,
                 first_failure_at_unix_ms: None,
+                credential_generation: None,
             },
         )
         .expect("unicom lease should persist");
@@ -59891,6 +59995,7 @@ mod tests {
                 last_success_at_unix_ms: Some(200),
                 last_error: None,
                 first_failure_at_unix_ms: None,
+                credential_generation: None,
             },
         )
         .expect("telecom lease should persist");
