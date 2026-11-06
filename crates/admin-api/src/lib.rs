@@ -318,7 +318,9 @@ pub struct ReplicationDlqListPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplicationDlqReplayPayload {
     pub original_job_id: u64,
-    pub replayed_job_id: u64,
+    /// `None` when the replay was superseded by a newer operation for the same
+    /// tuple and no job was produced.
+    pub replayed_job_id: Option<u64>,
     pub status: String,
     pub target: String,
     pub bucket: String,
@@ -1427,7 +1429,7 @@ mod tests {
             replayed_jobs: 1,
             jobs: vec![ReplicationDlqReplayPayload {
                 original_job_id: 10,
-                replayed_job_id: 99,
+                replayed_job_id: Some(99),
                 status: "pending".to_string(),
                 target: "telecom".to_string(),
                 bucket: "root".to_string(),

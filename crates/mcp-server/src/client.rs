@@ -246,7 +246,7 @@ impl ControlPlaneClient for StubControlPlaneClient {
     ) -> Result<ReplicationDlqReplayPayload, ServerError> {
         Ok(ReplicationDlqReplayPayload {
             original_job_id: job_id,
-            replayed_job_id: job_id,
+            replayed_job_id: Some(job_id),
             status: "not_implemented".to_string(),
             target: "unknown".to_string(),
             bucket: String::new(),

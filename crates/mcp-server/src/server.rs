@@ -509,7 +509,7 @@ mod tests {
         ) -> Result<admin_api::ReplicationDlqReplayPayload, ServerError> {
             Ok(admin_api::ReplicationDlqReplayPayload {
                 original_job_id: job_id,
-                replayed_job_id: job_id + 1,
+                replayed_job_id: Some(job_id + 1),
                 status: "queued".to_string(),
                 target: "mobile".to_string(),
                 bucket: "bucket".to_string(),

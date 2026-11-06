@@ -118,7 +118,7 @@ use metadata_store::{
     GatewayWriteAheadLogStateRecord, LogicalObjectRecord, MetadataRetentionPolicy,
     MetadataSnapshot, MetadataStore, MetadataStoreOptions, MetadataTargetStatus,
     MultipartUploadPartRecord, MultipartUploadSessionRecord, ObjectPlacementRecord,
-    ObjectProtectionPlanRecord,
+    ObjectProtectionPlanRecord, ReplayOutcome,
 };
 use object_crypto::{
     AlgorithmPreference as CryptoAlgorithmPreference, EncryptRequest as CryptoEncryptRequest,
@@ -15454,19 +15454,38 @@ async fn replay_replication_dlq_job_api(
     Path(job_id): Path<u64>,
 ) -> Result<Json<ReplicationDlqReplayPayload>, ApiError> {
     let replayed_job_id = state.replication.allocate_job_id();
-    let replayed = state
+    let outcome = state
         .metadata_store
         .replay_dead_letter_job(job_id, replayed_job_id, u128::from(current_unix_ms()))
         .map_err(|error| BlobError::Configuration(error.to_string()))?;
-    state.replication.enqueue_existing_job(replayed.clone());
-    Ok(Json(ReplicationDlqReplayPayload {
-        original_job_id: job_id,
-        replayed_job_id: replayed.job_id,
-        status: replayed.status.as_str().to_string(),
-        target: replayed.target,
-        bucket: replayed.object.bucket,
-        key: replayed.object.key,
-    }))
+    let payload = match outcome {
+        ReplayOutcome::Replayed(replayed) => {
+            state.replication.enqueue_existing_job(replayed.clone());
+            ReplicationDlqReplayPayload {
+                original_job_id: job_id,
+                replayed_job_id: Some(replayed.job_id),
+                status: replayed.status.as_str().to_string(),
+                target: replayed.target,
+                bucket: replayed.object.bucket,
+                key: replayed.object.key,
+            }
+        }
+        ReplayOutcome::Superseded {
+            original_job_id,
+            current_version: _,
+            target,
+            bucket,
+            key,
+        } => ReplicationDlqReplayPayload {
+            original_job_id,
+            replayed_job_id: None,
+            status: "superseded".to_string(),
+            target,
+            bucket,
+            key,
+        },
+    };
+    Ok(Json(payload))
 }
 
 async fn replay_replication_dlq_target_api(
@@ -15485,7 +15504,7 @@ async fn replay_replication_dlq_target_api(
     let replayed_job_ids = (0..replay_limit)
         .map(|_| state.replication.allocate_job_id())
         .collect::<Vec<_>>();
-    let replayed_jobs = state
+    let outcomes = state
         .metadata_store
         .replay_dead_letter_jobs_for_target(
             &target,
@@ -15494,21 +15513,41 @@ async fn replay_replication_dlq_target_api(
             replay_limit,
         )
         .map_err(|error| BlobError::Configuration(error.to_string()))?;
-    let mut jobs = Vec::with_capacity(replayed_jobs.len());
-    for (original_job_id, replayed) in replayed_jobs {
-        state.replication.enqueue_existing_job(replayed.clone());
-        jobs.push(ReplicationDlqReplayPayload {
-            original_job_id,
-            replayed_job_id: replayed.job_id,
-            status: replayed.status.as_str().to_string(),
-            target: replayed.target,
-            bucket: replayed.object.bucket,
-            key: replayed.object.key,
-        });
+    let mut jobs = Vec::with_capacity(outcomes.len());
+    let mut replayed_count = 0usize;
+    for (original_job_id, outcome) in outcomes {
+        match outcome {
+            ReplayOutcome::Replayed(replayed) => {
+                state.replication.enqueue_existing_job(replayed.clone());
+                replayed_count += 1;
+                jobs.push(ReplicationDlqReplayPayload {
+                    original_job_id,
+                    replayed_job_id: Some(replayed.job_id),
+                    status: replayed.status.as_str().to_string(),
+                    target: replayed.target,
+                    bucket: replayed.object.bucket,
+                    key: replayed.object.key,
+                });
+            }
+            ReplayOutcome::Superseded {
+                original_job_id,
+                current_version: _,
+                target,
+                bucket,
+                key,
+            } => jobs.push(ReplicationDlqReplayPayload {
+                original_job_id,
+                replayed_job_id: None,
+                status: "superseded".to_string(),
+                target,
+                bucket,
+                key,
+            }),
+        }
     }
     Ok(Json(ReplicationDlqTargetReplayPayload {
         target,
-        replayed_jobs: jobs.len(),
+        replayed_jobs: replayed_count,
         jobs,
     }))
 }
@@ -49571,7 +49610,8 @@ mod tests {
             .expect("single replay should succeed");
         assert_eq!(replayed.original_job_id, job.job_id);
         assert_eq!(replayed.status, "pending");
-        assert_ne!(replayed.replayed_job_id, job.job_id);
+        assert_ne!(replayed.replayed_job_id, Some(job.job_id));
+        assert!(replayed.replayed_job_id.is_some());
     }
 
     #[tokio::test]

@@ -32,6 +32,7 @@ pub struct MetadataSnapshot {
 pub enum ReplicationDeadLetterStatus {
     Open,
     Replayed,
+    Superseded,
 }
 
 impl ReplicationDeadLetterStatus {
@@ -39,6 +40,7 @@ impl ReplicationDeadLetterStatus {
         match self {
             Self::Open => "open",
             Self::Replayed => "replayed",
+            Self::Superseded => "superseded",
         }
     }
 
@@ -46,6 +48,7 @@ impl ReplicationDeadLetterStatus {
         match value {
             "open" => Ok(Self::Open),
             "replayed" => Ok(Self::Replayed),
+            "superseded" => Ok(Self::Superseded),
             _ => Err(MetadataError::InvalidDeadLetterStatus(value.to_string())),
         }
     }
@@ -60,6 +63,21 @@ pub struct ReplicationDeadLetterEntry {
     pub replay_count: u32,
     pub last_replayed_job_id: Option<u64>,
     pub last_replayed_at_unix_ms: Option<u64>,
+}
+
+/// Outcome of a checked DLQ replay. A stale entry is superseded by a newer
+/// operation for its tuple and produces no executable job; a current entry
+/// produces a replayed job with the same logical `object_version`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReplayOutcome {
+    Replayed(ReplicationJob),
+    Superseded {
+        original_job_id: u64,
+        current_version: u64,
+        target: String,
+        bucket: String,
+        key: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -973,7 +991,7 @@ impl MetadataStore {
         original_job_id: u64,
         new_job_id: u64,
         enqueued_at_unix_ms: u128,
-    ) -> Result<ReplicationJob, MetadataError> {
+    ) -> Result<ReplayOutcome, MetadataError> {
         let mut connection = self.connection.lock().expect("metadata store poisoned");
         let transaction = connection.transaction().map_err(MetadataError::Sqlite)?;
 
@@ -1005,6 +1023,39 @@ impl MetadataStore {
         }
         ensure_job_id_available(&transaction, new_job_id)?;
 
+        // Check the current durable version in the same transaction. A stale
+        // entry (a newer operation superseded it) is marked superseded and
+        // creates no executable job.
+        let current_version = transaction
+            .query_row(
+                "SELECT COALESCE((
+                    SELECT MAX(object_version) FROM replication_jobs
+                    WHERE target = ?1 AND bucket = ?2 AND key = ?3
+                 ), 0)",
+                params![original_job.target, original_job.object.bucket, original_job.object.key],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(MetadataError::Sqlite)? as u64;
+
+        if current_version > original_job.object_version {
+            transaction
+                .execute(
+                    "UPDATE replication_dead_letters
+                     SET status = 'superseded'
+                     WHERE original_job_id = ?1",
+                    [original_job_id as i64],
+                )
+                .map_err(MetadataError::Sqlite)?;
+            transaction.commit().map_err(MetadataError::Sqlite)?;
+            return Ok(ReplayOutcome::Superseded {
+                original_job_id,
+                current_version,
+                target: original_job.target,
+                bucket: original_job.object.bucket,
+                key: original_job.object.key,
+            });
+        }
+
         let replayed_job = ReplicationJob {
             job_id: new_job_id,
             status: ReplicationStatus::Pending,
@@ -1034,7 +1085,7 @@ impl MetadataStore {
             .map_err(MetadataError::Sqlite)?;
 
         transaction.commit().map_err(MetadataError::Sqlite)?;
-        Ok(replayed_job)
+        Ok(ReplayOutcome::Replayed(replayed_job))
     }
 
     pub fn replay_dead_letter_jobs_for_target(
@@ -1043,7 +1094,7 @@ impl MetadataStore {
         new_job_ids: &[u64],
         enqueued_at_unix_ms: u128,
         limit: usize,
-    ) -> Result<Vec<(u64, ReplicationJob)>, MetadataError> {
+    ) -> Result<Vec<(u64, ReplayOutcome)>, MetadataError> {
         if limit == 0 || new_job_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -1084,10 +1135,74 @@ impl MetadataStore {
             ensure_job_id_available(&transaction, new_job_id)?;
         }
 
-        let mut replayed_jobs = Vec::with_capacity(original_jobs.len());
+        // Deduplicate by (target, bucket, key): only the newest open entry per
+        // tuple may be replayed; older entries for the same tuple are marked
+        // superseded and produce no job.
+        let mut newest_id_by_tuple = BTreeMap::<(String, String, String), u64>::new();
+        for job in &original_jobs {
+            let key = (
+                job.target.clone(),
+                job.object.bucket.clone(),
+                job.object.key.clone(),
+            );
+            match newest_id_by_tuple.get(&key) {
+                Some(existing) if *existing > job.job_id => {}
+                _ => {
+                    newest_id_by_tuple.insert(key, job.job_id);
+                }
+            }
+        }
+
+        let mut outcomes = Vec::with_capacity(original_jobs.len());
         for (original_job, new_job_id) in original_jobs.into_iter().zip(new_job_ids.iter().copied())
         {
             let original_job_id = original_job.job_id;
+            let is_newest = newest_id_by_tuple
+                .get(&(
+                    original_job.target.clone(),
+                    original_job.object.bucket.clone(),
+                    original_job.object.key.clone(),
+                ))
+                .map(|newest| *newest == original_job_id)
+                .unwrap_or(false);
+
+            let current_version = transaction
+                .query_row(
+                    "SELECT COALESCE((
+                        SELECT MAX(object_version) FROM replication_jobs
+                        WHERE target = ?1 AND bucket = ?2 AND key = ?3
+                     ), 0)",
+                    params![
+                        original_job.target,
+                        original_job.object.bucket,
+                        original_job.object.key
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(MetadataError::Sqlite)? as u64;
+
+            if !is_newest || current_version > original_job.object_version {
+                transaction
+                    .execute(
+                        "UPDATE replication_dead_letters
+                         SET status = 'superseded'
+                         WHERE original_job_id = ?1 AND status = 'open'",
+                        [original_job_id as i64],
+                    )
+                    .map_err(MetadataError::Sqlite)?;
+                outcomes.push((
+                    original_job_id,
+                    ReplayOutcome::Superseded {
+                        original_job_id,
+                        current_version,
+                        target: original_job.target,
+                        bucket: original_job.object.bucket,
+                        key: original_job.object.key,
+                    },
+                ));
+                continue;
+            }
+
             let replay_count = transaction
                 .query_row(
                     "SELECT replay_count
@@ -1126,11 +1241,11 @@ impl MetadataStore {
                     ],
                 )
                 .map_err(MetadataError::Sqlite)?;
-            replayed_jobs.push((original_job_id, replayed_job));
+            outcomes.push((original_job_id, ReplayOutcome::Replayed(replayed_job)));
         }
 
         transaction.commit().map_err(MetadataError::Sqlite)?;
-        Ok(replayed_jobs)
+        Ok(outcomes)
     }
 
     pub fn snapshot(&self, recent_limit: usize) -> Result<MetadataSnapshot, MetadataError> {
@@ -2908,7 +3023,7 @@ mod tests {
         GatewayWriteAheadLogStateRecord, LogicalObjectRecord, MetadataError,
         MetadataRetentionPolicy, MetadataStore, MetadataStoreOptions, MultipartUploadPartRecord,
         MultipartUploadSessionRecord, ObjectPlacementRecord, ObjectProtectionPlanRecord,
-        ReplicationDeadLetterStatus,
+        ReplayOutcome, ReplicationDeadLetterStatus,
     };
 
     fn temp_db_path() -> std::path::PathBuf {
@@ -3274,6 +3389,10 @@ mod tests {
         let replayed = store
             .replay_dead_letter_job(100, 200, 222_000)
             .expect("open dlq should replay");
+        let replayed = match replayed {
+            ReplayOutcome::Replayed(job) => job,
+            ReplayOutcome::Superseded { .. } => panic!("expected replayed outcome"),
+        };
         assert_eq!(replayed.job_id, 200);
         assert!(matches!(replayed.status, ReplicationStatus::Pending));
         assert_eq!(replayed.attempts, 0);
@@ -3342,6 +3461,10 @@ mod tests {
         let replayed = store
             .replay_dead_letter_job(300, 301, 334_000)
             .expect("dlq should replay");
+        let replayed = match replayed {
+            ReplayOutcome::Replayed(job) => job,
+            ReplayOutcome::Superseded { .. } => panic!("expected replayed outcome"),
+        };
         store
             .mark_job_status(replayed.job_id, ReplicationStatus::Completed, 1, None)
             .expect("replayed job completion should apply retention");
@@ -3489,15 +3612,177 @@ mod tests {
             .expect("batch replay should succeed atomically");
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].0, 331);
-        assert_eq!(replayed[0].1.job_id, 400);
         assert_eq!(replayed[1].0, 330);
-        assert_eq!(replayed[1].1.job_id, 401);
+        match (&replayed[0].1, &replayed[1].1) {
+            (ReplayOutcome::Replayed(job_a), ReplayOutcome::Replayed(job_b)) => {
+                assert_eq!(job_a.job_id, 400);
+                assert_eq!(job_b.job_id, 401);
+            }
+            _ => panic!("expected both replayed"),
+        }
         assert_eq!(
             store
                 .count_dead_letter_jobs(Some("telecom"), false)
                 .expect("open dlq count should load"),
             0
         );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn stale_dlq_replay_marks_superseded_and_creates_no_job() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        // First operation for the tuple gets version 1.
+        let mut first = sample_job(500);
+        first.object.key = "dlq/stale.txt".to_string();
+        let enqueued_first = store
+            .enqueue_jobs_with_versions(&[first])
+            .expect("first job should persist with version");
+        assert_eq!(enqueued_first[0].object_version, 1);
+        store
+            .mark_job_dead_letter(500, 3, Some("fail"), "max_attempts_exhausted", 100)
+            .expect("first job should enter dlq");
+
+        // A newer operation for the same tuple supersedes the dead-lettered one.
+        let mut second = sample_job(501);
+        second.object.key = "dlq/stale.txt".to_string();
+        let enqueued_second = store
+            .enqueue_jobs_with_versions(&[second])
+            .expect("second job should persist with version");
+        assert_eq!(enqueued_second[0].object_version, 2);
+
+        // Replaying the stale entry produces no job and marks it superseded.
+        let outcome = store
+            .replay_dead_letter_job(500, 600, 200)
+            .expect("stale replay should be handled");
+        match outcome {
+            ReplayOutcome::Superseded {
+                original_job_id,
+                current_version,
+                ..
+            } => {
+                assert_eq!(original_job_id, 500);
+                assert_eq!(current_version, 2);
+            }
+            ReplayOutcome::Replayed(_) => panic!("stale entry must not replay"),
+        }
+
+        // No new job was created and the entry is no longer open.
+        assert!(store
+            .latest_job_for_object("onedrive", "bucket-a", "dlq/stale.txt")
+            .expect("latest query should succeed")
+            .expect("superseded original job should remain")
+            .job_id
+            != 600);
+        assert_eq!(
+            store
+                .count_dead_letter_jobs(Some("onedrive"), false)
+                .expect("open count should load"),
+            0
+        );
+        let all = store
+            .list_dead_letter_jobs(Some("onedrive"), true, 10)
+            .expect("audit list should load");
+        assert_eq!(all.len(), 1);
+        assert!(matches!(
+            all[0].status,
+            ReplicationDeadLetterStatus::Superseded
+        ));
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn current_dlq_replay_creates_new_job_same_version() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut original = sample_job(510);
+        original.object.key = "dlq/current.txt".to_string();
+        let enqueued = store
+            .enqueue_jobs_with_versions(&[original])
+            .expect("job should persist with version");
+        assert_eq!(enqueued[0].object_version, 1);
+        store
+            .mark_job_dead_letter(510, 3, Some("fail"), "max_attempts_exhausted", 100)
+            .expect("job should enter dlq");
+
+        let outcome = store
+            .replay_dead_letter_job(510, 511, 200)
+            .expect("current dlq should replay");
+        match outcome {
+            ReplayOutcome::Replayed(replayed) => {
+                assert_eq!(replayed.job_id, 511);
+                assert_eq!(replayed.object_version, 1);
+                assert_eq!(replayed.status, ReplicationStatus::Pending);
+            }
+            ReplayOutcome::Superseded { .. } => panic!("current entry must replay"),
+        }
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn batch_replay_dedupes_per_tuple_and_marks_older_superseded() {
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        // Two open entries for the same tuple plus one for another tuple.
+        let mut first = sample_job(520);
+        first.object.key = "dlq/dup.txt".to_string();
+        let mut second = sample_job(521);
+        second.object.key = "dlq/dup.txt".to_string();
+        let mut other = sample_job(522);
+        other.object.key = "dlq/other.txt".to_string();
+        let enqueued = store
+            .enqueue_jobs_with_versions(&[first, second, other])
+            .expect("jobs should persist with versions");
+        assert_eq!(enqueued[0].object_version, 1);
+        assert_eq!(enqueued[1].object_version, 2);
+        assert_eq!(enqueued[2].object_version, 1);
+        store
+            .mark_job_dead_letter(520, 3, Some("fail"), "max_attempts_exhausted", 100)
+            .expect("first should enter dlq");
+        store
+            .mark_job_dead_letter(521, 3, Some("fail"), "max_attempts_exhausted", 200)
+            .expect("second should enter dlq");
+        store
+            .mark_job_dead_letter(522, 3, Some("fail"), "max_attempts_exhausted", 150)
+            .expect("other should enter dlq");
+
+        let outcomes = store
+            .replay_dead_letter_jobs_for_target("onedrive", &[600, 601, 602], 300, 10)
+            .expect("batch replay should succeed");
+        assert_eq!(outcomes.len(), 3);
+
+        // Newest entry for the duplicate tuple replays; the older one is
+        // superseded; the other-tuple entry replays.
+        let mut replayed_ids = Vec::new();
+        let mut superseded_ids = Vec::new();
+        for (original_job_id, outcome) in outcomes {
+            match outcome {
+                ReplayOutcome::Replayed(job) => {
+                    replayed_ids.push((original_job_id, job.job_id));
+                }
+                ReplayOutcome::Superseded { original_job_id, .. } => {
+                    superseded_ids.push(original_job_id);
+                }
+            }
+        }
+        assert!(superseded_ids.contains(&520));
+        assert!(!superseded_ids.contains(&521));
+        assert!(!superseded_ids.contains(&522));
+        assert_eq!(replayed_ids.len(), 2);
+
+        // Only one new job remains for the duplicate tuple (the newest version).
+        let dup_jobs = store
+            .latest_job_for_object("onedrive", "bucket-a", "dlq/dup.txt")
+            .expect("latest query should succeed")
+            .expect("replayed job should exist");
+        assert_eq!(dup_jobs.object_version, 2);
 
         fs::remove_file(db_path).ok();
     }
