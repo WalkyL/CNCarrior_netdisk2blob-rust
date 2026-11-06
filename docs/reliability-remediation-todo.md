@@ -17,7 +17,7 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | T03 | Checked DLQ replay and API outcomes | T01, T02 | pending |
 | T04 | Recoverable overwrite/staging/WAL | T01–T03 | pending |
 | T05a | Mobile family error propagation | architecture | complete |
-| T05b | Mobile non-destructive staged overwrite | T05a | pending |
+| T05b | Mobile non-destructive staged overwrite | T05a | complete |
 | T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | pending |
 | T07 | Four-provider exact list prefix preservation | Mobile file waits T05 | complete |
 | T08a | Action-scoped CDP checkpoints | architecture | complete |
@@ -102,6 +102,16 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: `cargo test -p provider-mobile --lib` = 28 passed (before prefix addition); family group = 5 passed including the previously-masked `list_containers_keeps_root_when_family_disk_info_is_unavailable`.
 - Review: pending.
 - Integration: committed `575c763`.
+
+### T05b — Mobile non-destructive staged overwrite (finding #6)
+
+- Route: direct implementation.
+- Owned files: `crates/provider-mobile/src/lib.rs`.
+- Change: `create_mobile_upload` no longer deletes existing same-name children before uploading the replacement. When `file/create` reports an existing object without an uploadId, each same-name sibling is renamed to a hidden `.ccbg-staging-<nonce>-<name>` via `file_update` before `file/create` is retried at the original name. The staged backups are returned with the upload plan; `put_object` discards them (delete) only after the replacement is uploaded and completed, and renames them back to their original names if create/upload/complete fails. `delete_child_files_by_name` is removed. `list_scope_objects` hides staging-named siblings so they never surface in ordinary list results.
+- Tests: `overwrite_restores_staged_old_object_when_complete_fails` (complete error → original renamed back and still reachable, no delete), `put_object_retries_after_existing_object_blocks_mobile_create_upload_id` (asserts rename-backup precedes retried create, delete follows complete, staging prefix), `list_objects_excludes_staged_overwrite_siblings`.
+- GREEN: `cargo test -p provider-mobile --lib` = 31 passed; `cargo build -p provider-mobile` clean; `cargo check --workspace` clean.
+- Review: pending (needs GLM-5.3 or Kimi-K3).
+- Integration: committed `134b270`. Remaining concern: best-effort restore failure leaves a hidden staging sibling (never surfaced in listings); a backup delete failure after success leaves an invisible orphan.
 
 ### T07 (Mobile portion) — Mobile exact list prefix preservation (finding #10)
 
