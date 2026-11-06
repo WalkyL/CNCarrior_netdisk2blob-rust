@@ -1999,7 +1999,7 @@ impl MobileBlobAdapter {
                 "container not found: {container}"
             )));
         }
-        let normalized_prefix = request.prefix.as_deref().map(normalize_object_key);
+        let requested_prefix = request.prefix.as_deref();
         let Some(container_root_id) = self.resolve_container_root_folder_id(container).await?
         else {
             return Ok(Vec::new());
@@ -2029,7 +2029,7 @@ impl MobileBlobAdapter {
                             )
                         })?;
                         let child_prefix = join_relative_key(&folder_prefix, child_name);
-                        if normalized_prefix.as_deref().is_none_or(|prefix| {
+                        if requested_prefix.is_none_or(|prefix| {
                             directory_may_contain_prefix(&child_prefix, prefix)
                         }) {
                             stack.push((child_id.to_string(), child_prefix));
@@ -2038,7 +2038,7 @@ impl MobileBlobAdapter {
                     }
 
                     let object_key = item.object_key(&folder_prefix)?;
-                    if normalized_prefix
+                    if requested_prefix
                         .as_deref()
                         .is_none_or(|prefix| object_key.starts_with(prefix))
                     {
@@ -2811,10 +2811,16 @@ fn mobile_account_from_authorization(value: Option<&str>) -> String {
 }
 
 fn directory_may_contain_prefix(directory_key: &str, prefix: &str) -> bool {
+    if directory_key.is_empty() {
+        return true;
+    }
+    // S3 raw-substring semantics: a directory may contain an object matching
+    // the prefix when the directory key equals the prefix, is a descendant of
+    // the prefix (prefix + "/"), or the directory key itself starts with the
+    // prefix (so e.g. prefix "docs" also reaches "docs-archive").
     directory_key == prefix
-        || prefix
-            .strip_prefix(directory_key)
-            .is_some_and(|suffix| suffix.starts_with('/'))
+        || prefix.starts_with(&format!("{directory_key}/"))
+        || directory_key.starts_with(prefix)
 }
 
 fn trim_objects_to_limit(objects: &mut BTreeMap<String, ObjectInfo>, limit: usize) {
@@ -3555,6 +3561,104 @@ mod tests {
             !matches!(error, BlobError::NotFound(_)),
             "transient family disk-info failure must not be masked as NotFound: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn list_objects_prefix_is_segment_boundary_aware() {
+        // Regression (finding #10, Mobile): prefix "docs/" must match only the
+        // "docs" directory, not the sibling "docs-archive". The raw prefix must
+        // be preserved through matching (no trailing-slash normalization).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile prefix server");
+        let address = listener.local_addr().expect("mock mobile prefix local addr");
+        let base_url = format!("http://{address}");
+        let mut items_by_parent = BTreeMap::new();
+        // The managed container root resolves to ccbg-managed/root, so the
+        // list fixture must nest docs/docs-archive under that path.
+        items_by_parent.insert(
+            "/".to_string(),
+            vec![sample_folder_item("dir-managed", "ccbg-managed")],
+        );
+        items_by_parent.insert(
+            "dir-managed".to_string(),
+            vec![sample_folder_item("dir-root", "root")],
+        );
+        items_by_parent.insert(
+            "dir-root".to_string(),
+            vec![
+                sample_folder_item("dir-docs", "docs"),
+                sample_folder_item("dir-docs-archive", "docs-archive"),
+            ],
+        );
+        items_by_parent.insert(
+            "dir-docs".to_string(),
+            vec![
+                sample_file_item("file-a", "a.txt", 3),
+                sample_file_item("file-b", "b.txt", 3),
+            ],
+        );
+        items_by_parent.insert(
+            "dir-docs-archive".to_string(),
+            vec![sample_file_item("file-old", "old.txt", 4)],
+        );
+        let state = MockMobileState {
+            base_url: base_url.clone(),
+            items_by_parent,
+            downloads: BTreeMap::new(),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list))
+            .route("/health/family", post(mock_health_family_disk_info_enabled))
+            .with_state(Arc::new(state));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile prefix server");
+        });
+
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        config.family_root_folder_id = Some("family-root".to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let keys_for = |container: &str, prefix: Option<&str>| {
+            let adapter = &adapter;
+            let container = container.to_string();
+            let prefix = prefix.map(str::to_string);
+            async move {
+                adapter
+                    .list_objects(ListObjectsRequest {
+                        container: Some(container),
+                        prefix,
+                        limit: None,
+                    })
+                    .await
+                    .expect("list with prefix should succeed")
+                    .into_iter()
+                    .map(|object| object.key)
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        // "docs/" must not leak the sibling directory.
+        let with_trailing_slash = keys_for(MOBILE_ROOT_CONTAINER, Some("docs/")).await;
+        assert_eq!(with_trailing_slash, vec!["docs/a.txt", "docs/b.txt"]);
+
+        // Raw "docs" (S3 substring semantics) also reaches the sibling subtree.
+        let no_slash = keys_for(MOBILE_ROOT_CONTAINER, Some("docs")).await;
+        assert_eq!(no_slash, vec!["docs-archive/old.txt", "docs/a.txt", "docs/b.txt"]);
+
+        // The sibling is reachable by its own prefix.
+        let archive = keys_for(MOBILE_ROOT_CONTAINER, Some("docs-archive/")).await;
+        assert_eq!(archive, vec!["docs-archive/old.txt"]);
+
+        // Partial file prefix still works.
+        let file_prefix = keys_for(MOBILE_ROOT_CONTAINER, Some("docs/a")).await;
+        assert_eq!(file_prefix, vec!["docs/a.txt"]);
     }
 
     #[test]
