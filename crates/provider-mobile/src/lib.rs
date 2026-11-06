@@ -45,6 +45,7 @@ const MOBILE_FAMILY_CONTAINER: &str = "family";
 const MOBILE_NATIVE_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MOBILE_UPLOAD_MAX_PART_COUNT: u64 = 41;
 const MOBILE_UPLOAD_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
+const MOBILE_STAGING_NAME_PREFIX: &str = ".ccbg-staging-";
 const DEFAULT_MOBILE_NATIVE_CAPABILITY_CATALOG_JSON: &str =
     include_str!("../../../config/provider-capabilities/mobile-native.json");
 
@@ -222,6 +223,12 @@ struct MobileUploadPlan {
     upload_id: Option<String>,
     rapid_upload: bool,
     part_infos: Vec<MobileUploadPartInfo>,
+}
+
+#[derive(Debug)]
+struct StagedOverwriteBackup {
+    file_id: String,
+    original_name: String,
 }
 
 const MOBILE_FILE_CREATE_INITIAL_PART_INFOS_LIMIT: usize = 100;
@@ -734,8 +741,9 @@ impl MobileBlobAdapter {
         parent_file_id: &str,
         content_type: &str,
         upload: &MobileUploadDescriptor,
-    ) -> Result<MobileUploadPlan, BlobError> {
-        let mut retry_after_delete = false;
+    ) -> Result<(MobileUploadPlan, Vec<StagedOverwriteBackup>), BlobError> {
+        let mut staged_backups: Vec<StagedOverwriteBackup> = Vec::new();
+        let mut retry_after_stage = false;
         let mut create_retry_count = 0u8;
         loop {
             let capability = self.native_capability("file_create")?;
@@ -754,6 +762,7 @@ impl MobileBlobAdapter {
                 )
                 .await?;
             if !response.success {
+                self.restore_staged_backups(&staged_backups).await;
                 return Err(BlobError::Upstream(format!(
                     "China Mobile file/create rejected the request: code={} message={}",
                     response.code.unwrap_or_else(|| "unknown".to_string()),
@@ -771,22 +780,34 @@ impl MobileBlobAdapter {
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
             if !rapid_upload && upload_id.is_none() && data.exists.unwrap_or(false) {
-                if retry_after_delete {
+                if retry_after_stage {
                     if create_retry_count < 3 {
                         create_retry_count += 1;
                         sleep(Duration::from_millis(250 * u64::from(create_retry_count))).await;
                         continue;
                     }
+                    self.restore_staged_backups(&staged_backups).await;
                     return Err(BlobError::Upstream(
-                        "China Mobile file/create reported an existing object without an uploadId even after deleting the old object and retrying".to_string(),
+                        "China Mobile file/create reported an existing object without an uploadId even after staging the old object and retrying".to_string(),
                     ));
                 }
-                if self
-                    .delete_child_files_by_name(parent_file_id, file_name)
-                    .await?
-                    > 0
-                {
-                    retry_after_delete = true;
+                let existing_file_ids =
+                    self.find_child_file_ids(parent_file_id, file_name).await?;
+                if !existing_file_ids.is_empty() {
+                    for file_id in existing_file_ids {
+                        let staging_name = staging_file_name(file_name);
+                        if let Err(error) =
+                            self.update_file_name(file_id.as_str(), staging_name.as_str()).await
+                        {
+                            self.restore_staged_backups(&staged_backups).await;
+                            return Err(error);
+                        }
+                        staged_backups.push(StagedOverwriteBackup {
+                            file_id,
+                            original_name: file_name.to_string(),
+                        });
+                    }
+                    retry_after_stage = true;
                     continue;
                 }
                 if create_retry_count < 3 {
@@ -795,21 +816,46 @@ impl MobileBlobAdapter {
                     continue;
                 }
             }
-            return Ok(MobileUploadPlan {
-                file_id: ensure_present_string(data.file_id, "China Mobile file/create fileId")?,
-                rapid_upload,
-                upload_id: if rapid_upload {
-                    upload_id
-                } else {
-                    Some(upload_id.ok_or_else(|| {
-                        BlobError::Upstream(
-                            "China Mobile file/create uploadId was missing".to_string(),
-                        )
-                    })?)
+            return Ok((
+                MobileUploadPlan {
+                    file_id: ensure_present_string(
+                        data.file_id,
+                        "China Mobile file/create fileId",
+                    )?,
+                    rapid_upload,
+                    upload_id: if rapid_upload {
+                        upload_id
+                    } else {
+                        Some(upload_id.ok_or_else(|| {
+                            BlobError::Upstream(
+                                "China Mobile file/create uploadId was missing".to_string(),
+                            )
+                        })?)
+                    },
+                    part_infos: data.part_infos,
                 },
-                part_infos: data.part_infos,
-            });
+                staged_backups,
+            ));
         }
+    }
+
+    async fn restore_staged_backups(&self, backups: &[StagedOverwriteBackup]) {
+        for backup in backups.iter().rev() {
+            // Best-effort rollback: a failure to rename the staged sibling back
+            // must not mask the original upload error. The staging name is
+            // excluded from ordinary list results, so a leak is never surfaced
+            // as a visible object.
+            let _ = self
+                .update_file_name(backup.file_id.as_str(), backup.original_name.as_str())
+                .await;
+        }
+    }
+
+    async fn discard_staged_backups(&self, backups: &[StagedOverwriteBackup]) -> Result<(), BlobError> {
+        for backup in backups {
+            self.delete_file_id(backup.file_id.as_str()).await?;
+        }
+        Ok(())
     }
 
     async fn get_mobile_upload_urls(
@@ -1261,19 +1307,6 @@ impl MobileBlobAdapter {
                 None => return Ok(file_ids),
             }
         }
-    }
-
-    async fn delete_child_files_by_name(
-        &self,
-        parent_file_id: &str,
-        file_name: &str,
-    ) -> Result<usize, BlobError> {
-        let file_ids = self.find_child_file_ids(parent_file_id, file_name).await?;
-        let count = file_ids.len();
-        for file_id in file_ids {
-            self.delete_file_id(file_id.as_str()).await?;
-        }
-        Ok(count)
     }
 
     async fn ensure_folder(
@@ -2038,6 +2071,15 @@ impl MobileBlobAdapter {
                     }
 
                     let object_key = item.object_key(&folder_prefix)?;
+                    if item
+                        .display_name()
+                        .map(is_staging_file_name)
+                        .unwrap_or(false)
+                    {
+                        // Staging siblings used during a non-destructive
+                        // overwrite must never surface in ordinary listings.
+                        continue;
+                    }
                     if requested_prefix
                         .as_deref()
                         .is_none_or(|prefix| object_key.starts_with(prefix))
@@ -2269,7 +2311,7 @@ impl BlobBackend for MobileBlobAdapter {
 
         let create_started_at = Instant::now();
         let (first_response_latency_ms, etag) = if let Some(upload) = streaming_upload {
-            let mut plan = self
+            let (mut plan, staged_backups) = self
                 .create_mobile_upload(
                     file_name.as_str(),
                     parent_file_id.as_str(),
@@ -2277,33 +2319,43 @@ impl BlobBackend for MobileBlobAdapter {
                     &upload,
                 )
                 .await?;
-            self.expand_mobile_upload_plan(&mut plan, &upload).await?;
-            let create_latency_ms = elapsed_millis(create_started_at);
-            if plan.rapid_upload {
-                self.drain_streaming_body(body, upload.size).await?;
-                return Ok(PutObjectResult {
-                    etag: Some(plan.file_id),
-                    first_response_latency_ms: Some(create_latency_ms),
-                });
+            let run_result: Result<(Option<u64>, Option<String>), BlobError> = async {
+                self.expand_mobile_upload_plan(&mut plan, &upload).await?;
+                let create_latency_ms = elapsed_millis(create_started_at);
+                if plan.rapid_upload {
+                    self.drain_streaming_body(body, upload.size).await?;
+                    return Ok((Some(create_latency_ms), Some(plan.file_id.clone())));
+                }
+                let upload_started_at = Instant::now();
+                let first_response_latency_ms = self
+                    .upload_mobile_parts_streaming(upload_started_at, body, &upload, &plan)
+                    .await?
+                    .or(Some(elapsed_millis(upload_started_at).max(1)));
+                let completed = self.complete_mobile_upload(&plan, &upload).await?;
+                Ok((
+                    first_response_latency_ms,
+                    completed
+                        .content_hash
+                        .or(Some(upload.content_hash.clone()))
+                        .or(Some(plan.file_id.clone())),
+                ))
             }
-            let upload_started_at = Instant::now();
-            let first_response_latency_ms = self
-                .upload_mobile_parts_streaming(upload_started_at, body, &upload, &plan)
-                .await?
-                .or(Some(elapsed_millis(upload_started_at).max(1)));
-            let completed = self.complete_mobile_upload(&plan, &upload).await?;
-            (
-                first_response_latency_ms,
-                completed
-                    .content_hash
-                    .or(Some(upload.content_hash.clone()))
-                    .or(Some(plan.file_id.clone())),
-            )
+            .await;
+            match run_result {
+                Ok(result) => {
+                    self.discard_staged_backups(&staged_backups).await?;
+                    result
+                }
+                Err(error) => {
+                    self.restore_staged_backups(&staged_backups).await;
+                    return Err(error);
+                }
+            }
         } else {
             let upload = self
                 .prepare_upload_body(body, size, preferred_upload_part_size_bytes)
                 .await?;
-            let mut plan = self
+            let (mut plan, staged_backups) = self
                 .create_mobile_upload(
                     file_name.as_str(),
                     parent_file_id.as_str(),
@@ -2311,30 +2363,40 @@ impl BlobBackend for MobileBlobAdapter {
                     &upload.descriptor,
                 )
                 .await?;
-            self.expand_mobile_upload_plan(&mut plan, &upload.descriptor)
-                .await?;
-            let create_latency_ms = elapsed_millis(create_started_at);
-            if plan.rapid_upload {
-                return Ok(PutObjectResult {
-                    etag: Some(plan.file_id),
-                    first_response_latency_ms: Some(create_latency_ms),
-                });
+            let run_result: Result<(Option<u64>, Option<String>), BlobError> = async {
+                self.expand_mobile_upload_plan(&mut plan, &upload.descriptor)
+                    .await?;
+                let create_latency_ms = elapsed_millis(create_started_at);
+                if plan.rapid_upload {
+                    return Ok((Some(create_latency_ms), Some(plan.file_id.clone())));
+                }
+                let upload_started_at = Instant::now();
+                let first_response_latency_ms = self
+                    .upload_mobile_parts(upload_started_at, &upload, &plan)
+                    .await?
+                    .or(Some(elapsed_millis(upload_started_at).max(1)));
+                let completed = self
+                    .complete_mobile_upload(&plan, &upload.descriptor)
+                    .await?;
+                Ok((
+                    first_response_latency_ms,
+                    completed
+                        .content_hash
+                        .or(Some(upload.descriptor.content_hash.clone()))
+                        .or(Some(plan.file_id.clone())),
+                ))
             }
-            let upload_started_at = Instant::now();
-            let first_response_latency_ms = self
-                .upload_mobile_parts(upload_started_at, &upload, &plan)
-                .await?
-                .or(Some(elapsed_millis(upload_started_at).max(1)));
-            let completed = self
-                .complete_mobile_upload(&plan, &upload.descriptor)
-                .await?;
-            (
-                first_response_latency_ms,
-                completed
-                    .content_hash
-                    .or(Some(upload.descriptor.content_hash.clone()))
-                    .or(Some(plan.file_id.clone())),
-            )
+            .await;
+            match run_result {
+                Ok(result) => {
+                    self.discard_staged_backups(&staged_backups).await?;
+                    result
+                }
+                Err(error) => {
+                    self.restore_staged_backups(&staged_backups).await;
+                    return Err(error);
+                }
+            }
         };
         Ok(PutObjectResult {
             etag,
@@ -2689,6 +2751,17 @@ fn join_relative_key(prefix: &str, child_name: &str) -> String {
 
 fn normalize_object_key(key: &str) -> String {
     key.trim_matches('/').to_string()
+}
+
+fn staging_file_name(original_name: &str) -> String {
+    format!(
+        "{MOBILE_STAGING_NAME_PREFIX}{}-{original_name}",
+        mobile_signature_nonce()
+    )
+}
+
+fn is_staging_file_name(name: &str) -> bool {
+    name.starts_with(MOBILE_STAGING_NAME_PREFIX)
 }
 
 fn split_parent_and_name(key: &str) -> Result<(Option<String>, String), BlobError> {
@@ -3661,6 +3734,79 @@ mod tests {
         assert_eq!(file_prefix, vec!["docs/a.txt"]);
     }
 
+    #[tokio::test]
+    async fn list_objects_excludes_staged_overwrite_siblings() {
+        // Finding #6: a staging sibling created during a non-destructive
+        // overwrite must never surface in ordinary list results.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile staging filter server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile staging filter local addr");
+        let base_url = format!("http://{address}");
+        let mut items_by_parent = BTreeMap::new();
+        items_by_parent.insert(
+            "/".to_string(),
+            vec![sample_folder_item("dir-managed", "ccbg-managed")],
+        );
+        items_by_parent.insert(
+            "dir-managed".to_string(),
+            vec![sample_folder_item("dir-root", "root")],
+        );
+        items_by_parent.insert(
+            "dir-root".to_string(),
+            vec![sample_folder_item("dir-docs", "docs")],
+        );
+        items_by_parent.insert(
+            "dir-docs".to_string(),
+            vec![
+                sample_file_item("file-visible", "a.txt", 3),
+                sample_file_item(
+                    "file-staged",
+                    ".ccbg-staging-abcdefg12345678-probe.bin",
+                    7,
+                ),
+            ],
+        );
+        let state = MockMobileState {
+            base_url: base_url.clone(),
+            items_by_parent,
+            downloads: BTreeMap::new(),
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list))
+            .route("/health/family", post(mock_health_family_disk_info_enabled))
+            .with_state(Arc::new(state));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile staging filter server");
+        });
+
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        config.family_root_folder_id = Some("family-root".to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let listed = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(MOBILE_ROOT_CONTAINER.to_string()),
+                prefix: Some("docs/".to_string()),
+                limit: None,
+            })
+            .await
+            .expect("list should succeed");
+        let keys = listed
+            .into_iter()
+            .map(|object| object.key)
+            .collect::<Vec<_>>();
+        assert_eq!(keys, vec!["docs/a.txt"], "staging sibling must be hidden");
+    }
+
     #[test]
     fn effective_upload_part_size_respects_max_part_count() {
         let adapter = MobileBlobAdapter::new(sample_config()).expect("adapter");
@@ -3840,9 +3986,32 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct MockUploadControl {
+        update_requests: Arc<Mutex<Vec<Value>>>,
+        events: Arc<Mutex<Vec<String>>>,
+        update_error_on_call: Option<(u32, String, String)>,
+        update_call_count: Arc<Mutex<u32>>,
+        complete_error_on_call: Option<(u32, String, String)>,
+        complete_call_count: Arc<Mutex<u32>>,
+    }
+
+    impl Default for MockUploadControl {
+        fn default() -> Self {
+            Self {
+                update_requests: Arc::new(Mutex::new(Vec::new())),
+                events: Arc::new(Mutex::new(Vec::new())),
+                update_error_on_call: None,
+                update_call_count: Arc::new(Mutex::new(0)),
+                complete_error_on_call: None,
+                complete_call_count: Arc::new(Mutex::new(0)),
+            }
+        }
+    }
+
+    #[derive(Clone)]
     struct MockMobileUploadState {
         base_url: String,
-        items_by_parent: BTreeMap<String, Vec<Value>>,
+        items_by_parent: Arc<Mutex<BTreeMap<String, Vec<Value>>>>,
         create_requests: Arc<Mutex<Vec<Value>>>,
         get_upload_url_requests: Arc<Mutex<Vec<Value>>>,
         complete_requests: Arc<Mutex<Vec<Value>>>,
@@ -3852,6 +4021,7 @@ mod tests {
         create_existing_without_upload_id_once: bool,
         create_error_once: Option<(String, String)>,
         create_call_count: Arc<Mutex<u32>>,
+        control: MockUploadControl,
     }
 
     async fn mock_file_list_upload(
@@ -3864,6 +4034,8 @@ mod tests {
             .unwrap_or("/");
         let items = state
             .items_by_parent
+            .lock()
+            .expect("items poisoned")
             .get(parent_file_id)
             .cloned()
             .unwrap_or_default();
@@ -3887,6 +4059,17 @@ mod tests {
             .lock()
             .expect("create requests poisoned")
             .push(body.clone());
+        state
+            .control
+            .events
+            .lock()
+            .expect("events poisoned")
+            .push(format!(
+                "create:{}",
+                body.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+            ));
         let mut create_call_count = state
             .create_call_count
             .lock()
@@ -3996,6 +4179,34 @@ mod tests {
             .lock()
             .expect("complete requests poisoned")
             .push(body.clone());
+        state
+            .control
+            .events
+            .lock()
+            .expect("events poisoned")
+            .push("complete".to_string());
+        let mut complete_call_count = state
+            .control
+            .complete_call_count
+            .lock()
+            .expect("complete call count poisoned");
+        *complete_call_count += 1;
+        let current_complete_call = *complete_call_count;
+        drop(complete_call_count);
+
+        if let Some((_, code, message)) = state
+            .control
+            .complete_error_on_call
+            .as_ref()
+            .filter(|(call, _, _)| *call == current_complete_call)
+            .cloned()
+        {
+            return Json(json!({
+                "success": false,
+                "code": code,
+                "message": message
+            }));
+        }
         Json(json!({
             "success": true,
             "code": "0000",
@@ -4016,7 +4227,94 @@ mod tests {
             .delete_requests
             .lock()
             .expect("delete requests poisoned")
-            .push(body);
+            .push(body.clone());
+        state
+            .control
+            .events
+            .lock()
+            .expect("events poisoned")
+            .push(format!(
+                "delete:{}",
+                body.get("fileIds")
+                    .and_then(Value::as_array)
+                    .map(|ids| ids
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(","))
+                    .unwrap_or_default()
+            ));
+        Json(json!({
+            "success": true,
+            "code": "0000",
+            "message": "ok"
+        }))
+    }
+
+    async fn mock_file_update_upload(
+        State(state): State<Arc<MockMobileUploadState>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        state
+            .control
+            .update_requests
+            .lock()
+            .expect("update requests poisoned")
+            .push(body.clone());
+        state
+            .control
+            .events
+            .lock()
+            .expect("events poisoned")
+            .push(format!(
+                "update:{}:{}",
+                body.get("fileId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                body.get("name").and_then(Value::as_str).unwrap_or_default()
+            ));
+        let mut update_call_count = state
+            .control
+            .update_call_count
+            .lock()
+            .expect("update call count poisoned");
+        *update_call_count += 1;
+        let current_update_call = *update_call_count;
+        drop(update_call_count);
+
+        if let Some((_, code, message)) = state
+            .control
+            .update_error_on_call
+            .as_ref()
+            .filter(|(call, _, _)| *call == current_update_call)
+            .cloned()
+        {
+            return Json(json!({
+                "success": false,
+                "code": code,
+                "message": message
+            }));
+        }
+
+        let file_id = body
+            .get("fileId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let new_name = body.get("name").and_then(Value::as_str).map(str::to_string);
+        if let Some(new_name) = new_name {
+            let mut items_by_parent = state
+                .items_by_parent
+                .lock()
+                .expect("items poisoned");
+            for items in items_by_parent.values_mut() {
+                for item in items.iter_mut() {
+                    if item.get("fileId").and_then(Value::as_str) == Some(file_id.as_str()) {
+                        item["name"] = Value::String(new_name.clone());
+                    }
+                }
+            }
+        }
         Json(json!({
             "success": true,
             "code": "0000",
@@ -4080,6 +4378,15 @@ mod tests {
                         "url": format!("{base_url}/hcy/file/getUploadUrl"),
                         "signature_strategy": "mcloud_md5_v1",
                         "body_defaults": {}
+                    },
+                    {
+                        "id": "file_update",
+                        "method": "POST",
+                        "url": format!("{base_url}/hcy/file/update"),
+                        "signature_strategy": "mcloud_md5_v1",
+                        "body_defaults": {
+                            "description": ""
+                        }
                     },
                     {
                         "id": "file_batch_delete",
@@ -4521,10 +4828,10 @@ mod tests {
 
         let upload_state = MockMobileUploadState {
             base_url: base_url.clone(),
-            items_by_parent: BTreeMap::from([(
+            items_by_parent: Arc::new(Mutex::new(BTreeMap::from([(
                 "/".to_string(),
                 vec![sample_folder_item("folder-root", "root")],
-            )]),
+            )]))),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
@@ -4534,6 +4841,7 @@ mod tests {
             create_existing_without_upload_id_once: false,
             create_error_once: None,
             create_call_count: Arc::new(Mutex::new(0)),
+            control: MockUploadControl::default(),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
@@ -4649,10 +4957,10 @@ mod tests {
 
         let upload_state = MockMobileUploadState {
             base_url: base_url.clone(),
-            items_by_parent: BTreeMap::from([(
+            items_by_parent: Arc::new(Mutex::new(BTreeMap::from([(
                 "/".to_string(),
                 vec![sample_folder_item("folder-root", "root")],
-            )]),
+            )]))),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
@@ -4662,6 +4970,7 @@ mod tests {
             create_existing_without_upload_id_once: false,
             create_error_once: None,
             create_call_count: Arc::new(Mutex::new(0)),
+            control: MockUploadControl::default(),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
@@ -4757,10 +5066,10 @@ mod tests {
 
         let upload_state = MockMobileUploadState {
             base_url: base_url.clone(),
-            items_by_parent: BTreeMap::from([(
+            items_by_parent: Arc::new(Mutex::new(BTreeMap::from([(
                 "/".to_string(),
                 vec![sample_folder_item("folder-root", "root")],
-            )]),
+            )]))),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
@@ -4770,6 +5079,7 @@ mod tests {
             create_existing_without_upload_id_once: false,
             create_error_once: None,
             create_call_count: Arc::new(Mutex::new(0)),
+            control: MockUploadControl::default(),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
@@ -4844,10 +5154,10 @@ mod tests {
 
         let upload_state = MockMobileUploadState {
             base_url: base_url.clone(),
-            items_by_parent: BTreeMap::from([(
+            items_by_parent: Arc::new(Mutex::new(BTreeMap::from([(
                 "/".to_string(),
                 vec![sample_folder_item("folder-root", "root")],
-            )]),
+            )]))),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
@@ -4857,6 +5167,7 @@ mod tests {
             create_existing_without_upload_id_once: false,
             create_error_once: None,
             create_call_count: Arc::new(Mutex::new(0)),
+            control: MockUploadControl::default(),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
@@ -4943,7 +5254,7 @@ mod tests {
 
         let upload_state = MockMobileUploadState {
             base_url: base_url.clone(),
-            items_by_parent: BTreeMap::from([
+            items_by_parent: Arc::new(Mutex::new(BTreeMap::from([
                 (
                     "/".to_string(),
                     vec![sample_folder_item("folder-root", "root")],
@@ -4952,7 +5263,7 @@ mod tests {
                     "folder-root".to_string(),
                     vec![sample_file_item("file-existing", "probe-overwrite.bin", 11)],
                 ),
-            ]),
+            ]))),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
@@ -4962,12 +5273,14 @@ mod tests {
             create_existing_without_upload_id_once: true,
             create_error_once: None,
             create_call_count: Arc::new(Mutex::new(0)),
+            control: MockUploadControl::default(),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
             .route("/hcy/file/create", post(mock_file_create_upload))
             .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
             .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/hcy/file/update", post(mock_file_update_upload))
             .route("/hcy/file/batchDelete", post(mock_file_delete_upload))
             .route("/upload/{part_number}", put(mock_upload_part))
             .with_state(Arc::new(upload_state.clone()));
@@ -5007,6 +5320,68 @@ mod tests {
             .clone();
         assert_eq!(create_requests.len(), 2);
 
+        // The old object must be staged (renamed away) before the second
+        // create attempt, never deleted before the replacement is uploaded.
+        let update_requests = upload_state
+            .control
+            .update_requests
+            .lock()
+            .expect("update requests poisoned")
+            .clone();
+        assert_eq!(update_requests.len(), 1);
+        assert_eq!(
+            update_requests[0].get("fileId").and_then(Value::as_str),
+            Some("file-existing")
+        );
+        let staged_name = update_requests[0]
+            .get("name")
+            .and_then(Value::as_str)
+            .expect("staged backup name");
+        assert!(
+            staged_name.starts_with(MOBILE_STAGING_NAME_PREFIX),
+            "backup name should use the staging prefix, got {staged_name}"
+        );
+        assert!(staged_name.ends_with("-probe-overwrite.bin"));
+
+        let complete_requests = upload_state
+            .complete_requests
+            .lock()
+            .expect("complete requests poisoned")
+            .clone();
+        assert_eq!(complete_requests.len(), 1);
+
+        // After a successful replacement the staged backup is deleted; the
+        // delete must never precede the complete.
+        let events = upload_state
+            .control
+            .events
+            .lock()
+            .expect("events poisoned")
+            .clone();
+        let delete_index = events
+            .iter()
+            .position(|event| event.starts_with("delete:"))
+            .expect("backup cleanup delete");
+        let complete_index = events
+            .iter()
+            .position(|event| event == "complete")
+            .expect("complete event");
+        assert!(
+            delete_index > complete_index,
+            "backup delete must happen after complete, events={events:?}"
+        );
+        let update_index = events
+            .iter()
+            .position(|event| event.starts_with("update:file-existing:"))
+            .expect("backup rename event");
+        let second_create_index = events
+            .iter()
+            .rposition(|event| event == "create:probe-overwrite.bin")
+            .expect("second create event");
+        assert!(
+            update_index < second_create_index,
+            "backup rename must precede the retried create, events={events:?}"
+        );
         let delete_requests = upload_state
             .delete_requests
             .lock()
@@ -5016,15 +5391,122 @@ mod tests {
             delete_requests,
             vec![json!({ "fileIds": ["file-existing"] })]
         );
-
-        let complete_requests = upload_state
-            .complete_requests
-            .lock()
-            .expect("complete requests poisoned")
-            .clone();
-        assert_eq!(complete_requests.len(), 1);
     }
 
+    #[tokio::test]
+    async fn overwrite_restores_staged_old_object_when_complete_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile restore upload server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile restore upload local addr");
+        let base_url = format!("http://{address}");
+
+        let mut control = MockUploadControl::default();
+        control.complete_error_on_call = Some((1, "04010319".to_string(), "Insufficient Rights".to_string()));
+        let upload_state = MockMobileUploadState {
+            base_url: base_url.clone(),
+            items_by_parent: Arc::new(Mutex::new(BTreeMap::from([
+                (
+                    "/".to_string(),
+                    vec![sample_folder_item("folder-root", "root")],
+                ),
+                (
+                    "folder-root".to_string(),
+                    vec![sample_file_item("file-existing", "probe-overwrite.bin", 11)],
+                ),
+            ]))),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
+            get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
+            complete_requests: Arc::new(Mutex::new(Vec::new())),
+            delete_requests: Arc::new(Mutex::new(Vec::new())),
+            upload_parts: Arc::new(Mutex::new(Vec::new())),
+            rapid_upload: false,
+            create_existing_without_upload_id_once: true,
+            create_error_once: None,
+            create_call_count: Arc::new(Mutex::new(0)),
+            control,
+        };
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_file_list_upload))
+            .route("/hcy/file/create", post(mock_file_create_upload))
+            .route("/hcy/file/getUploadUrl", post(mock_file_get_upload_url))
+            .route("/hcy/file/complete", post(mock_file_complete_upload))
+            .route("/hcy/file/update", post(mock_file_update_upload))
+            .route("/hcy/file/batchDelete", post(mock_file_delete_upload))
+            .route("/upload/{part_number}", put(mock_upload_part))
+            .with_state(Arc::new(upload_state.clone()));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile restore upload server");
+        });
+
+        let catalog = write_mobile_upload_capability_catalog(base_url.as_str());
+        let mut config = sample_config();
+        config.upload_part_size_bytes = 5;
+        config.root_prefix = None;
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let request = PutObjectRequest {
+            container: MOBILE_ROOT_CONTAINER.to_string(),
+            key: "probe-overwrite.bin".to_string(),
+            body: ObjectBody::from_stream(stream::iter([
+                Ok(Bytes::from_static(b"hello ")),
+                Ok(Bytes::from_static(b"world")),
+            ])),
+            size: Some(11),
+            content_type: Some("application/octet-stream".to_string()),
+            preferred_upload_part_size_bytes: None,
+        };
+        let error = adapter.put_object(request).await.expect_err("put should fail");
+        assert!(error.to_string().contains("04010319"));
+
+        // The old object must be restored to its original name after failure.
+        let update_requests = upload_state
+            .control
+            .update_requests
+            .lock()
+            .expect("update requests poisoned")
+            .clone();
+        assert_eq!(update_requests.len(), 2, "one rename away, one rename back");
+        assert_eq!(
+            update_requests[0].get("fileId").and_then(Value::as_str),
+            Some("file-existing")
+        );
+        let staged_name = update_requests[0]
+            .get("name")
+            .and_then(Value::as_str)
+            .expect("staged backup name");
+        assert!(staged_name.starts_with(MOBILE_STAGING_NAME_PREFIX));
+        assert_eq!(
+            update_requests[1].get("fileId").and_then(Value::as_str),
+            Some("file-existing")
+        );
+        assert_eq!(
+            update_requests[1].get("name").and_then(Value::as_str),
+            Some("probe-overwrite.bin"),
+            "restore must rename the staged backup back to the original name"
+        );
+
+        // No delete should be issued for the staged object on failure.
+        let delete_requests = upload_state
+            .delete_requests
+            .lock()
+            .expect("delete requests poisoned")
+            .clone();
+        assert!(delete_requests.is_empty());
+
+        // The original object must remain accessible at the original key.
+        let restored = adapter
+            .head_object(MOBILE_ROOT_CONTAINER, "probe-overwrite.bin")
+            .await
+            .expect("original object still accessible");
+        assert_eq!(restored.size, 11);
+    }
     #[tokio::test]
     async fn put_object_does_not_delete_existing_same_name_files_before_mobile_create() {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -5037,7 +5519,7 @@ mod tests {
 
         let upload_state = MockMobileUploadState {
             base_url: base_url.clone(),
-            items_by_parent: BTreeMap::from([
+            items_by_parent: Arc::new(Mutex::new(BTreeMap::from([
                 (
                     "/".to_string(),
                     vec![sample_folder_item("folder-root", "root")],
@@ -5049,7 +5531,7 @@ mod tests {
                         sample_file_item("file-existing-b", "probe-overwrite.bin", 11),
                     ],
                 ),
-            ]),
+            ]))),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
@@ -5059,6 +5541,7 @@ mod tests {
             create_existing_without_upload_id_once: false,
             create_error_once: None,
             create_call_count: Arc::new(Mutex::new(0)),
+            control: MockUploadControl::default(),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
@@ -5119,7 +5602,7 @@ mod tests {
 
         let upload_state = MockMobileUploadState {
             base_url: base_url.clone(),
-            items_by_parent: BTreeMap::from([
+            items_by_parent: Arc::new(Mutex::new(BTreeMap::from([
                 (
                     "/".to_string(),
                     vec![sample_folder_item("folder-root", "root")],
@@ -5128,7 +5611,7 @@ mod tests {
                     "folder-root".to_string(),
                     vec![sample_file_item("file-existing", "probe-overwrite.bin", 11)],
                 ),
-            ]),
+            ]))),
             create_requests: Arc::new(Mutex::new(Vec::new())),
             get_upload_url_requests: Arc::new(Mutex::new(Vec::new())),
             complete_requests: Arc::new(Mutex::new(Vec::new())),
@@ -5138,6 +5621,7 @@ mod tests {
             create_existing_without_upload_id_once: false,
             create_error_once: Some(("04010319".to_string(), "Insufficient Rights".to_string())),
             create_call_count: Arc::new(Mutex::new(0)),
+            control: MockUploadControl::default(),
         };
         let app = Router::new()
             .route("/hcy/file/list", post(mock_file_list_upload))
