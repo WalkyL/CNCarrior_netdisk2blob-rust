@@ -1229,6 +1229,14 @@ impl<S> BrowserFlowSessionExecutor<S> {
 
 #[async_trait]
 pub trait BrowserFlowSession: Send + Sync {
+    /// Establish a one-shot request checkpoint before dispatching an action so
+    /// the immediately-following `wait_for_request` observes the request the
+    /// action fired even though it is already buffered. Default no-op keeps
+    /// non-CDP implementations (and the test mock) unchanged.
+    async fn mark_action_request_checkpoint(&self) {
+        // default: no-op
+    }
+
     async fn navigate(&self, url: &str) -> Result<(), BlobError>;
 
     async fn click(&self, element: &BrowserFlowElement) -> Result<(), BlobError>;
@@ -2010,6 +2018,7 @@ where
         BrowserFlowStep::Navigate {
             url, wait_for_page, ..
         } => {
+            session.mark_action_request_checkpoint().await;
             session.navigate(url).await?;
             if let Some(page_id) = wait_for_page {
                 session
@@ -2029,6 +2038,7 @@ where
             let element = plan
                 .find_element(element)
                 .ok_or_else(|| missing_bound_reference("element", element, &plan.flow.id))?;
+            session.mark_action_request_checkpoint().await;
             match session.click(element).await {
                 Ok(()) => {
                     report.status = BrowserFlowExecutionStepStatus::Succeeded;
@@ -2049,6 +2059,7 @@ where
             dispatch_events,
             ..
         } => {
+            session.mark_action_request_checkpoint().await;
             session
                 .set_input(
                     plan.find_element(element).ok_or_else(|| {
@@ -2061,6 +2072,7 @@ where
             report.status = BrowserFlowExecutionStepStatus::Succeeded;
         }
         BrowserFlowStep::InvokeOperation { operation, .. } => {
+            session.mark_action_request_checkpoint().await;
             session
                 .invoke_operation(plan.find_operation(operation).ok_or_else(|| {
                     missing_bound_reference("operation", operation, &plan.flow.id)
@@ -2079,6 +2091,7 @@ where
                 );
                 return Ok(report);
             };
+            session.mark_action_request_checkpoint().await;
             session
                 .set_files(
                     plan.find_element(element).ok_or_else(|| {
@@ -2092,6 +2105,7 @@ where
         BrowserFlowStep::DispatchEvents {
             element, events, ..
         } => {
+            session.mark_action_request_checkpoint().await;
             session
                 .dispatch_events(
                     plan.find_element(element).ok_or_else(|| {

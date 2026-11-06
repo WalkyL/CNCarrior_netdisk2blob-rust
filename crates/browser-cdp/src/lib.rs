@@ -266,6 +266,10 @@ struct CdpEventState {
     pending_request_extra_headers: BTreeMap<String, BTreeMap<String, String>>,
     request_selections: BTreeMap<String, u64>,
     next_request_sequence: u64,
+    /// One-shot floor established by an action BEFORE it dispatches, so the
+    /// following wait can see the just-fired request even though it is already
+    /// buffered when the wait snapshots. None = documented current-time floor.
+    request_floor_sequence: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,8 +393,8 @@ impl CdpConnection {
     ) -> Result<(), BlobError> {
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(15_000));
         let start_sequence = {
-            let events = self.events.lock().await;
-            events.latest_request_sequence()
+            let mut events = self.events.lock().await;
+            events.take_request_floor()
         };
         let future = async {
             loop {
@@ -872,7 +876,16 @@ impl CdpBrowserFlowSession {
 
 #[async_trait]
 impl BrowserFlowSession for CdpBrowserFlowSession {
+    /// Mark a one-shot request checkpoint in the shared event state so the
+    /// next wait_for_request observes a request fired by this action even
+    /// though it is buffered by the time the wait snapshots its floor.
+    async fn mark_action_request_checkpoint(&self) {
+        let mut events = self.connection.events.lock().await;
+        events.mark_request_checkpoint();
+    }
+
     async fn navigate(&self, url: &str) -> Result<(), BlobError> {
+        self.mark_action_request_checkpoint().await;
         self.connection
             .send_command("Page.navigate", json!({ "url": url }))
             .await?;
@@ -881,6 +894,7 @@ impl BrowserFlowSession for CdpBrowserFlowSession {
 
     async fn click(&self, element: &BrowserFlowElement) -> Result<(), BlobError> {
         let object_id = self.wait_for_object_id(element).await?;
+        self.mark_action_request_checkpoint().await;
         let result = self
             .call_function_on_object(&object_id, "function() { this.click(); return true; }", &[])
             .await;
@@ -1297,6 +1311,21 @@ impl CdpObservedRequest {
 impl CdpEventState {
     fn latest_request_sequence(&self) -> u64 {
         self.next_request_sequence
+    }
+
+    /// Record a one-shot floor so a following wait can observe a request fired
+    /// by the action that calls this immediately before dispatching.
+    fn mark_request_checkpoint(&mut self) {
+        self.request_floor_sequence = Some(self.next_request_sequence);
+    }
+
+    /// Take and clear the pending action checkpoint, returning the floor to
+    /// use. Falls back to the current latest sequence (documented behavior for
+    /// standalone waits).
+    fn take_request_floor(&mut self) -> u64 {
+        self.request_floor_sequence
+            .take()
+            .unwrap_or_else(|| self.next_request_sequence)
     }
 
     fn observed_request_state_since(
@@ -2570,5 +2599,91 @@ mod tests {
             percent_encode_target_url("about:blank").expect("about:blank should be valid"),
             "about:blank"
         );
+    }
+
+    #[test]
+    fn request_checkpoint_captures_action_request_and_excludes_preaction() {
+        // Finding #11: a wait that snapshots the latest sequence misses the
+        // just-fired action request. An action checkpoint taken BEFORE the
+        // action dispatches must lower the floor so the action request is seen
+        // while the pre-action request stays excluded.
+        let mut state = CdpEventState::default();
+        let request = test_request_definition();
+
+        // Pre-action request already buffered and succeeded (sequence 1).
+        assert!(apply_event_state(
+            &mut state,
+            "Network.requestWillBeSent",
+            &json!({
+                "requestId": "request-preact",
+                "request": {
+                    "method": "POST",
+                    "url": "https://personal-kd-njs.yun.139.com/hcy/file/list",
+                    "postData": "{\"parentFileId\":\"/\"}"
+                }
+            }),
+        ));
+        assert!(apply_event_state(
+            &mut state,
+            "Network.responseReceived",
+            &json!({
+                "requestId": "request-preact",
+                "response": { "status": 200, "statusText": "OK" }
+            }),
+        ));
+
+        // The action takes a checkpoint BEFORE it fires its own request.
+        state.mark_request_checkpoint();
+        let floor = state
+            .request_floor_sequence
+            .expect("checkpoint should be recorded");
+
+        // Action request (sequence 2) fires and succeeds.
+        assert!(apply_event_state(
+            &mut state,
+            "Network.requestWillBeSent",
+            &json!({
+                "requestId": "request-action",
+                "request": {
+                    "method": "POST",
+                    "url": "https://personal-kd-njs.yun.139.com/hcy/file/list",
+                    "postData": "{\"parentFileId\":\"/\"}"
+                }
+            }),
+        ));
+        assert!(apply_event_state(
+            &mut state,
+            "Network.responseReceived",
+            &json!({
+                "requestId": "request-action",
+                "response": { "status": 200, "statusText": "OK" }
+            }),
+        ));
+
+        // The floor is the sequence BEFORE the action (1), so the action
+        // request (2) is visible to the wait.
+        assert_eq!(
+            state.observed_request_state_since(&request, floor),
+            CdpObservedRequestState::Succeeded(2)
+        );
+
+        // Without a checkpoint, a wait snapshots the latest sequence (2) and
+        // would miss the just-fired action request — the original bug.
+        assert_eq!(
+            state.observed_request_state_since(&request, state.latest_request_sequence()),
+            CdpObservedRequestState::NotSeen
+        );
+    }
+
+    #[test]
+    fn request_checkpoint_consumed_by_following_wait() {
+        // A checkpoint is a one-shot floor: after a wait consumes it, the next
+        // standalone wait falls back to the documented current-time behavior.
+        let mut state = CdpEventState::default();
+        state.mark_request_checkpoint();
+        assert!(state.request_floor_sequence.is_some());
+        // Simulate the wait consuming the floor.
+        let _ = state.request_floor_sequence.take();
+        assert!(state.request_floor_sequence.is_none());
     }
 }
