@@ -9,6 +9,24 @@ PORT=61999
 readiness="200"
 listbuckets="200"
 
+# Failure accumulator: any FAIL (or mock startup failure) flips the final exit
+# status so CI surfaces a broken smoke.sh instead of a silent false-green.
+FAILURES=0
+MOCK_PID=""
+
+# Ensure the harness-owned mock is stopped and only our mktemp directory is
+# removed, even on interrupt/termination.
+cleanup() {
+  if [ -n "${MOCK_PID}" ]; then
+    kill "${MOCK_PID}" 2>/dev/null || true
+    wait "${MOCK_PID}" 2>/dev/null || true
+  fi
+  if [ -n "${WORK}" ] && [ -d "${WORK}" ]; then
+    rm -rf "${WORK}"
+  fi
+}
+trap cleanup EXIT INT TERM
+
 # This WSL distro symlinks /usr/local/bin/curl -> /mnt/c/WINDOWS/system32/curl.exe
 # (Windows curl), which cannot write to WSL's /dev/null -> curl exits 23. Force
 # the real Linux curl onto PATH so the test exercises smoke.sh's logic, not the
@@ -70,6 +88,7 @@ start_mock() {
 stop_mock() {
   kill "${MOCK_PID}" 2>/dev/null || true
   wait "${MOCK_PID}" 2>/dev/null || true
+  MOCK_PID=""
 }
 
 run_case() {
@@ -80,7 +99,11 @@ run_case() {
   local expect_exit="$5"
   readiness="${readiness_code}"
   listbuckets="${lb_code}"
-  start_mock
+  if ! start_mock; then
+    echo "FAIL: ${name} (mock failed to start)"
+    FAILURES=$((FAILURES + 1))
+    return 1
+  fi
   CCBG_SMOKE_ENDPOINT="http://127.0.0.1:${PORT}" \
   CCBG_SMOKE_METRICS_ENDPOINT="http://127.0.0.1:${PORT}" \
   CCBG_SMOKE_CONTROL_API_KEY="" \
@@ -93,6 +116,7 @@ run_case() {
   else
     echo "FAIL: ${name} (exit=${rc}, expected ${expect_exit})"
     sed 's/^/    /' "${WORK}/out.txt"
+    FAILURES=$((FAILURES + 1))
   fi
 }
 
@@ -105,14 +129,17 @@ run_case "healthy (readyz=200, ListBuckets=200)" 200 200 0 0
 run_case "degraded (readyz=503, ListBuckets=500)" 503 500 0 0
 
 # 3. Dead process (no listener) -> exit 1
-start_mock
+if ! start_mock; then
+  echo "FAIL: dead (no listener) mock startup" >&2
+  FAILURES=$((FAILURES + 1))
+fi
 CCBG_SMOKE_ENDPOINT="http://127.0.0.1:1" \
 CCBG_SMOKE_METRICS_ENDPOINT="http://127.0.0.1:1" \
 CCBG_SMOKE_REQUIRE_READY="0" \
 bash "${SMOKE}" >"${WORK}/out.txt" 2>&1
 rc=$?
 stop_mock
-if [ "${rc}" -eq 1 ]; then echo "PASS: dead (no listener) exit=1"; else echo "FAIL: dead exit=${rc}"; sed 's/^/    /' "${WORK}/out.txt"; fi
+if [ "${rc}" -eq 1 ]; then echo "PASS: dead (no listener) exit=1"; else echo "FAIL: dead exit=${rc}"; sed 's/^/    /' "${WORK}/out.txt"; FAILURES=$((FAILURES + 1)); fi
 
 # 4. Strict mode + degraded -> exit 1
 run_case "strict + degraded (readyz=503, require_ready=1)" 503 500 1 1
@@ -120,5 +147,12 @@ run_case "strict + degraded (readyz=503, require_ready=1)" 503 500 1 1
 # 5. Strict mode + healthy -> exit 0
 run_case "strict + healthy (require_ready=1)" 200 200 1 0
 
-rm -rf "${WORK}"
 echo "=== done ==="
+
+# Propagate any failure so the caller/CI sees a real broken signal.
+if [ "${FAILURES}" -ne 0 ]; then
+  echo "RESULT: FAIL (${FAILURES} failing case(s))" >&2
+  exit 1
+fi
+echo "RESULT: PASS"
+exit 0
