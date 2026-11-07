@@ -1583,12 +1583,43 @@ fn trim_response_body(body: &str) -> String {
     }
 }
 
+/// Extracts a stable human-readable description of an upstream Graph error body,
+/// derived from `error.code` + `error.message` only. The Graph `innerError`
+/// carries per-request fields (`date`, `request-id`, `client-request-id`) that
+/// change on every call; embedding them in error text makes derived health /
+/// alert fingerprints unstable across ticks and defeats the notify dedupe.
+fn stable_graph_error_text(body: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return trim_response_body(body);
+    };
+    let Some(error) = value.get("error") else {
+        return trim_response_body(body);
+    };
+    let code = error.get("code").and_then(|v| v.as_str()).unwrap_or_default();
+    let message = error
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if code.is_empty() && message.is_empty() {
+        return trim_response_body(body);
+    }
+    let mut parts = Vec::new();
+    if !code.is_empty() {
+        parts.push(code);
+    }
+    if !message.is_empty() {
+        parts.push(message);
+    }
+    let combined = parts.join(": ");
+    trim_response_body(&combined)
+}
+
 async fn response_to_error(response: reqwest::Response, action: &str) -> BlobError {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     BlobError::Upstream(format!(
         "{action} failed with {status}: {}",
-        trim_response_body(&body)
+        stable_graph_error_text(&body)
     ))
 }
 
@@ -2791,6 +2822,53 @@ mod tests {
         let result = trim_response_body(&long);
         assert!(result.ends_with("..."));
         assert_eq!(result.len(), 243); // 240 chars + "..."
+    }
+
+    #[test]
+    fn stable_graph_error_text_omits_per_request_transient_fields() {
+        // Graph 401 bodies embed per-request `request-id` and `date` under
+        // `error.innerError`. Those change on every call, so if they leak into
+        // the health/alert text the notify dedupe fingerprint changes each tick
+        // and the webhook is re-posted for an unchanged alert state. The stable
+        // error text must be derived from `error.code` + `error.message` only.
+        let body = r#"{
+            "error": {
+                "code": "InvalidAuthenticationToken",
+                "message": "Protocol 'Bearer' failed to validate because The token could not be read.",
+                "innerError": {
+                    "date": "2026-11-07T07:14:28",
+                    "request-id": "88b2b2e9-f68a-4d21-8c2a-ef37ccf00c93",
+                    "client-request-id": "d60f2e43-5174-4b0c-b7dd-888400ef2cc7"
+                }
+            }
+        }"#;
+        let stable = stable_graph_error_text(body);
+        assert!(
+            stable.contains("InvalidAuthenticationToken"),
+            "code must be preserved, got: {stable}"
+        );
+        assert!(
+            stable.contains("could not be read"),
+            "message must be preserved, got: {stable}"
+        );
+        assert!(
+            !stable.contains("request-id")
+                && !stable.contains("88b2b2e9")
+                && !stable.contains("2026-11-07T07:14:28"),
+            "transient request-id/date must be omitted, got: {stable}"
+        );
+    }
+
+    #[test]
+    fn non_graph_error_text_falls_back_to_trimmed_body() {
+        let body = "upstream returned an opaque non-JSON error";
+        assert_eq!(stable_graph_error_text(body), body);
+    }
+
+    #[test]
+    fn graph_error_without_parseable_json_falls_back_to_trimmed_body() {
+        let body = r#"{"error": {"code": "bad"}"#; // truncated JSON
+        assert_eq!(stable_graph_error_text(body), body);
     }
 
     #[test]
