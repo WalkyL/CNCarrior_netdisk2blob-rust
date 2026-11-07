@@ -1023,13 +1023,16 @@ impl MetadataStore {
         }
         ensure_job_id_available(&transaction, new_job_id)?;
 
-        // Check the current durable version in the same transaction. A stale
-        // entry (a newer operation superseded it) is marked superseded and
-        // creates no executable job.
+        // Check the current durable version in the same transaction. The
+        // replication_object_versions table is the authoritative source (it is
+        // maintained on enqueue and preserved through backup/restore), unlike
+        // MAX(object_version) over replication_jobs, which loses versions whose
+        // job rows were pruned. A stale entry (a newer operation superseded it)
+        // is marked superseded and creates no executable job.
         let current_version = transaction
             .query_row(
                 "SELECT COALESCE((
-                    SELECT MAX(object_version) FROM replication_jobs
+                    SELECT current_version FROM replication_object_versions
                     WHERE target = ?1 AND bucket = ?2 AND key = ?3
                  ), 0)",
                 params![original_job.target, original_job.object.bucket, original_job.object.key],
@@ -1169,7 +1172,7 @@ impl MetadataStore {
             let current_version = transaction
                 .query_row(
                     "SELECT COALESCE((
-                        SELECT MAX(object_version) FROM replication_jobs
+                        SELECT current_version FROM replication_object_versions
                         WHERE target = ?1 AND bucket = ?2 AND key = ?3
                      ), 0)",
                     params![
@@ -3692,6 +3695,68 @@ mod tests {
             ReplicationDeadLetterStatus::Superseded
         ));
 
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
+    fn stale_dlq_replay_uses_durable_version_after_job_pruned() {
+        // The durable current version is the source of truth even after the
+        // superseding job row is pruned: replication_object_versions keeps
+        // version 2 while MAX(object_version) over replication_jobs would only
+        // see the dead-lettered version-1 row. A stale DLQ entry must still be
+        // rejected as superseded.
+        let db_path = temp_db_path();
+        let store = MetadataStore::open(&db_path).expect("store should open");
+
+        let mut first = sample_job(500);
+        first.object.key = "dlq/prune.txt".to_string();
+        let enqueued_first = store
+            .enqueue_jobs_with_versions(&[first])
+            .expect("first job should persist with version");
+        assert_eq!(enqueued_first[0].object_version, 1);
+        store
+            .mark_job_dead_letter(500, 3, Some("fail"), "max_attempts_exhausted", 100)
+            .expect("first job should enter dlq");
+
+        // A newer operation supersedes the dead-lettered one (version 2), then
+        // its job row is pruned, leaving only the durable version table at 2.
+        let mut second = sample_job(501);
+        second.object.key = "dlq/prune.txt".to_string();
+        let enqueued_second = store
+            .enqueue_jobs_with_versions(&[second])
+            .expect("second job should persist with version");
+        assert_eq!(enqueued_second[0].object_version, 2);
+        store
+            .connection
+            .lock()
+            .expect("store should not be poisoned")
+            .execute("DELETE FROM replication_jobs WHERE job_id = ?1", [501i64])
+            .expect("prune the superseding job row");
+
+        // With MAX(object_version) over jobs the stale entry would not be
+        // detected (current_version would be 1); the durable table says 2.
+        let outcome = store
+            .replay_dead_letter_job(500, 600, 200)
+            .expect("stale replay should be handled");
+        match outcome {
+            ReplayOutcome::Superseded {
+                original_job_id,
+                current_version,
+                ..
+            } => {
+                assert_eq!(original_job_id, 500);
+                assert_eq!(current_version, 2);
+            }
+            ReplayOutcome::Replayed(_) => panic!("stale entry must not replay"),
+        }
+
+        // No new executable job was created.
+        assert!(!store
+            .latest_job_for_object("onedrive", "bucket-a", "dlq/prune.txt")
+            .expect("latest query should succeed")
+            .expect("original job should remain")
+            .job_id
+            != 600);
         fs::remove_file(db_path).ok();
     }
 
