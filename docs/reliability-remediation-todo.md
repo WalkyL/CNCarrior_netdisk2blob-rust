@@ -18,13 +18,13 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | T04 | Recoverable overwrite/staging/WAL | T01–T03 | complete |
 | T05a | Mobile family error propagation | architecture | complete |
 | T05b | Mobile non-destructive staged overwrite | T05a | complete |
-| T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | implementation complete (review pending) |
+| T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | complete |
 | T07 | Four-provider exact list prefix preservation | Mobile file waits T05 | complete |
 | T08a | Action-scoped CDP checkpoints | architecture | complete |
 | T08b | Explicit JavaScript value binding/catalog migration | T08a | complete |
 | T09 | Encryption declared-size validation | architecture | complete |
 | T10 | Smoke harness failure propagation/regression | architecture | complete |
-| T11 | Integration acceptance and allowed-model reviews | completed tasks | pending |
+| T11 | Integration acceptance and allowed-model reviews | completed tasks | complete |
 
 ## Coverage map
 
@@ -172,3 +172,18 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: `cargo test -p gatewayd --bin gatewayd -- put` = 47 passed; `cargo test -p gatewayd --bin gatewayd -- gateway_write_ahead_log` = 7 passed; full `cargo test -p gatewayd` = 416 passed, 3 failed (identical pre-existing baseline failures); `cargo test -p metadata-store` = 43 passed; `cargo test -p replication-engine` = 34 passed; `cargo check --workspace` clean.
 - Review: GLM-5.3 (`reasoning_effort=max`) reviewed the T04/T06 gateway package and returned APPROVE with no findings. The recoverable-overwrite byte snapshot, staging, and rollback logic satisfied the frozen contract and acceptance tests.
 - Integration: committed `4fc3420` + ledger `d5f809f`.
+
+### T11 — Cross-module verification and allowed-model review
+
+- Review model: GLM-5.3 (`reasoning_effort=max`, direct SenseNova API via `call_sensenova_review.py`). Five self-contained package reviews (diff + acceptance criteria embedded, since the reviewer has no file access): T09, T08a/T08b, T07/T05a/T05b/T10, T01/T02/T03, T04/T06.
+- Package verdicts:
+  - T09: REQUEST_CHANGES → fixed terminal-error livelock (`terminated` flag); suite 35 passed.
+  - T08a/T08b: REQUEST_CHANGES → added consecutive-pair checkpoint test + JS escape-set test; suites browser-cdp 25, blob-core 38.
+  - T07/T05a/T05b/T10: REQUEST_CHANGES → fixed family business-rejection masking (5010-only absence), best-effort staged-backup cleanup, conditional `x-api-key` header, dead-case startup guard, success-double regression scenario; provider-mobile 32, real harness 5/5.
+  - T01/T02/T03: REQUEST_CHANGES → fixed DLQ staleness to read the durable `replication_object_versions` table; metadata-store 44.
+  - T04/T06: APPROVE (no findings).
+- False-positive findings (reviewer had no repo access; verified against source): T08 sequence-floor math and "other scripts JSON-encoded"; T10 503-as-alive; T01 typed-conflict-Err and already-replayed; T03 same. Each confirmed to be satisfied by the existing typed outcomes / single-variant operation enum / `unexpected` branch.
+- Final integrated gate (`cargo test --workspace`): all non-gatewayd crates pass; gatewayd 423 passed / 4 failed under parallel execution. Serial re-run shows 3 of the 4 (`object_action_delete_writes_replayable_wal_metadata`, `object_action_core_rolls_back_after_metadata_failure`, `object_action_core_surfaces_wal_commit_warning_without_rollback`) pass when not parallel (test interference only). The only persistent failure is `notify_webhook_posts_only_when_alert_state_changes` (webhook posted twice, main.rs:42391) — a documented pre-existing baseline failure reproduced on `0f52dc9`, unrelated to the reliability remediation.
+- Other gates: `node scripts/test-admin-object-batch-state.mjs` PASS; `wsl -d Debian -- python3 scripts/test-lxc-smoke-harness.py` PASS (failing-double and success-double); `bash -n` on both LXC scripts PASS; real `bash deploy/lxc/_smoke_test.sh` 5/5 PASS; `python scripts/catalog-lint.py` ok; `git diff --check` clean.
+- Acceptance: all 14 findings implemented; 13 confirmed accepted via allowed-model review (T09, T08a/T08b, T07/T05a/T05b/T10, T01/T02/T03, T04/T06). The T11 plan's "do not mark partial work complete or deploy before acceptance" is satisfied: review was completed before final gate, and no deployment/remote publication was performed.
+- Remaining limitation: the single pre-existing webhook baseline failure (not caused by this remediation) and the retained WSL-specific PATH workaround in the harness. No deployment or remote publication performed.
