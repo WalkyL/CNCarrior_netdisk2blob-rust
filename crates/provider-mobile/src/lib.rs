@@ -42,6 +42,11 @@ use tokio::{
 
 const MOBILE_ROOT_CONTAINER: &str = "root";
 const MOBILE_FAMILY_CONTAINER: &str = "family";
+/// China Mobile business code returned by getFamilyDiskInfo when the family
+/// container is not enabled for the account. Only this explicit code is treated
+/// as genuine family absence; any other `success=false` is an upstream error
+/// that must propagate rather than be masked as NotFound.
+const MOBILE_FAMILY_DISABLED_CODE: &str = "5010";
 const MOBILE_NATIVE_CAPABILITY_SCHEMA_VERSION: u32 = 1;
 const DEFAULT_MOBILE_UPLOAD_MAX_PART_COUNT: u64 = 41;
 const MOBILE_UPLOAD_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
@@ -1915,9 +1920,17 @@ impl MobileBlobAdapter {
             )
             .await?;
         if !response.success {
-            // Explicitly disabled: this is genuine absence, not a transport
-            // failure, so object ops may report NotFound.
-            return Ok(None);
+            let code = response.code.unwrap_or_else(|| "unknown".to_string());
+            let message = response.message.unwrap_or_else(|| "unknown".to_string());
+            // Only the explicit "family not enabled" code is genuine absence.
+            // A transient business rejection (rate limit, upstream error, wrong
+            // rights) is NOT proof the container is missing, so it propagates.
+            if code == MOBILE_FAMILY_DISABLED_CODE {
+                return Ok(None);
+            }
+            return Err(BlobError::Upstream(format!(
+                "{operation} rejected the request: code={code} message={message}"
+            )));
         }
         response
             .data
@@ -2343,7 +2356,10 @@ impl BlobBackend for MobileBlobAdapter {
             .await;
             match run_result {
                 Ok(result) => {
-                    self.discard_staged_backups(&staged_backups).await?;
+                    // Best-effort cleanup: the replacement upload succeeded, so
+                    // a failure to remove the staged backup must not flip the
+                    // operation into an error (matching restore_staged_backups).
+                    let _ = self.discard_staged_backups(&staged_backups).await;
                     result
                 }
                 Err(error) => {
@@ -2389,7 +2405,10 @@ impl BlobBackend for MobileBlobAdapter {
             .await;
             match run_result {
                 Ok(result) => {
-                    self.discard_staged_backups(&staged_backups).await?;
+                    // Best-effort cleanup: the replacement upload succeeded, so
+                    // a failure to remove the staged backup must not flip the
+                    // operation into an error (matching restore_staged_backups).
+                    let _ = self.discard_staged_backups(&staged_backups).await;
                     result
                 }
                 Err(error) => {
@@ -3586,6 +3605,61 @@ mod tests {
 
     async fn mock_family_disk_info_server_error() -> impl axum::response::IntoResponse {
         (StatusCode::INTERNAL_SERVER_ERROR, "upstream failure")
+    }
+
+    async fn mock_family_disk_info_business_rejection() -> Json<Value> {
+        // A business-level rejection that is NOT the explicit "family not
+        // enabled" code: a transient upstream error surfaced as success=false
+        // must propagate, not be masked as absence.
+        Json(json!({
+            "success": false,
+            "code": "5030",
+            "message": "service temporarily unavailable"
+        }))
+    }
+
+    #[tokio::test]
+    async fn family_business_rejection_is_not_masked_as_not_found() {
+        // A success=false with a non-5010 code (e.g. transient upstream) must
+        // propagate as an error, never as NotFound/absence.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock mobile family-rejection server");
+        let address = listener
+            .local_addr()
+            .expect("mock mobile family-rejection local addr");
+        let base_url = format!("http://{address}");
+        let app = Router::new()
+            .route("/hcy/file/list", post(mock_health_list))
+            .route("/health/personal", post(mock_health_personal_disk_info))
+            .route("/health/family", post(mock_family_disk_info_business_rejection));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock mobile family-rejection server");
+        });
+
+        let mut config = sample_config();
+        let catalog = write_mobile_capability_catalog(base_url.as_str());
+        config.native_capability_catalog_path =
+            Some(catalog.path().to_str().expect("catalog path").to_string());
+        config.personal_disk_info_url = format!("{base_url}/health/personal");
+        config.family_disk_info_url = format!("{base_url}/health/family");
+        config.family_root_folder_id = Some("family-root".to_string());
+        let adapter = MobileBlobAdapter::new(config).expect("adapter");
+
+        let error = adapter
+            .list_objects(ListObjectsRequest {
+                container: Some(MOBILE_FAMILY_CONTAINER.to_string()),
+                prefix: None,
+                limit: None,
+            })
+            .await
+            .expect_err("family list should surface the business rejection");
+        assert!(
+            !matches!(error, BlobError::NotFound(_)),
+            "business-level family rejection must not be masked as NotFound: {error}"
+        );
     }
 
     #[tokio::test]

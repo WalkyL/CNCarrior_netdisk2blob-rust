@@ -39,6 +39,39 @@ def make_failing_smoke(tmp: Path) -> Path:
     return smoke
 
 
+def make_success_smoke(tmp: Path) -> Path:
+    """A deterministic success double that behaves like the real smoke.sh.
+
+    Emulates the smoke.sh contract so every harness case matches its expected
+    outcome: liveness (/healthz != 200) is a hard failure, and a degraded
+    readiness (/readyz != 200) only fails in strict mode
+    (CCBG_SMOKE_REQUIRE_READY=1). This lets the harness's healthy/degraded cases
+    pass without substituting for the real matrix (which the harness runs
+    against its own mock)."""
+    smoke = tmp / "smoke.sh"
+    smoke.write_text(
+        "#!/usr/bin/env bash\n"
+        'endpoint="${CCBG_SMOKE_ENDPOINT:-http://127.0.0.1:61080}"\n'
+        'metrics="${CCBG_SMOKE_METRICS_ENDPOINT:-${endpoint}}"\n'
+        'require_ready="${CCBG_SMOKE_REQUIRE_READY:-0}"\n'
+        'healthz="$(curl -sS -o /dev/null -w \'%{http_code}\' --max-time 5 "${endpoint}/healthz" 2>/dev/null || echo "000")"\n'
+        'if [ "${healthz}" != "200" ]; then\n'
+        '  echo "LIVENESS FAIL: /healthz ${healthz}" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'readyz="$(curl -sS -o /dev/null -w \'%{http_code}\' --max-time 5 "${metrics}/readyz" 2>/dev/null || echo "000")"\n'
+        'if [ "${readyz}" != "200" ] && [ "${require_ready}" = "1" ]; then\n'
+        '  echo "READINESS FAIL: /readyz ${readyz}" >&2\n'
+        "  exit 1\n"
+        "fi\n"
+        'echo "PASS: healthy (readyz=${readyz}, require_ready=${require_ready})"\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    smoke.chmod(0o755)
+    return smoke
+
+
 def run_harness(tmp: Path) -> tuple[int, str]:
     harness = tmp / "_smoke_test.sh"
     shutil.copy(HARNESS, harness)
@@ -61,6 +94,9 @@ def main() -> int:
         print(f"harness not found: {HARNESS}", file=sys.stderr)
         return 2
 
+    # Scenario 1: a deliberately failing smoke.sh double must produce a nonzero
+    # harness exit (finding #14). With the buggy harness FAIL is printed but the
+    # exit status is 0, so this assertion fails until the harness propagates it.
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         make_failing_smoke(tmp)
@@ -77,6 +113,26 @@ def main() -> int:
         return 1
 
     print(f"OK: harness propagated FAIL as exit {rc}")
+
+    # Scenario 2: a deterministic success double selected by endpoint/strict
+    # flag must not trip a false failure in the harness. The harness runs the
+    # success double for its healthy/degraded cases; any harness failure here
+    # (nonzero exit) means it falsely failed a healthy double.
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        make_success_smoke(tmp)
+        rc, output = run_harness(tmp)
+
+    if "RESULT: PASS" not in output:
+        print("harness did not report PASS for a healthy double", file=sys.stderr)
+        print(output, file=sys.stderr)
+        return 1
+    if rc != 0:
+        print(f"harness exited {rc} for a healthy double (false positive)", file=sys.stderr)
+        print(output, file=sys.stderr)
+        return 1
+
+    print("OK: harness passed the deterministic success double")
     return 0
 
 

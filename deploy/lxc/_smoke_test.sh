@@ -132,14 +132,15 @@ run_case "degraded (readyz=503, ListBuckets=500)" 503 500 0 0
 if ! start_mock; then
   echo "FAIL: dead (no listener) mock startup" >&2
   FAILURES=$((FAILURES + 1))
+else
+  CCBG_SMOKE_ENDPOINT="http://127.0.0.1:1" \
+  CCBG_SMOKE_METRICS_ENDPOINT="http://127.0.0.1:1" \
+  CCBG_SMOKE_REQUIRE_READY="0" \
+  bash "${SMOKE}" >"${WORK}/out.txt" 2>&1
+  rc=$?
+  stop_mock
+  if [ "${rc}" -eq 1 ]; then echo "PASS: dead (no listener) exit=1"; else echo "FAIL: dead exit=${rc}"; sed 's/^/    /' "${WORK}/out.txt"; FAILURES=$((FAILURES + 1)); fi
 fi
-CCBG_SMOKE_ENDPOINT="http://127.0.0.1:1" \
-CCBG_SMOKE_METRICS_ENDPOINT="http://127.0.0.1:1" \
-CCBG_SMOKE_REQUIRE_READY="0" \
-bash "${SMOKE}" >"${WORK}/out.txt" 2>&1
-rc=$?
-stop_mock
-if [ "${rc}" -eq 1 ]; then echo "PASS: dead (no listener) exit=1"; else echo "FAIL: dead exit=${rc}"; sed 's/^/    /' "${WORK}/out.txt"; FAILURES=$((FAILURES + 1)); fi
 
 # 4. Strict mode + degraded -> exit 1
 run_case "strict + degraded (readyz=503, require_ready=1)" 503 500 1 1

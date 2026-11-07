@@ -46,7 +46,14 @@ else
 fi
 
 # --- Readiness: /readyz is reported; 503 is a valid degraded state ------------
-readyz_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -H "x-api-key: ${control_api_key}" "${metrics_endpoint}/readyz" 2>/dev/null || echo "000")"
+# Only attach the x-api-key header when a control API key is configured; an
+# empty key must omit the header (an empty x-api-key: is not the same as no
+# header and can be rejected as 401 by some servers).
+readyz_args=(--max-time 5)
+if [ -n "${control_api_key}" ]; then
+  readyz_args+=(-H "x-api-key: ${control_api_key}")
+fi
+readyz_status="$(curl -sS -o /dev/null -w '%{http_code}' "${readyz_args[@]}" "${metrics_endpoint}/readyz" 2>/dev/null || echo "000")"
 case "${readyz_status}" in
   200)
     echo "READINESS: ready (readyz 200)"
