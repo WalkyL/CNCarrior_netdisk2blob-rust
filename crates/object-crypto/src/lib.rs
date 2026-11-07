@@ -184,13 +184,18 @@ pub fn encrypt_upload(
             expected_plaintext_size: metadata.plaintext_size,
             consumed_plaintext: 0,
             terminal_error: None,
+            terminated: false,
         },
         |mut state| async move {
+            if state.terminated {
+                return None;
+            }
             if let Some(header) = state.header.take() {
                 return Some((Ok(header), state));
             }
 
             if let Some(error_msg) = state.terminal_error.take() {
+                state.terminated = true;
                 return Some((Err(BlobError::BodyStream(error_msg)), state));
             }
 
@@ -211,6 +216,7 @@ pub fn encrypt_upload(
                         Ok(_) | Err(_) => {
                             let msg = "encrypted plaintext exceeds declared size".to_string();
                             state.terminal_error = Some(msg.clone());
+                            state.terminated = true;
                             return Some((Err(BlobError::BodyStream(msg)), state));
                         }
                     }
@@ -248,11 +254,15 @@ pub fn encrypt_upload(
                     if state.consumed_plaintext != state.expected_plaintext_size {
                         let msg = "encrypted plaintext is shorter than declared size".to_string();
                         state.terminal_error = Some(msg.clone());
+                        state.terminated = true;
                         return Some((Err(BlobError::BodyStream(msg)), state));
                     }
                     None
                 }
-                Err(error) => Some((Err(error), state)),
+                Err(error) => {
+                    state.terminated = true;
+                    Some((Err(error), state))
+                }
             }
         },
     );
@@ -840,6 +850,7 @@ struct EncryptStreamState {
     expected_plaintext_size: u64,
     consumed_plaintext: u64,
     terminal_error: Option<String>,
+    terminated: bool,
 }
 
 struct DecryptStreamState {
@@ -1156,6 +1167,73 @@ mod tests {
         assert!(result.is_err());
         let error_message = format!("{:?}", result.unwrap_err());
         assert!(error_message.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn encrypt_terminal_length_error_emitted_exactly_once() {
+        use futures_util::StreamExt;
+        let request = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 10,
+            logical_content_type: None,
+        };
+        // Plaintext shorter than declared size -> terminal error at EOF.
+        let upload = encrypt_upload(
+            ObjectBody::from_stream(stream::iter([Ok(Bytes::from_static(b"hello"))])),
+            request,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let mut items = upload.body.into_stream();
+        let mut error_count = 0usize;
+        let mut observed = 0usize;
+        while observed < 64 {
+            match items.next().await {
+                Some(Err(_)) => error_count += 1,
+                Some(Ok(_)) => {}
+                None => break,
+            }
+            observed += 1;
+        }
+        assert_eq!(error_count, 1, "terminal error must be emitted exactly once");
+    }
+
+    #[tokio::test]
+    async fn encrypt_source_error_emitted_exactly_once() {
+        use futures_util::StreamExt;
+        let request = EncryptRequest {
+            profile_id: "profile".to_string(),
+            key_id: "key".to_string(),
+            algorithm_preference: AlgorithmPreference::Auto,
+            chunk_plaintext_bytes: 1024,
+            plaintext_size: 6,
+            logical_content_type: None,
+        };
+        let source_stream = stream::iter([
+            Ok(Bytes::from_static(b"hello")),
+            Err(BlobError::BodyStream("boom".to_string())),
+        ]);
+        let upload = encrypt_upload(
+            ObjectBody::from_stream(source_stream),
+            request,
+            [0x22; 32],
+        )
+        .expect("encryption should initialize");
+        let mut items = upload.body.into_stream();
+        let mut error_count = 0usize;
+        let mut observed = 0usize;
+        while observed < 64 {
+            match items.next().await {
+                Some(Err(_)) => error_count += 1,
+                Some(Ok(_)) => {}
+                None => break,
+            }
+            observed += 1;
+        }
+        assert_eq!(error_count, 1, "source error must be emitted exactly once");
     }
 
     #[tokio::test]
