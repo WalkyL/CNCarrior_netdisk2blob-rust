@@ -1,0 +1,21 @@
+{
+  "admin/ccbg/": {
+    "title": "CCBG Gateway",
+    "order": 80,
+    "action": {
+      "type": "firstchild"
+    },
+    "depends": {
+      "acl": [ "luci-app-ccbg" ]
+    }
+  },
+
+  "admin/ccbg/overview": {
+    "title": "Overview",
+    "order": 1,
+    "action": {
+      "type": "view",
+      "path": "ccbg/admin"
+    }
+  }
+}

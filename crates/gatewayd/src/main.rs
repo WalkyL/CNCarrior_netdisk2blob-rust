@@ -12,7 +12,7 @@ use std::{
     env, fs,
     future::Future,
     io::{BufReader, BufWriter, Cursor, Read, Write},
-    net::SocketAddr,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path as FsPath, PathBuf},
     sync::{
         Arc, Mutex,
@@ -4139,6 +4139,46 @@ fn validate_control_plane_api_exposure(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
+/// Warn (but do not fail) on a likely plain-HTTP iframe deployment where the
+/// session cookie is still marked `Secure`.
+///
+/// `CCBG_ADMIN_COOKIE_SECURE` defaults to `true`. When the operator configures
+/// `CCBG_ADMIN_FRAME_ANCESTORS` for the LuCI embed and one of the ancestors is
+/// an `http://` origin, the most common intent is a plain-HTTP LAN deployment
+/// served by uhttpd — in which case a `Secure` cookie would not be stored or
+/// sent, and Admin login inside the iframe would silently fail. This is
+/// heuristic, advisory advice, not a proof: an HTTPS Admin page embedded from
+/// an HTTP LuCI page is legitimate and needs no change. The warning therefore
+/// asks the operator to confirm the Admin transport rather than asserting a
+/// failure. When `admin_cookie_secure=false`, the transport is plainly HTTP and
+/// no warning is needed.
+///
+/// Returns the warning text for the caller to emit, or `None` when consistent.
+fn admin_frame_ancestors_cookie_warning(config: &AppConfig) -> Option<String> {
+    let origins = config.admin_frame_ancestors.as_ref()?;
+    if origins.is_empty() {
+        return None;
+    }
+    if !config.admin_cookie_secure {
+        return None;
+    }
+    let has_http_ancestor = origins.iter().any(|origin| origin.starts_with("http://"));
+    if has_http_ancestor {
+        Some(
+            "CCBG_ADMIN_FRAME_ANCESTORS includes an http:// origin while \
+             CCBG_ADMIN_COOKIE_SECURE=true (the default). If the Admin service is \
+             served over plain HTTP (the common uhttpd LAN case), a Secure session \
+             cookie will not be sent and Admin login in the iframe will fail; set \
+             CCBG_ADMIN_COOKIE_SECURE=false for that deployment. If the Admin \
+             service is served over HTTPS, keep the cookie Secure — this warning \
+             is advisory only."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
+
 fn snapshot_data_plane_rate_limiter(
     state: &AppState,
     now_unix_ms: u64,
@@ -4855,6 +4895,13 @@ struct AppConfig {
     admin_password_plain: Option<String>,
     admin_session_ttl_seconds: u64,
     admin_cookie_secure: bool,
+    /// When set, the Admin SPA is allowed to be embedded by the listed
+    /// frame ancestors (each a canonical `scheme://host[:port]` origin parsed
+    /// and validated at startup by `parse_frame_ancestors`). When unset
+    /// (default), the Admin SPA keeps the hardened `frame-ancestors 'none'` +
+    /// `X-Frame-Options: DENY` behavior. The LuCI embed scenario (OpenWRT) sets
+    /// this to the router origin (e.g. `http://192.168.1.1`).
+    admin_frame_ancestors: Option<Vec<String>>,
     control_api_key: Option<String>,
     topology: TopologyPolicy,
     s3_access_key_id: String,
@@ -5981,6 +6028,7 @@ admin_session_ttl_seconds: env_u64(
             )
             .max(300),
             admin_cookie_secure: env_bool("CCBG_ADMIN_COOKIE_SECURE", true),
+            admin_frame_ancestors: parse_frame_ancestors(env_opt("CCBG_ADMIN_FRAME_ANCESTORS"))?,
             control_api_key: env_opt_or_file("CCBG_CONTROL_API_KEY", "CCBG_CONTROL_API_KEY_FILE"),
             topology,
             s3_access_key_id: env_or("CCBG_S3_ACCESS_KEY_ID", "ccbg"),
@@ -6059,6 +6107,328 @@ fn validate_port_range(port: u16) -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!("CCBG_BIND_ADDR port must be between 60000 and 65534, got {port}")
+    }
+}
+
+/// A validated, canonicalized origin (`scheme://host[:port]`).
+///
+/// This is the single representation used for the CSP `frame-ancestors`
+/// directive, the Admin CORS allow-list, and the CSRF same-origin comparison.
+/// It is produced only by [`OriginParts::parse`], which rejects anything that
+/// is not a strict web origin: wildcards, CSP keyword sources, bare
+/// scheme-source, path/query/fragment, userinfo, whitespace and control
+/// characters, invalid ports, invalid or unbracketed IPv6 literals, and host
+/// labels containing characters that are not part of a browser-serialized host
+/// (so a value can never inject an extra CSP directive). The default port for
+/// the scheme is dropped so that `http://host:80` and `http://host` serialize
+/// identically, matching how a browser serializes an `Origin` header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OriginParts {
+    scheme: String,
+    host: String,
+    /// Effective non-default port; `None` when the scheme's default is used.
+    port: Option<u16>,
+}
+
+impl OriginParts {
+    /// Parse and canonicalize an origin string, returning a normalized origin.
+    fn parse(raw: &str) -> Result<Self> {
+        // Reject control characters on the raw string BEFORE trimming: a
+        // trailing tab/newline must not be silently stripped, since such bytes
+        // would corrupt the CSP header and are never present in a real Origin.
+        if raw.chars().any(|c| c.is_control()) {
+            anyhow::bail!("control character in origin entry: {raw:?}");
+        }
+        // Reject surrounding whitespace before trimming (an origin never has
+        // leading/trailing spaces) and internal whitespace after trimming.
+        if raw != raw.trim() {
+            anyhow::bail!("surrounding whitespace in origin entry: {raw:?}");
+        }
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("empty origin entry");
+        }
+        // A space (not a control char) is likewise never in a real Origin and
+        // would corrupt the CSP header; reject it too.
+        if trimmed.chars().any(|c| c.is_whitespace()) {
+            anyhow::bail!("whitespace in origin entry: {raw:?}");
+        }
+        if trimmed.contains('*') {
+            anyhow::bail!("wildcard '*' is not allowed in origin entry: {trimmed}");
+        }
+        if trimmed.starts_with('\'') || trimmed.ends_with('\'') {
+            anyhow::bail!(
+                "CSP keyword source is not allowed in origin entry: {trimmed}"
+            );
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let (scheme, rest) = lower.split_once("://").ok_or_else(|| {
+            anyhow::anyhow!("expected scheme://host[:port] in origin entry: {trimmed}")
+        })?;
+        if scheme != "http" && scheme != "https" {
+            anyhow::bail!(
+                "scheme must be http or https in origin entry: {trimmed}"
+            );
+        }
+        // No path, query, fragment, or userinfo.
+        if rest.contains('/') || rest.contains('?') || rest.contains('#') || rest.contains('@') {
+            anyhow::bail!(
+                "origin entry must not contain a path, query, fragment, or userinfo: {trimmed}"
+            );
+        }
+        if rest.is_empty() {
+            anyhow::bail!("missing host in origin entry: {trimmed}");
+        }
+
+        let (host, port) = split_origin_host_port(rest)?;
+        if port == Some(0) {
+            anyhow::bail!("port must be non-zero in origin entry: {trimmed}");
+        }
+        let default_port = default_port_for_scheme(scheme);
+        let port = if port == Some(default_port) {
+            None
+        } else {
+            port
+        };
+        Ok(OriginParts {
+            scheme: scheme.to_string(),
+            host,
+            port,
+        })
+    }
+
+    /// Serialize back to `scheme://host[:port]` (default port omitted).
+    fn to_origin_string(&self) -> String {
+        match self.port {
+            Some(port) => format!("{}://{}:{}", self.scheme, self.host, port),
+            None => format!("{}://{}", self.scheme, self.host),
+        }
+    }
+
+    /// True when `self` has the same scheme, host, and effective port as
+    /// `other` (an incoming `Origin` header parsed the same way).
+    fn same_origin(&self, other: &OriginParts) -> bool {
+        self.scheme == other.scheme
+            && self.host == other.host
+            && self.effective_port() == other.effective_port()
+    }
+
+    fn effective_port(&self) -> u16 {
+        self.port.unwrap_or_else(|| default_port_for_scheme(&self.scheme))
+    }
+}
+
+fn default_port_for_scheme(scheme: &str) -> u16 {
+    if scheme == "https" {
+        443
+    } else {
+        80
+    }
+}
+
+/// Serialize an IPv6 address the way a WHATWG URL parser does, which is what a
+/// browser's `Origin`/`Host` serialization produces.
+///
+/// Rust's `Ipv6Addr::Display` renders IPv4-compatible and IPv4-mapped addresses
+/// with embedded dotted-decimal notation (`[::ffff:192.0.2.1]`), but browsers
+/// always render those segments as hex (`[::ffff:c000:201]`). Because the CORS
+/// allow-list compares configured origins byte-for-byte against a browser's
+/// `Origin` header, a canonical origin built from Rust's `Display` would never
+/// match the browser's actual serialization. This function implements RFC 5952
+/// compression with lowercase hex and a pure-hex tail, matching WHATWG.
+fn whatwg_ipv6(addr: Ipv6Addr) -> String {
+    let segs = addr.segments();
+    // RFC 5952: compress the longest run of >=2 zero segments; on a tie, the
+    // first such run wins (WHATWG picks the leftmost longest run).
+    let (mut best_start, mut best_len) = (0usize, 0usize);
+    let mut i = 0usize;
+    while i < 8 {
+        if segs[i] == 0 {
+            let start = i;
+            while i < 8 && segs[i] == 0 {
+                i += 1;
+            }
+            let len = i - start;
+            if len > best_len {
+                best_start = start;
+                best_len = len;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = String::new();
+    if best_len >= 2 {
+        for (idx, seg) in segs.iter().take(best_start).enumerate() {
+            if idx > 0 {
+                out.push(':');
+            }
+            out.push_str(&format!("{seg:x}"));
+        }
+        out.push_str("::");
+        for seg in segs.iter().skip(best_start + best_len) {
+            if !out.ends_with("::") {
+                out.push(':');
+            }
+            out.push_str(&format!("{seg:x}"));
+        }
+    } else {
+        for (idx, seg) in segs.iter().enumerate() {
+            if idx > 0 {
+                out.push(':');
+            }
+            out.push_str(&format!("{seg:x}"));
+        }
+    }
+    out
+}
+
+/// True when a host label looks like a WHATWG IPv4 *number* form (a
+/// single decimal/hex integer, or a dot-separated mixture of decimal/hex
+/// parts) rather than a DNS hostname. Such forms are how a browser parses
+/// addresses like `0x7f000001`, `127.1`, `010.0.0.1`, or `127.0.0x.1`; because
+/// the browser resolves them to a canonical dotted-quad, a config entry written
+/// in one of these forms can never match the browser's serialized `Origin`.
+fn is_whatwg_ipv4_number_host(host: &str) -> bool {
+    if host.is_empty() || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+    host.split('.').all(|part| {
+        if part.is_empty() {
+            // A browser rejects interior empty parts (e.g. `1..2`), so a host
+            // with one is not a valid WHATWG IPv4 number; treat it as a
+            // hostname-shaped label that we can still validate/compare.
+            return false;
+        }
+        if let Some(hex) = part
+            .strip_prefix("0x")
+            .or_else(|| part.strip_prefix("0X"))
+        {
+            // A bare `0x`/`0X` component parses as hex zero (WHATWG treats the
+            // empty remainder after the prefix as 0), so it IS an IPv4-number
+            // component and must not slip past the canonical-quad check.
+            hex.chars().all(|c| c.is_ascii_hexdigit())
+        } else {
+            part.chars().all(|c| c.is_ascii_digit())
+        }
+    })
+}
+
+/// Split a validated authority (`host[:port]`) into (host, port), handling a
+/// bracketed IPv6 literal. The caller must have already rejected path/query/
+/// fragment/userinfo; this function only validates the authority shape.
+fn split_origin_host_port(authority: &str) -> Result<(String, Option<u16>)> {
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let (addr, remainder) = bracketed.split_once(']').ok_or_else(|| {
+            anyhow::anyhow!("unterminated IPv6 literal in origin entry: {authority}")
+        })?;
+        if addr.is_empty() {
+            anyhow::bail!("empty IPv6 literal in origin entry: {authority}");
+        }
+        if addr.parse::<Ipv6Addr>().is_err() {
+            anyhow::bail!("invalid IPv6 literal in origin entry: {authority}");
+        }
+        let port = if remainder.is_empty() {
+            None
+        } else {
+            let port_str = remainder.strip_prefix(':').ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unexpected characters after IPv6 literal in origin entry: {authority}"
+                )
+            })?;
+            Some(port_str.parse::<u16>().map_err(|_| {
+                anyhow::anyhow!("invalid port in origin entry: {authority}")
+            })?)
+        };
+        // Canonicalize the IPv6 literal with WHATWG-compatible serialization so
+        // the configured origin matches the browser's `Origin`/`Host` form
+        // (IPv4-mapped/compatible addresses stay pure-hex, never dotted-decimal).
+        let canonical = addr
+            .parse::<Ipv6Addr>()
+            .map(|value| format!("[{}]", whatwg_ipv6(value)))
+            .map_err(|_| anyhow::anyhow!("invalid IPv6 literal in origin entry: {authority}"))?;
+        return Ok((canonical, port));
+    }
+    if authority.contains(':') {
+        let mut parts = authority.rsplitn(2, ':');
+        let port_part = parts.next().unwrap_or("");
+        let host_part = parts.next().unwrap_or("");
+        if host_part.is_empty() || host_part.contains(':') {
+            anyhow::bail!(
+                "IPv6 literals must be bracketed in origin entry: {authority}"
+            );
+        }
+        validate_host_label(host_part, authority)?;
+        let port = port_part.parse::<u16>().map_err(|_| {
+            anyhow::anyhow!("invalid port in origin entry: {authority}")
+        })?;
+        Ok((host_part.to_string(), Some(port)))
+    } else {
+        validate_host_label(authority, authority)?;
+        Ok((authority.to_string(), None))
+    }
+}
+
+/// Validate a non-bracketed host label.
+///
+/// A browser serializes a host as an IPv4 address, a bracketed IPv6 literal, or
+/// an ASCII/IDNA domain label. We accept only ASCII host characters that cannot
+/// break out of a CSP source list: alphanumerics, `.`, `-`, and `_`. This
+/// rejects CSP delimiters (`;`), commas, backslashes, stray brackets, and any
+/// other control or non-ASCII byte, so an ancestor origin can never inject an
+/// extra CSP directive or an unbounded host string. DNS hostnames are matched
+/// without canonicalization (a browser normalizes case, which we already lower);
+/// an underscore is tolerated for internal/legacy hostnames. A dotted-numeric
+/// host is validated as a canonical dotted-quad IPv4 so a noncanonical form like
+/// `127.1` (which a browser resolves to `127.0.0.1`) is rejected rather than
+/// silently diverging from the browser's serialized Origin.
+fn validate_host_label(host: &str, authority: &str) -> Result<()> {
+    if host.is_empty() {
+        anyhow::bail!("missing host in origin entry: {authority}");
+    }
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    {
+        anyhow::bail!("invalid host in origin entry: {authority}");
+    }
+    if host.starts_with('.') || host.ends_with('.') {
+        anyhow::bail!("host must not start or end with a dot in origin entry: {authority}");
+    }
+    // A host that a WHATWG parser treats as an IPv4 *number* (single decimal or
+    // hex integer, or a dot-separated mixture of decimal/hex parts) must be a
+    // canonical dotted-quad. A browser resolves `0x7f000001`, `127.1`,
+    // `010.0.0.1`, or `2130706433` to a canonical IPv4 address, so accepting
+    // the shorthand verbatim would silently diverge from the browser's
+    // serialized Origin (astra r4 #1).
+    if is_whatwg_ipv4_number_host(host) && host.parse::<Ipv4Addr>().is_err() {
+        anyhow::bail!(
+            "IPv4 host must be a canonical dotted-quad in origin entry: {authority}"
+        );
+    }
+    Ok(())
+}
+
+/// Parse the `CCBG_ADMIN_FRAME_ANCESTORS` config value into a validated list of
+/// canonical origin strings. Any invalid entry aborts configuration (rather
+/// than being silently dropped), so a typo cannot silently weaken or disable
+/// the `frame-ancestors` directive. An unset or blank value yields `None`.
+fn parse_frame_ancestors(raw: Option<String>) -> Result<Option<Vec<String>>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut origins = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        origins.push(OriginParts::parse(entry)?.to_origin_string());
+    }
+    if origins.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(origins))
     }
 }
 
@@ -7274,6 +7644,9 @@ async fn main() -> Result<()> {
         config.onedrive.enabled,
     )?;
     config.topology = control_plane.topology.clone();
+    if let Some(warning) = admin_frame_ancestors_cookie_warning(&config) {
+        warn!("{warning}");
+    }
     let config = Arc::new(config);
     validate_startup_provider_catalogs(&config)
         .context("failed startup provider catalog validation")?;
@@ -7752,14 +8125,13 @@ async fn spawn_admin_services(state: AppState) -> Result<()> {
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(
             state.clone(),
+            require_admin_csrf_safe,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
             capture_admin_client_ip,
         ))
-        .layer(CorsLayer::new()
-            .allow_origin(AllowOrigin::mirror_request())
-            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
-            .allow_headers([AUTHORIZATION, CONTENT_TYPE, HeaderName::from_static("x-admin-api-version")])
-            .allow_credentials(true)
-        )
+        .layer(admin_cors(state.config.admin_frame_ancestors.as_deref()))
         .layer(gateway_http_trace_layer!());
     tokio::spawn(async move {
         if let Err(error) = axum::serve(
@@ -8063,6 +8435,7 @@ fn test_app_config() -> AppConfig {
         admin_password_plain: Some("password".to_string()),
         admin_session_ttl_seconds: DEFAULT_ADMIN_SESSION_TTL_SECONDS,
         admin_cookie_secure: true,
+        admin_frame_ancestors: None,
         control_api_key: None,
         topology: TopologyPolicy::from_input(TopologyInput {
             primary_provider: ProviderId::Unicom,
@@ -8154,6 +8527,300 @@ mod admin_cookie_tests {
         };
         let header = expire_cookie_header(&config, ADMIN_SESSION_COOKIE);
         assert!(!header.contains("Secure"));
+    }
+}
+
+#[cfg(test)]
+mod admin_frame_ancestors_tests {
+    use super::*;
+
+    #[test]
+    fn origin_parse_accepts_plain_origin() {
+        assert_eq!(
+            OriginParts::parse("http://192.168.1.1").unwrap().to_origin_string(),
+            "http://192.168.1.1"
+        );
+    }
+
+    #[test]
+    fn origin_parse_lowercases_scheme_and_host() {
+        assert_eq!(
+            OriginParts::parse("HTTP://192.168.1.1").unwrap().to_origin_string(),
+            "http://192.168.1.1"
+        );
+        assert_eq!(
+            OriginParts::parse("https://EXAMPLE.com:8443")
+                .unwrap()
+                .to_origin_string(),
+            "https://example.com:8443"
+        );
+    }
+
+    #[test]
+    fn origin_parse_drops_default_port() {
+        // A browser serializes an Origin header without the default port, so the
+        // configured ancestor must canonicalize identically.
+        assert_eq!(
+            OriginParts::parse("http://192.168.1.1:80")
+                .unwrap()
+                .to_origin_string(),
+            "http://192.168.1.1"
+        );
+        assert_eq!(
+            OriginParts::parse("https://router.lan:443")
+                .unwrap()
+                .to_origin_string(),
+            "https://router.lan"
+        );
+    }
+
+    #[test]
+    fn origin_parse_accepts_non_default_port_and_ipv6() {
+        assert_eq!(
+            OriginParts::parse("http://192.168.1.1:61081")
+                .unwrap()
+                .to_origin_string(),
+            "http://192.168.1.1:61081"
+        );
+        assert_eq!(
+            OriginParts::parse("http://[::1]:61081")
+                .unwrap()
+                .to_origin_string(),
+            "http://[::1]:61081"
+        );
+    }
+
+    #[test]
+    fn origin_parse_rejects_wildcard() {
+        assert!(OriginParts::parse("*").is_err());
+        assert!(OriginParts::parse("http://*").is_err());
+    }
+
+    #[test]
+    fn origin_parse_rejects_keyword_sources() {
+        assert!(OriginParts::parse("'self'").is_err());
+        assert!(OriginParts::parse("'none'").is_err());
+    }
+
+    #[test]
+    fn origin_parse_rejects_scheme_source_path_and_userinfo() {
+        assert!(OriginParts::parse("http:").is_err());
+        assert!(OriginParts::parse("http://192.168.1.1/").is_err());
+        assert!(OriginParts::parse("http://192.168.1.1/evil").is_err());
+        assert!(OriginParts::parse("http://192.168.1.1?x=1").is_err());
+        assert!(OriginParts::parse("http://user@192.168.1.1").is_err());
+    }
+
+    #[test]
+    fn origin_parse_rejects_control_and_whitespace() {
+        // A newline/control character must never reach the CSP header (astra #1).
+        assert!(OriginParts::parse("http://router.lan\nattacker.example").is_err());
+        assert!(OriginParts::parse("http://router.lan\t").is_err());
+        assert!(OriginParts::parse("http://router.lan ").is_err());
+    }
+
+    #[test]
+    fn origin_parse_rejects_bad_port_bad_scheme_and_bad_ipv6() {
+        assert!(OriginParts::parse("http://192.168.1.1:0").is_err());
+        assert!(OriginParts::parse("http://192.168.1.1:99999").is_err());
+        assert!(OriginParts::parse("ftp://192.168.1.1").is_err());
+        assert!(OriginParts::parse("192.168.1.1").is_err());
+        assert!(OriginParts::parse("http://[garbage]").is_err());
+        assert!(OriginParts::parse("http://2001:db8::1").is_err());
+    }
+
+    #[test]
+    fn origin_parse_rejects_csp_delimiters_and_non_host_chars() {
+        // A CSP delimiter or stray bracket must never inject an extra directive.
+        assert!(OriginParts::parse("http://router.lan;upgrade-insecure-requests").is_err());
+        assert!(OriginParts::parse("http://router.lan,").is_err());
+        assert!(OriginParts::parse("http://router.lan\\").is_err());
+        assert!(OriginParts::parse("http://router]").is_err());
+        assert!(OriginParts::parse("http://[router.lan]").is_err());
+        // Non-ASCII (Unicode/IDNA) is not a browser-serialized host we support.
+        assert!(OriginParts::parse("http://例え.jp").is_err());
+    }
+
+    #[test]
+    fn origin_parse_accepts_hostnames_and_underscore() {
+        assert_eq!(
+            OriginParts::parse("https://router.lan:8443").unwrap().to_origin_string(),
+            "https://router.lan:8443"
+        );
+        // An underscore is tolerated for internal hostnames.
+        assert_eq!(
+            OriginParts::parse("http://my_router.lan").unwrap().to_origin_string(),
+            "http://my_router.lan"
+        );
+    }
+
+    #[test]
+    fn origin_parse_requires_canonical_ipv4() {
+        // A canonical dotted-quad is accepted.
+        assert_eq!(
+            OriginParts::parse("http://192.168.1.1").unwrap().to_origin_string(),
+            "http://192.168.1.1"
+        );
+        // A noncanonical IPv4 (browser would resolve `127.1` to `127.0.0.1`) is
+        // rejected so it cannot silently diverge from the serialized Origin.
+        assert!(OriginParts::parse("http://127.1").is_err());
+        assert!(OriginParts::parse("http://1.2.3").is_err());
+        assert!(OriginParts::parse("http://256.1.1.1").is_err());
+        // WHATWG IPv4-number forms (astra r4 #1): a browser parses these to a
+        // canonical dotted-quad, so accepting them verbatim would diverge from
+        // the browser's serialized Origin.
+        assert!(OriginParts::parse("http://0x7f000001").is_err());
+        assert!(OriginParts::parse("http://0x7f.1").is_err());
+        assert!(OriginParts::parse("http://010.0.0.1").is_err());
+        assert!(OriginParts::parse("http://2130706433").is_err());
+        assert!(OriginParts::parse("http://0x7f.1.1.1").is_err());
+        // A canonical dotted-quad written in hex is still not a canonical
+        // dotted-quad decimal form, so it is rejected.
+        assert!(OriginParts::parse("http://0x7f.0.0.1").is_err());
+        // Bare `0x`/`0X` components (astra r5): WHATWG treats an empty hex
+        // remainder as zero, so these resolve to a canonical dotted-quad and
+        // must be rejected rather than retained verbatim.
+        assert!(OriginParts::parse("http://0x").is_err());
+        assert!(OriginParts::parse("http://127.0.0x.1").is_err());
+        assert!(OriginParts::parse("http://127.0.0x").is_err());
+        assert!(OriginParts::parse("http://0x.1").is_err());
+        // Mixed alphanumeric parts are NOT IPv4 numbers; they stay hostnames
+        // (a browser keeps `dead.beef` and `0xdead.beef` as labels).
+        assert_eq!(
+            OriginParts::parse("http://dead.beef").unwrap().to_origin_string(),
+            "http://dead.beef"
+        );
+    }
+
+    #[test]
+    fn origin_parse_serializes_ipv6_whatwg_compatibly() {
+        // IPv4-mapped/compatible addresses must serialize pure-hex, matching
+        // the browser (which renders `[::ffff:c000:201]`, NOT dotted-decimal
+        // `[::ffff:192.0.2.1]`). This keeps the CORS allow-list byte-compatible
+        // with the browser's Origin header (astra r4 #1).
+        assert_eq!(
+            OriginParts::parse("http://[::ffff:192.0.2.1]").unwrap().to_origin_string(),
+            "http://[::ffff:c000:201]"
+        );
+        assert_eq!(
+            OriginParts::parse("http://[::ffff:c000:201]").unwrap().to_origin_string(),
+            "http://[::ffff:c000:201]"
+        );
+        assert_eq!(
+            OriginParts::parse("http://[::192.0.2.1]").unwrap().to_origin_string(),
+            "http://[::c000:201]"
+        );
+        // Ordinary IPv6 compresses the longest zero-run (first on tie), and
+        // lowercase hex, matching WHATWG.
+        assert_eq!(
+            OriginParts::parse("http://[2001:db8::1]").unwrap().to_origin_string(),
+            "http://[2001:db8::1]"
+        );
+        assert_eq!(
+            OriginParts::parse("http://[0:0:0:0:0:0:0:1]").unwrap().to_origin_string(),
+            "http://[::1]"
+        );
+        assert_eq!(
+            OriginParts::parse("http://[0:0:0:0:0:0:0:0]").unwrap().to_origin_string(),
+            "http://[::]"
+        );
+        assert_eq!(
+            OriginParts::parse("http://[2001:db8:0:0:1:0:0:1]")
+                .unwrap()
+                .to_origin_string(),
+            "http://[2001:db8::1:0:0:1]"
+        );
+    }
+
+    #[test]
+    fn origin_same_origin_matches_scheme_host_and_effective_port() {
+        let a = OriginParts::parse("http://router.lan:80").unwrap();
+        let b = OriginParts::parse("http://router.lan").unwrap();
+        assert!(a.same_origin(&b));
+        // Cross-scheme is NOT same-origin (astra #2).
+        let https = OriginParts::parse("https://router.lan").unwrap();
+        assert!(!a.same_origin(&https));
+        // Different port is NOT same-origin.
+        let other_port = OriginParts::parse("http://router.lan:61082").unwrap();
+        assert!(!a.same_origin(&other_port));
+    }
+
+    #[test]
+    fn parse_rejects_any_invalid_entry() {
+        // A single bad entry aborts the whole config (no silent drop).
+        assert!(parse_frame_ancestors(Some(
+            "http://192.168.1.1,http://evil:99999".to_string()
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn parse_accepts_multiple_and_blank() {
+        assert_eq!(
+            parse_frame_ancestors(Some(
+                " http://192.168.1.1 , HTTPS://router.lan:8443 ".to_string()
+            ))
+            .unwrap()
+            .unwrap(),
+            vec![
+                "http://192.168.1.1".to_string(),
+                "https://router.lan:8443".to_string()
+            ]
+        );
+        assert!(parse_frame_ancestors(Some("  ,  ".to_string())).unwrap().is_none());
+        assert!(parse_frame_ancestors(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn cors_allow_origins_are_always_valid_header_values() {
+        // The validated ancestors are guaranteed parseable as HeaderValue, so
+        // admin_cors cannot silently weaken the allow-list (kimi #1 / astra #5).
+        let origins = vec!["http://192.168.1.1".to_string(), "https://router.lan:8443".to_string()];
+        let layer = admin_cors(Some(&origins));
+        // The layer is constructed without panicking; assert the invariant via a
+        // direct re-parse that mirrors the map closure.
+        for origin in &origins {
+            origin.parse::<HeaderValue>().expect("validated ancestor is a HeaderValue");
+        }
+        let _ = layer;
+    }
+
+    #[test]
+    fn cookie_warning_fires_for_http_admin_with_secure_cookie() {
+        let config = AppConfig {
+            admin_cookie_secure: true,
+            admin_frame_ancestors: Some(vec!["http://192.168.1.1".to_string()]),
+            ..test_app_config()
+        };
+        let warning = admin_frame_ancestors_cookie_warning(&config).unwrap();
+        assert!(warning.contains("CCBG_ADMIN_COOKIE_SECURE=false"));
+    }
+
+    #[test]
+    fn cookie_warning_silent_for_https_ancestor_with_secure_cookie() {
+        // An HTTPS Admin page can be embedded from an HTTPS ancestor; no warning.
+        let config = AppConfig {
+            admin_cookie_secure: true,
+            admin_frame_ancestors: Some(vec!["https://router.lan".to_string()]),
+            ..test_app_config()
+        };
+        assert!(admin_frame_ancestors_cookie_warning(&config).is_none());
+    }
+
+    #[test]
+    fn cookie_warning_silent_for_http_ancestor_with_insecure_cookie() {
+        let config = AppConfig {
+            admin_cookie_secure: false,
+            admin_frame_ancestors: Some(vec!["http://192.168.1.1".to_string()]),
+            ..test_app_config()
+        };
+        assert!(admin_frame_ancestors_cookie_warning(&config).is_none());
+    }
+
+    #[test]
+    fn cookie_warning_silent_when_unconfigured() {
+        let config = test_app_config();
+        assert!(admin_frame_ancestors_cookie_warning(&config).is_none());
     }
 }
 
@@ -8318,6 +8985,171 @@ async fn require_admin_access(
         error.set_cookie = Some(expire_cookie_header(&state.config, ADMIN_SESSION_COOKIE));
     }
     Err(error)
+}
+
+/// Build the Admin API CORS layer.
+///
+/// When `frame_ancestors` is configured (the LuCI embed scenario), only the
+/// listed origins are allowed as cross-origin callers; otherwise the
+/// pre-existing mirror-the-request behavior is preserved. The methods, allowed
+/// headers, and credentials flag are shared by both branches so a future
+/// change cannot silently diverge between the two modes. The origins are
+/// guaranteed by [`parse_frame_ancestors`] to be valid `HeaderValue`s (they
+/// contain no whitespace/control characters and are non-empty), so this cannot
+/// silently weaken the allow-list; any parse failure is a programming error.
+fn admin_cors(frame_ancestors: Option<&[String]>) -> CorsLayer {
+    let allow_origins = match frame_ancestors {
+        Some(origins) if !origins.is_empty() => AllowOrigin::list(
+            origins
+                .iter()
+                .map(|value| {
+                    value.parse::<HeaderValue>().unwrap_or_else(|error| {
+                        panic!("validated frame ancestor must be a valid HeaderValue: {value:?}: {error}")
+                    })
+                })
+                .collect::<Vec<HeaderValue>>(),
+        ),
+        _ => AllowOrigin::mirror_request(),
+    };
+    CorsLayer::new()
+        .allow_origin(allow_origins)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            AUTHORIZATION,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-admin-api-version"),
+        ])
+        .allow_credentials(true)
+}
+
+/// `CCBG_ADMIN_FRAME_ANCESTORS` is configured (the OpenWRT LuCI embed
+/// scenario). For state-changing requests (POST) that carry an `Origin` header,
+/// the origin must be either one of the configured frame ancestors or the
+/// request's own host (same-origin). Requests without an `Origin` header
+/// (curl / api-key / non-browser clients) and safe methods (GET/OPTIONS) pass
+/// through. When the config is unset, this middleware is a no-op, preserving
+/// the pre-existing behavior for non-iframe deployments.
+async fn require_admin_csrf_safe(
+    State(state): State<AppState>,
+    req: AxumRequest<Body>,
+    next: Next,
+) -> Result<Response, ControlApiError> {
+    let Some(configured) = state.config.admin_frame_ancestors.as_deref() else {
+        return Ok(next.run(req).await);
+    };
+
+    if req.method() != Method::POST {
+        return Ok(next.run(req).await);
+    }
+
+    let Some(origin) = req.headers().get("origin").and_then(|value| value.to_str().ok()) else {
+        return Ok(next.run(req).await);
+    };
+    let origin = origin.trim();
+
+    // The configured ancestors are already canonical `scheme://host[:port]`
+    // (validated and normalized at startup), so a normalized comparison is
+    // exact. The same-origin fallback compares the Origin's authority against
+    // the Host header structurally (host and effective port), which is robust
+    // to default-port omission and to a port in the Origin that the Host omits.
+    let allowed = origins_contain(configured, origin)
+        || req
+            .headers()
+            .get(HOST)
+            .and_then(|value| value.to_str().ok())
+            .map(|host| origin_matches_host(origin, host.trim(), state.config.admin_cookie_secure))
+            .unwrap_or(false);
+
+    if !allowed {
+        // `capture_admin_client_ip` runs before this middleware (it is the
+        // outer layer), so the connect info is already available; surface it in
+        // the audit log so a rejected cross-origin write is attributable.
+        let client_ip = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|value| value.0.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        warn!(origin = %origin, client_ip = %client_ip, "rejected cross-origin admin write");
+        return Err(ControlApiError::forbidden("cross-origin admin write rejected"));
+    }
+
+    Ok(next.run(req).await)
+}
+
+/// Return true if `origin` (parsed and canonicalized the same way as a
+/// configured frame ancestor) equals any configured ancestor.
+fn origins_contain(configured: &[String], origin: &str) -> bool {
+    let Ok(parsed) = OriginParts::parse(origin) else {
+        return false;
+    };
+    let canonical = parsed.to_origin_string();
+    configured.iter().any(|value| value == &canonical)
+}
+
+/// Return true if `origin`'s scheme+host+port refers to the same origin as the
+/// request's `Host` header authority (`host[:port]`).
+///
+/// This is the CSRF same-origin fallback for the LuCI embed case, where the
+/// Admin SPA posts to its own origin (`http://host:61081`) and the Host header
+/// carries the same authority.
+///
+/// The Admin transport scheme is derived from the operator's
+/// `CCBG_ADMIN_COOKIE_SECURE` setting: a `Secure` cookie is only ever set by an
+/// HTTPS endpoint, so `admin_cookie_secure=true` implies the Admin endpoint is
+/// served over HTTPS and `false` implies plain HTTP. The Origin's scheme must
+/// match that trusted transport (scheme is part of the browser's origin
+/// boundary), and the Host header's default port is inferred from that same
+/// scheme. An HTTP origin with the default port (omitted or `:80`) matches a
+/// Host that omits the port when the Admin endpoint is plain HTTP.
+fn origin_matches_host(origin: &str, host: &str, admin_cookie_secure: bool) -> bool {
+    let Ok(origin_parts) = OriginParts::parse(origin) else {
+        return false;
+    };
+    // The transport scheme is a trusted configuration signal, not a client
+    // header: a Secure cookie implies HTTPS, an insecure cookie implies HTTP.
+    let expected_scheme = if admin_cookie_secure { "https" } else { "http" };
+    if origin_parts.scheme != expected_scheme {
+        return false;
+    }
+    let Some((host_host, host_port)) = parse_host_authority(host) else {
+        return false;
+    };
+    if origin_parts.host != host_host {
+        return false;
+    }
+    let host_default_port = default_port_for_scheme(expected_scheme);
+    let host_effective_port = host_port.unwrap_or(host_default_port);
+    origin_parts.effective_port() == host_effective_port
+}
+
+/// Parse a `Host` header value (`host[:port]`) into lower-cased host + optional
+/// port. IPv6 literals are canonicalized through [`Ipv6Addr`].
+fn parse_host_authority(host: &str) -> Option<(String, Option<u16>)> {
+    let lower = host.trim().to_ascii_lowercase();
+    if lower.is_empty() || lower.contains('/') || lower.contains('?') || lower.contains('#') {
+        return None;
+    }
+    if let Some(bracketed) = lower.strip_prefix('[') {
+        let (addr, remainder) = bracketed.split_once(']')?;
+        let parsed = addr.parse::<Ipv6Addr>().ok()?;
+        let canonical = format!("[{}]", whatwg_ipv6(parsed));
+        let port = if remainder.is_empty() {
+            None
+        } else {
+            Some(remainder.strip_prefix(':')?.parse::<u16>().ok()?)
+        };
+        return Some((canonical, port));
+    }
+    if lower.contains(':') {
+        let mut parts = lower.rsplitn(2, ':');
+        let port_part = parts.next()?;
+        let host_part = parts.next()?;
+        if host_part.is_empty() || host_part.contains(':') {
+            return None;
+        }
+        return Some((host_part.to_string(), Some(port_part.parse().ok()?)));
+    }
+    Some((lower, None))
 }
 
 async fn require_admin_password_rotation_completed(
@@ -13700,20 +14532,32 @@ fn render_admin_index_html(nonce: &str) -> String {
     render_admin_index_html_from_template_source(&admin_index_template_source(), nonce)
 }
 
-async fn admin_index(State(_state): State<AppState>) -> Response {
+async fn admin_index(State(state): State<AppState>) -> Response {
     let nonce = random_urlsafe_token(32);
     let html = render_admin_index_html(&nonce);
 
     let mut response = Html(html).into_response();
     let headers = response.headers_mut();
 
+    // When `admin_frame_ancestors` is configured (the OpenWRT LuCI embed
+    // scenario), allow embedding by the listed origins and drop the
+    // `X-Frame-Options: DENY` header (a modern browser honors the CSP
+    // `frame-ancestors` directive, and XFO would otherwise conflict). The
+    // default keeps the hardened `frame-ancestors 'none'` + XFO DENY.
+    let frame_ancestors = match state.config.admin_frame_ancestors.as_deref() {
+        Some(origins) if !origins.is_empty() => origins.join(" "),
+        _ => "'none'".to_string(),
+    };
+
     // CSP with nonce
     let csp = format!(
-        "default-src 'self'; script-src 'self' 'nonce-{}'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
-        nonce
+        "default-src 'self'; script-src 'self' 'nonce-{}'; style-src 'self' 'unsafe-inline'; frame-ancestors {}; base-uri 'none'; form-action 'self'",
+        nonce, frame_ancestors
     );
     headers.insert("content-security-policy", csp.parse().unwrap());
-    headers.insert("x-frame-options", "DENY".parse().unwrap());
+    if frame_ancestors == "'none'" {
+        headers.insert("x-frame-options", "DENY".parse().unwrap());
+    }
     headers.insert("x-content-type-options", "nosniff".parse().unwrap());
     headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
     headers.insert(
@@ -39972,6 +40816,7 @@ mod tests {
             admin_password_plain: Some("test-password".to_string()),
             admin_session_ttl_seconds: DEFAULT_ADMIN_SESSION_TTL_SECONDS,
             admin_cookie_secure: true,
+            admin_frame_ancestors: None,
             control_api_key: None,
             topology,
             s3_access_key_id: "ccbg-test".to_string(),
@@ -41314,6 +42159,501 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admin_csrf_middleware_allows_same_origin_post_when_configured() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://192.168.1.1")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_rejects_cross_origin_post_when_configured() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://evil.example.com")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_allows_post_without_origin_when_configured() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_passthrough_when_not_configured() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://evil.example.com")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_allows_get_with_cross_origin_when_configured() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", get(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/status")
+                    .header("origin", "http://evil.example.com")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_allows_same_origin_with_port_in_host() {
+        // Finding #1 boundary: Origin carries scheme+port, Host carries the same
+        // authority with a port. The old `origin.ends_with("://{host}")` check
+        // happened to match this equal-authority case (the suffix `://host:port`
+        // is present), but it was not a structured comparison; the structural
+        // check is what makes the scheme+host+port comparison correct.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://192.168.1.1:61081")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_allows_same_origin_default_port_omitted() {
+        // Finding #1 boundary (fallback path): the Origin carries the explicit
+        // default port while the Host omits it; both must normalize to the same
+        // effective port. The configured ancestor is deliberately UNRELATED so
+        // only origin_matches_host can authorize the request (astra #3).
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://other.lan".to_string()]);
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://192.168.1.1:80")
+                    .header("host", "192.168.1.1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_rejects_port_mismatch_same_host() {
+        // Finding #1 boundary: same host, different port -> cross-origin.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://192.168.1.1:61082")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_rejects_host_spoofed_by_origin_suffix() {
+        // Finding #1 boundary: an Origin that merely ends with the Host text
+        // (e.g. `http://evil.com:61081` vs Host `com:61081`) must not pass the
+        // same-origin check. Structural comparison rejects it.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://192.168.1.1:61081.evil.com")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_allows_case_insensitive_origin() {
+        // Finding #4 boundary: scheme/host case normalization.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "HTTP://192.168.1.1")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_rejects_origin_with_path() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://192.168.1.1/evil")
+                    .header("host", "192.168.1.1:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_allows_ipv6_same_origin() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://[::1]".to_string()]);
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://[::1]:61081")
+                    .header("host", "[::1]:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_accepts_whatwg_ipv4_mapped_ipv6_origin() {
+        // astra r4/r5 #1: a browser serializes `[::ffff:192.0.2.1]` as
+        // `[::ffff:c000:201]` (pure hex). We configure the ancestor with a
+        // dotted-tail IPv6 input so `parse_frame_ancestors` canonicalizes it to
+        // the browser form; the request Origin uses the browser-serialized
+        // pure-hex form at the SAME effective port. An UNRELATED Host excludes
+        // the same-origin fallback, so authorization comes only from the
+        // configured ancestor — proving the CORS allow-list and the CSRF check
+        // agree on the browser-serialized origin.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors = parse_frame_ancestors(Some(
+            "http://[::ffff:192.0.2.1]:61081".to_string(),
+        ))
+        .unwrap();
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(admin_cors(state.config.admin_frame_ancestors.as_deref()))
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://[::ffff:c000:201]:61081")
+                    .header("host", "other.host:61081")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+        // The CORS allow-list echoes the exact browser-serialized origin.
+        assert_eq!(
+            response.headers().get("access-control-allow-origin").unwrap(),
+            "http://[::ffff:c000:201]:61081"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_rejects_cross_scheme_same_host() {
+        // astra #2: scheme is part of the origin boundary, so an https Origin
+        // against an http Host (default port omitted) must not pass.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        // The LuCI embed runs over plain HTTP (uhttpd, no TLS in front of the
+        // Admin listener), so the session cookie is not Secure.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "https://192.168.1.1")
+                    .header("host", "192.168.1.1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_allows_https_transport_same_origin() {
+        // astra #2: when the operator serves the Admin endpoint over HTTPS
+        // (Secure cookie), an https Origin against the same host (default port
+        // omitted) is a legitimate same-origin write.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://other.lan".to_string()]);
+        // Secure cookie => HTTPS transport.
+        Arc::make_mut(&mut state.config).admin_cookie_secure = true;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "https://192.168.1.1")
+                    .header("host", "192.168.1.1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_rejects_http_origin_on_https_transport() {
+        // A plain-HTTP Origin must never match an HTTPS Admin endpoint.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://other.lan".to_string()]);
+        Arc::make_mut(&mut state.config).admin_cookie_secure = true;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://192.168.1.1")
+                    .header("host", "192.168.1.1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_csrf_middleware_allows_origin_with_explicit_default_port() {
+        // astra #3: an Origin that carries the explicit default port must match a
+        // Host that omits it. The configured ancestor is deliberately UNRELATED
+        // so only the same-origin fallback can authorize the request.
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://other.lan".to_string()]);
+        Arc::make_mut(&mut state.config).admin_cookie_secure = false;
+        let app = Router::new()
+            .route("/api/status", post(|| async { StatusCode::OK }))
+            .with_state(state.clone())
+            .layer(middleware::from_fn_with_state(state, require_admin_csrf_safe));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/status")
+                    .header("origin", "http://192.168.1.1:80")
+                    .header("host", "192.168.1.1")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn admin_login_cookie_unlocks_protected_routes() {
         let state = test_state();
         let protected_app = Router::new()
@@ -41659,6 +42999,46 @@ mod tests {
             .unwrap();
         assert!(hsts.contains("max-age=31536000"));
         assert!(hsts.contains("includeSubDomains"));
+    }
+
+    #[tokio::test]
+    async fn admin_index_keeps_frame_denied_when_no_frame_ancestors_configured() {
+        let state = test_state();
+        let response = admin_index(axum::extract::State(state)).await;
+        let headers = response.headers();
+
+        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(csp.contains("frame-ancestors 'none'"));
+
+        let xfo = headers.get("x-frame-options").unwrap().to_str().unwrap();
+        assert_eq!(xfo, "DENY");
+    }
+
+    #[tokio::test]
+    async fn admin_index_allows_frame_ancestors_and_drops_xfo_when_configured() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        let response = admin_index(axum::extract::State(state)).await;
+        let headers = response.headers();
+
+        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(csp.contains("frame-ancestors http://192.168.1.1"));
+        assert!(!csp.contains("frame-ancestors 'none'"));
+
+        assert!(headers.get("x-frame-options").is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_index_renders_nonce_with_frame_ancestors_configured() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        let response = admin_index(axum::extract::State(state)).await;
+        let headers = response.headers();
+
+        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(csp.contains("script-src 'self' 'nonce-"));
     }
 
     #[test]

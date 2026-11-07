@@ -1,0 +1,15 @@
+{
+  "luci-app-ccbg": {
+    "description": "Grant access to the CCBG Gateway admin view",
+    "read": {
+      "ubus": {
+        "luci.ccbg": []
+      }
+    },
+    "write": {
+      "ubus": {
+        "luci.ccbg": []
+      }
+    }
+  }
+}

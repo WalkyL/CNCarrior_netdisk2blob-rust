@@ -47,6 +47,28 @@ fi
 
 chmod 0700 /overlay/ccbg /overlay/ccbg/provider-credentials /tmp/ccbg-spool
 
+# Install the LuCI plugin (menu + ACL + JS view). This does NOT restart
+# uhttpd or rpcd: LuCI refreshes its menu/ACL cache on log-out / log-in
+# (official LuCI behavior). gatewayd restart is handled below per user's
+# accepted boundary.
+LUCI_PLUGIN_ROOT="${PACKAGE_ROOT}/luci-app-ccbg"
+if [ -d "${LUCI_PLUGIN_ROOT}" ]; then
+	install -d -m 0755 \
+		/usr/share/luci/menu.d \
+		/usr/share/rpcd/acl.d \
+		/www/luci-static/resources/view/ccbg
+	if [ -f "${LUCI_PLUGIN_ROOT}/root/usr/share/luci/menu.d/luci-app-ccbg.json" ]; then
+		install -m 0644 "${LUCI_PLUGIN_ROOT}/root/usr/share/luci/menu.d/luci-app-ccbg.json" /usr/share/luci/menu.d/luci-app-ccbg.json
+	fi
+	if [ -f "${LUCI_PLUGIN_ROOT}/root/usr/share/rpcd/acl.d/luci-app-ccbg.json" ]; then
+		install -m 0644 "${LUCI_PLUGIN_ROOT}/root/usr/share/rpcd/acl.d/luci-app-ccbg.json" /usr/share/rpcd/acl.d/luci-app-ccbg.json
+	fi
+	if [ -f "${LUCI_PLUGIN_ROOT}/htdocs/luci-static/resources/view/ccbg/admin.js" ]; then
+		install -m 0644 "${LUCI_PLUGIN_ROOT}/htdocs/luci-static/resources/view/ccbg/admin.js" /www/luci-static/resources/view/ccbg/admin.js
+	fi
+	echo "ccbg LuCI plugin files installed (log out / log in to LuCI to refresh)"
+fi
+
 if [ "$START_SERVICE" -eq 1 ]; then
 	/etc/init.d/ccbg enable
 	/etc/init.d/ccbg restart

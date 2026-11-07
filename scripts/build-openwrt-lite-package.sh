@@ -83,6 +83,10 @@ install -m 0755 "${ROOT_DIR}/deploy/openwrt/install.sh" "${DIST_DIR}/${PACKAGE_N
 install -m 0755 "${ROOT_DIR}/deploy/openwrt/smoke.sh" "${DIST_DIR}/${PACKAGE_NAME}/scripts/smoke.sh"
 install -m 0644 "${ROOT_DIR}/docs/openwrt-host-profile.md" "${DIST_DIR}/${PACKAGE_NAME}/docs/openwrt-host-profile.md"
 install -m 0644 "${ROOT_DIR}/docs/openwrt-lite-deployment.md" "${DIST_DIR}/${PACKAGE_NAME}/docs/openwrt-lite-deployment.md"
+# LuCI embed plugin (architecture-independent). install.sh picks it up from here.
+if [ -d "${ROOT_DIR}/deploy/openwrt/luci-app-ccbg" ]; then
+  cp -R "${ROOT_DIR}/deploy/openwrt/luci-app-ccbg" "${DIST_DIR}/${PACKAGE_NAME}/luci-app-ccbg"
+fi
 
 {
   echo "package=${PACKAGE_NAME}"
