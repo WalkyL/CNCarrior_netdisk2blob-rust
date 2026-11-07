@@ -18,7 +18,7 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | T04 | Recoverable overwrite/staging/WAL | T01–T03 | complete |
 | T05a | Mobile family error propagation | architecture | complete |
 | T05b | Mobile non-destructive staged overwrite | T05a | complete |
-| T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | pending |
+| T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | implementation complete (review pending) |
 | T07 | Four-provider exact list prefix preservation | Mobile file waits T05 | complete |
 | T08a | Action-scoped CDP checkpoints | architecture | complete |
 | T08b | Explicit JavaScript value binding/catalog migration | T08a | complete |
@@ -121,6 +121,16 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - GREEN: `cargo test -p provider-mobile --lib` = 29 passed.
 - Review: pending.
 - Integration: committed `6421343`. Finding #10 now complete across Unicom, Telecom, OneDrive, and Mobile.
+
+### T06 — Credential generation, sticky reauth, local liveness (findings #7/#8/#9)
+
+- Route: direct implementation.
+- Owned files: `crates/gatewayd/src/main.rs`.
+- Change: `ConfiguredBackend` gains `credential_generation` captured when the backend is built/registered; `current_primary_backend` returns it, `ReadSource` carries it, `select_home_write_provider`/`eligible_write_candidates_for_object` carry it, and `note_provider_auth_failure_on_request` takes `request_generation` and ignores failures from a generation older than the current credential record. Probe classification adds `CredentialVerificationOutcome::{Verified, AuthenticationFailure, InconclusiveFailure}`; `provider_credential_lease_summary_from_health` returns it (Degraded → InconclusiveFailure). `maybe_probe_provider_credential_lease` preserves a sticky `requires_reauth=true` on InconclusiveFailure and only clears it on Verified for the current generation. Data-plane `/healthz` now returns a local Healthy payload without calling `backend.health()`; metrics `/readyz` and extended `/healthz` remain provider-aware and authenticated.
+- Tests (RED → GREEN): `network_probe_preserves_reauth` (network-error probe must not clear a sticky `requires_reauth=true`), `verified_probe_clears_current_reauth`, `stale_probe_generation_does_not_mutate_lease` (credential save fired inside `health()` while the probe is in flight; stale result discarded), `stale_request_generation_does_not_fence_new_credentials`, `current_request_generation_fences`, `fallback_read_carries_selected_backend_generation`, `local_healthz_does_not_call_backend`. Existing `note_provider_auth_failure_*` tests updated for the new signature.
+- GREEN: `cargo test -p gatewayd probe` = 24 passed; `cargo test -p gatewayd generation` = 6 passed; `cargo test -p gatewayd healthz` = 1 passed; full `cargo test -p gatewayd` = 426 passed, 1 failed (`notify_webhook_posts_only_when_alert_state_changes` — one of the three documented pre-existing baseline failures, reproduced on `0f52dc9`; unrelated to T06).
+- Review: pending (needs GLM-5.3 or Kimi-K3).
+- Integration: uncommitted working tree; `git diff --check` clean; only `crates/gatewayd/src/main.rs` touched.
 
 ### T01 — Durable replication contracts (versions/claims/schema)
 

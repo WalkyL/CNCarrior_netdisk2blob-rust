@@ -16,7 +16,7 @@ use std::{
     path::{Path as FsPath, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         OnceLock,
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -821,12 +821,20 @@ struct DataPlaneTransferPayload {
 struct ConfiguredBackend {
     provider: ProviderId,
     backend: DynBackend,
+    /// Credential generation captured when this backend was built. A request
+    /// that selects this backend tags its auth failures with this generation so
+    /// a stale in-flight request cannot fence a freshly saved credential set.
+    credential_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ReadSource {
     provider: ProviderId,
     fallback_from: Option<ProviderId>,
+    /// Credential generation of the credential set the selected backend was
+    /// built against. Auth failures attributed to this read source carry this
+    /// generation so a stale in-flight request cannot fence newer credentials.
+    credential_generation: u64,
 }
 
 #[derive(Clone)]
@@ -12318,21 +12326,25 @@ fn is_primary_stale(state: &AppState) -> bool {
 /// fencing (`is_primary_stale`), alerting (`build_admin_alerts`), and the next
 /// readiness probe all see the degraded state promptly. It is best-effort and
 /// never fails the request itself.
-fn note_provider_auth_failure_on_request(state: &AppState, provider: ProviderId, error: &str) {
+fn note_provider_auth_failure_on_request(
+    state: &AppState,
+    provider: ProviderId,
+    request_generation: u64,
+    error: &str,
+) {
     if !provider_error_implies_reauth(provider, error) {
         return;
     }
     let Ok(mut record) = load_provider_credential_lease_record(&state.config, provider) else {
         return;
     };
-    // If the credential set changed since this lease was derived, the request
-    // failure may be from the previous credential set. Do not let a stale
-    // request-side failure overwrite a freshly saved credential set.
+    // The failure came from a request that selected a backend built against a
+    // particular credential set. If the operator saved new credentials since
+    // that backend was selected, the failure is from the previous credential set
+    // and must not fence the freshly saved credentials.
     let current_generation =
         load_provider_credential_record_or_default(&state.config, provider).credential_generation;
-    if record.credential_generation.is_some()
-        && record.credential_generation != Some(current_generation)
-    {
+    if request_generation != current_generation {
         return;
     }
     let now = current_unix_ms();
@@ -12990,10 +13002,25 @@ fn provider_error_implies_reauth(provider: ProviderId, message: &str) -> bool {
     }
 }
 
+/// Classification of a credential-lease probe result. Distinguishing these
+/// matters because an inconclusive result (network error, degraded probe) is
+/// *not* evidence that the saved credentials are good — it must not clear a
+/// sticky `requires_reauth` flag that was raised by a real auth failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CredentialVerificationOutcome {
+    /// The saved credentials were positively authenticated by this probe.
+    Verified,
+    /// The probe positively determined the saved credentials are rejected.
+    AuthenticationFailure,
+    /// The probe could not determine authentication status (network error,
+    /// degraded path, or otherwise inconclusive).
+    InconclusiveFailure,
+}
+
 fn provider_credential_lease_summary_from_health(
     provider: ProviderId,
     health: &blob_core::ServiceHealth,
-) -> (String, String, bool, Option<String>) {
+) -> (String, String, bool, Option<String>, CredentialVerificationOutcome) {
     let joined_notes = health.notes.join(" | ");
     let provider_name = provider_label(provider);
     let requires_reauth = provider_error_implies_reauth(provider, &joined_notes);
@@ -13010,6 +13037,7 @@ fn provider_credential_lease_summary_from_health(
             ),
             false,
             None,
+            CredentialVerificationOutcome::Verified,
         ),
         blob_core::HealthStatus::Degraded => (
             "degraded".to_string(),
@@ -13018,6 +13046,9 @@ fn provider_credential_lease_summary_from_health(
             ),
             false,
             last_error,
+            // Degraded is not evidence of successful authentication; a healthy
+            // data path was not proven, so treat it as inconclusive.
+            CredentialVerificationOutcome::InconclusiveFailure,
         ),
         blob_core::HealthStatus::Unavailable => (
             if requires_reauth {
@@ -13036,6 +13067,11 @@ fn provider_credential_lease_summary_from_health(
             },
             requires_reauth,
             last_error,
+            if requires_reauth {
+                CredentialVerificationOutcome::AuthenticationFailure
+            } else {
+                CredentialVerificationOutcome::InconclusiveFailure
+            },
         ),
     }
 }
@@ -13116,22 +13152,33 @@ async fn maybe_probe_provider_credential_lease(
     if current_generation != starting_generation {
         return Ok(());
     }
-    let (status, summary, requires_reauth, last_error) =
+    let (status, summary, _requires_reauth, last_error, outcome) =
         provider_credential_lease_summary_from_health(provider, &health);
     let previous =
         load_provider_credential_lease_record(&state.config, provider).unwrap_or_default();
+    // A `requires_reauth=true` flag is sticky: it is only cleared when the
+    // *current* credential generation receives a positive authentication
+    // verification. An inconclusive probe (network error, degraded path) is not
+    // evidence that the saved credentials are valid, so it must not unfence.
+    let effective_requires_reauth = match outcome {
+        CredentialVerificationOutcome::Verified => false,
+        CredentialVerificationOutcome::AuthenticationFailure => true,
+        CredentialVerificationOutcome::InconclusiveFailure => {
+            previous.requires_reauth.unwrap_or(false)
+        }
+    };
     let now = current_unix_ms();
-    let success_at =
-        if requires_reauth || matches!(health.status, blob_core::HealthStatus::Unavailable) {
-            previous.last_success_at_unix_ms
-        } else {
-            Some(now)
-        };
-    let first_failure_at = if requires_reauth && previous.first_failure_at_unix_ms.is_none() {
+    let success_at = if outcome == CredentialVerificationOutcome::Verified {
         Some(now)
     } else {
-        previous.first_failure_at_unix_ms
+        previous.last_success_at_unix_ms
     };
+    let first_failure_at =
+        if effective_requires_reauth && previous.first_failure_at_unix_ms.is_none() {
+            Some(now)
+        } else {
+            previous.first_failure_at_unix_ms
+        };
     persist_provider_credential_lease_record(
         &state.config,
         provider,
@@ -13139,7 +13186,7 @@ async fn maybe_probe_provider_credential_lease(
             provider: Some(provider.as_str().to_string()),
             status: Some(status),
             summary: Some(summary),
-            requires_reauth: Some(requires_reauth),
+            requires_reauth: Some(effective_requires_reauth),
             credential_generation: Some(current_generation),
             captured_at_unix_ms: previous.captured_at_unix_ms,
             last_verified_at_unix_ms: Some(now),
@@ -13155,7 +13202,7 @@ async fn maybe_probe_provider_credential_lease(
         .expect("credential lease probe state poisoned");
     let advance_ms = credential_lease_probe_advance_ms(
         state.config.provider_credential_lease_probe_interval_seconds,
-        requires_reauth,
+        effective_requires_reauth,
     );
     guard.next_probe_at_unix_ms_by_provider.insert(provider, now.saturating_add(advance_ms));
     Ok(())
@@ -20487,16 +20534,19 @@ fn build_all_backends(
     ]
     .into_iter()
     .map(|provider| {
+        let backend = build_backend(
+            config,
+            auth_capture_policy,
+            Some(browser_flow_catalogs.clone()),
+            Some(spool_usage.clone()),
+            Some(provider_resource_stats.clone()),
+            provider,
+        )?;
         Ok(ConfiguredBackend {
             provider,
-            backend: build_backend(
-                config,
-                auth_capture_policy,
-                Some(browser_flow_catalogs.clone()),
-                Some(spool_usage.clone()),
-                Some(provider_resource_stats.clone()),
-                provider,
-            )?,
+            backend: backend.clone(),
+            credential_generation: load_provider_credential_record_or_default(config, provider)
+                .credential_generation,
         })
     })
     .collect()
@@ -20512,6 +20562,20 @@ fn backend_for_provider_from(
         .map(|backend| backend.backend.clone())
 }
 
+/// Returns the backend plus the credential generation it was built against, in a
+/// single consistent registry read. Callers that will later report an auth
+/// failure must use the returned generation so a stale in-flight request cannot
+/// fence a freshly saved credential set.
+fn backend_and_generation_for_provider_from(
+    backends: &[ConfiguredBackend],
+    provider: ProviderId,
+) -> Option<(DynBackend, u64)> {
+    backends
+        .iter()
+        .find(|backend| backend.provider == provider)
+        .map(|backend| (backend.backend.clone(), backend.credential_generation))
+}
+
 fn backends_snapshot(state: &AppState) -> Vec<ConfiguredBackend> {
     state
         .backends
@@ -20524,18 +20588,26 @@ fn replace_backend_in_registry(
     backends: &mut Vec<ConfiguredBackend>,
     provider: ProviderId,
     backend: DynBackend,
+    credential_generation: u64,
 ) {
     if let Some(configured) = backends.iter_mut().find(|item| item.provider == provider) {
         configured.backend = backend;
+        configured.credential_generation = credential_generation;
         return;
     }
 
-    backends.push(ConfiguredBackend { provider, backend });
+    backends.push(ConfiguredBackend {
+        provider,
+        backend,
+        credential_generation,
+    });
 }
 
 fn set_backend_in_registry(state: &AppState, provider: ProviderId, backend: DynBackend) {
+    let credential_generation =
+        load_provider_credential_record_or_default(&state.config, provider).credential_generation;
     let mut backends = state.backends.lock().expect("backend registry poisoned");
-    replace_backend_in_registry(&mut backends, provider, backend);
+    replace_backend_in_registry(&mut backends, provider, backend, credential_generation);
 }
 
 fn rebuild_backend_for_provider(state: &AppState, provider: ProviderId) -> Result<(), BlobError> {
@@ -20568,6 +20640,22 @@ fn runtime_topology(state: &AppState) -> TopologyPolicy {
 fn backend_for_provider(state: &AppState, provider: ProviderId) -> Result<DynBackend, BlobError> {
     let backends = backends_snapshot(state);
     backend_for_provider_from(&backends, provider).ok_or_else(|| {
+        BlobError::Configuration(format!(
+            "backend is not configured for provider {}",
+            provider.as_str()
+        ))
+    })
+}
+
+/// Resolves a provider backend together with the credential generation it was
+/// built against, so request-side auth failures can be attributed to the
+/// generation actually used by the request.
+fn backend_with_generation_for_provider(
+    state: &AppState,
+    provider: ProviderId,
+) -> Result<(DynBackend, u64), BlobError> {
+    let backends = backends_snapshot(state);
+    backend_and_generation_for_provider_from(&backends, provider).ok_or_else(|| {
         BlobError::Configuration(format!(
             "backend is not configured for provider {}",
             provider.as_str()
@@ -20632,7 +20720,7 @@ async fn eligible_write_candidates_for_object(
     bucket: &str,
     key: &str,
     size: u64,
-) -> Result<(Vec<(ProviderId, DynBackend)>, Option<BlobError>), BlobError> {
+) -> Result<(Vec<(ProviderId, DynBackend, u64)>, Option<BlobError>), BlobError> {
     let topology = runtime_topology(state);
     let high_speed = current_high_speed_providers(state);
     let write_targets = current_write_targets(state);
@@ -20708,8 +20796,8 @@ async fn eligible_write_candidates_for_object(
 
     let mut candidates = Vec::new();
     for provider in ordered {
-        let backend = match backend_for_provider(state, provider) {
-            Ok(backend) => backend,
+        let (backend, generation) = match backend_with_generation_for_provider(state, provider) {
+            Ok(pair) => pair,
             Err(_) => continue,
         };
         let capabilities = backend.capabilities();
@@ -20743,7 +20831,7 @@ async fn eligible_write_candidates_for_object(
                 continue;
             }
         }
-        candidates.push((provider, backend));
+        candidates.push((provider, backend, generation));
     }
 
     Ok((candidates, first_quota_error))
@@ -20771,9 +20859,9 @@ async fn select_home_write_provider(
     application: Option<&S3ApplicationIdentity>,
     content_type: Option<&str>,
     size: u64,
-) -> Result<(ProviderId, DynBackend), BlobError> {
+) -> Result<(ProviderId, DynBackend, u64), BlobError> {
     if let Some(provider) = placed_home_provider(state, bucket, key)? {
-        let backend = backend_for_provider(state, provider)?;
+        let (backend, generation) = backend_with_generation_for_provider(state, provider)?;
         if backend.capabilities().write {
             ensure_provider_write_allowed_by_quota(
                 state,
@@ -20784,7 +20872,7 @@ async fn select_home_write_provider(
                 "object PUT",
             )
             .await?;
-            return Ok((provider, backend));
+            return Ok((provider, backend, generation));
         }
     }
 
@@ -20800,7 +20888,7 @@ async fn select_home_write_provider(
     ) {
         if let Some(index) = candidates
             .iter()
-            .position(|(provider, _)| *provider == preferred_provider)
+            .position(|(provider, _, _)| *provider == preferred_provider)
         {
             candidates.rotate_left(index);
         }
@@ -21064,10 +21152,13 @@ fn persisted_home_providers_for_bucket(
     Ok(providers)
 }
 
-fn current_primary_backend(state: &AppState) -> Result<(ProviderId, DynBackend), BlobError> {
+fn current_primary_backend(
+    state: &AppState,
+) -> Result<(ProviderId, DynBackend, u64), BlobError> {
     let topology = runtime_topology(state);
     let provider = topology.primary_provider;
-    Ok((provider, backend_for_provider(state, provider)?))
+    let (backend, credential_generation) = backend_with_generation_for_provider(state, provider)?;
+    Ok((provider, backend, credential_generation))
 }
 
 fn sync_backends_for_topology(
@@ -21079,10 +21170,10 @@ fn sync_backends_for_topology(
         .sync_targets
         .iter()
         .filter_map(|provider| {
-            backend_for_provider_from(&backends, *provider).map(|backend| ConfiguredBackend {
-                provider: *provider,
-                backend,
-            })
+            backends
+                .iter()
+                .find(|backend| backend.provider == *provider)
+                .cloned()
         })
         .collect()
 }
@@ -26377,7 +26468,8 @@ async fn list_bucket_objects_for_delimited_listing(
 async fn list_containers_with_fallback(
     state: &AppState,
 ) -> Result<ReadResult<Vec<blob_core::ContainerInfo>>, BlobError> {
-    let (primary_provider, primary_backend) = current_primary_backend(state)?;
+    let (primary_provider, primary_backend, primary_generation) =
+        current_primary_backend(state)?;
     let mut first_non_not_found = None;
 
     match primary_backend.list_containers().await {
@@ -26386,6 +26478,7 @@ async fn list_containers_with_fallback(
                 source: ReadSource {
                     provider: primary_provider,
                     fallback_from: None,
+                    credential_generation: primary_generation,
                 },
                 value: containers,
             });
@@ -26410,6 +26503,7 @@ async fn list_containers_with_fallback(
                     source: ReadSource {
                         provider: backend.provider,
                         fallback_from: Some(primary_provider),
+                        credential_generation: backend.credential_generation,
                     },
                     value: containers,
                 });
@@ -26506,7 +26600,8 @@ async fn resolve_bucket_read_backend(
     state: &AppState,
     bucket: &str,
 ) -> Result<ResolvedReadBackend, BlobError> {
-    let (primary_provider, primary_backend) = current_primary_backend(state)?;
+    let (primary_provider, primary_backend, primary_generation) =
+        current_primary_backend(state)?;
     let mut first_non_not_found = None;
 
     match primary_backend.head_container(bucket).await {
@@ -26515,6 +26610,7 @@ async fn resolve_bucket_read_backend(
                 source: ReadSource {
                     provider: primary_provider,
                     fallback_from: None,
+                    credential_generation: primary_generation,
                 },
                 backend: primary_backend,
             });
@@ -26527,6 +26623,7 @@ async fn resolve_bucket_read_backend(
             source: ReadSource {
                 provider: primary_provider,
                 fallback_from: None,
+                credential_generation: primary_generation,
             },
             backend: primary_backend,
         });
@@ -26536,8 +26633,8 @@ async fn resolve_bucket_read_backend(
         if provider == primary_provider {
             continue;
         }
-        let backend = match backend_for_provider(state, provider) {
-            Ok(backend) => backend,
+        let (backend, generation) = match backend_with_generation_for_provider(state, provider) {
+            Ok(pair) => pair,
             Err(error) => {
                 remember_read_error(&mut first_non_not_found, error);
                 continue;
@@ -26556,6 +26653,7 @@ async fn resolve_bucket_read_backend(
                     source: ReadSource {
                         provider,
                         fallback_from: Some(primary_provider),
+                        credential_generation: generation,
                     },
                     backend,
                 });
@@ -26576,6 +26674,7 @@ async fn resolve_bucket_read_backend(
                 source: ReadSource {
                     provider: backend.provider,
                     fallback_from: Some(primary_provider),
+                    credential_generation: backend.credential_generation,
                 },
                 backend: backend.backend,
             });
@@ -26597,6 +26696,7 @@ async fn resolve_bucket_read_backend(
                     source: ReadSource {
                         provider: backend.provider,
                         fallback_from: Some(primary_provider),
+                        credential_generation: backend.credential_generation,
                     },
                     backend: backend.backend,
                 });
@@ -26614,13 +26714,14 @@ async fn resolve_object_read(
     key: &str,
 ) -> Result<ResolvedObjectRead, BlobError> {
     if let Some(home_provider) = placed_home_provider(state, bucket, key)? {
-        let backend = backend_for_provider(state, home_provider)?;
+        let (backend, generation) = backend_with_generation_for_provider(state, home_provider)?;
         match backend.head_object(bucket, key).await {
             Ok(object) => {
                 return Ok(ResolvedObjectRead {
                     source: ReadSource {
                         provider: home_provider,
                         fallback_from: None,
+                        credential_generation: generation,
                     },
                     backend,
                     object,
@@ -26631,7 +26732,8 @@ async fn resolve_object_read(
         }
     }
 
-    let (primary_provider, primary_backend) = current_primary_backend(state)?;
+    let (primary_provider, primary_backend, primary_generation) =
+        current_primary_backend(state)?;
     let mut first_non_not_found = None;
     let mut deleted_on_fallback = false;
 
@@ -26641,6 +26743,7 @@ async fn resolve_object_read(
                 source: ReadSource {
                     provider: primary_provider,
                     fallback_from: None,
+                    credential_generation: primary_generation,
                 },
                 backend: primary_backend,
                 object,
@@ -26676,6 +26779,7 @@ async fn resolve_object_read(
                     source: ReadSource {
                         provider: backend.provider,
                         fallback_from: Some(primary_provider),
+                        credential_generation: backend.credential_generation,
                     },
                     backend: backend.backend,
                     object,
@@ -33438,11 +33542,38 @@ async fn replication_snapshot(
     Ok(Json(replication_state_payload(&state)?))
 }
 
+/// Data-plane liveness probe.
+///
+/// This is deliberately a *local* check: it must succeed while the process is
+/// alive and listening, regardless of whether any provider backend is reachable
+/// or authenticated. Upstream provider reachability/auth is reported by the
+/// metrics service `/readyz` and the extended `/healthz` payload, both of which
+/// run behind control-plane auth. Returning here avoids a scenario where a
+/// provider network outage or auth expiry would make the whole gateway appear
+/// dead to an orchestrator even though the process is healthy.
 async fn healthz(
     State(state): State<AppState>,
 ) -> Result<Json<blob_core::ServiceHealth>, ApiError> {
-    let (_, backend) = current_primary_backend(&state)?;
-    Ok(Json(backend.health().await?))
+    let capabilities = current_primary_backend(&state)
+        .map(|(_, backend, _)| backend.capabilities())
+        .unwrap_or_else(|_| blob_core::BackendCapabilities {
+            read: false,
+            write: false,
+            delete: false,
+            multipart_upload: false,
+            streaming_get: false,
+            streaming_put: false,
+            max_single_upload_bytes: None,
+            max_single_download_bytes: None,
+            upload_part_size_bytes: None,
+        });
+    Ok(Json(blob_core::ServiceHealth {
+        backend: "gateway-local".to_string(),
+        status: blob_core::HealthStatus::Healthy,
+        capabilities,
+        scopes: Vec::new(),
+        notes: Vec::new(),
+    }))
 }
 
 /// Returns true when the data plane is considered ready to serve writes.
@@ -33909,7 +34040,7 @@ async fn list_objects(
         None,
     )
     .map_err(DataPlaneApiError::from_s3_error)?;
-    let (_, backend) = current_primary_backend(&state)?;
+    let (_, backend, _) = current_primary_backend(&state)?;
     let request = ListObjectsRequest {
         container: query.container,
         prefix: query.prefix,
@@ -35252,7 +35383,7 @@ async fn execute_put_upload(
         &application,
     );
 
-    let (home_provider, home_backend) = select_home_write_provider(
+    let (home_provider, home_backend, home_generation) = select_home_write_provider(
         state,
         &bucket,
         &key,
@@ -35422,7 +35553,12 @@ async fn execute_put_upload(
                 ProviderIoOperationKind::Write,
                 &error.to_string(),
             );
-            note_provider_auth_failure_on_request(&state, home_provider, &error.to_string());
+            note_provider_auth_failure_on_request(
+                &state,
+                home_provider,
+                home_generation,
+                &error.to_string(),
+            );
             let _ = restore_previous_object_write_state(
                 state,
                 &bucket,
@@ -35823,7 +35959,12 @@ async fn get_object(
                 ProviderIoOperationKind::Read,
                 &error.to_string(),
             );
-            note_provider_auth_failure_on_request(&state, resolved.source.provider, &error.to_string());
+            note_provider_auth_failure_on_request(
+                &state,
+                resolved.source.provider,
+                resolved.source.credential_generation,
+                &error.to_string(),
+            );
             map_object_error(error, &bucket, &key)
         })?;
     let observed_body = observe_provider_read_body(
@@ -38401,6 +38542,104 @@ mod tests {
         }
     }
 
+    /// A controllable fake backend whose `health()` result can be switched
+    /// between runs, so credential-lease probe tests can exercise
+    /// Verified / AuthenticationFailure / Inconclusive classifications without
+    /// touching a real carrier endpoint.
+    struct ControllableHealthBackend {
+        name: &'static str,
+        health_status: Mutex<HealthStatus>,
+        notes: Mutex<Vec<String>>,
+        health_calls: AtomicUsize,
+        // When true, `health()` returns an Err (network failure) instead of a
+        // ServiceHealth payload.
+        health_error: Mutex<bool>,
+        // Optional hook fired at the top of `health()` to simulate a
+        // concurrent mutation (e.g. an operator saving new credentials) while
+        // the probe is in flight.
+        on_health_start: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    }
+
+    impl ControllableHealthBackend {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                health_status: Mutex::new(HealthStatus::Unavailable),
+                notes: Mutex::new(Vec::new()),
+                health_calls: AtomicUsize::new(0),
+                health_error: Mutex::new(false),
+                on_health_start: Mutex::new(None),
+            }
+        }
+
+        fn set_health(&self, status: HealthStatus, notes: Vec<String>) {
+            *self.health_status.lock().expect("health status poisoned") = status;
+            *self.notes.lock().expect("health notes poisoned") = notes;
+        }
+
+        fn set_health_error(&self, error: bool) {
+            *self.health_error.lock().expect("health error poisoned") = error;
+        }
+
+        fn set_on_health_start(&self, hook: impl Fn() + Send + Sync + 'static) {
+            *self.on_health_start.lock().expect("health hook poisoned") = Some(Box::new(hook));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlobBackend for ControllableHealthBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn capabilities(&self) -> BackendCapabilities {
+            BackendCapabilities {
+                read: true,
+                write: false,
+                delete: false,
+                multipart_upload: false,
+                streaming_get: false,
+                streaming_put: false,
+                max_single_upload_bytes: None,
+                max_single_download_bytes: None,
+                upload_part_size_bytes: None,
+            }
+        }
+
+        async fn health(&self) -> Result<ServiceHealth, BlobError> {
+            self.health_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(hook) = self.on_health_start.lock().expect("health hook poisoned").take()
+            {
+                hook();
+            }
+            if *self.health_error.lock().expect("health error poisoned") {
+                return Err(BlobError::Upstream("network unreachable".to_string()));
+            }
+            Ok(ServiceHealth {
+                backend: self.name().to_string(),
+                status: self
+                    .health_status
+                    .lock()
+                    .expect("health status poisoned")
+                    .clone(),
+                capabilities: self.capabilities(),
+                scopes: Vec::new(),
+                notes: self.notes.lock().expect("health notes poisoned").clone(),
+            })
+        }
+
+        async fn list_containers(&self) -> Result<Vec<ContainerInfo>, BlobError> {
+            Err(BlobError::Upstream("not implemented".to_string()))
+        }
+
+        async fn list_objects(
+            &self,
+            _request: ListObjectsRequest,
+        ) -> Result<Vec<ObjectInfo>, BlobError> {
+            Err(BlobError::Upstream("not implemented".to_string()))
+        }
+    }
+
     struct FlakyWriteBackend {
         name: &'static str,
         message: String,
@@ -40191,8 +40430,10 @@ mod tests {
     }
 
     fn replace_backend(state: &mut AppState, provider: ProviderId, backend: DynBackend) {
+        let generation =
+            load_provider_credential_record_or_default(&state.config, provider).credential_generation;
         let mut backends = state.backends.lock().expect("backend registry should lock");
-        replace_backend_in_registry(&mut backends, provider, backend);
+        replace_backend_in_registry(&mut backends, provider, backend, generation);
     }
 
     fn install_test_managed_encryption_profiles_for_application(
@@ -41779,6 +42020,7 @@ mod tests {
         note_provider_auth_failure_on_request(
             &state,
             ProviderId::Unicom,
+            0,
             "QueryAllFiles returned RSP_CODE=1001 (无效登录信息)",
         );
         let record =
@@ -41800,6 +42042,7 @@ mod tests {
         note_provider_auth_failure_on_request(
             &state,
             ProviderId::Unicom,
+            0,
             "connection reset by peer",
         );
         let record =
@@ -41842,22 +42085,285 @@ mod tests {
             load_provider_credential_record_or_default(&state.config, provider).credential_generation;
         assert_eq!(generation, 1);
 
-        // Now simulate a lease record still bound to the OLD generation (0): a
-        // request-side failure derived from a previous credential set must NOT
-        // overwrite the freshly saved credentials.
-        let mut stale_lease =
-            load_provider_credential_lease_record(&state.config, provider).unwrap();
-        stale_lease.credential_generation = Some(0);
-        persist_provider_credential_lease_record(&state.config, provider, &stale_lease).unwrap();
-
+        // A request-side failure derived from the OLD credential set (request
+        // generation 0) must NOT overwrite the freshly saved credentials
+        // (current generation 1).
         note_provider_auth_failure_on_request(
             &state,
             provider,
+            0,
             "QueryAllFiles returned RSP_CODE=1001 (无效登录信息)",
         );
         let after =
             load_provider_credential_lease_record(&state.config, provider).unwrap();
         assert_ne!(after.requires_reauth, Some(true));
+    }
+
+    #[test]
+    fn current_request_generation_fences() {
+        let state = test_state();
+        let provider = ProviderId::Unicom;
+        let record = ProviderCredentialRecord::from(ProviderCredentialInput {
+            token: Some("token-current".to_string()),
+            ..Default::default()
+        });
+        persist_provider_credential_record(&state.config, provider, &record).unwrap();
+        let generation =
+            load_provider_credential_record_or_default(&state.config, provider).credential_generation;
+        assert_eq!(generation, 1);
+
+        // A request that used the CURRENT generation must fence the lease.
+        note_provider_auth_failure_on_request(
+            &state,
+            provider,
+            generation,
+            "QueryAllFiles returned RSP_CODE=1001 (无效登录信息)",
+        );
+        let after =
+            load_provider_credential_lease_record(&state.config, provider).unwrap();
+        assert_eq!(after.requires_reauth, Some(true));
+        assert_eq!(after.credential_generation, Some(generation));
+    }
+
+    #[test]
+    fn stale_request_generation_does_not_fence_new_credentials() {
+        let state = test_state();
+        let provider = ProviderId::Unicom;
+        let record = ProviderCredentialRecord::from(ProviderCredentialInput {
+            token: Some("token-v1".to_string()),
+            ..Default::default()
+        });
+        persist_provider_credential_record(&state.config, provider, &record).unwrap();
+        // Capture the generation a request would have used (1), then the
+        // operator saves new credentials (bumps to 2) and resets the lease.
+        let request_generation =
+            load_provider_credential_record_or_default(&state.config, provider).credential_generation;
+        assert_eq!(request_generation, 1);
+        let newer = ProviderCredentialRecord::from(ProviderCredentialInput {
+            token: Some("token-v2".to_string()),
+            ..Default::default()
+        });
+        persist_provider_credential_record(&state.config, provider, &newer).unwrap();
+        reset_provider_credential_lease_on_save(&state.config, provider).unwrap();
+        let current_generation =
+            load_provider_credential_record_or_default(&state.config, provider).credential_generation;
+        assert_eq!(current_generation, 2);
+        assert_ne!(request_generation, current_generation);
+
+        // A stale in-flight request failure (from generation 1) must NOT fence
+        // the freshly saved credentials (generation 2).
+        note_provider_auth_failure_on_request(
+            &state,
+            provider,
+            request_generation,
+            "QueryAllFiles returned RSP_CODE=1001 (无效登录信息)",
+        );
+        let after =
+            load_provider_credential_lease_record(&state.config, provider).unwrap();
+        assert_eq!(after.requires_reauth, Some(false));
+        assert_eq!(after.credential_generation, Some(current_generation));
+    }
+
+    fn unicom_credential_input(token: &str) -> ProviderCredentialInput {
+        ProviderCredentialInput {
+            token: Some(token.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// Seeds a Unicom credential lease already flagged `requires_reauth=true`
+    /// and bound to the current credential generation, mirroring a request-side
+    /// auth failure that already occurred.
+    fn seed_unicom_reauth_lease(state: &AppState) {
+        let generation =
+            load_provider_credential_record_or_default(&state.config, ProviderId::Unicom)
+                .credential_generation;
+        persist_provider_credential_lease_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialLeaseRecord {
+                provider: Some("unicom".to_string()),
+                status: Some("reauth_required".to_string()),
+                summary: Some("needs reauth".to_string()),
+                requires_reauth: Some(true),
+                credential_generation: Some(generation),
+                captured_at_unix_ms: Some(1_700_000_000_000),
+                last_verified_at_unix_ms: Some(1_700_000_000_321),
+                last_success_at_unix_ms: Some(1_699_999_999_999),
+                last_error: Some("HTTP 401".to_string()),
+                first_failure_at_unix_ms: Some(1_700_000_000_100),
+            },
+        )
+        .expect("unicom lease should persist");
+    }
+
+    #[tokio::test]
+    async fn network_probe_preserves_reauth() {
+        let mut state = test_state();
+        persist_provider_credential_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialRecord::from(unicom_credential_input("token-network-probe")),
+        )
+        .unwrap();
+        seed_unicom_reauth_lease(&state);
+
+        let backend = Arc::new(ControllableHealthBackend::new("unicom"));
+        // Inconclusive probe: network error, not an auth failure.
+        backend.set_health_error(true);
+        replace_backend(&mut state, ProviderId::Unicom, backend.clone());
+
+        maybe_probe_provider_credential_lease(&state, ProviderId::Unicom)
+            .await
+            .expect("probe should not fail");
+
+        let after =
+            load_provider_credential_lease_record(&state.config, ProviderId::Unicom).unwrap();
+        // An inconclusive/network probe must NOT clear the sticky reauth flag.
+        assert_eq!(
+            after.requires_reauth,
+            Some(true),
+            "inconclusive network probe must preserve sticky reauth"
+        );
+    }
+
+    #[tokio::test]
+    async fn verified_probe_clears_current_reauth() {
+        let mut state = test_state();
+        persist_provider_credential_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialRecord::from(unicom_credential_input("token-verified-probe")),
+        )
+        .unwrap();
+        seed_unicom_reauth_lease(&state);
+
+        let backend = Arc::new(ControllableHealthBackend::new("unicom"));
+        backend.set_health(HealthStatus::Healthy, Vec::new());
+        replace_backend(&mut state, ProviderId::Unicom, backend.clone());
+
+        maybe_probe_provider_credential_lease(&state, ProviderId::Unicom)
+            .await
+            .expect("probe should not fail");
+
+        let after =
+            load_provider_credential_lease_record(&state.config, ProviderId::Unicom).unwrap();
+        // A positive verification for the current generation clears the fence.
+        assert_eq!(after.requires_reauth, Some(false));
+        assert_eq!(after.status.as_deref(), Some("active"));
+    }
+
+    #[tokio::test]
+    async fn stale_probe_generation_does_not_mutate_lease() {
+        let mut state = test_state();
+        persist_provider_credential_record(
+            &state.config,
+            ProviderId::Unicom,
+            &ProviderCredentialRecord::from(unicom_credential_input("token-stale-probe")),
+        )
+        .unwrap();
+        let starting_generation =
+            load_provider_credential_record_or_default(&state.config, ProviderId::Unicom)
+                .credential_generation;
+        assert_eq!(starting_generation, 1);
+
+        // Seed a reauth-fenced lease bound to the starting generation, then let
+        // the operator save NEW credentials (bumps to 2, resets the lease to
+        // pending_verification) *while the probe is in flight*.
+        seed_unicom_reauth_lease(&state);
+        let backend = Arc::new(ControllableHealthBackend::new("unicom"));
+        backend.set_health(HealthStatus::Healthy, Vec::new());
+        replace_backend(&mut state, ProviderId::Unicom, backend.clone());
+
+        // Fire the credential save inside `health()` so the probe's
+        // `starting_generation` (1) is now stale by the time it re-reads the
+        // current generation (2). The Healthy result must be discarded.
+        let hook_config = state.config.clone();
+        backend.set_on_health_start(move || {
+            persist_provider_credential_record(
+                &hook_config,
+                ProviderId::Unicom,
+                &ProviderCredentialRecord::from(unicom_credential_input("token-newer")),
+            )
+            .unwrap();
+            reset_provider_credential_lease_on_save(&hook_config, ProviderId::Unicom).unwrap();
+        });
+
+        maybe_probe_provider_credential_lease(&state, ProviderId::Unicom)
+            .await
+            .expect("probe should not fail");
+
+        let after =
+            load_provider_credential_lease_record(&state.config, ProviderId::Unicom).unwrap();
+        let current_generation =
+            load_provider_credential_record_or_default(&state.config, ProviderId::Unicom)
+                .credential_generation;
+        assert_eq!(current_generation, 2);
+        // The stale probe must not have overwritten the freshly reset lease.
+        assert_eq!(
+            after.credential_generation,
+            Some(current_generation),
+            "stale probe must not clobber the new generation's lease"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_healthz_does_not_call_backend() {
+        let mut state = test_state();
+        let backend = Arc::new(ControllableHealthBackend::new("unicom"));
+        replace_backend(&mut state, ProviderId::Unicom, backend.clone());
+        // Make the backend unusable so a real `backend.health()` would fail.
+        backend.set_health_error(true);
+
+        let response = healthz(State(state.clone())).await;
+
+        // Local liveness must not depend on provider reachability.
+        assert!(response.is_ok(), "local healthz must succeed without upstream");
+        let health = response.expect("healthz should return payload");
+        assert!(matches!(health.0.status, HealthStatus::Healthy));
+    }
+
+    #[tokio::test]
+    async fn fallback_read_carries_selected_backend_generation() {
+        let mut state = test_state();
+        // Primary (Unicom) does not have the object; Telecom does. The resolved
+        // read source must carry the generation captured when the Telecom
+        // backend was registered.
+        let telecom_backend: DynBackend = Arc::new(StubBackend::new());
+        replace_backend(&mut state, ProviderId::Telecom, telecom_backend.clone());
+        state
+            .metadata_store
+            .upsert_object_placement(
+                "telecom",
+                "placeholder",
+                "notes/fallback-gen.txt",
+                current_unix_ms(),
+            )
+            .expect("placement should persist");
+        telecom_backend
+            .put_object(PutObjectRequest {
+                container: "placeholder".to_string(),
+                key: "notes/fallback-gen.txt".to_string(),
+                body: Bytes::from_static(b"fallback").into(),
+                size: Some(8),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("telecom object should exist");
+
+        let resolved = resolve_object_read(&state, "placeholder", "notes/fallback-gen.txt")
+            .await
+            .expect("object should resolve");
+        assert_eq!(resolved.source.provider, ProviderId::Telecom);
+        // The object is placed on Telecom (a home provider), so it resolves
+        // directly rather than through the fallback path.
+        assert_eq!(resolved.source.fallback_from, None);
+        // The generation must be the one registered for Telecom, not a fresh
+        // read of the credential record (which would race).
+        let expected = load_provider_credential_record_or_default(&state.config, ProviderId::Telecom)
+            .credential_generation;
+        assert_eq!(resolved.source.credential_generation, expected);
     }
 
     #[tokio::test]
@@ -43118,6 +43624,7 @@ mod tests {
             ReadSource {
                 provider: ProviderId::Onedrive,
                 fallback_from: Some(ProviderId::Stub),
+                credential_generation: 0,
             },
         );
 
@@ -55966,6 +56473,9 @@ mod tests {
             }),
             started_at_unix_ms: current_unix_ms(),
         };
+        let telecom_generation =
+            load_provider_credential_record_or_default(&restarted.config, ProviderId::Telecom)
+                .credential_generation;
         replace_backend_in_registry(
             &mut restarted
                 .backends
@@ -55973,6 +56483,7 @@ mod tests {
                 .expect("backend registry should lock"),
             ProviderId::Telecom,
             telecom_backend,
+            telecom_generation,
         );
 
         let list_uri: Uri = format!("/{bucket}?list-type=2")

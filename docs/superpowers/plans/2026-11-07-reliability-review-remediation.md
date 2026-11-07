@@ -114,12 +114,12 @@ Gateway/metadata lanes are serialized: T01 → T02/T03 integration → T04 → T
 
 **Owner:** gatewayd main.rs. Serialize after shared gateway integration.
 
-- [ ] RED: `stale_request_generation_does_not_fence_new_credentials`, `current_request_generation_fences`, `network_probe_preserves_reauth`, `verified_probe_clears_current_reauth`, `fallback_auth_error_uses_selected_backend_generation`, `local_healthz_does_not_call_backend`.
-- [ ] Run `cargo test -p gatewayd credential -- --test-threads=1`, `cargo test -p gatewayd reauth -- --test-threads=1`, and `cargo test -p gatewayd healthz -- --test-threads=1`. Use local fake backends, not carrier endpoints; report existing unrelated network-dependent test timeouts separately.
-- [ ] GREEN: snapshot generation alongside actual registry backend construction/lookup; carry it through resolved read and write contexts. Guard lease read-modify-write and credential save using the same provider-state synchronization so check→persist cannot race.
-- [ ] Use Verified/AuthFailure/Inconclusive classifications. Inconclusive preserves previous reauth; only current-generation positive auth clears it. Do not classify generic Degraded as positive without evidence of successful authentication.
-- [ ] Make data-plane healthz local 200. Keep metrics extended healthz and readyz provider-aware and protected by existing control API key middleware.
-- [ ] Run focused tests and metrics/readiness tests. Review save→registry swap→late failure schedules and generation-guard atomicity.
+- [x] RED: `stale_request_generation_does_not_fence_new_credentials`, `current_request_generation_fences`, `network_probe_preserves_reauth`, `verified_probe_clears_current_reauth`, `fallback_auth_error_uses_selected_backend_generation`, `local_healthz_does_not_call_backend`.
+- [x] Run `cargo test -p gatewayd credential -- --test-threads=1`, `cargo test -p gatewayd reauth -- --test-threads=1`, and `cargo test -p gatewayd healthz -- --test-threads=1`. Use local fake backends, not carrier endpoints; report existing unrelated network-dependent test timeouts separately.
+- [x] GREEN: snapshot generation alongside actual registry backend construction/lookup; carry it through resolved read and write contexts. Guard lease read-modify-write and credential save using the same provider-state synchronization so check→persist cannot race.
+- [x] Use Verified/AuthFailure/Inconclusive classifications. Inconclusive preserves previous reauth; only current-generation positive auth clears it. Do not classify generic Degraded as positive without evidence of successful authentication.
+- [x] Make data-plane healthz local 200. Keep metrics extended healthz and readyz provider-aware and protected by existing control API key middleware.
+- [x] Run focused tests and metrics/readiness tests. Review save→registry swap→late failure schedules and generation-guard atomicity.
 
 ## T07 — Exact S3 prefix semantics
 
