@@ -4429,4 +4429,45 @@ mod tests {
         // No unescaped single-quote or newline can terminate the literal early.
         assert!(!bound.source.contains("'; alert"));
     }
+
+    #[test]
+    fn bind_javascript_values_cover_js_string_escape_set() {
+        // The T08 acceptance criteria require focused binding coverage for the
+        // full JS string-literal escape set: apostrophe, double quote,
+        // backslash, CR/LF, Unicode U+2028, and `</script>`. Each value must be
+        // JSON-encoded into one safe quoted literal and never break out.
+        let payloads = [
+            ("apostrophe", "a'b"),
+            ("double_quote", "a\"b"),
+            ("backslash", "a\\b"),
+            ("crlf", "a\r\nb"),
+            ("u2028", "a\u{2028}b"),
+            ("script_close", "</script>"),
+            ("combined", "\"';\\\r\n</script>\u{2028}"),
+        ];
+        for (key, payload) in payloads {
+            let context = BrowserFlowBindingContext {
+                inputs: BTreeMap::from([(key.to_string(), Value::String(payload.to_string()))]),
+                runtime: BTreeMap::new(),
+            };
+            let operation = BrowserFlowOperation {
+                id: format!("op-{key}"),
+                page: None,
+                frame: None,
+                kind: super::BrowserFlowOperationKind::Javascript,
+                source: format!("const value = {{{{inputs.{key}}}}}; value;"),
+                notes: Vec::new(),
+            };
+            let bound = bind_operation(&operation, &context).expect("operation should bind");
+            // The rendered literal must be exactly the JSON encoding of the
+            // value: quoted, with every special character escaped by serde_json.
+            let expected = serde_json::to_string(&Value::String(payload.to_string()))
+                .expect("value is JSON-serializable");
+            assert_eq!(
+                bound.source,
+                format!("const value = {expected}; value;"),
+                "payload {key:?} must render as a single JSON-encoded JS literal"
+            );
+        }
+    }
 }

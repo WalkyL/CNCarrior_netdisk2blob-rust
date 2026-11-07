@@ -2686,4 +2686,75 @@ mod tests {
         let _ = state.request_floor_sequence.take();
         assert!(state.request_floor_sequence.is_none());
     }
+
+    #[test]
+    fn consecutive_action_wait_pairs_use_own_checkpoints() {
+        // Two consecutive operation/wait pairs must each observe only their own
+        // action's request: the second action re-marks the floor, so the first
+        // pair's floor cannot leak into the second wait.
+        let mut state = CdpEventState::default();
+        let request = test_request_definition();
+
+        // Pair 1: action marks floor, fires request (sequence 1), wait consumes.
+        state.mark_request_checkpoint();
+        let floor1 = state.request_floor_sequence.expect("pair 1 checkpoint");
+        assert!(apply_event_state(
+            &mut state,
+            "Network.requestWillBeSent",
+            &json!({
+                "requestId": "request-a",
+                "request": {
+                    "method": "POST",
+                    "url": "https://personal-kd-njs.yun.139.com/hcy/file/list",
+                    "postData": "{\"parentFileId\":\"/\"}"
+                }
+            }),
+        ));
+        assert!(apply_event_state(
+            &mut state,
+            "Network.responseReceived",
+            &json!({
+                "requestId": "request-a",
+                "response": { "status": 200, "statusText": "OK" }
+            }),
+        ));
+        assert_eq!(
+            state.observed_request_state_since(&request, floor1),
+            CdpObservedRequestState::Succeeded(1)
+        );
+        // Wait consumes pair 1's floor.
+        let _ = state.request_floor_sequence.take();
+
+        // Pair 2: a fresh action marks its own floor and fires request (seq 2).
+        // Even though pair 1's floor is now cleared, pair 2 re-marks, so the
+        // wait for pair 2 uses a floor that excludes pair 1's request.
+        state.mark_request_checkpoint();
+        let floor2 = state.request_floor_sequence.expect("pair 2 checkpoint");
+        assert_eq!(floor2, 1, "pair 2 floor is pair 1's last sequence, not its own");
+        assert!(apply_event_state(
+            &mut state,
+            "Network.requestWillBeSent",
+            &json!({
+                "requestId": "request-b",
+                "request": {
+                    "method": "POST",
+                    "url": "https://personal-kd-njs.yun.139.com/hcy/file/list",
+                    "postData": "{\"parentFileId\":\"/\"}"
+                }
+            }),
+        ));
+        assert!(apply_event_state(
+            &mut state,
+            "Network.responseReceived",
+            &json!({
+                "requestId": "request-b",
+                "response": { "status": 200, "statusText": "OK" }
+            }),
+        ));
+        // Pair 2's wait sees only pair 2's request (sequence 2), not pair 1's.
+        assert_eq!(
+            state.observed_request_state_since(&request, floor2),
+            CdpObservedRequestState::Succeeded(2)
+        );
+    }
 }
