@@ -35073,6 +35073,7 @@ async fn rollback_put_after_failure_with_note(
     previous_placement: Option<(ProviderId, u64)>,
     previous_logical: Option<LogicalObjectRecord>,
     previous_protection_plan_record: Option<ObjectProtectionPlanRecord>,
+    previous_remote_snapshot: &mut Option<ExistingCopyDestinationRemoteSnapshot>,
     failure_context: &'static str,
 ) -> String {
     let metadata_note = match ensure_previous_object_metadata_state(
@@ -35086,6 +35087,23 @@ async fn rollback_put_after_failure_with_note(
         Ok(()) => "metadata rollback succeeded".to_string(),
         Err(error) => format!("metadata rollback failed: {error}"),
     };
+    let same_provider_overwrite = previous_placement
+        .as_ref()
+        .is_some_and(|(provider, _)| *provider == home_provider);
+    if same_provider_overwrite {
+        // The provider PUT replaced the previous bytes in place. Restore the
+        // previous bytes from the bounded snapshot so metadata and remote
+        // bytes agree again; never leave the new bytes under old metadata.
+        let restore_note = restore_previous_put_remote_bytes(
+            state,
+            backend,
+            bucket,
+            key,
+            previous_remote_snapshot,
+        )
+        .await;
+        return format!("remote put already succeeded; {metadata_note}; {restore_note}");
+    }
     maybe_cleanup_failed_put_object(
         backend,
         home_provider,
@@ -35096,6 +35114,39 @@ async fn rollback_put_after_failure_with_note(
     )
     .await;
     format!("remote put already succeeded; {metadata_note}")
+}
+
+async fn restore_previous_put_remote_bytes(
+    state: &AppState,
+    backend: &DynBackend,
+    bucket: &str,
+    key: &str,
+    previous_remote_snapshot: &mut Option<ExistingCopyDestinationRemoteSnapshot>,
+) -> String {
+    let Some(snapshot) = previous_remote_snapshot.take() else {
+        return "previous remote bytes were unavailable so the overwrite was not recoverable".to_string();
+    };
+    match backend
+        .put_object(PutObjectRequest {
+            container: bucket.to_string(),
+            key: key.to_string(),
+            body: match snapshot.body {
+                ExistingCopyDestinationRemoteSnapshotBody::Bytes(body) => {
+                    ObjectBody::from_bytes(body)
+                }
+                ExistingCopyDestinationRemoteSnapshotBody::Spooled(body) => {
+                    body.into_object_body(state.config.spooled_body_chunk_bytes)
+                }
+            },
+            size: Some(snapshot.size),
+            content_type: snapshot.content_type,
+            preferred_upload_part_size_bytes: None,
+        })
+        .await
+    {
+        Ok(_) => "previous remote bytes were restored".to_string(),
+        Err(error) => format!("restoring the previous remote bytes failed: {error}"),
+    }
 }
 
 async fn mark_gateway_write_ahead_log_rolled_back(
@@ -35243,6 +35294,34 @@ async fn execute_put_upload(
         .map_err(|error| map_backend_error_to_s3(BlobError::Upstream(error.to_string())))?;
     let previous_protection_plan =
         load_object_protection_plan(state, &bucket, &key).map_err(map_backend_error_to_s3)?;
+    // A same-provider overwrite replaces the previous object in place. Capture
+    // the previous remote bytes into a bounded snapshot before any destructive
+    // step so a later failure can restore them (finding #4). If the previous
+    // bytes cannot be reserved (spool limit / read failure), reject before the
+    // destructive PUT rather than overwriting without a recoverable backup.
+    let mut previous_remote_snapshot = if previous_placement
+        .as_ref()
+        .is_some_and(|(provider, _)| *provider == home_provider)
+    {
+        match spool_existing_copy_destination_remote_snapshot(
+            state,
+            &home_backend,
+            &bucket,
+            &key,
+        )
+        .await
+        {
+            Ok(Some(snapshot)) => Some(snapshot),
+            Ok(None) => None,
+            Err(error) => {
+                return Err(S3Error::internal_error(format!(
+                    "refusing same-provider overwrite for {bucket}/{key}: previous remote bytes could not be reserved for recovery: {error}"
+                )));
+            }
+        }
+    } else {
+        None
+    };
     let gateway_write_ahead_log = maybe_prepare_gateway_write_ahead_log(
         state,
         &application,
@@ -35376,7 +35455,19 @@ async fn execute_put_upload(
                 previous_placement,
                 previous_logical.clone(),
             );
-            if let Err(cleanup_error) = home_backend.delete_object(&bucket, &key).await {
+            if previous_placement
+                .as_ref()
+                .is_some_and(|(provider, _)| *provider == home_provider)
+            {
+                let _ = restore_previous_put_remote_bytes(
+                    state,
+                    &home_backend,
+                    &bucket,
+                    &key,
+                    &mut previous_remote_snapshot,
+                )
+                .await;
+            } else if let Err(cleanup_error) = home_backend.delete_object(&bucket, &key).await {
                 warn!(
                     bucket = %bucket,
                     key = %key,
@@ -35431,15 +35522,29 @@ async fn execute_put_upload(
                 previous_placement,
                 previous_logical.clone(),
             );
-            maybe_cleanup_failed_put_object(
-                &home_backend,
-                home_provider,
-                &bucket,
-                &key,
-                previous_placement,
-                "post-write head verification failed",
-            )
-            .await;
+            if previous_placement
+                .as_ref()
+                .is_some_and(|(provider, _)| *provider == home_provider)
+            {
+                let _ = restore_previous_put_remote_bytes(
+                    state,
+                    &home_backend,
+                    &bucket,
+                    &key,
+                    &mut previous_remote_snapshot,
+                )
+                .await;
+            } else {
+                maybe_cleanup_failed_put_object(
+                    &home_backend,
+                    home_provider,
+                    &bucket,
+                    &key,
+                    previous_placement,
+                    "post-write head verification failed",
+                )
+                .await;
+            }
             mark_gateway_write_ahead_log_rolled_back_or_warn(
                 state,
                 gateway_write_ahead_log.as_ref(),
@@ -35486,6 +35591,7 @@ async fn execute_put_upload(
             previous_placement,
             previous_logical.clone(),
             previous_protection_plan_record.clone(),
+            &mut previous_remote_snapshot,
             "persist object protection plan after put",
         )
         .await;
@@ -35507,6 +35613,7 @@ async fn execute_put_upload(
             previous_placement,
             previous_logical.clone(),
             previous_protection_plan_record.clone(),
+            &mut previous_remote_snapshot,
             "persist logical metadata after put",
         )
         .await;
@@ -35526,6 +35633,7 @@ async fn execute_put_upload(
             previous_placement,
             previous_logical.clone(),
             previous_protection_plan_record.clone(),
+            &mut previous_remote_snapshot,
             "persist logical metadata after put",
         )
         .await;
@@ -35573,6 +35681,7 @@ async fn execute_put_upload(
             previous_placement,
             previous_logical,
             previous_protection_plan_record,
+            &mut previous_remote_snapshot,
             "persist replication jobs after put",
         )
         .await;
@@ -53554,6 +53663,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn put_overwrite_restores_previous_remote_bytes_after_post_write_failure() {
+        let state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/put-overwrite-rollback.txt".to_string();
+        let backend = backend_for_provider(&state, ProviderId::Stub)
+            .expect("stub backend should resolve")
+            .clone();
+        backend
+            .put_object(PutObjectRequest {
+                container: bucket.clone(),
+                key: key.clone(),
+                size: Some(12),
+                body: ObjectBody::from_bytes(Bytes::from_static(b"old contents")),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("previous object should seed");
+        state
+            .metadata_store
+            .upsert_object_placement("stub", &bucket, &key, 100)
+            .expect("previous placement should persist");
+        state
+            .metadata_store
+            .upsert_logical_object(&LogicalObjectRecord {
+                bucket: bucket.clone(),
+                key: key.clone(),
+                etag: None,
+                application_id: Some("default".to_string()),
+                encrypted: false,
+                encryption_profile_id: None,
+                algorithm: None,
+                key_id: None,
+                key_source_kind: None,
+                key_source_ref: None,
+                chunk_plaintext_bytes: None,
+                plaintext_size: 12,
+                stored_size: 12,
+                logical_content_type: Some("text/plain".to_string()),
+                updated_at_unix_ms: 101,
+            })
+            .expect("previous logical metadata should persist");
+
+        let body = Bytes::from_static(b"new payload that must roll back");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        set_test_put_object_replication_enqueue_failures(&bucket, &key, 1);
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect_err("put should fail when replication enqueue fails after overwrite")
+        .into_response();
+        set_test_put_object_replication_enqueue_failures(&bucket, &key, 0);
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response_body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body should read");
+        let response_body =
+            String::from_utf8(response_body.to_vec()).expect("error body should be utf-8");
+        assert!(response_body.contains("put remote side effect may have occurred"));
+        assert!(response_body.contains("metadata rollback succeeded"));
+
+        // The previous remote bytes must be restored, not left as the new payload.
+        let object = backend
+            .get_object(&bucket, &key)
+            .await
+            .expect("previous object should still exist");
+        let object_body = object
+            .body
+            .collect()
+            .await
+            .expect("previous body should read");
+        assert_eq!(object_body.as_ref(), b"old contents");
+
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load after rollback")
+            .expect("placement should still exist");
+        assert_eq!(placement.provider, "stub");
+        assert_eq!(placement.updated_at_unix_ms, 100);
+        let logical = state
+            .metadata_store
+            .logical_object(&bucket, &key)
+            .expect("logical should load after rollback")
+            .expect("logical should still exist");
+        assert_eq!(logical.plaintext_size, 12);
+    }
+
+    #[tokio::test]
+    async fn put_overwrite_rejects_before_destructive_write_when_backup_unavailable() {
+        let mut state = test_state();
+        let bucket = "root".to_string();
+        let key = "docs/put-overwrite-no-backup.txt".to_string();
+        let backend = backend_for_provider(&state, ProviderId::Stub)
+            .expect("stub backend should resolve")
+            .clone();
+        let previous_body = Bytes::from(vec![0x41u8; 1024 * 1024]);
+        backend
+            .put_object(PutObjectRequest {
+                container: bucket.clone(),
+                key: key.clone(),
+                size: Some(previous_body.len() as u64),
+                body: ObjectBody::from_bytes(previous_body),
+                content_type: Some("text/plain".to_string()),
+                preferred_upload_part_size_bytes: None,
+            })
+            .await
+            .expect("previous object should seed");
+        state
+            .metadata_store
+            .upsert_object_placement("stub", &bucket, &key, 100)
+            .expect("previous placement should persist");
+        // The previous object exceeds the in-memory limit, so snapshotting it
+        // would need the spool path; disabling spooling makes the recovery
+        // snapshot unreservable and the overwrite must be rejected up front.
+        Arc::make_mut(&mut state.config).max_in_memory_object_bytes = 512 * 1024;
+        Arc::make_mut(&mut state.config).max_spooled_object_bytes = 0;
+
+        let body = Bytes::from_static(b"new payload that must not overwrite");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let headers = signed_headers(
+            &state.config,
+            &Method::PUT,
+            &uri,
+            &body,
+            &[("content-type", "text/plain")],
+        );
+
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri),
+            headers,
+            body.into(),
+        )
+        .await
+        .expect_err("put should be rejected before overwriting")
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // The previous bytes are untouched and no new object replaced them.
+        let object = backend
+            .get_object(&bucket, &key)
+            .await
+            .expect("previous object should still exist");
+        assert_eq!(object.info.size, 1024 * 1024);
+        let object_body = object
+            .body
+            .collect()
+            .await
+            .expect("previous body should read");
+        assert_eq!(object_body.len(), 1024 * 1024);
+        assert!(object_body.iter().all(|byte| *byte == 0x41));
+        let placement = state
+            .metadata_store
+            .object_placement(&bucket, &key)
+            .expect("placement should load")
+            .expect("placement should still exist");
+        assert_eq!(placement.provider, "stub");
+        assert_eq!(placement.updated_at_unix_ms, 100);
+    }
+
+    #[tokio::test]
     async fn put_protection_plan_persist_failure_reports_remote_rollback_status() {
         let state = test_state();
         let bucket = "root".to_string();
@@ -54435,6 +54727,94 @@ mod tests {
             .await
             .expect("get body should read");
         assert_eq!(get_body.as_ref(), body.as_ref());
+    }
+
+    #[tokio::test]
+    async fn encrypted_overwrite_restores_previous_ciphertext_after_post_write_failure() {
+        let state = test_state();
+        install_test_managed_encryption_application(
+            &state,
+            "enc-app",
+            "enc-access",
+            "enc-secret",
+            "enc-profile",
+            "managed-test-key",
+        );
+
+        let bucket = "root".to_string();
+        let key = "encrypted/overwrite-rollback.txt".to_string();
+        let original_body = Bytes::from_static(b"original plaintext");
+        let uri: Uri = format!("/{bucket}/{key}")
+            .parse()
+            .expect("uri should parse");
+        let put_headers = signed_headers_for_application(
+            &state.config,
+            "enc-access",
+            "enc-secret",
+            &Method::PUT,
+            &uri,
+            &original_body,
+            &[("content-type", "text/plain")],
+        );
+        put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            put_headers,
+            original_body.clone().into(),
+        )
+        .await
+        .expect("first encrypted put should succeed");
+
+        let stored = backend_for_test(&state, ProviderId::Stub)
+            .get_object(&bucket, &key)
+            .await
+            .expect("home provider object should exist");
+        let previous_ciphertext = stored
+            .body
+            .collect()
+            .await
+            .expect("stored body should collect");
+        assert!(previous_ciphertext.starts_with(b"CCBGENC1"));
+
+        // Overwrite with a new plaintext, but fail at replication enqueue.
+        let new_body = Bytes::from_static(b"new plaintext that must roll back");
+        let put_headers = signed_headers_for_application(
+            &state.config,
+            "enc-access",
+            "enc-secret",
+            &Method::PUT,
+            &uri,
+            &new_body,
+            &[("content-type", "text/plain")],
+        );
+        set_test_put_object_replication_enqueue_failures(&bucket, &key, 1);
+        let response = put_object(
+            State(state.clone()),
+            Path((bucket.clone(), key.clone())),
+            Method::PUT,
+            OriginalUri(uri.clone()),
+            put_headers,
+            new_body.into(),
+        )
+        .await
+        .expect_err("overwrite should fail at replication enqueue")
+        .into_response();
+        set_test_put_object_replication_enqueue_failures(&bucket, &key, 0);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        // The previous ciphertext bytes must be restored, not the new ones.
+        let stored = backend_for_test(&state, ProviderId::Stub)
+            .get_object(&bucket, &key)
+            .await
+            .expect("home provider object should exist");
+        let restored_ciphertext = stored
+            .body
+            .collect()
+            .await
+            .expect("stored body should collect");
+        assert_eq!(restored_ciphertext.as_ref(), previous_ciphertext.as_ref());
     }
 
     #[tokio::test]
