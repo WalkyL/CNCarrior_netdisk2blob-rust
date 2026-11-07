@@ -15,7 +15,7 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 | T01 | Durable versions/claims/schema and backup compatibility | architecture | complete |
 | T02 | DB-first enqueue/retry, striped worker locks, recovery | T01 | complete |
 | T03 | Checked DLQ replay and API outcomes | T01, T02 | complete |
-| T04 | Recoverable overwrite/staging/WAL | T01–T03 | pending |
+| T04 | Recoverable overwrite/staging/WAL | T01–T03 | complete |
 | T05a | Mobile family error propagation | architecture | complete |
 | T05b | Mobile non-destructive staged overwrite | T05a | complete |
 | T06 | Request backend generation, sticky reauth, local liveness | gateway owner released | pending |
@@ -150,5 +150,15 @@ Each task appends: model/route, owned files, RED command and failing assertion, 
 - Change: DLQ replay is now version-checked in the same transaction as the status transition. `ReplicationDeadLetterStatus::Superseded` added; `replay_dead_letter_job` and `replay_dead_letter_jobs_for_target` return `ReplayOutcome::{Replayed(ReplicationJob), Superseded{...}}`; a stale entry (a newer operation for the same target/bucket/key tuple already advanced the durable version) is marked `superseded` and produces no executable job, so DLQ replay can no longer resurrect a superseded operation. The batch variant deduplicates open entries per `(target,bucket,key)` (newest job_id only) and marks older duplicates superseded. Gateway APIs match on the outcome: a replayed job is published via `enqueue_existing_job`; a superseded entry is reported with `replayed_job_id: None` and `status: "superseded"`. `ReplicationDlqReplayPayload.replayed_job_id` is now `Option<u64>`; `ReplicationDlqTargetReplayPayload.replayed_jobs` counts only actually-replayed jobs.
 - Tests (RED → GREEN): metadata-store `stale_dlq_replay_marks_superseded_and_creates_no_job` (newer op bumps tuple to v2; replaying the v1 DLQ entry yields `Superseded`, no new job row, entry no longer open), `current_dlq_replay_creates_new_job_same_version` (replay preserves the tuple version and re-arms the pending job), `batch_replay_dedupes_per_tuple_and_marks_older_superseded` (two open entries for one tuple + one other: newest replays, older superseded, other replays).
 - GREEN: `cargo test -p metadata-store` = 43 passed; `cargo test -p gatewayd --bin gatewayd -- replay` = 13 passed (filtered); `cargo test -p admin-api` = 8 passed; `cargo test -p mcp-server` = 68 passed; `cargo check --workspace` clean.
+- Review: pending (needs GLM-5.3 or Kimi-K3).
+- Integration: committed `747d571` (code), `c8907d3` (ledger).
+
+### T04 — Recoverable overwrite/staging/WAL (finding #4)
+
+- Route: direct implementation (serial gateway/metadata lane).
+- Owned files: `crates/gatewayd/src/main.rs`.
+- Change: a same-provider overwrite (the previous home placement used the same provider as the new write) previously replaced the remote object in place; a failure after the PUT restored only the previous metadata, leaving the new remote bytes under old metadata. `execute_put_upload` now captures the previous remote bytes into a bounded snapshot (`spool_existing_copy_destination_remote_snapshot`) before the destructive PUT. `rollback_put_after_failure_with_note` and the inline post-PUT failure paths (payload hash mismatch, post-write head verification) restore the previous bytes from the snapshot for a same-provider overwrite via a new `restore_previous_put_remote_bytes` helper. If the snapshot cannot be reserved (previous object exceeds the in-memory limit and spooling is disabled/unavailable), the overwrite is rejected before any destructive mutation.
+- Tests (RED → GREEN): `put_overwrite_restores_previous_remote_bytes_after_post_write_failure` (seeded previous Stub object; replication enqueue fails after the PUT replaces it; old bytes restored, not the new payload), `put_overwrite_rejects_before_destructive_write_when_backup_unavailable` (previous object forces the spool path which is disabled → PUT rejected before overwrite, previous bytes intact), `encrypted_overwrite_restores_previous_ciphertext_after_post_write_failure` (same-provider encrypted overwrite; previous ciphertext bytes restored).
+- GREEN: `cargo test -p gatewayd --bin gatewayd -- put` = 47 passed; `cargo test -p gatewayd --bin gatewayd -- gateway_write_ahead_log` = 7 passed; full `cargo test -p gatewayd` = 416 passed, 3 failed (identical pre-existing baseline failures); `cargo test -p metadata-store` = 43 passed; `cargo test -p replication-engine` = 34 passed; `cargo check --workspace` clean.
 - Review: pending (needs GLM-5.3 or Kimi-K3).
 - Integration: pending commit.
