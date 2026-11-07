@@ -2210,6 +2210,13 @@ impl MetadataStore {
 
     fn init_schema(&self) -> Result<(), MetadataError> {
         let connection = self.connection.lock().expect("metadata store poisoned");
+        // The `object_version` column must exist BEFORE the batch below, which
+        // emits `CREATE INDEX ... (..., object_version, ...)` and references
+        // `object_version` when building `replication_object_versions`. A
+        // pre-T01 database already has `replication_jobs` without that column,
+        // so the ALTER must run first or the batch fails with
+        // "no such column: object_version" (confirmed production failure).
+        ensure_replication_jobs_column(&connection, "object_version", "INTEGER NOT NULL DEFAULT 0")?;
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;
@@ -2342,13 +2349,6 @@ impl MetadataStore {
                     &connection,
                     "next_attempt_at_unix_ms",
                     "INTEGER NULL",
-                )
-            })
-            .and_then(|_| {
-                ensure_replication_jobs_column(
-                    &connection,
-                    "object_version",
-                    "INTEGER NOT NULL DEFAULT 0",
                 )
             })
             .and_then(|_| ensure_logical_objects_column(&connection, "etag", "TEXT NULL"))
@@ -2518,6 +2518,17 @@ fn ensure_replication_jobs_column(
     column_name: &str,
     definition: &str,
 ) -> Result<(), MetadataError> {
+    // If the table does not exist yet, the CREATE TABLE batch below builds it
+    // with the current column set, so there is nothing to migrate.
+    let table_exists = connection
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='replication_jobs'")
+        .map_err(MetadataError::Sqlite)?
+        .exists([])
+        .map_err(MetadataError::Sqlite)?;
+    if !table_exists {
+        return Ok(());
+    }
+
     let mut statement = connection
         .prepare("PRAGMA table_info(replication_jobs)")
         .map_err(MetadataError::Sqlite)?;
@@ -3063,13 +3074,67 @@ mod tests {
     }
 
     #[test]
+    fn old_schema_without_object_version_column_migrates_on_open() {
+        // Reproduces the production upgrade failure: an existing database whose
+        // `replication_jobs` table predates the `object_version` column (T01).
+        // `init_schema` used to emit `CREATE INDEX ... (..., object_version, ...)`
+        // and reference `object_version` in the same batch BEFORE running the
+        // `ALTER TABLE ... ADD COLUMN object_version` migration, so opening a
+        // pre-T01 database failed with "no such column: object_version". A
+        // legacy store must open cleanly and migrate in place.
+        let db_path = temp_db_path();
+        {
+            let connection = rusqlite::Connection::open(&db_path).expect("legacy db should open");
+            connection
+                .execute_batch(
+                    "CREATE TABLE replication_jobs (
+                        job_id INTEGER PRIMARY KEY,
+                        target TEXT NOT NULL,
+                        source_provider TEXT NULL,
+                        operation TEXT NOT NULL,
+                        bucket TEXT NOT NULL,
+                        key TEXT NOT NULL,
+                        etag TEXT NULL,
+                        size INTEGER NULL,
+                        content_type TEXT NULL,
+                        status TEXT NOT NULL,
+                        attempts INTEGER NOT NULL,
+                        enqueued_at_unix_ms INTEGER NOT NULL,
+                        next_attempt_at_unix_ms INTEGER NULL,
+                        last_error TEXT NULL
+                    );
+                    INSERT INTO replication_jobs
+                        (job_id, target, source_provider, operation, bucket, key, etag, size, content_type, status, attempts, enqueued_at_unix_ms, next_attempt_at_unix_ms, last_error)
+                    VALUES
+                        (1, 'onedrive', 'unicom', 'put', 'bucket-a', 'hello.txt', 'etag-1', 12, 'text/plain', 'pending', 0, 1234, NULL, NULL);",
+                )
+                .expect("legacy schema should build");
+        }
+
+        let store = MetadataStore::open(&db_path).expect("legacy store should migrate and open");
+        let jobs = store.load_pending_jobs(None).expect("jobs should load");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].job_id, 1);
+        // Legacy rows are backfilled deterministically from job_id.
+        assert_eq!(jobs[0].object_version, 1);
+        // The durable version table must be seeded from the backfilled row.
+        assert_eq!(
+            store
+                .current_object_version("onedrive", "bucket-a", "hello.txt")
+                .expect("version should load"),
+            Some(1)
+        );
+
+        fs::remove_file(db_path).ok();
+    }
+
+    #[test]
     fn pending_jobs_round_trip_through_sqlite() {
         let db_path = temp_db_path();
         let store = MetadataStore::open(&db_path).expect("store should open");
         store
             .enqueue_jobs(&[sample_job(1), sample_job(2)])
             .expect("jobs should persist");
-
         let jobs = store.load_pending_jobs(None).expect("jobs should load");
         assert_eq!(jobs.len(), 2);
         assert_eq!(jobs[0].job_id, 1);
