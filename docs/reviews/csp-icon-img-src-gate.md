@@ -6,8 +6,7 @@ Content-Security-Policy header, restoring the inlined SVG brand icon and the
 browser-flow PNG screenshots (both `data:` URLs) that were previously blocked by
 the `default-src 'self'` fallback.
 
-- **Commit reviewed:** working tree against `618f842` (uncommitted; the commit
-  hash is filled at commit time)
+- **Commit reviewed:** `ae1aa63` (against parent `618f842`)
 - **Change summary:** one production line (`img-src 'self' data:` added to the
   CSP string in `async fn admin_index`), plus a `parse_csp_directives` test
   helper and two new unit tests.
