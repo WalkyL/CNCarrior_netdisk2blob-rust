@@ -30,6 +30,32 @@ Architecture owner: Kimi-K3 (verified direct Responses completion), calibrated t
 
 Review findings 1/3 → T01/T02; 2 → T03; 4 → T04; 5/6 → T05a/T05b; 7/8/9 → T06; 10 → T07; 11/12 → T08a/T08b; 13 → T09; 14 → T10.
 
+## Memory footprint remediation (idle RSS)
+
+- **Symptom:** on the deployed host (`192.168.1.49`, PID 4550), the gateway held
+  **36.7 MiB idle RSS** with no drive online and no traffic.
+- **Diagnosis (GLM-5.3@max + on-host measurement):** a single **19.2 MiB
+  anonymous `rw-p` region** flanked by two `PROT_NONE` (`---p`) guards of
+  ~64 MiB each = a **glibc secondary malloc arena** holding free-but-retained
+  heap. Flat over 5 min (no leak); `VmHWM` +528 kB. The arena was *retained*, not
+  live — the process had grown a secondary arena under a transient allocation
+  spike and glibc had not returned it.
+- **Fix (operational, glibc/Linux-only):** `MALLOC_TRIM_THRESHOLD_=131072` in
+  `/etc/ccbg/ccbg.env` (original backed up to
+  `/etc/ccbg/ccbg.env.bak-before-malloc-trim-20261109`).
+- **Result (measured):** idle RSS **36,760 → 18,636 kB (49% drop)**;
+  `Private_Dirty` 21,332 → 3,248 kB; the secondary arena is gone. Confirmed
+  stable across the run. No functional regression (providers unicom/mobile/telecom
+  still load; `degraded` is the pre-existing no-drive state).
+- **Caveat:** this is a glibc `malloc` tunable, so it applies only to Linux glibc
+  targets (not musl/Windows/macOS). It is a configuration, not a code change; it
+  trips no ADR-007 rule. If the gateway ever runs under a non-glibc libc or on
+  Windows, the knob is inert (harmless).
+- **Decision:** keep in place (stable, measured, reversible via the backup file).
+  Recorded here for traceability.
+- **Evidence:** `.cache/glm53-memory.json` (GLM-5.3 analysis), `.cache/astra-arena.json`
+  (astra verification), on-host `smaps_rollup`/`maps` measurements above.
+
 ## Evidence log
 
 ### Documentation phase
