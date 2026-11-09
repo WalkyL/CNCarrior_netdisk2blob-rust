@@ -14549,9 +14549,11 @@ async fn admin_index(State(state): State<AppState>) -> Response {
         _ => "'none'".to_string(),
     };
 
-    // CSP with nonce
+    // CSP with nonce. `img-src 'self' data:` permits the inlined SVG brand
+    // icon and the browser-flow PNG screenshots (both `data:` URLs), which
+    // would otherwise fall back to `default-src 'self'` and be blocked.
     let csp = format!(
-        "default-src 'self'; script-src 'self' 'nonce-{}'; style-src 'self' 'unsafe-inline'; frame-ancestors {}; base-uri 'none'; form-action 'self'",
+        "default-src 'self'; img-src 'self' data:; script-src 'self' 'nonce-{}'; style-src 'self' 'unsafe-inline'; frame-ancestors {}; base-uri 'none'; form-action 'self'",
         nonce, frame_ancestors
     );
     headers.insert("content-security-policy", csp.parse().unwrap());
@@ -42999,6 +43001,75 @@ mod tests {
             .unwrap();
         assert!(hsts.contains("max-age=31536000"));
         assert!(hsts.contains("includeSubDomains"));
+    }
+
+    /// Parses a CSP header into (directive, Vec<source tokens>) pairs.
+    fn parse_csp_directives(csp: &str) -> Vec<(String, Vec<String>)> {
+        csp.split(';')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut tokens = part.split_whitespace();
+                let directive = tokens.next().unwrap_or("").to_string();
+                let sources = tokens.map(|s| s.to_string()).collect();
+                (directive, sources)
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn admin_index_allows_data_images_and_keeps_other_directives() {
+        let state = test_state();
+        let response = admin_index(axum::extract::State(state)).await;
+        let headers = response.headers();
+
+        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        let directives = parse_csp_directives(csp);
+
+        let img_src: Vec<_> = directives
+            .iter()
+            .filter(|(name, _)| name == "img-src")
+            .collect();
+        assert_eq!(img_src.len(), 1, "expected exactly one img-src directive");
+        assert_eq!(img_src[0].1, vec!["'self'".to_string(), "data:".to_string()]);
+
+        // Other directives must remain intact (default-src 'self', nonce
+        // script-src, and the hardened frame-ancestors 'none' default).
+        let default_src: Vec<_> = directives
+            .iter()
+            .filter(|(name, _)| name == "default-src")
+            .collect();
+        assert_eq!(default_src.len(), 1);
+        assert_eq!(default_src[0].1, vec!["'self'".to_string()]);
+
+        assert!(
+            csp.contains("script-src 'self' 'nonce-"),
+            "script-src must retain its nonce"
+        );
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+    }
+
+    #[tokio::test]
+    async fn admin_index_img_src_is_stable_with_configured_ancestor() {
+        let mut state = test_state();
+        Arc::make_mut(&mut state.config).admin_frame_ancestors =
+            Some(vec!["http://192.168.1.1".to_string()]);
+        let response = admin_index(axum::extract::State(state)).await;
+        let headers = response.headers();
+
+        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        let directives = parse_csp_directives(csp);
+
+        let img_src: Vec<_> = directives
+            .iter()
+            .filter(|(name, _)| name == "img-src")
+            .collect();
+        assert_eq!(img_src.len(), 1);
+        assert_eq!(img_src[0].1, vec!["'self'".to_string(), "data:".to_string()]);
+
+        assert!(csp.contains("frame-ancestors http://192.168.1.1"));
+        assert!(!csp.contains("frame-ancestors 'none'"));
     }
 
     #[tokio::test]
