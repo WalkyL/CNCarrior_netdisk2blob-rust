@@ -2388,12 +2388,26 @@ fn row_to_multipart_upload_session_record(
     })
 }
 
+/// Reads a `u32` column from a row, checking that the stored `i64` is in range
+/// instead of silently truncating with a bare `as u32`. An out-of-range value
+/// (e.g. a negative or > u32::MAX part number / attempt count) returns an error
+/// rather than a silently wrapped value.
+fn row_u32(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u32> {
+    u32::try_from(row.get::<_, i64>(idx)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            idx,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
 fn row_to_multipart_upload_part_record(
     row: &rusqlite::Row<'_>,
 ) -> Result<MultipartUploadPartRecord, rusqlite::Error> {
     Ok(MultipartUploadPartRecord {
         upload_id: row.get(0)?,
-        part_number: row.get::<_, i64>(1)? as u32,
+        part_number: row_u32(row, 1)?,
         etag: row.get(2)?,
         size_bytes: row.get::<_, i64>(3)? as u64,
         offset_bytes: row.get::<_, i64>(4)? as u64,
@@ -2821,7 +2835,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplicationJob> {
                 Box::new(error),
             )
         })?,
-        attempts: row.get::<_, i64>(10)? as u32,
+        attempts: row_u32(row, 10)?,
         enqueued_at_unix_ms: row.get::<_, i64>(11)? as u128,
         next_attempt_at_unix_ms: row.get::<_, Option<i64>>(12)?.map(|value| value as u128),
         last_error: row.get(13)?,
@@ -2856,7 +2870,7 @@ fn row_to_dead_letter_entry(
                 content_type: row.get(8).map_err(MetadataError::Sqlite)?,
             },
             status,
-            attempts: row.get::<_, i64>(10).map_err(MetadataError::Sqlite)? as u32,
+            attempts: row_u32(row, 10).map_err(MetadataError::Sqlite)?,
             enqueued_at_unix_ms: row.get::<_, i64>(11).map_err(MetadataError::Sqlite)? as u128,
             next_attempt_at_unix_ms: row
                 .get::<_, Option<i64>>(12)
@@ -2872,7 +2886,7 @@ fn row_to_dead_letter_entry(
         status: ReplicationDeadLetterStatus::parse(&dlq_status_value)?,
         dead_lettered_at_unix_ms: row.get::<_, i64>(15).map_err(MetadataError::Sqlite)? as u64,
         reason: row.get(16).map_err(MetadataError::Sqlite)?,
-        replay_count: row.get::<_, i64>(17).map_err(MetadataError::Sqlite)? as u32,
+        replay_count: row_u32(row, 17).map_err(MetadataError::Sqlite)?,
         last_replayed_job_id: row
             .get::<_, Option<i64>>(18)
             .map_err(MetadataError::Sqlite)?

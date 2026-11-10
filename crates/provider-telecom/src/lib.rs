@@ -53,6 +53,7 @@ const DEFAULT_FAMILY_ROOT_FOLDER_ID: &str = "home";
 const DEFAULT_PAGE_SIZE: usize = 60;
 const DEFAULT_UPLOAD_PART_SIZE_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_UPLOAD_MAX_PART_COUNT: u64 = 1_000;
+const STREAM_READ_CHUNK_BYTES: u64 = 1024 * 1024;
 const DEFAULT_UPLOAD_CONTROL_BASE_URL: &str = "https://upload.cloud.189.cn";
 const TELECOM_BATCH_POLL_INTERVAL_MS: u64 = 500;
 const URI_COMPONENT_ENCODE_SET: &AsciiSet = &CONTROLS
@@ -2162,7 +2163,7 @@ impl TelecomBlobAdapter {
                     if remaining == 0 {
                         return Ok(None);
                     }
-                    let next_len = remaining.min(1024 * 1024) as usize;
+                    let next_len = remaining.min(STREAM_READ_CHUNK_BYTES) as usize;
                     let mut chunk = vec![0u8; next_len];
                     let read = file.read(&mut chunk).await?;
                     if read == 0 {
