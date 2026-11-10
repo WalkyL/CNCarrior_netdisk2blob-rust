@@ -32,6 +32,438 @@ fn mutex_recover<T>(result: std::sync::LockResult<std::sync::MutexGuard<'_, T>>)
     result.unwrap_or_else(|e| e.into_inner())
 }
 
+/// A bounded executor that runs synchronous database commands off the async
+/// runtime's worker threads.
+///
+/// # Design (ADR-007 F1 remediation)
+///
+/// The gateway runs on a single-worker tokio runtime (1-CPU host). Synchronous
+/// SQLite calls invoked directly from `async fn` handlers (e.g.
+/// `enqueue_jobs_with_versions`, `try_claim_job`, `save_job`) block the sole
+/// worker, stalling every other in-flight request. This executor moves those
+/// commands onto tokio's blocking thread pool (`spawn_blocking`) while bounding
+/// admission with a `Semaphore`, so a burst of DB commands cannot pile up an
+/// unbounded number of blocking threads contending on the store's connection
+/// mutex.
+///
+/// # Contract (ADR-007 F1 constraints)
+///
+/// 1. **Commit-before-success.** Each command closure performs its own
+///    transaction and commits *before* returning `Ok`. The executor never
+///    acknowledges work that has not reached the same commit point as a direct
+///    call. It holds no transaction state of its own and cannot split one, so a
+///    command is atomic and its success implies its commit.
+/// 2. **Admission bound.** A `Semaphore` bounds how many commands are in flight
+///    (queued or running) on blocking threads. `execute` awaits capacity without
+///    holding any synchronous lock. This prevents unbounded blocking-pool growth
+///    and the contention that results when many blocking threads wait on one
+///    connection mutex.
+/// 3. **No lock-across-await.** The executor holds no `std::sync::Mutex` guard
+///    across an `.await`; only the semaphore permit (which is not a data lock)
+///    is held across the await.
+/// 4. **Cancellation.** Once a command is admitted and dispatched, its
+///    `spawn_blocking` task runs to completion on the blocking pool even if the
+///    awaiting caller is cancelled; the permit is released when the blocking
+///    work finishes. A caller cancelled while *waiting for a permit* (not yet
+///    admitted) does not consume a permit.
+/// 5. **Ordering.** Commands are dispatched in the order their closures are
+///    submitted *per caller* (FIFO via the semaphore permit queue), but the
+///    executor does not impose a cross-caller total order — the caller owns any
+///    required ordering (matching today's direct-call semantics, where ordering
+///    is enforced by the caller's own `replication_stripes` lock, not the store).
+/// 6. **Overload.** The chosen admission bound is a backpressure policy: when it
+///    is reached, `execute` awaits a permit instead of piling up blocking
+///    threads. The bound is documented at the call site.
+#[derive(Debug, Clone)]
+struct DbExecutor {
+    admission: std::sync::Arc<Semaphore>,
+}
+
+impl DbExecutor {
+    /// Creates an executor allowing at most `max_in_flight` commands to be
+    /// queued or running on blocking threads at once. A bound below 1 is
+    /// clamped to 1 so the executor always makes progress (a 0-permit semaphore
+    /// would stall every caller forever).
+    fn new(max_in_flight: usize) -> Self {
+        Self {
+            admission: std::sync::Arc::new(Semaphore::new(max_in_flight.max(1))),
+        }
+    }
+
+    /// Runs `command` on a blocking thread, awaiting a permit (backpressure)
+    /// when the admission bound is reached. The result is the command's own
+    /// outcome (`Result<T, E>`), produced only after the command has committed.
+    ///
+    /// If the blocking thread panics (a bug), the panic propagates to the
+    /// awaiting task — matching the codebase's existing `spawn_blocking` join
+    /// pattern. A panic mid-command rolls the command's transaction back on
+    /// drop, so durability is not compromised by a panic.
+    async fn execute<T, E, F>(&self, command: F) -> Result<T, E>
+    where
+        T: Send + 'static,
+        E: Send + 'static,
+        F: FnOnce() -> Result<T, E> + Send + 'static,
+    {
+        let permit = self
+            .admission
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("db executor semaphore is never closed");
+        tokio::task::spawn_blocking(move || {
+            let out = command();
+            drop(permit);
+            out
+        })
+        .await
+        .unwrap_or_else(|join_error| {
+            // The only reachable JoinError is a panic inside the command: the
+            // JoinHandle is created and immediately awaited, so it is never
+            // cancelled or aborted. Resume the original panic so the awaiting
+            // task observes the command's own panic (with its original payload),
+            // matching the doc-comment's claim that the panic propagates.
+            if join_error.is_panic() {
+                std::panic::resume_unwind(join_error.into_panic());
+            }
+            std::panic::panic_any("db executor blocking task was aborted")
+        })
+    }
+}
+
+/// Async wrappers that route synchronous `MetadataStore` calls through the
+/// `DbExecutor` so they run on tokio's blocking pool instead of the single
+/// async worker (F1: blocking-in-async). Each closure performs the store call
+/// inline; the store's own `std::sync::Mutex` serializes concurrent access
+/// exactly as before, and each call commits before returning, so
+/// commit-before-success semantics are preserved. The `db_executor` admission
+/// bound bounds how many such calls may be in flight on blocking threads.
+impl AppState {
+    /// Enqueues replication jobs with object-version assignment, off the async
+    /// worker. Returns the versioned jobs (the store's own result).
+    async fn enqueue_replication_jobs_offload(
+        &self,
+        jobs: &[ReplicationJob],
+    ) -> Result<Vec<ReplicationJob>, metadata_store::MetadataError> {
+        let store = self.metadata_store.clone();
+        let jobs = jobs.to_vec();
+        self.db_executor
+            .execute(move || store.enqueue_jobs_with_versions(&jobs))
+            .await
+    }
+
+    /// Claims a replication job exclusively, off the async worker.
+    async fn claim_replication_job_offload(
+        &self,
+        job_id: u64,
+        object_version: u64,
+        claimed_at_unix_ms: u128,
+    ) -> Result<bool, metadata_store::MetadataError> {
+        let store = self.metadata_store.clone();
+        self.db_executor
+            .execute(move || store.try_claim_job(job_id, object_version, claimed_at_unix_ms))
+            .await
+    }
+
+    /// Marks a replication job completed-if-current, off the async worker.
+    async fn mark_job_completed_offload(
+        &self,
+        job_id: u64,
+        object_version: u64,
+        attempts: u32,
+    ) -> Result<bool, metadata_store::MetadataError> {
+        let store = self.metadata_store.clone();
+        self.db_executor
+            .execute(move || store.mark_job_completed_if_current(job_id, object_version, attempts))
+            .await
+    }
+
+    /// Persists a replication job (retry scheduling), off the async worker.
+    async fn save_job_offload(
+        &self,
+        job: &ReplicationJob,
+    ) -> Result<(), metadata_store::MetadataError> {
+        let store = self.metadata_store.clone();
+        let job = job.clone();
+        self.db_executor.execute(move || store.save_job(&job)).await
+    }
+
+    /// Releases a replication job claim, off the async worker.
+    async fn release_job_claim_offload(
+        &self,
+        job_id: u64,
+    ) -> Result<(), metadata_store::MetadataError> {
+        let store = self.metadata_store.clone();
+        self.db_executor
+            .execute(move || store.release_job_claim(job_id))
+            .await
+    }
+
+    /// Reads the latest replication job for an object, off the async worker.
+    async fn latest_job_for_object_offload(
+        &self,
+        target: &str,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<ReplicationJob>, metadata_store::MetadataError> {
+        let store = self.metadata_store.clone();
+        let target = target.to_string();
+        let bucket = bucket.to_string();
+        let key = key.to_string();
+        self.db_executor
+            .execute(move || store.latest_job_for_object(&target, &bucket, &key))
+            .await
+    }
+
+    /// Marks a replication job superseded, off the async worker.
+    async fn mark_job_superseded_offload(
+        &self,
+        job_id: u64,
+    ) -> Result<(), metadata_store::MetadataError> {
+        let store = self.metadata_store.clone();
+        self.db_executor
+            .execute(move || store.mark_job_superseded(job_id))
+            .await
+    }
+
+    /// Marks a replication job dead-lettered, off the async worker.
+    async fn mark_job_dead_letter_offload(
+        &self,
+        job_id: u64,
+        attempts: u32,
+        error: Option<&str>,
+        reason: &str,
+        now_unix_ms: u64,
+    ) -> Result<metadata_store::ReplicationDeadLetterEntry, metadata_store::MetadataError> {
+        let store = self.metadata_store.clone();
+        let error = error.map(ToOwned::to_owned);
+        let reason = reason.to_string();
+        self.db_executor
+            .execute(move || {
+                store.mark_job_dead_letter(job_id, attempts, error.as_deref(), &reason, now_unix_ms)
+            })
+            .await
+    }
+}
+
+#[cfg(test)]
+mod db_executor_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc as StdArc;
+
+    /// Simulates a command that runs its own transaction and commits *before*
+    /// returning `Ok`, recording the commit in `commit_counter`. A command that
+    /// returns `Err` models a failure that did NOT reach its commit point, so
+    /// the counter is NOT incremented on the error path. This models the
+    /// commit-before-success contract exactly: a success is observed only after
+    /// exactly one commit, and a failure is observed with zero commits.
+    fn committed_command(
+        commit_counter: StdArc<AtomicUsize>,
+        result: Result<(), &'static str>,
+    ) -> impl FnOnce() -> Result<(), &'static str> + Send + 'static {
+        move || {
+            // The closure owns the transaction. It commits (records one commit)
+            // only when the operation succeeds; a failure returns before the
+            // commit point, so no commit is recorded.
+            if result.is_ok() {
+                commit_counter.fetch_add(1, Ordering::SeqCst);
+            }
+            result
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_runs_command_on_blocking_thread_and_returns_ok() {
+        // Verifies the command runs once (on a tokio blocking thread) and its
+        // Ok result is passed through.
+        let executor = DbExecutor::new(4);
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let caller_thread = std::thread::current().id();
+        let out = executor.execute(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            // The command must run on a different thread than the caller (the
+            // tokio blocking pool, not the async worker). std::thread::current()
+            // inside the closure captures the executing thread.
+            let executing = std::thread::current().id();
+            assert_ne!(executing, caller_thread, "command must run off the caller's thread");
+            Ok::<_, &'static str>(42u64)
+        }).await;
+        assert_eq!(out, Ok(42));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_propagates_command_error_transparently() {
+        let executor = DbExecutor::new(4);
+        let out = executor.execute::<(), _, _>(move || {
+            Err::<(), _>("boom")
+        }).await;
+        assert_eq!(out, Err("boom"));
+    }
+
+    #[tokio::test]
+    async fn execute_commit_before_success() {
+        // The command commits (increments) then returns Ok. The caller must
+        // observe a success that was preceded by exactly one commit, and must
+        // never see a success that skipped the commit.
+        let executor = DbExecutor::new(4);
+        let commits = StdArc::new(AtomicUsize::new(0));
+        let out = executor.execute(committed_command(commits.clone(), Ok(()))).await;
+        assert_eq!(out, Ok(()));
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_does_not_report_success_when_command_failed_before_commit() {
+        // A failing command did not reach its commit point, so it must not
+        // increment the commit counter, and the error must surface.
+        let executor = DbExecutor::new(4);
+        let commits = StdArc::new(AtomicUsize::new(0));
+        let out = executor.execute(committed_command(commits.clone(), Err("nope"))).await;
+        assert_eq!(out, Err("nope"));
+        assert_eq!(commits.load(Ordering::SeqCst), 0, "a failed command must not report a commit");
+    }
+
+    #[tokio::test]
+    async fn execute_respects_admission_bound() {
+        // With bound 2, at most 2 commands run concurrently on blocking
+        // threads; a third waits for a permit (backpressure). Each `execute`
+        // future is spawned as its own task so the six submissions are polled
+        // concurrently, making the bound observable: peak concurrency must be
+        // exactly 2 (it reaches the bound and never exceeds it).
+        let executor = DbExecutor::new(2);
+        let running = StdArc::new(AtomicUsize::new(0));
+        let peak = StdArc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..6 {
+            let r = running.clone();
+            let p = peak.clone();
+            let exec = executor.clone();
+            handles.push(tokio::spawn(async move {
+                exec.execute(move || {
+                    let now = r.fetch_add(1, Ordering::SeqCst) + 1;
+                    p.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    r.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<_, &'static str>(())
+                }).await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+        let peak = peak.load(Ordering::SeqCst);
+        assert_eq!(
+            peak, 2,
+            "admission bound must be exactly 2 (reached and not exceeded), got {peak}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_releases_permit_after_failure() {
+        // After a command errors, its permit is released, so a subsequent
+        // command can still be admitted (no leaked permit).
+        let executor = DbExecutor::new(1);
+        let first = executor.execute::<(), _, _>(move || Err::<(), _>("boom")).await;
+        assert_eq!(first, Err("boom"));
+        let second = executor.execute(move || Ok::<_, &'static str>(7u64)).await;
+        assert_eq!(second, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn execute_dispatch_order_is_fifo_per_caller() {
+        // Commands submitted from one caller are dispatched in submission
+        // order. With bound 1, only one command runs at a time; the other four
+        // queue on the semaphore permit. All five are spawned concurrently so
+        // the permit queue is actually exercised; the recorded dispatch order
+        // must match submission order.
+        let executor = DbExecutor::new(1);
+        let seq = StdArc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+        let mut handles = Vec::new();
+        for i in 0..5 {
+            let s = seq.clone();
+            let exec = executor.clone();
+            handles.push(tokio::spawn(async move {
+                exec.execute(move || {
+                    s.lock().unwrap().push(i);
+                    Ok::<_, &'static str>(())
+                }).await
+            }));
+        }
+        for h in handles {
+            h.await.unwrap().unwrap();
+        }
+        let got = seq.lock().unwrap().clone();
+        assert_eq!(got, vec![0usize, 1, 2, 3, 4], "FIFO order violated: {got:?}");
+    }
+
+    #[tokio::test]
+    async fn execute_cancelled_while_waiting_for_permit_does_not_consume_permit() {
+        // A caller cancelled while waiting for a permit must not have consumed
+        // one; the full bound remains available to later commands.
+        let executor = DbExecutor::new(1);
+        // Occupy the single permit with a long-running command, driven as a
+        // real task so it actually runs and signals when it holds the permit.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let holder_executor = executor.clone();
+        let holder = tokio::spawn(async move {
+            holder_executor.execute(move || {
+                let _ = tx.send(());
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                Ok::<_, &'static str>(())
+            }).await
+        });
+        // Wait until the holder command is running (permit consumed).
+        let _ = rx.await;
+        // This second caller will wait for the permit (held), then get cancelled.
+        let waiter_executor = executor.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_executor.execute(move || Ok::<_, &'static str>(99u64)).await
+        });
+        // Cancel the waiter before the holder releases the permit.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        waiter.abort();
+        let _ = waiter.await;
+        let _ = holder.await.unwrap();
+        // The permit must be free: a fresh command runs immediately.
+        let quick = executor.execute(move || Ok::<_, &'static str>(1u64));
+        let out = tokio::time::timeout(std::time::Duration::from_millis(200), quick).await;
+        assert_eq!(out, Ok(Ok(1)), "permit leaked after caller cancellation");
+    }
+
+    #[tokio::test]
+    async fn execute_resumes_command_panic_with_original_payload() {
+        // A command that panics (a bug) must propagate its own panic payload to
+        // the awaiting task — the doc-comment's "the panic propagates" claim.
+        // The JoinError from spawn_blocking is a panic; execute must resume the
+        // original payload rather than raise a fresh panic with a misleading
+        // message.
+        let executor = DbExecutor::new(1);
+        let handle = tokio::spawn(async move {
+            executor
+                .execute::<(), &'static str, _>(move || -> Result<(), &'static str> {
+                    panic!("db executor command marker panic");
+                })
+                .await
+        });
+        let result = handle.await;
+        // The spawned task itself panicked (the panic was resumed), so await
+        // returns a JoinError that is itself a panic carrying our marker.
+        let join_error = result.expect_err("the task must panic, not return Ok");
+        assert!(
+            join_error.is_panic(),
+            "the task must fail with a panic, got: {join_error:?}"
+        );
+        let payload = join_error.into_panic();
+        let msg = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(msg, Some("db executor command marker panic"));
+    }
+}
+
 use admin_api::{
     ADMIN_API_VERSION, AdminAlertSuppressionInput, AdminApiErrorCode, AdminApiErrorResponse,
     AdminChangePasswordInput, AdminChangePasswordPayload, AdminLoginInput, AdminLoginPayload,
@@ -259,6 +691,10 @@ struct AppState {
     backends: Arc<Mutex<Vec<ConfiguredBackend>>>,
     replication: Arc<ReplicationEngine>,
     metadata_store: Arc<MetadataStore>,
+    /// Bounded executor that runs synchronous metadata-store commands off the
+    /// async runtime's worker threads (F1: blocking-in-async on the 1-worker
+    /// runtime). See `DbExecutor` for the contract.
+    db_executor: DbExecutor,
     replication_stripes: Arc<[TokioMutex<()>]>,
     auth: Arc<AuthBrokerState>,
     control_plane: Arc<Mutex<ControlPlaneState>>,
@@ -6047,7 +6483,7 @@ admin_session_ttl_seconds: env_u64(
                 0,
             ),
             replication_recent_limit: env_usize("CCBG_REPLICATION_RECENT_LIMIT", 64),
-            replication_max_attempts: env_u64("CCBG_REPLICATION_MAX_ATTEMPTS", 3) as u32,
+            replication_max_attempts: env_u32("CCBG_REPLICATION_MAX_ATTEMPTS", 3),
             replication_base_retry_delay_ms: env_u64("CCBG_REPLICATION_BASE_RETRY_DELAY_MS", 1_000),
             replication_max_retry_delay_ms: env_u64("CCBG_REPLICATION_MAX_RETRY_DELAY_MS", 30_000),
             object_action_history_limit: env_usize(
@@ -7746,6 +8182,7 @@ async fn main() -> Result<()> {
         backends: Arc::new(Mutex::new(backends)),
         replication,
         metadata_store,
+        db_executor: DbExecutor::new(config.data_plane_max_in_flight),
         replication_stripes: (0..REPLICATION_LOCK_STRIPES)
             .map(|_| TokioMutex::new(()))
             .collect::<Vec<_>>()
@@ -14556,15 +14993,31 @@ async fn admin_index(State(state): State<AppState>) -> Response {
         "default-src 'self'; img-src 'self' data:; script-src 'self' 'nonce-{}'; style-src 'self' 'unsafe-inline'; frame-ancestors {}; base-uri 'none'; form-action 'self'",
         nonce, frame_ancestors
     );
-    headers.insert("content-security-policy", csp.parse().unwrap());
+    headers.insert(
+        "content-security-policy",
+        csp.parse().expect("content-security-policy should be a valid header value"),
+    );
     if frame_ancestors == "'none'" {
-        headers.insert("x-frame-options", "DENY".parse().unwrap());
+        headers.insert(
+            "x-frame-options",
+            "DENY".parse().expect("x-frame-options should be a valid header value"),
+        );
     }
-    headers.insert("x-content-type-options", "nosniff".parse().unwrap());
-    headers.insert("referrer-policy", "strict-origin-when-cross-origin".parse().unwrap());
+    headers.insert(
+        "x-content-type-options",
+        "nosniff".parse().expect("x-content-type-options should be a valid header value"),
+    );
+    headers.insert(
+        "referrer-policy",
+        "strict-origin-when-cross-origin"
+            .parse()
+            .expect("referrer-policy should be a valid header value"),
+    );
     headers.insert(
         "strict-transport-security",
-        "max-age=31536000; includeSubDomains".parse().unwrap(),
+        "max-age=31536000; includeSubDomains"
+            .parse()
+            .expect("strict-transport-security should be a valid header value"),
     );
 
     response
@@ -18562,6 +19015,7 @@ async fn execute_object_action_core_with_options(
             ) {
                 Ok(jobs) => {
                     enqueue_admin_object_action_replication_jobs(&state, &bucket, &key, &jobs)
+                        .await
                         .map_err(|error| {
                             BlobError::Upstream(format!(
                                 "delete remote side effect may have occurred for {}/{}: {error}; {}",
@@ -18942,7 +19396,9 @@ async fn execute_object_action_core_with_options(
                     &bucket,
                     &new_key,
                     &replication_jobs,
-                ) {
+                )
+                .await
+                {
                     let rollback_note = rollback_rename_after_failure_with_note(
                         &state,
                         &backend,
@@ -19191,7 +19647,9 @@ async fn execute_object_action_core_with_options(
                 &destination_bucket,
                 &destination_key,
                 &jobs,
-            ) {
+            )
+            .await
+            {
                 let rollback_note = rollback_copy_destination_after_failure_with_note(
                     &state,
                     &destination_bucket,
@@ -19588,7 +20046,9 @@ async fn execute_object_action_core_with_options(
                     &destination_bucket,
                     &destination_key,
                     &replication_jobs,
-                ) {
+                )
+                .await
+                {
                     let rollback_note = rollback_move_after_failure_with_note(
                         &state,
                         &backend,
@@ -23605,8 +24065,8 @@ async fn replay_gateway_write_ahead_log_from_remote(state: &AppState) -> Result<
                         .and_then(|value| value.logical_content_type.clone()),
                 );
                 let versioned = state
-                    .metadata_store
-                    .enqueue_jobs_with_versions(&jobs)
+                    .enqueue_replication_jobs_offload(&jobs)
+                    .await
                     .map_err(|error| BlobError::Upstream(error.to_string()))?;
                 state.replication.publish_existing(versioned);
                 last_replayed_lsn = Some(last_replayed_lsn.unwrap_or(0).max(record.lsn));
@@ -23650,8 +24110,8 @@ async fn replay_gateway_write_ahead_log_from_remote(state: &AppState) -> Result<
                         record.key.clone(),
                     );
                     let versioned = state
-                        .metadata_store
-                        .enqueue_jobs_with_versions(&jobs)
+                        .enqueue_replication_jobs_offload(&jobs)
+                        .await
                         .map_err(|error| BlobError::Upstream(error.to_string()))?;
                     state.replication.publish_existing(versioned);
                 }
@@ -23919,7 +24379,7 @@ fn replication_stripe_index(target: &str, bucket: &str, key: &str) -> usize {
     (hasher.finish() as usize) % REPLICATION_LOCK_STRIPES
 }
 
-fn enqueue_copy_object_replication_jobs(
+async fn enqueue_copy_object_replication_jobs(
     state: &AppState,
     bucket: &str,
     key: &str,
@@ -23948,12 +24408,12 @@ fn enqueue_copy_object_replication_jobs(
             }
         }
     }
-    let versioned = state.metadata_store.enqueue_jobs_with_versions(jobs)?;
+    let versioned = state.enqueue_replication_jobs_offload(jobs).await?;
     state.replication.publish_existing(versioned);
     Ok(())
 }
 
-fn enqueue_delete_object_replication_jobs(
+async fn enqueue_delete_object_replication_jobs(
     state: &AppState,
     bucket: &str,
     key: &str,
@@ -23982,12 +24442,12 @@ fn enqueue_delete_object_replication_jobs(
             }
         }
     }
-    let versioned = state.metadata_store.enqueue_jobs_with_versions(jobs)?;
+    let versioned = state.enqueue_replication_jobs_offload(jobs).await?;
     state.replication.publish_existing(versioned);
     Ok(())
 }
 
-fn enqueue_admin_object_action_replication_jobs(
+async fn enqueue_admin_object_action_replication_jobs(
     state: &AppState,
     bucket: &str,
     key: &str,
@@ -24016,12 +24476,12 @@ fn enqueue_admin_object_action_replication_jobs(
             }
         }
     }
-    let versioned = state.metadata_store.enqueue_jobs_with_versions(jobs)?;
+    let versioned = state.enqueue_replication_jobs_offload(jobs).await?;
     state.replication.publish_existing(versioned);
     Ok(())
 }
 
-fn enqueue_put_object_replication_jobs(
+async fn enqueue_put_object_replication_jobs(
     state: &AppState,
     bucket: &str,
     key: &str,
@@ -24050,7 +24510,7 @@ fn enqueue_put_object_replication_jobs(
             }
         }
     }
-    let versioned = state.metadata_store.enqueue_jobs_with_versions(jobs)?;
+    let versioned = state.enqueue_replication_jobs_offload(jobs).await?;
     state.replication.publish_existing(versioned);
     Ok(())
 }
@@ -24109,8 +24569,8 @@ fn enqueue_replication_delete_for_object(
     ))
 }
 
-fn persist_replication_jobs(state: &AppState, jobs: &[ReplicationJob], reason: &'static str) {
-    match state.metadata_store.enqueue_jobs_with_versions(jobs) {
+async fn persist_replication_jobs(state: &AppState, jobs: &[ReplicationJob], reason: &'static str) {
+    match state.enqueue_replication_jobs_offload(jobs).await {
         Ok(versioned) if !versioned.is_empty() => {
             // Persistence succeeded first; publish the versioned rows so
             // workers only observe durable jobs.
@@ -25960,7 +26420,7 @@ async fn apply_reconcile_replica_plan_only(
             record.key.clone(),
         ));
     }
-    persist_replication_jobs(state, &jobs, "historical object reconcile");
+    persist_replication_jobs(state, &jobs, "historical object reconcile").await;
     let _ = mark_gateway_write_ahead_log_committed_or_warn(
         state,
         gateway_write_ahead_log.as_ref(),
@@ -26202,7 +26662,7 @@ async fn execute_historical_object_rewrite(
             record.key
         )));
     }
-    persist_replication_jobs(state, &jobs, "historical object reconcile");
+    persist_replication_jobs(state, &jobs, "historical object reconcile").await;
     let _ = mark_gateway_write_ahead_log_committed_or_warn(
         state,
         gateway_write_ahead_log.as_ref(),
@@ -27727,11 +28187,10 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
 
     // Claim the job exclusively. A superseded or already-claimed job is
     // skipped without remote I/O; the claim is the in-progress marker.
-    let claimed = match state.metadata_store.try_claim_job(
-        job.job_id,
-        job.object_version,
-        current_unix_ms() as u128,
-    ) {
+    let claimed = match state
+        .claim_replication_job_offload(job.job_id, job.object_version, current_unix_ms() as u128)
+        .await
+    {
         Ok(claimed) => claimed,
         Err(error) => {
             warn!(
@@ -27760,11 +28219,10 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
             completed_job.attempts = attempts;
             completed_job.last_error = None;
             state.replication.record_completed(completed_job);
-            match state.metadata_store.mark_job_completed_if_current(
-                job.job_id,
-                job.object_version,
-                attempts,
-            ) {
+            match state
+                .mark_job_completed_offload(job.job_id, job.object_version, attempts)
+                .await
+            {
                 Ok(true) => {
                     info!(
                         worker_id,
@@ -27810,7 +28268,7 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
                 retry_job.last_error = Some(error.to_string());
                 retry_job.next_attempt_at_unix_ms = Some(retry_at);
                 state.replication.schedule_retry(retry_job.clone());
-                if let Err(store_error) = state.metadata_store.save_job(&retry_job) {
+                if let Err(store_error) = state.save_job_offload(&retry_job).await {
                     warn!(
                         worker_id,
                         job_id = retry_job.job_id,
@@ -27818,7 +28276,7 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
                         "failed to persist scheduled replication retry"
                     );
                 } else if let Err(claim_error) =
-                    state.metadata_store.release_job_claim(retry_job.job_id)
+                    state.release_job_claim_offload(retry_job.job_id).await
                 {
                     warn!(
                         worker_id,
@@ -27845,17 +28303,22 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
                 state
                     .replication
                     .record_failed(failed_job, error_message.clone());
-                let is_superseded = matches!(state.metadata_store.latest_job_for_object(
-                    &job.target,
-                    &job.object.bucket,
-                    &job.object.key,
-                ), Ok(Some(latest)) if latest.object_version > job.object_version);
+                let is_superseded = matches!(
+                    state
+                        .latest_job_for_object_offload(
+                            &job.target,
+                            &job.object.bucket,
+                            &job.object.key,
+                        )
+                        .await,
+                    Ok(Some(latest)) if latest.object_version > job.object_version
+                );
                 if is_superseded {
                     // A newer operation for the tuple exists; this attempt is
                     // obsolete. Mark it superseded (Failed + diagnostic) and
                     // release the claim instead of dead-lettering it.
                     if let Err(supersede_error) =
-                        state.metadata_store.mark_job_superseded(job.job_id)
+                        state.mark_job_superseded_offload(job.job_id).await
                     {
                         warn!(
                             worker_id,
@@ -27877,13 +28340,16 @@ async fn process_next_replication_job(worker_id: usize, state: &AppState) -> boo
                 } else {
                     "max_attempts_exhausted"
                 };
-                match state.metadata_store.mark_job_dead_letter(
-                    job.job_id,
-                    attempts,
-                    Some(&error_message),
-                    reason,
-                    current_unix_ms(),
-                ) {
+                match state
+                    .mark_job_dead_letter_offload(
+                        job.job_id,
+                        attempts,
+                        Some(&error_message),
+                        reason,
+                        current_unix_ms(),
+                    )
+                    .await
+                {
                     Ok(_) => {
                         warn!(
                             worker_id,
@@ -27926,7 +28392,7 @@ async fn process_replication_job(
     state: &AppState,
     job: &replication_engine::ReplicationJob,
 ) -> Result<(), ReplicationFailure> {
-    ensure_job_is_current(state, job)?;
+    ensure_job_is_current(state, job).await?;
     let target_provider = ProviderId::parse(&job.target)
         .map_err(|error| ReplicationFailure::permanent(error.to_string()))?;
     let backend =
@@ -28053,13 +28519,17 @@ async fn process_replication_job(
     Ok(())
 }
 
-fn ensure_job_is_current(
+async fn ensure_job_is_current(
     state: &AppState,
     job: &replication_engine::ReplicationJob,
 ) -> Result<(), ReplicationFailure> {
     let latest = state
-        .metadata_store
-        .latest_job_for_object(&job.target, &job.object.bucket, &job.object.key)
+        .latest_job_for_object_offload(
+            &job.target,
+            &job.object.bucket,
+            &job.object.key,
+        )
+        .await
         .map_err(|error| {
             ReplicationFailure::retryable(format!(
                 "failed to inspect latest replication job state: {error}"
@@ -34344,6 +34814,34 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Reads an env var as `u32`, validating the range instead of narrowing with a
+/// silent `as` cast. A value that parses as `u64` but exceeds `u32::MAX` is
+/// clamped to `u32::MAX` with a warning (a silent wrap would silently disable
+/// the feature, e.g. a max-attempts value of 2^32 becoming 0). A non-numeric
+/// value falls back to `default` with a warning, matching `env_u64`.
+fn env_u32(key: &str, default: u32) -> u32 {
+    env::var(key)
+        .ok()
+        .and_then(|value| match value.parse::<u64>() {
+            Ok(v) => match u32::try_from(v) {
+                Ok(n) => Some(n),
+                Err(_) => {
+                    warn!(
+                        %key,
+                        %value,
+                        "env var exceeds u32::MAX, clamping to u32::MAX"
+                    );
+                    Some(u32::MAX)
+                }
+            },
+            Err(_) => {
+                warn!(%key, %value, "failed to parse env var as u32, using default");
+                None
+            }
+        })
+        .unwrap_or(default)
+}
+
 async fn index(State(state): State<AppState>) -> Json<IndexPayload> {
     let snapshot = state.replication.snapshot();
     let topology = runtime_topology(&state);
@@ -35600,6 +36098,7 @@ async fn execute_copy_object(
     };
     if let Err(error) =
         enqueue_copy_object_replication_jobs(state, &destination_bucket, &destination_key, &jobs)
+            .await
     {
         let rollback_note = rollback_copy_destination_after_failure_with_note(
             state,
@@ -36652,7 +37151,7 @@ async fn execute_put_upload(
             key.clone(),
         ));
     }
-    if let Err(error) = enqueue_put_object_replication_jobs(state, &bucket, &key, &jobs) {
+    if let Err(error) = enqueue_put_object_replication_jobs(state, &bucket, &key, &jobs).await {
         let rollback_note = rollback_put_after_failure_with_note(
             state,
             &home_backend,
@@ -37293,20 +37792,22 @@ async fn delete_object(
             bucket, key
         ))
     })?;
-    enqueue_delete_object_replication_jobs(&state, &bucket, &key, &jobs).map_err(|error| {
-        let rollback_note = rollback_delete_after_failure_with_note(
-            &state,
-            &bucket,
-            &key,
-            previous_placement_record,
-            previous_logical_record,
-            previous_protection_plan_record,
-        );
-        S3Error::internal_error(format!(
-            "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
-            bucket, key
-        ))
-    })?;
+    enqueue_delete_object_replication_jobs(&state, &bucket, &key, &jobs)
+        .await
+        .map_err(|error| {
+            let rollback_note = rollback_delete_after_failure_with_note(
+                &state,
+                &bucket,
+                &key,
+                previous_placement_record,
+                previous_logical_record,
+                previous_protection_plan_record,
+            );
+            S3Error::internal_error(format!(
+                "delete remote side effect may have occurred for {}/{}: {error}; {rollback_note}",
+                bucket, key
+            ))
+        })?;
     if !jobs.is_empty() {
         info!(
             bucket = %bucket,
@@ -41024,6 +41525,7 @@ mod tests {
                 config.replication_recent_limit,
             )),
             metadata_store,
+            db_executor: DbExecutor::new(config.data_plane_max_in_flight),
             replication_stripes: (0..REPLICATION_LOCK_STRIPES)
                 .map(|_| TokioMutex::new(()))
                 .collect::<Vec<_>>()
@@ -57878,6 +58380,7 @@ mod tests {
                 config.replication_recent_limit,
             )),
             metadata_store,
+            db_executor: DbExecutor::new(config.data_plane_max_in_flight),
             replication_stripes: (0..REPLICATION_LOCK_STRIPES)
                 .map(|_| TokioMutex::new(()))
                 .collect::<Vec<_>>()
@@ -61229,8 +61732,8 @@ mod tests {
             Some("text/plain".to_string()),
         );
         let put_jobs = state
-            .metadata_store
-            .enqueue_jobs_with_versions(&put_jobs)
+            .enqueue_replication_jobs_offload(&put_jobs)
+            .await
             .expect("put jobs should persist");
         let delete_jobs = state.replication.prepare_delete(
             &runtime_topology(&state),
@@ -61239,8 +61742,8 @@ mod tests {
             "worker/order.txt",
         );
         let delete_jobs = state
-            .metadata_store
-            .enqueue_jobs_with_versions(&delete_jobs)
+            .enqueue_replication_jobs_offload(&delete_jobs)
+            .await
             .expect("delete jobs should persist");
         state.replication.publish_existing(put_jobs.clone());
         state.replication.publish_existing(delete_jobs.clone());
@@ -61285,8 +61788,8 @@ mod tests {
             "worker/order2.txt",
         );
         let delete_jobs = state
-            .metadata_store
-            .enqueue_jobs_with_versions(&delete_jobs)
+            .enqueue_replication_jobs_offload(&delete_jobs)
+            .await
             .expect("delete jobs should persist");
         let put_jobs = state.replication.prepare_put(
             &runtime_topology(&state),
@@ -61298,8 +61801,8 @@ mod tests {
             Some("text/plain".to_string()),
         );
         let put_jobs = state
-            .metadata_store
-            .enqueue_jobs_with_versions(&put_jobs)
+            .enqueue_replication_jobs_offload(&put_jobs)
+            .await
             .expect("put jobs should persist");
         state.replication.publish_existing(delete_jobs.clone());
         state.replication.publish_existing(put_jobs.clone());
@@ -61353,8 +61856,8 @@ mod tests {
             Some("text/plain".to_string()),
         );
         state
-            .metadata_store
-            .enqueue_jobs_with_versions(&put_jobs)
+            .enqueue_replication_jobs_offload(&put_jobs)
+            .await
             .expect("put jobs should persist");
         assert_eq!(state.replication.snapshot().pending_count, 0);
 
@@ -61420,7 +61923,8 @@ mod tests {
             Some("text/plain".to_string()),
         );
         let result =
-            enqueue_put_object_replication_jobs(&state, "placeholder", "worker/store-fail.txt", &jobs);
+            enqueue_put_object_replication_jobs(&state, "placeholder", "worker/store-fail.txt", &jobs)
+                .await;
         assert!(result.is_err(), "injected store failure must propagate");
         assert_eq!(
             state.replication.snapshot().pending_count,
@@ -61466,8 +61970,8 @@ mod tests {
             Some("text/plain".to_string()),
         );
         let versioned = state
-            .metadata_store
-            .enqueue_jobs_with_versions(&jobs)
+            .enqueue_replication_jobs_offload(&jobs)
+            .await
             .expect("jobs should persist");
         // Duplicate hint: the same persisted job is published twice.
         state.replication.publish_existing(versioned.clone());
@@ -61529,8 +62033,8 @@ mod tests {
             Some("text/plain".to_string()),
         );
         let versioned = state
-            .metadata_store
-            .enqueue_jobs_with_versions(&jobs)
+            .enqueue_replication_jobs_offload(&jobs)
+            .await
             .expect("jobs should persist");
         state.replication.publish_existing(versioned);
 
@@ -61629,8 +62133,8 @@ mod tests {
             Some("text/plain".to_string()),
         );
         let versioned = state
-            .metadata_store
-            .enqueue_jobs_with_versions(&jobs)
+            .enqueue_replication_jobs_offload(&jobs)
+            .await
             .expect("jobs should persist");
         state.replication.publish_existing(versioned);
 
@@ -66860,5 +67364,207 @@ let mut saw_event = false;
         let result = handle.await.expect("probe task should complete");
         assert!(result.is_ok(), "probe should succeed: {:?}", result.err());
         assert!(saw_event, "should have received at least one probe event");
+    }
+
+    /// F1 real-workload measurement: faithfully reproduces the production
+    /// 1-CPU/1-worker condition with the replication worker loop RUNNING (as
+    /// `main` does: replication_workers=2). Drives the S3 data-plane handlers
+    /// end-to-end while a 1ms heartbeat canary records the longest stretch the
+    /// sole worker is starved. The starvation is the F1 symptom: synchronous
+    /// SQLite on the worker loop (baseline) blocks the only worker for the whole
+    /// DB call; the bounded DB-executor offload (prototype) moves that off the
+    /// worker. Run explicitly:
+    ///   cargo test -p gatewayd --release -- f1_workload_bench --ignored --nocapture
+    /// Identical source in both versions; only the internal routing differs.
+    #[ignore]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn f1_workload_bench() {
+        use tokio::time::Instant;
+
+        let state = test_state();
+        let app = Router::new()
+            .route(
+                "/{bucket}/{*key}",
+                axum::routing::put(put_object)
+                    .delete(delete_object)
+                    .post(post_object),
+            )
+            .with_state(state.clone())
+            .layer(DefaultBodyLimit::max(request_body_limit_bytes(
+                &state.config,
+            )));
+
+        let bucket = "root".to_string();
+        let key = "f1-bench/probe.txt".to_string();
+        let body = Bytes::from_static(b"f1 workload probe payload");
+        let uri: Uri = format!("/{bucket}/{key}").parse().expect("uri should parse");
+
+        let put_headers = |body: &[u8]| {
+            signed_headers(
+                &state.config,
+                &Method::PUT,
+                &uri,
+                body,
+                &[("content-type", "text/plain")],
+            )
+        };
+
+        // Warm up (first PUT creates metadata + replication jobs; also warms
+        // the SQLite page cache so later iterations measure steady state).
+        for _ in 0..3 {
+            let headers = put_headers(&body);
+            let mut request = Request::builder()
+                .method(Method::PUT)
+                .uri(uri.clone())
+                .body(Body::from(body.clone()))
+                .expect("request should build");
+            request.headers_mut().extend(headers);
+            request.headers_mut().insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&body.len().to_string())
+                    .expect("content length should be valid"),
+            );
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("router should respond");
+            assert_eq!(response.status(), StatusCode::OK, "warmup PUT should succeed");
+        }
+
+        // Replication worker loop, exactly as production: `main` spawns
+        // `replication_workers` (2 by default) loops that drain pending jobs
+        // to the sync targets. This is the code path the DB-executor offload
+        // routes through; without it running, the benchmark cannot show the
+        // fix's effect on the worker loop.
+        let worker_count = state.config.replication_workers.max(1);
+        for worker_id in 0..worker_count {
+            tokio::spawn(replication_worker_loop(worker_id, state.clone()));
+        }
+        // Let the worker loop start before the measured loop.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Heartbeat canary: ticks every 1ms while the worker is free. Any
+        // stretch where the worker is blocked (e.g. a synchronous SQLite
+        // call on the worker loop) delays the tick, and the recorded gap
+        // between ticks is exactly that starvation. The largest gap is the
+        // F1 symptom.
+        let gaps: std::sync::Arc<std::sync::Mutex<Vec<f64>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let gaps2 = gaps.clone();
+        let heartbeat = tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_millis(1));
+            interval.tick().await; // consume the immediate first tick
+            let mut last = Instant::now();
+            loop {
+                interval.tick().await;
+                let now = Instant::now();
+                let gap = (now - last).as_secs_f64() * 1000.0;
+                gaps2.lock().unwrap().push(gap);
+                last = now;
+            }
+        });
+
+        const N: usize = 200;
+        let mut put_lat = Vec::with_capacity(N);
+        let mut delete_lat = Vec::with_capacity(N);
+
+        for i in 0..N {
+            // PUT: DB-heavy path (placement read + logical read + WAL + replication enqueue).
+            let t0 = Instant::now();
+            let headers = put_headers(&body);
+            let mut request = Request::builder()
+                .method(Method::PUT)
+                .uri(uri.clone())
+                .body(Body::from(body.clone()))
+                .expect("request should build");
+            request.headers_mut().extend(headers);
+            request.headers_mut().insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&body.len().to_string())
+                    .expect("content length should be valid"),
+            );
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("router should respond");
+            put_lat.push(t0.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(response.status(), StatusCode::OK, "PUT {i} should succeed");
+
+            // DELETE: DB-heavy path (placement + logical + WAL + replication).
+            let t1 = Instant::now();
+            let del_headers = signed_headers(
+                &state.config,
+                &Method::DELETE,
+                &uri,
+                &[],
+                &[],
+            );
+            let mut del_request = Request::builder()
+                .method(Method::DELETE)
+                .uri(uri.clone())
+                .body(Body::empty())
+                .expect("request should build");
+            del_request.headers_mut().extend(del_headers);
+            let del_response = app
+                .clone()
+                .oneshot(del_request)
+                .await
+                .expect("router should respond");
+            delete_lat.push(t1.elapsed().as_secs_f64() * 1000.0);
+            assert!(
+                del_response.status() == StatusCode::OK
+                    || del_response.status() == StatusCode::NO_CONTENT,
+                "DELETE {i} should succeed, got {:?}",
+                del_response.status()
+            );
+
+            // Recreate the object for the next iteration (DELETE removed it).
+            let headers = put_headers(&body);
+            let mut request = Request::builder()
+                .method(Method::PUT)
+                .uri(uri.clone())
+                .body(Body::from(body.clone()))
+                .expect("request should build");
+            request.headers_mut().extend(headers);
+            request.headers_mut().insert(
+                CONTENT_LENGTH,
+                HeaderValue::from_str(&body.len().to_string())
+                    .expect("content length should be valid"),
+            );
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .expect("router should respond");
+            assert_eq!(response.status(), StatusCode::OK, "recreate PUT {i} should succeed");
+        }
+
+        heartbeat.abort();
+        let _ = heartbeat.await;
+        let gaps = std::sync::Arc::try_unwrap(gaps)
+            .expect("heartbeat should be the only holder")
+            .into_inner()
+            .unwrap();
+
+        fn stats(v: &[f64]) -> (f64, f64, f64, f64) {
+            let mut s = v.to_vec();
+            s.sort_by(|a, b| a.partial_cmp(b).expect("latency should be comparable"));
+            let n = s.len();
+            (s[n / 2], s[(n * 95) / 100], s[(n * 99) / 100], *s.last().unwrap())
+        }
+
+        let (put_p50, put_p95, put_p99, put_max) = stats(&put_lat);
+        let (del_p50, del_p95, del_p99, del_max) = stats(&delete_lat);
+        let (gap_p50, gap_p95, gap_p99, gap_max) = stats(&gaps);
+
+        println!("\n=== F1 real-workload (1-worker runtime, worker loop running) ===");
+        println!("PUT     p50={put_p50:.3}ms p95={put_p95:.3}ms p99={put_p99:.3}ms max={put_max:.3}ms");
+        println!("DELETE  p50={del_p50:.3}ms p95={del_p95:.3}ms p99={del_p99:.3}ms max={del_max:.3}ms");
+        println!("canary-gap p50={gap_p50:.3}ms p95={gap_p95:.3}ms p99={gap_p99:.3}ms max={gap_max:.3}ms");
+        println!("(canary-gap max = longest worker starvation = F1 symptom)");
     }
 }
